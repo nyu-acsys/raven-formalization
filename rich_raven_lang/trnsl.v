@@ -471,36 +471,84 @@ Section MainTranslation.
           rewrite HstkI. simpl. done.
     Qed.
 
-    Axiom proc_specs_valid :
-      forall proc proc_record stk_vals, 
-      proc ∈ proc_set  ->
-      proc_map !! proc = Some proc_record ->
+    (* Native-Iris restatement of the former [proc_specs_valid] axiom: the operational
+       Hoare triple for every procedure in [proc_map] holds. Persistent (□) so it can be
+       freely duplicated into every nested call frame; guarded uses of this fact (behind a
+       later, via Löb induction) are how [raven_soundness] below discharges it
+       without assuming it outright. *)
+    (* Parameterized by [σ], the same lvar-typing environment used throughout the
+       whole program's verification (matching rrl_validity's own σ parameter) — not
+       re-quantified internally, so every use of [all_proc_specs_valid_iris σ] and every
+       rrl_validity invocation are talking about the same σ. *)
+    Definition all_proc_specs_valid_iris (σ : lvar_typs) : iProp rrl_lang.Σ :=
+      □ ∀ proc proc_record stk_vals,
+      ⌜proc ∈ proc_set⌝ -∗
+      ⌜proc_map !! proc = Some proc_record⌝ -∗
 
-      exists (ret_val: lang.val),
-      forall precond postcond stk_id stk_frm mp stmt mask,
+      ∀ precond (postcond : lang.val -> iProp rrl_lang.Σ) stk_id stk_frm mp stmt (msk : maskAnnot),
 
-      (forall v, v ∈ (proc_args_of proc_record) -> is_Some (stk_frm.(locals) !! v.1)) ->
+      (* mp must be well-typed against σ, mirroring the requirement rrl_validity itself needs. *)
+      ⌜env_typ_well_defined σ mp⌝ -∗
 
-      Forall2 (λ var val, stk_frm.(locals) !! var = Some val) (proc_args_of proc_record).*1 stk_vals ->
+      ⌜forall v, v ∈ (proc_args_of proc_record) -> is_Some (stk_frm.(locals) !! v.1)⌝ -∗
 
-      let subst_map' := list_to_map (zip (proc_args_of proc_record).*1 (map (λ val, LVal (trnsl_val val)) stk_vals)) in
+      ⌜Forall2 (λ var val, stk_frm.(locals) !! var = Some val) (proc_args_of proc_record).*1 stk_vals⌝ -∗
 
-      trnsl_assertion (subst (proc_precond_of proc_record) subst_map') stk_id mp ≡ precond ->
-      trnsl_assertion (subst (proc_postcond_of proc_record) (<["#ret_val" := LVal (trnsl_val (ret_val))]> subst_map')) stk_id mp ≡ postcond ->
-      
-      ((trnsl_stmt (proc_body_of proc_record) = Some' stmt) \/ (trnsl_stmt (proc_body_of proc_record) = None' /\ stmt = lang.SkipS) ) ->
-      (∃ stk_frm'',
-      ({{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ mask {{{ RET lang.LitUnit; stack_own[stk_id, stk_frm''] ∗ ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗ postcond }}})).
+      (* stk_frm is exactly the frame a fresh call/spawn produces (see lang.v's
+         RTCallStep/SpawnStep): every declared local (including "#ret_val")
+         is present, holding a non-deterministically chosen value of its
+         declared type, and nothing else. Needed so a synthesized LStack for
+         the procedure's own entry scope can reconstruct stk_frm exactly. *)
+      ⌜∀ v tp, (v, tp) ∈ proc_locals_of proc_record ->
+          ∃ val, stk_frm.(locals) !! v = Some val ∧ typeOf val = tp⌝ -∗
+      ⌜dom stk_frm.(locals) = list_to_set (proc_args_of proc_record).*1 ∪ list_to_set (proc_locals_of proc_record).*1⌝ -∗
+
+      (* the argument values are well-typed against the procedure's own declared
+         parameter types, mirroring the static proc_call_args_well_typed check. *)
+      ⌜Forall2 (λ arg_decl val, typeOf val = snd arg_decl) (proc_args_of proc_record) stk_vals⌝ -∗
+
+      let subst_map' := val_subst_map (proc_args_of proc_record).*1 stk_vals in
+
+      ⌜trnsl_assertion (subst (proc_precond_of proc_record) subst_map') stk_id mp ≡ precond⌝ -∗
+      ⌜∀ ret_val, trnsl_assertion (subst (proc_postcond_of proc_record) (<["#ret_val" := LVal (trnsl_val (ret_val))]> subst_map')) stk_id mp ≡ postcond ret_val⌝ -∗
+
+      ⌜(trnsl_stmt (proc_body_of proc_record) = Some' stmt) \/ (trnsl_stmt (proc_body_of proc_record) = None' /\ stmt = lang.SkipS)⌝ -∗
+      {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ (inv_set_to_namespace msk)
+        {{{ RET lang.LitUnit; ∃ ret_val stk_frm'', stack_own[stk_id, stk_frm''] ∗ ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗ postcond ret_val }}}.
+
+    (* Raven counterpart of all_proc_specs_valid_iris: every procedure's own
+       body is provably correct against its own contract via RavenHoareTriple,
+       run from a symbolic entry stack synthesized (via a fresh
+       proc_entry_lvars) out of its formal args and locals. A plain Prop,
+       not an iProp -- raven_soundness below is exactly the bridge from this
+       Raven-level statement to the Iris-level all_proc_specs_valid_iris. *)
+    Definition all_proc_specs_valid_raven (ρ : pvar_typs) (σ : lvar_typs) : Prop :=
+      ∀ proc_name proc_record, proc_map !! proc_name = Some proc_record →
+        stmt_well_defined ρ (proc_body_of proc_record) ∧
+        ∀ msk (dll : proc_entry_lvars σ proc_record),
+          ∃ ι2 stk0' lv_final,
+            stk0' !! "#ret_val" = Some lv_final ∧
+            RavenHoareTriple ρ σ
+              (LAnd (LStack (assoc_map (proc_args_of proc_record ++ proc_locals_of proc_record).*1
+                                        (dll_args dll ++ dll_locals dll)))
+                 (subst (proc_precond_of proc_record)
+                    (lvar_subst_map (proc_args_of proc_record).*1 (dll_args dll))))
+              0 (proc_body_of proc_record) msk
+              (LAnd (LStack stk0')
+                 (subst (proc_postcond_of proc_record)
+                    (<["#ret_val" := LVar lv_final]>
+                       (lvar_subst_map (proc_args_of proc_record).*1 (dll_args dll)))))
+              ι2.
 
     Theorem rrl_validity ρ σ ι1 ι2 stk_id p msk cmd q
       (Hwf : ProgramWF) :
       stmt_well_defined ρ cmd ->
       forall mp, (env_typ_well_defined σ mp) ->
-       ⌜RavenHoareTriple ρ σ p ι1 cmd msk q ι2⌝
+       ▷ (all_proc_specs_valid_iris σ) ∗ ⌜RavenHoareTriple ρ σ p ι1 cmd msk q ι2⌝
       ⊢  (trnsl_hoare_triple stk_id p ι1 msk cmd q ι2 mp).
     Proof.
-      iIntros (Hwelldef mp Henv) "%H". 
-      iInduction H as 
+      iIntros (Hwelldef mp Henv) "[#Calls %H]".
+      iInduction H as
       [ | 
       | ρ σ ι stk mask v fld e old_val new_val lv Hatm HLexpr1 
       | | | | 
@@ -1216,6 +1264,14 @@ Section MainTranslation.
         unfold trnsl_hoare_triple. simpl (trnsl_stmt (Call x proc_name args)). case_match; try discriminate.
         pose proof H0 as H0'.
         apply Hwf.(pwf_proc_args_unique) in H0'.
+        pose proof H0 as H0_rv_fresh.
+        apply Hwf.(pwf_proc_ret_val_fresh) in H0_rv_fresh.
+        pose proof H0 as H0_locals_unique.
+        apply Hwf.(pwf_proc_locals_unique) in H0_locals_unique.
+        pose proof H0 as H0_args_locals_disjoint.
+        apply Hwf.(pwf_proc_args_locals_disjoint) in H0_args_locals_disjoint.
+        pose proof H0 as H0_rv_declared.
+        apply Hwf.(pwf_proc_ret_val_declared) in H0_rv_declared.
         pose proof H0 as Hspec_StackFree.
         apply Hwf.(pwf_proc_stack_free) in Hspec_StackFree.
 
@@ -1227,7 +1283,7 @@ Section MainTranslation.
           (* Save stk_type_compat before clearing *)
           assert (Hstk_compat: stk_type_compat ρ σ stk) by assumption.
           (* Prove existence of arg_vals *)
-          clear Hwelldef H1 H4 H11.
+          clear Hwelldef H1 H4 H11 H13.
           clear subst_map.
           revert lexprs H2 H12.
           induction args as [| a args IH]; intros lexprs H2 H12.
@@ -1253,7 +1309,7 @@ Section MainTranslation.
 
         assert (Forall2 (λ expr val, interp_lexpr expr mp = Some (trnsl_val val)) lexprs arg_vals) as Hlexprs_arg_vals.
           {
-            clear Hwelldef H1  H4 H11 H12 subst_map.
+            clear Hwelldef H1 H4 H11 H12 H13 subst_map.
             revert args arg_vals H2 Harg_vals.
             induction lexprs as [| le lexprs IH]; intros args arg_vals H2 Harg_vals.
             - destruct args; [| discriminate]. inversion Harg_vals. constructor.
@@ -1270,6 +1326,16 @@ Section MainTranslation.
         simpl in *.
         destruct proc_record as [proc_args proc_locals proc_pre proc_post proc_body] eqn:Hproc_record.
 
+        assert (proc_entry = Proc proc_args proc_locals proc_pre proc_post proc_body) as Hpe.
+        { rewrite H0 in H9. injection H9 as <-. done. }
+        rewrite Hpe in H13.
+
+        assert (Forall2 (λ arg_decl val, typeOf val = snd arg_decl)
+                  (proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body)) arg_vals)
+          as Harg_vals_typed.
+        { apply (proc_call_args_typed_result ρ σ stk mp args lexprs arg_vals
+            (Proc proc_args proc_locals proc_pre proc_post proc_body) H3 Henv H13 H2 Hlexprs_arg_vals). }
+
         set (trnsl_assertion (subst proc_pre subst_map) stk_id mp) as u1.
 
         assert (trnsl_assertion (subst proc_pre subst_map) stk_id mp ≡ u1) as Hproc_pre.
@@ -1278,31 +1344,33 @@ Section MainTranslation.
         destruct (trnsl_stmt (proc_body)) eqn:Hproc_body;  try discriminate.
 
         
-        {   
+        {
           (* proc_body = Skip *)
         inversion H4; subst s.
         iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold.
-        
-        iIntros "[[Hstk [Hproc_tbl Hu1]] Hcr] HΦ".
 
-        pose proof (proc_specs_valid proc_name (Proc proc_args proc_locals proc_pre proc_post proc_body) arg_vals ) as [ret_val Hproc]; try done.
+        iIntros "[[Hstk [Hproc_tbl Hu1]] Hcr] HΦ".
 
         set (subst_map' := @list_to_map var LExpr (gmap var LExpr) _ _ (zip (proc_args).*1 (map (λ val, LVal (trnsl_val val)) arg_vals))).
 
           set ((trnsl_assertion (subst proc_pre subst_map') stk_id mp)) as proc_frame_pre.
-          set (trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
+          set (fun ret_val => trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
 
-
-          assert ( trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp ≡ proc_frame_post) as Hproc_frame_post.
-          { subst proc_frame_post. reflexivity. }
-
-        iApply (wp_call _ _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hproc_tbl Hu1]"); try iFrame; try done.
+        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hproc_tbl Hu1]"); try iFrame; try done.
 
           {
-            (* Showing procedure contract holds *)
-            iIntros (stk_id' stk_frm') "%HlocalsDef". simpl in *.
+            (* Showing procedure contract holds, via the ambient (Löb-guarded) Calls fact *)
+            iNext.
+            iIntros (stk_id' stk_frm') "%HlocalsDef". destruct HlocalsDef as [HlocalsDef [Hrv_val Hdom_val]]. simpl in *.
 
-            specialize (Hproc proc_frame_pre proc_frame_post stk_id' stk_frm' mp lang.SkipS(inv_set_to_namespace mask)).
+            iPoseProof ("Calls" $! proc_name (Proc proc_args proc_locals proc_pre proc_post proc_body) arg_vals with "[%]") as "Calls'".
+            { done. }
+            iPoseProof ("Calls'" with "[%]") as "Hproc".
+            { exact H0. }
+
+            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post stk_id' stk_frm' mp lang.SkipS mask).
+
+            iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
             assert ((∀ v : var * typ, v ∈ proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body) → is_Some (locals stk_frm' !! v.1))) as HIsSome.
 
@@ -1314,9 +1382,16 @@ Section MainTranslation.
               eapply (Forall2_lookup_l _ proc_args.*1 arg_vals i v.1 HlocalsDef) in Hi' as [val [Hval Hlookup]]. by eexists.
             }
 
-          pose proof (Hproc HIsSome) as Hproc. simpl in Hproc.
+          iSpecialize ("Hproc" with "[%]"). { exact HIsSome. }
 
-          simpl in HlocalsDef. pose proof (Hproc HlocalsDef) as Hproc.
+          simpl in HlocalsDef.
+          iSpecialize ("Hproc" with "[%]"). { exact HlocalsDef. }
+
+          simpl in Hrv_val. simpl in Hdom_val.
+          iSpecialize ("Hproc" with "[%]").
+          { intros v tp Hin. destruct (Hrv_val v tp Hin) as [val [Hlk Hty]].
+            exists val. split; [exact Hlk |]. apply typeOf_val_has_typ. exact Hty. }
+          iSpecialize ("Hproc" with "[%]"). { exact Hdom_val. }
 
           assert (trnsl_assertion (subst proc_pre subst_map') stk_id mp ≡ proc_frame_pre) as Hproc_frame_pre.
           { subst proc_frame_pre. reflexivity. }
@@ -1327,28 +1402,28 @@ Section MainTranslation.
               apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
             - exact Hproc_frame_pre. }
 
-          have Hproc_frame_post' : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post.
-          { etransitivity.
+          iSpecialize ("Hproc" with "[%]"). { exact Harg_vals_typed. }
+
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_pre'. }
+
+          have Hproc_frame_post_all : ∀ ret_val,
+              trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
+          { intros ret_val. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
               apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
-            - exact Hproc_frame_post. }
+            - reflexivity. }
 
-          pose proof (Hproc Hproc_frame_pre' Hproc_frame_post') as Hproc.
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_post_all. }
 
           assert (trnsl_stmt proc_body = Some' lang.SkipS
             ∨ trnsl_stmt proc_body = None' ∧ lang.SkipS = lang.SkipS) as Hproc_body'. { right. split; try done. }
 
-          pose proof (Hproc Hproc_body') as Hproc.
-
-          destruct Hproc as [stk_frm'' Hproc].
-
-          iExists stk_frm''.
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_body'. }
 
           iIntros (Φ'). iModIntro.
           iIntros "[Hstk Hu1] HΦ".
-          instantiate (1 := lang.SkipS).
 
-          iApply (Hproc with "[Hstk Hu1]").
+          iApply ("Hproc" with "[Hstk Hu1]").
 
           {
             iFrame.
@@ -1377,7 +1452,11 @@ Section MainTranslation.
           { rewrite Hproc_body. iFrame. setoid_rewrite <- trnsl_assertion_unfold. iFrame. }
 
           {
-            iNext. iIntros "[Hstk [Hq Hcr']]".
+            iNext. iIntros "[%ret_val [Hstk [Hq Hcr']]]".
+
+            have Hproc_frame_post : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp ≡ proc_frame_post ret_val.
+            { reflexivity. }
+
             iApply "HΦ". iCombine "Hcr Hcr'" as "Hcr". rewrite Nat.add_1_r. iFrame. iExists (trnsl_val ret_val).
 
             set (trnsl_assertion (subst proc_post (<["#ret_val":=LVar lvar_x]> subst_map)) stk_id
@@ -1399,7 +1478,7 @@ Section MainTranslation.
               { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 rewrite !dom_insert_L. rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
-              pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u proc_frame_post
+              pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u (proc_frame_post ret_val)
                 Hwf (proj2 Hspec_StackFree)
                 (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
                 (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
@@ -1416,31 +1495,36 @@ Section MainTranslation.
           iIntros (Φ) "!> [[Hstk [Hfalse Hu]] Hcr]". rewrite Hproc_body. done. 
         }
 
-        {   
+        {
           (* proc_body != Skip *)
-        inversion H4; subst s. 
+        inversion H4; subst s.
         iIntros (Φ). iModIntro.
         setoid_rewrite trnsl_assertion_unfold.
-        
-        iIntros "[[Hstk [Hproc_tbl Hu1]] Hcr] HΦ".
 
-        pose proof (proc_specs_valid proc_name (Proc proc_args proc_locals proc_pre proc_post proc_body) arg_vals ) as [ret_val Hproc]; try done.
+        iIntros "[[Hstk [Hproc_tbl Hu1]] Hcr] HΦ".
 
         set (subst_map' := @list_to_map var LExpr (gmap var LExpr) _ _ (zip (proc_args).*1 (map (λ val, LVal (trnsl_val val)) arg_vals))).
 
           set (trnsl_assertion (subst proc_pre subst_map') stk_id mp) as proc_frame_pre.
           assert ((trnsl_assertion (subst proc_pre subst_map') stk_id mp) ≡ proc_frame_pre) as Hproc_frame_pre. { subst proc_frame_pre; reflexivity. }
 
-          set (trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
-          assert ((trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) ≡ proc_frame_post) as Hproc_frame_post. { subst proc_frame_post; reflexivity. }
+          set (fun ret_val => trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
 
-        iApply (wp_call _ _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hproc_tbl Hu1]"); try iFrame; try done.
+        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hproc_tbl Hu1]"); try iFrame; try done.
 
           {
-            (* Showing procedure contract holds *)
-            iIntros (stk_id' stk_frm') "%HlocalsDef". simpl in *.
+            (* Showing procedure contract holds, via the ambient (Löb-guarded) Calls fact *)
+            iNext.
+            iIntros (stk_id' stk_frm') "%HlocalsDef". destruct HlocalsDef as [HlocalsDef [Hrv_val Hdom_val]]. simpl in *.
 
-            specialize (Hproc proc_frame_pre proc_frame_post stk_id' stk_frm' mp s0 (inv_set_to_namespace mask)).
+            iPoseProof ("Calls" $! proc_name (Proc proc_args proc_locals proc_pre proc_post proc_body) arg_vals with "[%]") as "Calls'".
+            { done. }
+            iPoseProof ("Calls'" with "[%]") as "Hproc".
+            { exact H0. }
+
+            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post stk_id' stk_frm' mp s0 mask).
+
+            iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
             assert ((∀ v : var * typ, v ∈ proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body) → is_Some (locals stk_frm' !! v.1))) as HIsSome.
 
@@ -1452,9 +1536,16 @@ Section MainTranslation.
               eapply (Forall2_lookup_l _ proc_args.*1 arg_vals i v.1 HlocalsDef) in Hi' as [val [Hval Hlookup]]. by eexists.
             }
 
-          pose proof (Hproc HIsSome) as Hproc. simpl in Hproc.
+          iSpecialize ("Hproc" with "[%]"). { exact HIsSome. }
 
-          simpl in HlocalsDef. pose proof (Hproc HlocalsDef) as Hproc.
+          simpl in HlocalsDef.
+          iSpecialize ("Hproc" with "[%]"). { exact HlocalsDef. }
+
+          simpl in Hrv_val. simpl in Hdom_val.
+          iSpecialize ("Hproc" with "[%]").
+          { intros v tp Hin. destruct (Hrv_val v tp Hin) as [val [Hlk Hty]].
+            exists val. split; [exact Hlk |]. apply typeOf_val_has_typ. exact Hty. }
+          iSpecialize ("Hproc" with "[%]"). { exact Hdom_val. }
 
           have Hproc_frame_pre' : trnsl_assertion (subst proc_pre subst_map') stk_id' mp ≡ proc_frame_pre.
           { etransitivity.
@@ -1462,27 +1553,28 @@ Section MainTranslation.
               apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
             - exact Hproc_frame_pre. }
 
-          have Hproc_frame_post' : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post.
-          { etransitivity.
+          iSpecialize ("Hproc" with "[%]"). { exact Harg_vals_typed. }
+
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_pre'. }
+
+          have Hproc_frame_post_all : ∀ ret_val,
+              trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
+          { intros ret_val. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
               apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
-            - exact Hproc_frame_post. }
+            - reflexivity. }
 
-          pose proof (Hproc Hproc_frame_pre' Hproc_frame_post') as Hproc.
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_post_all. }
 
           assert (trnsl_stmt proc_body = Some' s0
             ∨ trnsl_stmt proc_body = None' ∧ s0 = lang.SkipS) as Hproc_body'. { left. try done. }
 
-          pose proof (Hproc Hproc_body') as Hproc.
-
-          destruct Hproc as [stk_frm'' Hproc].
-
-          iExists stk_frm''.
+          iSpecialize ("Hproc" with "[%]"). { exact Hproc_body'. }
 
           iIntros (Φ'). iModIntro.
           iIntros "[Hstk Hu1] HΦ".
 
-          iApply (Hproc with "[Hstk Hu1]").
+          iApply ("Hproc" with "[Hstk Hu1]").
 
           {
             iFrame.
@@ -1511,7 +1603,11 @@ Section MainTranslation.
           { rewrite Hproc_body. iFrame. setoid_rewrite <- trnsl_assertion_unfold. iFrame. }
 
           {
-            iNext. iIntros "[Hstk [Hq Hcr']]".
+            iNext. iIntros "[%ret_val [Hstk [Hq Hcr']]]".
+
+            have Hproc_frame_post : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp ≡ proc_frame_post ret_val.
+            { reflexivity. }
+
             iApply "HΦ". iCombine "Hcr" "Hcr'" as "Hcr". rewrite Nat.add_1_r. iFrame. iExists (trnsl_val ret_val).
 
             set (trnsl_assertion (subst proc_post (<["#ret_val":=LVar lvar_x]> subst_map)) stk_id
@@ -1530,7 +1626,7 @@ Section MainTranslation.
               { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 rewrite !dom_insert_L. rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
-              pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u proc_frame_post
+              pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u (proc_frame_post ret_val)
                 Hwf (proj2 Hspec_StackFree)
                 (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
                 (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
@@ -1569,5 +1665,361 @@ Section MainTranslation.
       }
 
     Qed.
-  
+
+    (* The central bootstrap theorem: if every procedure's own body is
+       provably correct against its own contract (via RavenHoareTriple, run
+       from a symbolic entry stack synthesized from its formal args and
+       locals), then all_proc_specs_valid_iris holds unconditionally -- with no
+       ▷ all_proc_specs_valid_iris hypothesis of its own. The recursive/mutually-
+       recursive call sites inside procedure bodies are discharged via Löb
+       induction, mirroring rrl_validity's own use of "Calls". *)
+    Theorem raven_soundness ρ σ
+      (Hwf : ProgramWF)
+      (* σ has enough distinct lvars of any given type, avoiding any finite
+         exclusion set -- lets every procedure synthesize its own entry stack
+         out of genuinely fresh lvars, rather than reusing formal-argument or
+         local-variable names as lvar names (which would force every
+         procedure sharing such a name to agree on its type under a single
+         global σ). *)
+      (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+      (* Every procedure call starts a fresh sub-execution: wp_call discards
+         whatever later-credits the caller has accumulated (never threads
+         them into the callee), so a procedure body's own derivation must be
+         able to start at credit-index 0 -- exactly like the top-level
+         "main" program itself must.
+         "#ret_val" is itself a stack variable, so by the time the body
+         returns it may have been reassigned (fresh lvar per
+         VarAssignmentRule) away from its initial binding; lv_final is
+         whatever lvar it now points to, and the postcondition's own
+         "#ret_val" occurrences must be read through that renaming --
+         mirroring exactly how ProcCallRuleRet's own conclusion substitutes
+         "#ret_val" with the call's fresh result lvar. *)
+      (Hbodies : all_proc_specs_valid_raven ρ σ) :
+      ⊢ all_proc_specs_valid_iris σ.
+    Proof.
+      iLöb as "IH".
+      rewrite /all_proc_specs_valid_iris.
+      iModIntro.
+      iIntros (proc proc_record stk_vals) "%Hproc_in_set %Hproc_map".
+      iIntros (precond postcond stk_id stk_frm mp stmt msk)
+        "%Henv %Hargs_present %Harg_vals %Hlocals_typed %Hdom_val %Harg_vals_typed %Hprecond_eq %Hpostcond_eq %Hstmt_shape".
+
+      pose proof (Hwf.(pwf_proc_args_unique) proc proc_record Hproc_map) as Hargs_nodup.
+      pose proof (Hwf.(pwf_proc_locals_unique) proc proc_record Hproc_map) as Hlocals_nodup.
+      pose proof (Hwf.(pwf_proc_args_locals_disjoint) proc proc_record Hproc_map) as Hargs_locals_disjoint.
+      pose proof (Hwf.(pwf_proc_stack_free) proc proc_record Hproc_map) as [Hpre_free Hpost_free].
+
+      destruct (fresh_proc_entry_lvars σ Hσ_rich proc_record) as (dll & _).
+      set (args_lvs := dll_args dll).
+      set (locals_lvs := dll_locals dll).
+      have Hargs_lvs_len : length args_lvs = length (proc_args_of proc_record) := dll_args_len dll.
+      have Hlocals_lvs_len : length locals_lvs = length (proc_locals_of proc_record) := dll_locals_len dll.
+      have Hargs_lvs_typed : Forall2 (fun decl lv => σ lv = snd decl) (proc_args_of proc_record) args_lvs
+        := dll_args_typed dll.
+      have Hlocals_lvs_typed : Forall2 (fun decl lv => σ lv = snd decl) (proc_locals_of proc_record) locals_lvs
+        := dll_locals_typed dll.
+      have Hargs_lvs_nodup : NoDup args_lvs := dll_args_nodup dll.
+      have Hlocals_lvs_nodup : NoDup locals_lvs := dll_locals_nodup dll.
+      have Hargs_locals_lvs_disjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs := dll_disjoint dll.
+
+      destruct (Hbodies proc proc_record Hproc_map) as [Hwelldef Hbody_msk].
+      destruct (Hbody_msk msk dll) as (ι2 & stk0' & lv_final & Hrv_final & HRHT).
+
+      set (args := (proc_args_of proc_record).*1).
+      set (loc_names := (proc_locals_of proc_record).*1).
+      set (names := (proc_args_of proc_record ++ proc_locals_of proc_record).*1).
+      set (lvs := args_lvs ++ locals_lvs).
+
+      have Hargs_len2 : length args = length stk_vals := Forall2_length _ _ _ Harg_vals.
+      destruct (extract_present_vals (proc_locals_of proc_record) stk_frm.(locals) Hlocals_typed)
+        as (local_vals & Hlocal_vals_F2 & Hlocal_vals_typed).
+      set (vals := stk_vals ++ local_vals).
+
+      have Hargs_len_lvs : length args = length args_lvs.
+      { unfold args. rewrite map_length. exact (eq_sym Hargs_lvs_len). }
+      have Hlocals_len_lvs : length loc_names = length locals_lvs.
+      { unfold loc_names. rewrite map_length. exact (eq_sym Hlocals_lvs_len). }
+      have Hlocals_len2 : length loc_names = length local_vals.
+      { unfold loc_names. rewrite map_length. exact (Forall2_length _ _ _ Hlocal_vals_F2). }
+
+      have Hnames_eq : names = args ++ loc_names.
+      { unfold names, args, loc_names. apply fmap_app. }
+
+      have Hnodup_names : NoDup names.
+      { rewrite Hnames_eq. apply NoDup_app. repeat split.
+        - exact Hargs_nodup.
+        - intros x Hx1 Hx2. exact (Hargs_locals_disjoint x Hx1 Hx2).
+        - exact Hlocals_nodup. }
+
+      have Hnodup_lvs : NoDup lvs.
+      { unfold lvs. apply NoDup_app. repeat split.
+        - exact Hargs_lvs_nodup.
+        - exact Hargs_locals_lvs_disjoint.
+        - exact Hlocals_lvs_nodup. }
+
+      have Hlen1 : length names = length lvs.
+      { rewrite Hnames_eq. unfold lvs. rewrite !app_length. f_equal; [exact Hargs_len_lvs | exact Hlocals_len_lvs]. }
+      have Hlen2 : length names = length vals.
+      { rewrite Hnames_eq. unfold vals. rewrite !app_length. f_equal; [exact Hargs_len2 | exact Hlocals_len2]. }
+
+      set (mp0 := fun lv0 => match (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv0 with
+                              | Some v => trnsl_val v | None => mp lv0 end).
+
+      have Hargs_typed_σ : Forall2 (λ lv val, typeOf val = σ lv) args_lvs stk_vals.
+      { eapply Forall2_combine; [| exact Hargs_lvs_typed | exact Harg_vals_typed].
+        intros decl lv val Hp1 Hp2. rewrite Hp2. exact (eq_sym Hp1). }
+      have Hlocals_typed_σ : Forall2 (λ lv val, typeOf val = σ lv) locals_lvs local_vals.
+      { eapply Forall2_combine; [| exact Hlocals_lvs_typed | exact Hlocal_vals_typed].
+        intros decl lv val Hp1 Hp2. rewrite Hp2. exact (eq_sym Hp1). }
+      have Hnames_typed : Forall2 (λ lv0 val0, typeOf val0 = σ lv0) lvs vals.
+      { unfold lvs, vals. apply Forall2_app; [exact Hargs_typed_σ | exact Hlocals_typed_σ]. }
+
+      have Henv0 : env_typ_well_defined σ mp0.
+      { unfold mp0. exact (env_typ_well_defined_override σ mp lvs vals Hnames_typed Henv). }
+
+      have Hnodup_names_vals : NoDup (zip names vals).*1.
+      { rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ Hlen2)). exact Hnodup_names. }
+      have Hzip_names_vals_eq : zip names vals = zip args stk_vals ++ zip loc_names local_vals.
+      { rewrite Hnames_eq. unfold vals. exact (zip_with_app pair args loc_names stk_vals local_vals Hargs_len2). }
+
+      have Hframe_eq : stk_frm.(locals) = list_to_map (zip names vals).
+      { apply map_eq. intro v.
+        destruct (decide (v ∈ names)) as [Hin | Hnotin].
+        - rewrite Hnames_eq elem_of_app in Hin.
+          destruct Hin as [Hin_args | Hin_locals].
+          + apply elem_of_list_lookup_1 in Hin_args as [i Hi].
+            pose proof (Forall2_lookup_l _ args stk_vals i v Harg_vals Hi) as [val [Hval Hlk]].
+            have Hzip_lookup : zip args stk_vals !! i = Some (v, val).
+            { apply lookup_zip_with_Some. exists v, val. done. }
+            have Hzip_in : (v, val) ∈ zip args stk_vals := elem_of_list_lookup_2 _ i _ Hzip_lookup.
+            rewrite Hlk. symmetry.
+            apply elem_of_list_to_map_1; [exact Hnodup_names_vals |].
+            rewrite Hzip_names_vals_eq. apply elem_of_app. left. exact Hzip_in.
+          + apply elem_of_list_lookup_1 in Hin_locals as [i Hi].
+            unfold loc_names in Hi. rewrite list_lookup_fmap in Hi.
+            destruct (proc_locals_of proc_record !! i) as [[v0 tp0]|] eqn:Hdecl_i; [| discriminate].
+            simpl in Hi. injection Hi as Hi_eq. subst v0.
+            pose proof (Forall2_lookup_l _ (proc_locals_of proc_record) local_vals i (v, tp0) Hlocal_vals_F2 Hdecl_i)
+              as [val [Hval Hlk]].
+            simpl in Hlk.
+            have Hi : loc_names !! i = Some v.
+            { unfold loc_names. rewrite list_lookup_fmap Hdecl_i. done. }
+            have Hzip_lookup : zip loc_names local_vals !! i = Some (v, val).
+            { apply lookup_zip_with_Some. exists v, val. done. }
+            have Hzip_in : (v, val) ∈ zip loc_names local_vals := elem_of_list_lookup_2 _ i _ Hzip_lookup.
+            rewrite Hlk. symmetry.
+            apply elem_of_list_to_map_1; [exact Hnodup_names_vals |].
+            rewrite Hzip_names_vals_eq. apply elem_of_app. right. exact Hzip_in.
+        - have Hn1 : stk_frm.(locals) !! v = None.
+          { apply not_elem_of_dom. rewrite Hdom_val.
+            intro Hc. apply Hnotin. rewrite Hnames_eq.
+            rewrite <- list_to_set_app_L in Hc. rewrite elem_of_list_to_set in Hc. exact Hc. }
+          have Hn2 : (list_to_map (zip names vals) : gmap var lang.val) !! v = None.
+          { apply not_elem_of_list_to_map_1. rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ Hlen2)). exact Hnotin. }
+          rewrite Hn1 Hn2. done. }
+
+      have Hstk0_eq : symb_stk_to_stk_frm (list_to_map (zip names lvs)) mp0 = stk_frm.
+      { unfold mp0.
+        rewrite (symb_stk_to_stk_frm_general names lvs vals mp Hnodup_names Hnodup_lvs Hlen1 Hlen2).
+        unfold assoc_map. rewrite <- Hframe_eq. destruct stk_frm. reflexivity. }
+
+      have Hargs_len2' : length args ≤ length (map (λ val, LVal (trnsl_val val)) stk_vals).
+      { rewrite map_length. rewrite Hargs_len2. apply Nat.le_refl. }
+      have Hargs_len_lvs' : length args ≤ length (map LVar args_lvs).
+      { rewrite map_length. rewrite Hargs_len_lvs. apply Nat.le_refl. }
+
+      have Hprecond_bridge :
+        trnsl_assertion (subst (proc_precond_of proc_record) (list_to_map (zip args (map LVar args_lvs)))) stk_id mp0
+        ≡ precond.
+      { set (M1 := list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr).
+        set (M2 := list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals)) : gmap var LExpr).
+        have Hfv := proj1 (Hwf.(pwf_proc_fvars_bounded) proc proc_record Hproc_map).
+        have HfvA : assertion_lexpr_fvars (proc_precond_of proc_record) ⊆ dom M1.
+        { unfold M1. rewrite dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hfv. }
+        have HdomEq : dom M1 = dom M2.
+        { unfold M1, M2. rewrite !dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') (fst_zip _ _ Hargs_len2'). reflexivity. }
+        have Hstab := hstab_lexpr_subst_fwd args (map LVar args_lvs) stk_vals HdomEq.
+        have Hbase : ∀ x, x ∈ dom M1 → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        { intros x Hx.
+          have Hx_args : x ∈ args.
+          { unfold M1 in Hx. rewrite dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') in Hx.
+            rewrite elem_of_list_to_set in Hx. exact Hx. }
+          pose proof Hx_args as Hx_args'.
+          apply elem_of_list_lookup_1 in Hx_args' as [i Hi].
+          have Hlv_ex : is_Some (args_lvs !! i).
+          { apply lookup_lt_is_Some_2. rewrite <- Hargs_len_lvs. eapply lookup_lt_Some. exact Hi. }
+          destruct Hlv_ex as [lv Hlv].
+          pose proof (Forall2_lookup_l _ args stk_vals i x Harg_vals Hi) as [val [Hval Hlk]].
+          have Hzip_lvs_in : (x, lv) ∈ zip args args_lvs.
+          { apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists x, lv. done. }
+          have Hzip_vals_in : (x, val) ∈ zip args stk_vals.
+          { apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists x, val. done. }
+          unfold eval_lvar, M1, M2.
+          rewrite (zip_wrap_map_lookup_arg args args_lvs LVar x lv Hargs_nodup Hzip_lvs_in).
+          rewrite (zip_wrap_map_lookup_arg args stk_vals (λ val0, LVal (trnsl_val val0)) x val Hargs_nodup Hzip_vals_in).
+          simpl. unfold mp0.
+          have Hzip_lvs_full : (lv, val) ∈ zip lvs vals.
+          { unfold lvs, vals. rewrite (zip_with_app pair args_lvs locals_lvs stk_vals local_vals (eq_trans (eq_sym Hargs_len_lvs) Hargs_len2)).
+            apply elem_of_app. left.
+            apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists lv, val.
+            split; [done |]. split.
+            - apply elem_of_list_lookup_1 in Hzip_lvs_in as [i' Hi'].
+              rewrite lookup_zip_with in Hi'.
+              destruct (args !! i') eqn:Ha; [| discriminate]. destruct (args_lvs !! i') eqn:Hb; [| discriminate].
+              simpl in Hi'. injection Hi' as Heqa Heqb. subst v. subst l.
+              have Hii' : i = i'. { apply (NoDup_lookup args i i' x Hargs_nodup Hi Ha). }
+              subst i'. exact Hb.
+            - apply elem_of_list_lookup_1 in Hzip_vals_in as [i' Hi'].
+              rewrite lookup_zip_with in Hi'.
+              destruct (args !! i') eqn:Ha; [| discriminate]. destruct (stk_vals !! i') eqn:Hb; [| discriminate].
+              simpl in Hi'. injection Hi' as Heqa Heqb. subst v. subst v0.
+              have Hii' : i = i'. { apply (NoDup_lookup args i i' x Hargs_nodup Hi Ha). }
+              subst i'. exact Hb. }
+          have Hmp0_lv : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some val.
+          { apply elem_of_list_to_map_1; [rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))); exact Hnodup_lvs | exact Hzip_lvs_full]. }
+          rewrite Hmp0_lv. done. }
+        have Heq := trnsl_assertion_subst_congr Hwf (proc_precond_of proc_record) M1 M2 stk_id mp0 mp
+          Hpre_free (proj1 (Hwf.(pwf_proc_binders_fresh) proc proc_record M1 Hproc_map))
+          (proj1 (Hwf.(pwf_proc_binders_fresh) proc proc_record M2 Hproc_map))
+          HfvA HdomEq Hstab Hbase.
+        rewrite Heq. exact Hprecond_eq. }
+
+      set (ret_val := trnsl_lval (mp0 lv_final)).
+
+      have Hpostcond_bridge :
+        trnsl_assertion
+          (subst (proc_postcond_of proc_record)
+             (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
+          stk_id mp0
+        ≡ postcond ret_val.
+      { set (M1 := <["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))) : gmap var LExpr).
+        set (M2 := <["#ret_val" := LVal (trnsl_val ret_val)]>
+                     (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals))) : gmap var LExpr).
+        have Hfv := proj2 (Hwf.(pwf_proc_fvars_bounded) proc proc_record Hproc_map).
+        have HdomEq0 : dom (list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr)
+                     = dom (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals)) : gmap var LExpr).
+        { rewrite !dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') (fst_zip _ _ Hargs_len2'). reflexivity. }
+        have HfvA : assertion_lexpr_fvars (proc_postcond_of proc_record) ⊆ dom M1.
+        { unfold M1. rewrite dom_insert_L dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hfv. }
+        have HdomEq : dom M1 = dom M2.
+        { unfold M1, M2. rewrite !dom_insert_L. rewrite HdomEq0. reflexivity. }
+        have Hstab := hstab_lexpr_subst_r args (map LVar args_lvs) stk_vals lv_final ret_val HdomEq.
+        have Hbase : ∀ x, x ∈ dom M1 → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        { intros x Hx.
+          destruct (decide (x = "#ret_val")) as [-> | Hne].
+          - unfold eval_lvar, M1, M2. rewrite !lookup_insert. simpl.
+            unfold ret_val. rewrite trnsl_val_trnsl_lval_inverse. reflexivity.
+          - have Hx_args : x ∈ args.
+            { unfold M1 in Hx. rewrite dom_insert_L elem_of_union in Hx.
+              destruct Hx as [Hx1 | Hx2].
+              - exfalso. apply Hne. rewrite elem_of_singleton in Hx1. exact Hx1.
+              - rewrite dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') in Hx2.
+                rewrite elem_of_list_to_set in Hx2. exact Hx2. }
+            unfold eval_lvar, M1, M2.
+            rewrite lookup_insert_ne; [| intro Heq'; apply Hne; exact (eq_sym Heq')].
+            rewrite lookup_insert_ne; [| intro Heq'; apply Hne; exact (eq_sym Heq')].
+            pose proof Hx_args as Hx_args'.
+            apply elem_of_list_lookup_1 in Hx_args' as [i Hi].
+            have Hlv_ex : is_Some (args_lvs !! i).
+            { apply lookup_lt_is_Some_2. rewrite <- Hargs_len_lvs. eapply lookup_lt_Some. exact Hi. }
+            destruct Hlv_ex as [lv Hlv].
+            pose proof (Forall2_lookup_l _ args stk_vals i x Harg_vals Hi) as [val [Hval Hlk]].
+            have Hzip_lvs_in : (x, lv) ∈ zip args args_lvs.
+            { apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists x, lv. done. }
+            have Hzip_vals_in : (x, val) ∈ zip args stk_vals.
+            { apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists x, val. done. }
+            rewrite (zip_wrap_map_lookup_arg args args_lvs LVar x lv Hargs_nodup Hzip_lvs_in).
+            rewrite (zip_wrap_map_lookup_arg args stk_vals (λ val0, LVal (trnsl_val val0)) x val Hargs_nodup Hzip_vals_in).
+            simpl. unfold mp0.
+            have Hzip_lvs_full : (lv, val) ∈ zip lvs vals.
+            { unfold lvs, vals. rewrite (zip_with_app pair args_lvs locals_lvs stk_vals local_vals (eq_trans (eq_sym Hargs_len_lvs) Hargs_len2)).
+              apply elem_of_app. left.
+              apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists lv, val.
+              split; [done |]. split.
+              - apply elem_of_list_lookup_1 in Hzip_lvs_in as [i' Hi'].
+                rewrite lookup_zip_with in Hi'.
+                destruct (args !! i') eqn:Ha; [| discriminate]. destruct (args_lvs !! i') eqn:Hb; [| discriminate].
+                simpl in Hi'. injection Hi' as Heqa Heqb. subst v. subst l.
+                have Hii' : i = i'. { apply (NoDup_lookup args i i' x Hargs_nodup Hi Ha). }
+                subst i'. exact Hb.
+              - apply elem_of_list_lookup_1 in Hzip_vals_in as [i' Hi'].
+                rewrite lookup_zip_with in Hi'.
+                destruct (args !! i') eqn:Ha; [| discriminate]. destruct (stk_vals !! i') eqn:Hb; [| discriminate].
+                simpl in Hi'. injection Hi' as Heqa Heqb. subst v. subst v0.
+                have Hii' : i = i'. { apply (NoDup_lookup args i i' x Hargs_nodup Hi Ha). }
+                subst i'. exact Hb. }
+            have Hmp0_lv : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some val.
+          { apply elem_of_list_to_map_1; [rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))); exact Hnodup_lvs | exact Hzip_lvs_full]. }
+          rewrite Hmp0_lv. done. }
+        have Heq := trnsl_assertion_subst_congr Hwf (proc_postcond_of proc_record) M1 M2 stk_id mp0 mp
+          Hpost_free (proj2 (Hwf.(pwf_proc_binders_fresh) proc proc_record M1 Hproc_map))
+          (proj2 (Hwf.(pwf_proc_binders_fresh) proc proc_record M2 Hproc_map))
+          HfvA HdomEq Hstab Hbase.
+        rewrite Heq. exact (Hpostcond_eq ret_val). }
+
+      iPoseProof (rrl_validity ρ σ 0 ι2 stk_id
+        (LAnd (LStack (list_to_map (zip names lvs)))
+           (subst (proc_precond_of proc_record) (list_to_map (zip args (map LVar args_lvs)))))
+        msk (proc_body_of proc_record)
+        (LAnd (LStack stk0')
+           (subst (proc_postcond_of proc_record)
+              (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))))))
+        Hwf Hwelldef mp0 Henv0 with "[$IH]") as "Htriple".
+      { iPureIntro. exact HRHT. }
+
+      destruct Hstmt_shape as [Hstmt_shape | [Hstmt_shape ->]];
+        iEval (rewrite /trnsl_hoare_triple Hstmt_shape) in "Htriple".
+
+      - (* proc_body_of proc_record translates to a real statement *)
+        iEval (setoid_rewrite trnsl_assertion_unfold; simpl) in "Htriple".
+        have Hprecond_bridge' := Hprecond_bridge.
+        unfold trnsl_assertion in Hprecond_bridge'.
+        rewrite trnsl_assertion_unfold in Hprecond_bridge'.
+        have Hpostcond_bridge' := Hpostcond_bridge.
+        unfold trnsl_assertion in Hpostcond_bridge'.
+        rewrite trnsl_assertion_unfold in Hpostcond_bridge'.
+        iIntros (Φ). iModIntro.
+        iMod lc_zero as "Hlc0".
+        iIntros "[Hstk Hpre] HΦ'".
+        iApply ("Htriple" with "[Hstk Hpre Hlc0]").
+        { rewrite Hstk0_eq.
+          iSplitL "Hstk Hpre".
+          - iSplitL "Hstk"; [iFrame |]. iEval (rewrite Hprecond_bridge'). iFrame.
+          - iFrame. }
+        iNext. iIntros "[[Hpost_stk Hpost_pred] Hcr2]".
+        iApply "HΦ'".
+        iExists ret_val, (symb_stk_to_stk_frm stk0' mp0).
+        iFrame "Hpost_stk".
+        iSplitR.
+        + iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
+        + iEval (rewrite Hpostcond_bridge') in "Hpost_pred". iFrame.
+
+      - (* trnsl_stmt (proc_body_of proc_record) = None': body is ghost-only, runs as Skip *)
+        have Hprecond_bridge' := Hprecond_bridge.
+        unfold trnsl_assertion in Hprecond_bridge'.
+        rewrite trnsl_assertion_unfold in Hprecond_bridge'.
+        have Hpostcond_bridge' := Hpostcond_bridge.
+        unfold trnsl_assertion in Hpostcond_bridge'.
+        rewrite trnsl_assertion_unfold in Hpostcond_bridge'.
+        iEval (setoid_rewrite trnsl_assertion_unfold; simpl) in "Htriple".
+        iIntros (Φ). iModIntro.
+        iMod lc_zero as "Hlc0".
+        iIntros "[Hstk Hpre] HΦ'".
+        iMod ("Htriple" with "[Hstk Hpre Hlc0]") as "[[Hpost_stk Hpost_pred] Hcr2]".
+        { rewrite Hstk0_eq.
+          iSplitL "Hstk Hpre".
+          - iSplitL "Hstk"; [iFrame |]. iEval (rewrite Hprecond_bridge'). iFrame.
+          - iFrame. }
+        iApply (wp_skip
+          (∃ ret_val0 stk_frm'', stack_own[stk_id, stk_frm''] ∗
+             ⌜locals stk_frm'' !! "#ret_val" = Some ret_val0⌝ ∗ postcond ret_val0)%I
+          (inv_set_to_namespace msk) stk_id with "[Hpost_stk Hpost_pred]").
+        { iExists ret_val, (symb_stk_to_stk_frm stk0' mp0). iFrame "Hpost_stk".
+          iSplitR.
+          - iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
+          - iEval (rewrite Hpostcond_bridge') in "Hpost_pred". iFrame. }
+        iNext. iIntros "[Hpost Hcr1]".
+        iApply "HΦ'". iFrame "Hpost".
+    Qed.
+
   End MainTranslation.

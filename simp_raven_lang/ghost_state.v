@@ -51,7 +51,11 @@ Definition state_wf (σ : state) : Prop :=
   (0 ≤ σ.(max_stack_id))%Z ∧
   (∀ k v, σ.(stack) !! k = Some v → (k ≤ σ.(max_stack_id))%Z) ∧
   (∀ l f v, σ.(global_heap) !! heap_addr_constr l f = Some v →
-            (l.(loc_car) < Z.of_nat (size σ.(global_heap)))%Z).
+            (l.(loc_car) < Z.of_nat (size σ.(global_heap)))%Z) ∧
+  (* "#ret_val" is present, with some value, in every stack frame: every call/spawn
+     step pre-populates it (see RTCallStep/SpawnStep in lang.v), and no step ever
+     removes a key from a frame's locals map, so this is preserved throughout. *)
+  (∀ k frm, σ.(stack) !! k = Some frm → is_Some (frm.(locals) !! "#ret_val")).
 
 Definition swf_max_stk_non_neg {σ} (Hwf : state_wf σ) : (0 ≤ σ.(max_stack_id))%Z :=
   proj1 Hwf.
@@ -61,14 +65,18 @@ Definition swf_stk_bounded {σ} (Hwf : state_wf σ)
 Definition swf_heap_bounded {σ} (Hwf : state_wf σ)
     : ∀ l f v, σ.(global_heap) !! heap_addr_constr l f = Some v →
                (l.(loc_car) < Z.of_nat (size σ.(global_heap)))%Z :=
-  proj2 (proj2 Hwf).
+  proj1 (proj2 (proj2 Hwf)).
+Definition swf_ret_val_bound {σ} (Hwf : state_wf σ)
+    : ∀ k frm, σ.(stack) !! k = Some frm → is_Some (frm.(locals) !! "#ret_val") :=
+  proj2 (proj2 (proj2 Hwf)).
 
 Definition mk_state_wf σ
     (Hnn : (0 ≤ σ.(max_stack_id))%Z)
     (Hbnd : ∀ k v, σ.(stack) !! k = Some v → (k ≤ σ.(max_stack_id))%Z)
     (Hhb : ∀ l f v, σ.(global_heap) !! heap_addr_constr l f = Some v →
-                    (l.(loc_car) < Z.of_nat (size σ.(global_heap)))%Z) :
-    state_wf σ := conj Hnn (conj Hbnd Hhb).
+                    (l.(loc_car) < Z.of_nat (size σ.(global_heap)))%Z)
+    (Hrv : ∀ k frm, σ.(stack) !! k = Some frm → is_Some (frm.(locals) !! "#ret_val")) :
+    state_wf σ := conj Hnn (conj Hbnd (conj Hhb Hrv)).
 
 Lemma fresh_loc_is_fresh (h : heap) (fld : fld_name)
     (Hwf : ∀ l f v, h !! heap_addr_constr l f = Some v → (l.(loc_car) < Z.of_nat (size h))%Z) :
@@ -418,6 +426,7 @@ Section updates.
         exact (swf_heap_bounded Hwf l fld old_v Hpresent).
       + rewrite lookup_insert_ne in Hlookup; [| by intro Heq'; apply Hne; symmetry].
         exact (swf_heap_bounded Hwf l' f' v' Hlookup).
+    - exact (swf_ret_val_bound Hwf).
   Qed.
 
   Lemma state_wf_update_lvar (σ : state) (x : var) (stk_id : stack_id) (v : val)
@@ -434,6 +443,15 @@ Section updates.
         * rewrite lookup_insert_ne in Hk; [| by intro H; exact (Hne (eq_sym H))].
           exact (swf_stk_bounded Hwf k vk Hk).
       + exact (swf_heap_bounded Hwf).
+      + simpl. intros k frm Hk.
+        destruct (decide (k = stk_id)) as [-> | Hne].
+        * rewrite lookup_insert in Hk. injection Hk as <-. simpl.
+          destruct (decide (x = "#ret_val")) as [-> | Hxne].
+          -- rewrite lookup_insert. by eexists.
+          -- rewrite lookup_insert_ne; [| exact Hxne].
+             exact (swf_ret_val_bound Hwf stk_id s Hlookup).
+        * rewrite lookup_insert_ne in Hk; [| by intro H; exact (Hne (eq_sym H))].
+          exact (swf_ret_val_bound Hwf k frm Hk).
     - exact Hwf.
   Qed.
 
@@ -480,6 +498,7 @@ Section updates.
           rewrite Hlcar. lia.
         * rewrite lookup_insert_ne in Hlookup; [| by intro H; exact (Hne (eq_sym H))].
           have := swf_heap_bounded IH l' f' v' Hlookup. lia.
+      + exact (swf_ret_val_bound IH).
   Qed.
 
   Lemma state_wf_fresh_stk_id (σ : state) (Hwf : state_wf σ) :
@@ -492,10 +511,12 @@ Section updates.
       have := swf_stk_bounded Hwf k v Hlookup.
       have := swf_max_stk_non_neg Hwf. lia.
     - simpl. exact (swf_heap_bounded Hwf).
+    - simpl. exact (swf_ret_val_bound Hwf).
   Qed.
 
   Lemma state_wf_update_stack (σ : state) (stk_id : stack_id) (frame : stack_frame)
       (Hid : (stk_id ≤ σ.(max_stack_id))%Z)
+      (Hrv : is_Some (frame.(locals) !! "#ret_val"))
       (Hwf : state_wf σ) :
       state_wf (update_stack σ stk_id frame).
   Proof.
@@ -507,6 +528,11 @@ Section updates.
       + rewrite lookup_insert_ne in Hk; [| by intro H; exact (Hne (eq_sym H))].
         exact (swf_stk_bounded Hwf k vk Hk).
     - exact (swf_heap_bounded Hwf).
+    - simpl. intros k frm Hk.
+      destruct (decide (k = stk_id)) as [-> | Hne].
+      + rewrite lookup_insert in Hk. injection Hk as <-. exact Hrv.
+      + rewrite lookup_insert_ne in Hk; [| by intro H; exact (Hne (eq_sym H))].
+        exact (swf_ret_val_bound Hwf k frm Hk).
   Qed.
 
 End updates.

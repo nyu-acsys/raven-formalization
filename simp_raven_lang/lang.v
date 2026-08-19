@@ -87,6 +87,25 @@ Proof.
   solve_decision.
 Qed.
 
+(* Whether a value inhabits a declared type -- used to non-deterministically
+   pick well-typed placeholder values for a fresh stack frame's local
+   variables (see RTCallStep/SpawnStep). *)
+Definition val_has_typ (v : val) (t : typ) : Prop :=
+  match v, t with
+  | LitBool _, TpBool | LitInt _, TpInt | LitUnit, TpUnit | LitLoc _, TpLoc => True
+  | _, _ => False
+  end.
+
+(* A fixed witness inhabitant of each type, used only to exhibit that a step
+   filling in non-deterministic local values is always possible. *)
+Definition canonical_val (t : typ) : val :=
+  match t with
+  | TpInt => LitInt 0 | TpBool => LitBool false | TpUnit => LitUnit | TpLoc => LitLoc (Loc 0)
+  end.
+
+Lemma canonical_val_has_typ t : val_has_typ (canonical_val t) t.
+Proof. destruct t; simpl; done. Qed.
+
 End expr.
 
 Inductive stmt :=
@@ -359,6 +378,12 @@ Inductive expr_step : expr → stack_frame → expr → Prop :=
     expr_step e3 stk_frame (Val v3) ->
     expr_step (IfE e1 e2 e3) stk_frame (Val v3).
 
+(* Pairs a declaration list's names with a same-length value list,
+   positionally -- the shape a fresh stack frame's association list is
+   built out of, whether from a procedure's args or its locals. *)
+Definition decls_zip_vals {A} (decls : list (var * typ)) (vals : list A) : list (var * A) :=
+  zip (map fst decls) vals.
+
 Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_stmt → state → list runtime_stmt → Prop :=
 | RTIfTStep σ stk_id stk_frm e s1 s2 s_next σ' efs:
   σ.(stack) !! stk_id = Some stk_frm ->
@@ -398,18 +423,28 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
 | RTSkipStep σ stk_id :
   runtime_step (RTSkipS stk_id) σ [] (RTVal LitUnit) σ []
 
-| RTCallStep σ stk_id stk_frm v proc args arg_vals procedure :
+| RTCallStep σ stk_id stk_frm v proc args arg_vals procedure local_vals :
   σ.(stack) !! stk_id = Some stk_frm ->
   σ.(procs) !! proc = Some procedure ->
   length procedure.(proc_args) = length args ->
   Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+  "#ret_val" ∈ (map fst procedure.(proc_local_vars)) ->
+  Forall2 (fun decl val => val_has_typ val (snd decl)) procedure.(proc_local_vars) local_vals ->
   let (new_stk_id, σ') := fresh_stk_id σ in
-  let new_stk_frame := StackFrame 
-      (list_to_map (zip (map fst procedure.(proc_args)) arg_vals))
+  (* Every local variable (including "#ret_val") is present, with some
+     non-deterministically chosen value of its declared type, in every stack
+     frame from the moment it is created -- the frame's variable slots are
+     fixed for the whole body, so they must all be allocated up front; the
+     body is expected to overwrite each before it is actually read. Args are
+     listed first so a (disallowed) name clash would still favor the
+     caller-supplied argument value. *)
+  let new_stk_frame := StackFrame
+      (list_to_map (decls_zip_vals procedure.(proc_args) arg_vals
+                    ++ decls_zip_vals procedure.(proc_local_vars) local_vals))
     in
   let σ'' := update_stack σ' new_stk_id new_stk_frame in
   let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
-  runtime_step (RTCall v proc args stk_id) σ [] 
+  runtime_step (RTCall v proc args stk_id) σ []
   (RTActiveCall v new_stmt new_stk_id stk_id) σ'' []
 
 | FldWrStep σ stk_id stk_frm v fld e l val:
@@ -450,14 +485,17 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   let σ'' := update_lvar σ' v stk_id (LitLoc l) in
   runtime_step (RTAlloc v fs stk_id) σ [] (RTVal LitUnit) σ'' []
 
-| SpawnStep σ stk_id stk_frm proc args arg_vals procedure :
+| SpawnStep σ stk_id stk_frm proc args arg_vals procedure local_vals :
   σ.(stack) !! stk_id = Some stk_frm ->
   σ.(procs) !! proc = Some procedure ->
   length procedure.(proc_args) = length args ->
   Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+  "#ret_val" ∈ (map fst procedure.(proc_local_vars)) ->
+  Forall2 (fun decl val => val_has_typ val (snd decl)) procedure.(proc_local_vars) local_vals ->
   let (new_stk_id, σ') := fresh_stk_id σ in
-  let new_stk_frame := StackFrame 
-      (list_to_map (zip (map fst procedure.(proc_args)) arg_vals))
+  let new_stk_frame := StackFrame
+      (list_to_map (decls_zip_vals procedure.(proc_args) arg_vals
+                    ++ decls_zip_vals procedure.(proc_local_vars) local_vals))
   in
   let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
   let σ'' := update_stack σ' new_stk_id new_stk_frame in

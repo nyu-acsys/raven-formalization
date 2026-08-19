@@ -466,6 +466,26 @@ Fixpoint subst (ra: assertion) (mp: gmap var LExpr) : assertion := match ra with
     LPred pred_name (map (fun expr => lexpr_subst expr mp) args)
 | LAnd a1 a2 => LAnd (subst a1 mp) (subst a2 mp)
 end.
+
+(* Builds an association gmap out of a key list zipped positionally against
+   a value list -- the one low-level pattern every symbolic stack (var ->
+   lvar), stack frame (var -> val / lvar -> val), and substitution map
+   below ultimately reduces to. *)
+Definition assoc_map `{Countable K} {V : Type} (ks : list K) (vs : list V) : gmap K V :=
+  list_to_map (zip ks vs).
+
+(* The two recurring shapes of substitution map built out of a name list
+   paired positionally with either lvars (symbolic, used in preconditions
+   naming the entry lvars of a fresh call frame) or concrete values
+   (ghost/logical, used when the map is meant to evaluate away): factors
+   out the zip/list_to_map/map boilerplate at every subst call site that
+   builds one from a procedure's, invariant's, or predicate's argument
+   names. *)
+Definition lvar_subst_map (names : list var) (lvs : list lvar) : gmap var LExpr :=
+  assoc_map names (map LVar lvs).
+Definition val_subst_map (names : list var) (vals : list lang.val) : gmap var LExpr :=
+  assoc_map names (map (fun v => LVal (trnsl_val v)) vals).
+
 Record InvRecord := Inv {
   inv_args: list var;
   inv_body: assertion;
@@ -685,6 +705,29 @@ Record ProgramWF : Prop := {
   pwf_proc_args_unique :
     map_Forall (λ _ r, NoDup (proc_args_of r).*1) proc_map;
 
+  (* "#ret_val" is a reserved name, never a formal argument: keeps the
+     operationally-appended "#ret_val" slot (see lang.v's RTCallStep) from
+     ever colliding with a real argument. *)
+  pwf_proc_ret_val_fresh :
+    map_Forall (λ _ r, "#ret_val" ∉ (proc_args_of r).*1) proc_map;
+
+  (* Local-variable names of every procedure are distinct. *)
+  pwf_proc_locals_unique :
+    map_Forall (λ _ r, NoDup (proc_locals_of r).*1) proc_map;
+
+  (* Formal-argument and local-variable names never collide -- both get their
+     own pre-allocated slot in a fresh stack frame (see lang.v's
+     RTCallStep/SpawnStep). *)
+  pwf_proc_args_locals_disjoint :
+    map_Forall (λ _ r, (proc_args_of r).*1 ## (proc_locals_of r).*1) proc_map;
+
+  (* "#ret_val" is declared as one of the procedure's own local variables,
+     with whatever type its associated proc_record gives it -- it is
+     initialized (like every other local) to a non-deterministically chosen
+     value of that type, then read out again at the return point. *)
+  pwf_proc_ret_val_declared :
+    map_Forall (λ _ r, "#ret_val" ∈ (proc_locals_of r).*1) proc_map;
+
   (* Pre- and postconditions of every procedure are stack-free. *)
   pwf_proc_stack_free :
     map_Forall (λ _ r,
@@ -751,6 +794,9 @@ match v with
 | lang.LitLoc _ => TpLoc
 end.
 
+Lemma typeOf_val_has_typ v t : typeOf v = t <-> lang.val_has_typ v t.
+Proof. destruct v, t; simpl; split; done. Qed.
+
 Fixpoint inf_expr (ρ: pvar_typs) (e: lang.expr) : option typ :=
 match e with
 | Var x => Some (ρ x)
@@ -797,6 +843,13 @@ end.
 Definition expr_well_defined (ρ : pvar_typs) (e : lang.expr) : Prop :=
   ∃ tp, inf_expr ρ e = Some tp.
 
+(* Separate type-checking judgment for procedure-call arguments: each argument
+   expression's inferred type must match the corresponding formal parameter's
+   declared type. Kept independent of RavenHoareTriple/stmt_well_defined's other
+   rules so type-checking and verification stay cleanly separated. *)
+Definition proc_call_args_well_typed (ρ : pvar_typs) (args : list lang.expr) (proc_entry : ProcRecord) : Prop :=
+  Forall2 (fun arg arg_decl => inf_expr ρ arg = Some (snd arg_decl)) args (proc_args_of proc_entry).
+
 Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
 | SeqTp ρ s1 s2 :
   stmt_well_defined ρ s1 ->
@@ -826,6 +879,7 @@ Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
     proc_map !! proc = Some proc_entry ->
     length args = length (proc_args_of proc_entry) ->
     (Forall (fun arg => expr_well_defined ρ arg) args) ->
+    proc_call_args_well_typed ρ args proc_entry ->
     stmt_well_defined ρ (Call v proc args)
 | FldWrTp ρ v fld e2:
     (fld ∈ fld_set) ->
@@ -947,6 +1001,164 @@ Section Translation.
 
     Definition symb_stk_to_stk_frm (stk : stack) (mp : symb_map) : stack_frame :=
       StackFrame (fmap (λ v, trnsl_lval (mp v)) stk).
+
+    (* Given a richness guarantee on σ (enough distinct lvars of any type,
+       avoiding any finite exclusion set), pick a list of distinct lvars
+       matching a list of declared types -- used to synthesize a procedure's
+       own entry stack out of fresh (not globally shared) lvar names, one per
+       formal arg / local variable, so that different procedures' same-named
+       parameters no longer need to agree on a single global type via σ. *)
+    Lemma fresh_lvars_list (σ : lvar_typs)
+        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+        (decls : list (var * typ)) (excl0 : gset lvar) :
+      ∃ lvs : list lvar,
+        length lvs = length decls ∧
+        Forall2 (fun decl lv => σ lv = snd decl) decls lvs ∧
+        NoDup lvs ∧
+        Forall (fun lv => lv ∉ excl0) lvs.
+    Proof.
+      revert excl0. induction decls as [| [v tp] decls IH]; intros excl0.
+      - exists []. repeat split; try constructor.
+      - destruct (Hrich tp excl0) as [lv [Hlv_notin Hlv_typ]].
+        destruct (IH ({[lv]} ∪ excl0)) as [lvs [Hlen [HF2 [Hnodup Hexcl]]]].
+        exists (lv :: lvs). repeat split.
+        + simpl. lia.
+        + constructor; [exact Hlv_typ | exact HF2].
+        + constructor.
+          * intro Hin. eapply (proj1 (Forall_forall _ _)) in Hexcl; [| exact Hin]. set_solver.
+          * exact Hnodup.
+        + constructor.
+          * exact Hlv_notin.
+          * eapply Forall_impl; [exact Hexcl |]. intros lv' Hlv'. set_solver.
+    Qed.
+
+    (* A pair of lvar lists that is a legal fresh entry-stack for calling
+       proc_record under σ: right length and σ-typed against proc_record's
+       args/locals declarations, each list duplicate-free, and the two
+       mutually disjoint. Parametric in σ and proc_record so that every
+       well-formedness condition a synthesized "args ⊎ locals" entry stack
+       must satisfy for that specific call lives in the type itself, rather
+       than as separate side-conditions threaded wherever such a pair is
+       used. *)
+    Record proc_entry_lvars (σ : lvar_typs) (proc_record : ProcRecord) := ProcEntryLvars {
+      dll_args : list lvar;
+      dll_locals : list lvar;
+      dll_args_len : length dll_args = length (proc_args_of proc_record);
+      dll_locals_len : length dll_locals = length (proc_locals_of proc_record);
+      dll_args_typed : Forall2 (fun decl lv => σ lv = snd decl) (proc_args_of proc_record) dll_args;
+      dll_locals_typed : Forall2 (fun decl lv => σ lv = snd decl) (proc_locals_of proc_record) dll_locals;
+      dll_args_nodup : NoDup dll_args;
+      dll_locals_nodup : NoDup dll_locals;
+      dll_disjoint : ∀ lv, lv ∈ dll_args → lv ∉ dll_locals;
+    }.
+    Global Arguments dll_args {_ _}.
+    Global Arguments dll_locals {_ _}.
+    Global Arguments dll_args_len {_ _}.
+    Global Arguments dll_locals_len {_ _}.
+    Global Arguments dll_args_typed {_ _}.
+    Global Arguments dll_locals_typed {_ _}.
+    Global Arguments dll_args_nodup {_ _}.
+    Global Arguments dll_locals_nodup {_ _}.
+    Global Arguments dll_disjoint {_ _}.
+
+    (* fresh_lvars_list, applied twice (locals avoiding the args' own
+       choices) and packaged into a proc_entry_lvars for proc_record. *)
+    Lemma fresh_proc_entry_lvars (σ : lvar_typs)
+        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+        (proc_record : ProcRecord) :
+      ∃ dll : proc_entry_lvars σ proc_record, Logic.True.
+    Proof.
+      destruct (fresh_lvars_list σ Hrich (proc_args_of proc_record) ∅)
+        as (args_lvs & Hargs_len & Hargs_typed & Hargs_nodup & _).
+      destruct (fresh_lvars_list σ Hrich (proc_locals_of proc_record) (list_to_set args_lvs))
+        as (locals_lvs & Hlocals_len & Hlocals_typed & Hlocals_nodup & Hlocals_excl).
+      have Hdisjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs.
+      { intros lv Hin1 Hin2.
+        pose proof (proj1 (Forall_forall (λ lv0, lv0 ∉ list_to_set args_lvs) locals_lvs) Hlocals_excl lv Hin2) as Hcontra.
+        apply Hcontra. rewrite elem_of_list_to_set. exact Hin1. }
+      exists (ProcEntryLvars σ proc_record args_lvs locals_lvs Hargs_len Hlocals_len Hargs_typed Hlocals_typed
+                Hargs_nodup Hlocals_nodup Hdisjoint).
+      exact Logic.I.
+    Qed.
+
+    (* Reconstructs the exact operational stack_frame -- the frame a fresh
+       call/spawn produces (see lang.v's RTCallStep/SpawnStep) -- from a
+       synthesized entry stack built out of fresh, distinct lvars: given
+       names/lvs/vals aligned positionally, LStack (list_to_map (zip names
+       lvs)) read through the mp overridden at each lv to the corresponding
+       (translated) val equals exactly StackFrame (list_to_map (zip names
+       vals)). *)
+    Lemma symb_stk_to_stk_frm_general
+        (names : list var) (lvs : list lvar) (vals : list lang.val) (mp : symb_map)
+        (Hnodup_names : NoDup names) (Hnodup_lvs : NoDup lvs)
+        (Hlen1 : length names = length lvs) (Hlen2 : length names = length vals) :
+      symb_stk_to_stk_frm (assoc_map names lvs)
+        (fun lv => match (assoc_map lvs vals : gmap lvar lang.val) !! lv with
+                   | Some v => trnsl_val v | None => mp lv end)
+      = StackFrame (assoc_map names vals).
+    Proof.
+      unfold symb_stk_to_stk_frm. f_equal.
+      apply map_eq. intro v.
+      rewrite lookup_fmap.
+      destruct ((list_to_map (zip names lvs) : gmap var lvar) !! v) as [lv|] eqn:Hstk0.
+      - rewrite Hstk0.
+        have Hstk0' := Hstk0.
+        apply elem_of_list_to_map_2 in Hstk0'.
+        apply elem_of_list_lookup_1 in Hstk0' as [i Hi].
+        rewrite lookup_zip_with in Hi.
+        destruct (names !! i) as [v'|] eqn:Hnv; [| discriminate].
+        destruct (lvs !! i) as [lv'|] eqn:Hlvi; [| discriminate].
+        simpl in Hi. injection Hi as Heq1 Heq2. subst v'. subst lv'.
+        have Hval_i : is_Some (vals !! i).
+        { apply lookup_lt_is_Some_2. rewrite <- Hlen2. eapply (lookup_lt_Some names). exact Hnv. }
+        destruct Hval_i as [valv Hval_i].
+        have Hlv_lookup : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some valv.
+        { apply elem_of_list_to_map_1.
+          - rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))). exact Hnodup_lvs.
+          - apply (elem_of_list_lookup_2 _ i). rewrite lookup_zip_with Hlvi Hval_i. done. }
+        simpl. rewrite Hlv_lookup. simpl. rewrite trnsl_lval_trnsl_val_inverse.
+        symmetry. apply elem_of_list_to_map_1.
+        + rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ Hlen2)). exact Hnodup_names.
+        + apply (elem_of_list_lookup_2 _ i). rewrite lookup_zip_with Hnv Hval_i. done.
+      - rewrite Hstk0. simpl.
+        symmetry. apply not_elem_of_list_to_map_1.
+        rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ Hlen2)).
+        apply not_elem_of_list_to_map_2 in Hstk0.
+        rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ Hlen1)) in Hstk0.
+        exact Hstk0.
+    Qed.
+
+    (* Constructively extracts a list of witness values (with their typing)
+       from a "every declared name has some value of the right shape" fact --
+       no choice axiom needed since decls is a concrete, finite list. *)
+    Lemma extract_present_vals (decls : list (var * typ)) (frm_locals : gmap var lang.val) :
+      (∀ v tp, (v, tp) ∈ decls -> ∃ val, frm_locals !! v = Some val ∧ typeOf val = tp) ->
+      ∃ vals : list lang.val,
+        Forall2 (fun decl val => frm_locals !! (fst decl) = Some val) decls vals ∧
+        Forall2 (fun decl val => typeOf val = snd decl) decls vals.
+    Proof.
+      induction decls as [| [v tp] rest IH]; intros Hpresent.
+      - exists []. split; constructor.
+      - destruct (Hpresent v tp (elem_of_list_here _ _)) as [val [Hval Hty]].
+        have IHpremise : ∀ v' tp', (v', tp') ∈ rest -> ∃ val, frm_locals !! v' = Some val ∧ typeOf val = tp'.
+        { intros v' tp' Hin. apply (Hpresent v' tp'). apply elem_of_cons. right. exact Hin. }
+        destruct (IH IHpremise) as [vals [HF2 HF2ty]].
+        exists (val :: vals). split; constructor; try done.
+    Qed.
+
+    (* Combines two Forall2 facts sharing the same left-hand list, pointwise,
+       into a single Forall2 relating their right-hand lists. *)
+    Lemma Forall2_combine {A B C : Type} (P1 : A -> B -> Prop) (P2 : A -> C -> Prop) (Q : B -> C -> Prop)
+        (decls : list A) (xs : list B) (ys : list C) :
+      (∀ a b c, P1 a b -> P2 a c -> Q b c) ->
+      Forall2 P1 decls xs -> Forall2 P2 decls ys -> Forall2 Q xs ys.
+    Proof.
+      intros HQ HF1. revert ys. induction HF1 as [| a b decls' xs' Hp1 Hrest IH]; intros ys HF2.
+      - apply Forall2_nil_inv_l in HF2. subst ys. constructor.
+      - destruct ys as [| c ys']; [exfalso; exact (Forall2_cons_nil_inv _ _ _ HF2) |].
+        apply Forall2_cons_1 in HF2 as [Hp2 Hrest2].
+        constructor; [exact (HQ a b c Hp1 Hp2) | exact (IH ys' Hrest2)].
+    Qed.
 
 
   Fixpoint trnsl_expr_lExpr (stk: stack) (e: lang.expr) :=
@@ -2024,6 +2236,7 @@ Section TypeInf.
       | TpBool, LitBool b => True
       | TpInt, LitInt i => True
       | TpLoc, LitLoc l => True
+      | TpUnit, LitUnit => True
       | _, _ => False
       end.
 
@@ -2187,6 +2400,150 @@ Section TypeInf.
     intros Hwf Hinf.
     destruct (interp_lexpr_well_typed σ le mp tp Hwf Hinf) as (val & Hval & _).
     eauto.
+  Qed.
+
+  (* Substituting a variable-named lvar map that just maps each name back to itself
+     is a no-op: this is used to view an assertion's "unsubstituted" translation
+     (evaluated directly via mp) as a degenerate case of the substitution lemmas. *)
+  Lemma lexpr_subst_id_map (args : list var) e :
+    lexpr_subst e (list_to_map (zip args (map LVar args)) : gmap var LExpr) = e.
+  Proof.
+    induction e; simpl; try (f_equal; done).
+    destruct (list_to_map (zip args (map LVar args)) !! x) as [e'|] eqn:Hx; [ | done].
+    apply elem_of_list_to_map_2 in Hx.
+    apply elem_of_list_lookup_1 in Hx as [i Hi].
+    apply lookup_zip_with_Some in Hi as (a & le & Heq & Ha & Hle).
+    injection Heq as <- <-.
+    rewrite list_lookup_fmap in Hle. rewrite Ha in Hle. simpl in Hle.
+    injection Hle as <-. done.
+  Qed.
+
+  Lemma subst_id_map (args : list var) a :
+    subst a (list_to_map (zip args (map LVar args)) : gmap var LExpr) = a.
+  Proof.
+    induction a; simpl;
+      repeat match goal with
+      | |- context [lexpr_subst ?e (list_to_map (zip args (map LVar args)))] =>
+          rewrite (lexpr_subst_id_map args e)
+      | H : subst ?a _ = ?a |- context [subst ?a (list_to_map (zip args (map LVar args)))] =>
+          rewrite H
+      end;
+      try done.
+    - f_equal. induction args0; simpl; [done|]. f_equal; [apply lexpr_subst_id_map | done].
+    - f_equal. induction args0; simpl; [done|]. f_equal; [apply lexpr_subst_id_map | done].
+  Qed.
+
+  (* If mp' agrees with the zipped (args,arg_vals) pairs, then the "identity lexprs"
+     (mapping each formal-arg name back to LVar itself) evaluate under mp' to exactly
+     those values — the fact needed to instantiate trnsl_assertion's substitution
+     lemmas at an mp that already "bakes in" the substitution directly. *)
+  Lemma eval_lvar_identity_map_agrees (args : list var) (arg_vals : list lang.val) (mp' : symb_map) :
+    length args = length arg_vals →
+    (∀ v val, (v, val) ∈ zip args arg_vals → mp' v = trnsl_val val) →
+    Forall2 (λ expr val0, interp_lexpr expr mp' = Some (trnsl_val val0)) (map LVar args) arg_vals.
+  Proof.
+    revert arg_vals. induction args as [| a args IH]; intros [| v vals] Hlen Hagree;
+      simpl in Hlen; try discriminate Hlen; simpl; [constructor |].
+    constructor.
+    - simpl. rewrite (Hagree a v (elem_of_list_here _ _)). done.
+    - apply IH; [lia |]. intros v' val' Hin. apply Hagree. right. exact Hin.
+  Qed.
+
+  Lemma zip_id_map_lookup_arg (xs : list var) (lv : var) :
+    NoDup xs → lv ∈ xs →
+    (list_to_map (zip xs (map LVar xs)) : gmap var LExpr) !! lv = Some (LVar lv).
+  Proof.
+    induction xs as [| x xs IH]; intros Hnodup Hin.
+    - inversion Hin.
+    - simpl. apply elem_of_cons in Hin as [-> | Hin'].
+      + rewrite lookup_insert. done.
+      + rewrite lookup_insert_ne.
+        * apply IH; [by inversion Hnodup | exact Hin'].
+        * intro Heq. subst lv. inversion Hnodup; subst. contradiction.
+  Qed.
+
+  Lemma zip_val_map_lookup_arg (xs : list var) (vals : list lang.val) (lv : var) (v : lang.val) :
+    NoDup xs → (lv, v) ∈ zip xs vals →
+    (list_to_map (zip xs (map (λ val, LVal (trnsl_val val)) vals)) : gmap var LExpr) !! lv = Some (LVal (trnsl_val v)).
+  Proof.
+    revert vals. induction xs as [| x xs IH]; intros vals Hnodup Hin.
+    - inversion Hin.
+    - destruct vals as [| val vals]; [inversion Hin |].
+      simpl in Hin. apply elem_of_cons in Hin as [Heq | Hin'].
+      + injection Heq as <- <-. simpl. rewrite lookup_insert. done.
+      + simpl. rewrite lookup_insert_ne.
+        * apply IH; [by inversion Hnodup | exact Hin'].
+        * intro Heq. subst lv. apply elem_of_zip_l in Hin'. inversion Hnodup; subst. contradiction.
+  Qed.
+
+  (* Generalizes zip_id_map_lookup_arg / zip_val_map_lookup_arg: whatever the
+     wrapping function f, a zipped (name, y) pair looks up correctly in the
+     map obtained after wrapping every y with f. Used both for a genuine
+     lvar-renaming (f := LVar) and for value-substitution (f := LVal ∘
+     trnsl_val), matching xs against fresh, non-identity lvars rather than
+     reusing the program variable names themselves. *)
+  Lemma zip_wrap_map_lookup_arg {A : Type} (xs : list var) (ys : list A) (f : A -> LExpr) (x : var) (y : A) :
+    NoDup xs → (x, y) ∈ zip xs ys →
+    (list_to_map (zip xs (map f ys)) : gmap var LExpr) !! x = Some (f y).
+  Proof.
+    revert ys. induction xs as [| x0 xs IH]; intros ys Hnodup Hin.
+    - inversion Hin.
+    - destruct ys as [| y0 ys]; [inversion Hin |].
+      simpl in Hin. apply elem_of_cons in Hin as [Heq | Hin'].
+      + injection Heq as <- <-. simpl. rewrite lookup_insert. done.
+      + simpl. rewrite lookup_insert_ne.
+        * apply IH; [by inversion Hnodup | exact Hin'].
+        * intro Heq. subst x0. apply elem_of_zip_l in Hin'. inversion Hnodup; subst. contradiction.
+  Qed.
+
+  (* Overriding mp at a list of lvar names with well-typed values (per σ) preserves
+     env_typ_well_defined, as long as it held for the original mp. *)
+  Lemma env_typ_well_defined_override σ mp (args : list var) (arg_vals : list lang.val) :
+    Forall2 (λ v val, typeOf val = σ v) args arg_vals ->
+    env_typ_well_defined σ mp ->
+    env_typ_well_defined σ
+      (fun lv => match (list_to_map (zip args arg_vals) : gmap var lang.val) !! lv with
+                 | Some v => trnsl_val v
+                 | None => mp lv
+                 end).
+  Proof.
+    intros HF2 Henv lv.
+    destruct ((list_to_map (zip args arg_vals) : gmap var lang.val) !! lv) as [v|] eqn:Hlv;
+      [ | exact (Henv lv) ].
+    apply elem_of_list_to_map_2 in Hlv.
+    apply elem_of_list_lookup_1 in Hlv as [i Hi].
+    apply lookup_zip_with_Some in Hi as (x & y & Heq & Hargs & Hvals).
+    injection Heq as <- <-.
+    pose proof (Forall2_lookup_lr _ _ _ _ _ _ HF2 Hargs Hvals) as Htyp.
+    rewrite <- Htyp. simpl.
+    destruct v; simpl; done.
+  Qed.
+
+  (* Connects the static proc_call_args_well_typed check on the caller's argument
+     expressions to the runtime types of the resulting argument values, threading
+     through the existing lexpr translation/interpretation type-soundness lemmas. *)
+  Lemma proc_call_args_typed_result ρ σ stk mp args lexprs arg_vals proc_entry :
+    stk_type_compat ρ σ stk ->
+    env_typ_well_defined σ mp ->
+    proc_call_args_well_typed ρ args proc_entry ->
+    map (fun arg => trnsl_expr_lExpr stk arg) args = map (fun le => Some le) lexprs ->
+    Forall2 (fun le val0 => interp_lexpr le mp = Some (trnsl_val val0)) lexprs arg_vals ->
+    Forall2 (fun arg_decl val => typeOf val = snd arg_decl) (proc_args_of proc_entry) arg_vals.
+  Proof.
+    unfold proc_call_args_well_typed.
+    intros Hstk Henv Htyped.
+    revert lexprs arg_vals.
+    induction Htyped as [| a arg_decl args params Htp Htyped IH];
+      intros lexprs arg_vals Hmap HF2.
+    - simpl in Hmap. destruct lexprs; [ | discriminate]. inversion HF2. constructor.
+    - simpl in Hmap. destruct lexprs as [| le lexprs']; [discriminate |].
+      injection Hmap as Hhd Htl.
+      inversion HF2 as [| l0 v0 ls vs Hinterp HF2']; subst.
+      constructor.
+      + pose proof (lexpr_expr_typ_compat ρ σ stk a le (snd arg_decl) Hstk Hhd Htp) as Hinf_le.
+        pose proof (interp_lexpr_typ_compat σ le (snd arg_decl) (trnsl_val v0) mp Henv Hinf_le Hinterp) as Htyp.
+        rewrite trnsl_lval_trnsl_val_inverse in Htyp. exact Htyp.
+      + exact (IH lexprs' vs Htl HF2').
   Qed.
 
 
