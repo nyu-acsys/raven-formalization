@@ -1,20 +1,98 @@
 From stdpp Require Export strings.
-From stdpp Require Import gmap list.
+From stdpp Require Import gmap list sets countable.
+Require Import Eqdep_dec.
 From iris.program_logic Require Export language ectx_language ectxi_language.
 
 Inductive bin_op : Set :=
-| AddOp | SubOp | MulOp | DivOp | ModOp 
+| AddOp | SubOp | MulOp | DivOp | ModOp
 | EqOp | NeOp | LtOp
 | GtOp | LeOp | GeOp
-| AndOp | OrOp.
+| AndOp | OrOp
+(* comp/frame : RA * RA -> RA; fpuValid : RA * RA -> Bool -- see ResourceAlgebra below *)
+| RACompOp | RAFrameOp | RAFpuValidOp.
 
 Inductive un_op : Set :=
-| NotBoolOp | NegOp.
+| NotBoolOp | NegOp
+(* valid : RA -> Bool *)
+| RAValidOp.
+
+(* Resource algebras usable as RA-typed program values (see typ/val below).
+   Defined here, at the base of the language, rather than in the ghost/spec
+   layer: RA elements are ordinary values a real program variable can hold
+   and manipulate via RACompOp/RAFrameOp/RAValidOp/RAFpuValidOp, tracked by
+   the real stack frame like any other value -- not a separate ghost-only
+   bookkeeping structure. *)
+Class ResourceAlgebra (A: Type) := {
+  comp : A -> A -> A;
+  frame : A -> A -> A;
+  valid : A -> Prop;
+  valid_dec :: forall x : A, Decision (valid x);
+  fpuValid : A -> A -> Prop;
+  fpuValid_dec :: forall x y : A, Decision (fpuValid x y);
+  fpuAxiom : forall x y, fpuValid x y -> valid x /\ valid y /\ forall c, (valid (comp x c) -> valid (comp y c));
+  (* The identity/unit element, and its defining left-identity law -- matches
+     how Raven's own RA formalization presents an RA (id together with
+     comp), and gives canonical_val below a natural witness value. *)
+  ra_id : A;
+  ra_id_comp : forall x, comp ra_id x = x;
+}.
+
+Record RA_Pack := {
+  RA_carrier :> Type;
+  RA_carrier_eqdec :> EqDecision RA_carrier;
+  RA_carrier_countable :> Countable RA_carrier;
+  RA_inst :> ResourceAlgebra RA_carrier;
+}.
+
+(* RA_Pack's fields use plain Record coercion (:>), not Class instance
+   fields, so they aren't picked up by typeclass search automatically --
+   register them explicitly. *)
+Global Instance ra_carrier_eqdec_instance (r : RA_Pack) : EqDecision (RA_carrier r) :=
+  RA_carrier_eqdec r.
+Global Instance ra_carrier_countable_instance (r : RA_Pack) : Countable (RA_carrier r) :=
+  RA_carrier_countable r.
+Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) :=
+  RA_inst r.
+
+(* Every RA usable in an RA-typed expression is looked up by name out of a
+   fixed, total registry -- mirrors fld_map/pred_map/inv_map in the ghost
+   layer. Naming RAs (rather than embedding RA_Pack values inline in
+   typ/val) is what makes equality of RA-typed values decidable: ra_name is
+   just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
+Definition ra_name := string.
+Global Parameter ra_set : gset ra_name.
+Global Parameter ra_map : ra_name -> RA_Pack.
+
+(* A concrete element of some named RA, its name bundled alongside it --
+   the payload of val's LitRAElem case below. *)
+Definition ra_elem : Type := {r : ra_name & RA_carrier (ra_map r)}.
+
+Global Instance ra_elem_eq_dec : EqDecision ra_elem.
+Proof.
+  intros [r1 x1] [r2 x2].
+  destruct (decide (r1 = r2)) as [<-|Hne].
+  - destruct (decide (x1 = x2)) as [->|Hne]; [left; reflexivity | ].
+    right. intro HH. apply Hne.
+    exact (Eqdep_dec.inj_pair2_eq_dec ra_name (fun a b => decide (a = b)) _ r1 x1 x2 HH).
+  - right. intro HH. apply Hne. exact (f_equal (@projT1 ra_name _) HH).
+Qed.
+
+Global Instance ra_elem_countable : Countable ra_elem.
+Proof.
+  apply (inj_countable
+    (fun p : ra_elem => let 'existT r x := p in (r, encode x) : ra_name * positive)
+    (fun rp : ra_name * positive => let '(r, xp) := rp in
+       match decode xp : option (RA_carrier (ra_map r)) with
+       | Some x => Some (existT r x)
+       | None => None
+       end)).
+  intros [r x]. simpl. rewrite decode_encode. reflexivity.
+Qed.
 
 Section expr.
 
 Inductive typ :=
-| TpInt | TpLoc | TpBool | TpUnit.
+| TpInt | TpLoc | TpBool | TpUnit | TpRA (r : ra_name).
 
 Global Instance bin_op_eq_decision : EqDecision bin_op.
 Proof. solve_decision. Qed.
@@ -26,11 +104,12 @@ Proof.
       | AddOp => 0 | SubOp => 1 | MulOp => 2 | DivOp => 3 | ModOp => 4
       | EqOp => 5 | NeOp => 6 | LtOp => 7 | GtOp => 8 | LeOp => 9 | GeOp => 10
       | AndOp => 11 | OrOp => 12
+      | RACompOp => 13 | RAFrameOp => 14 | RAFpuValidOp => 15
     end : nat)
     (λ n, match n with
       | 0 => AddOp | 1 => SubOp | 2 => MulOp | 3 => DivOp | 4 => ModOp
       | 5 => EqOp | 6 => NeOp | 7 => LtOp | 8 => GtOp | 9 => LeOp | 10 => GeOp
-      | 11 => AndOp | _ => OrOp
+      | 11 => AndOp | 12 => OrOp | 13 => RACompOp | 14 => RAFrameOp | _ => RAFpuValidOp
     end) _).
   intros []; done.
 Qed.
@@ -41,8 +120,8 @@ Proof. solve_decision. Qed.
 Global Instance un_op_countable : Countable un_op.
 Proof.
   refine (inj_countable'
-    (λ op, match op with NotBoolOp => 0 | NegOp => 1 end : nat)
-    (λ n, match n with 0 => NotBoolOp | _ => NegOp end) _).
+    (λ op, match op with NotBoolOp => 0 | NegOp => 1 | RAValidOp => 2 end : nat)
+    (λ n, match n with 0 => NotBoolOp | 1 => NegOp | _ => RAValidOp end) _).
   intros []; done.
 Qed.
 
@@ -80,7 +159,8 @@ Inductive expr :=
 | StuckE (* stuck expression *)
 with
 val :=
-| LitBool (b: bool) | LitInt (i: Z) | LitUnit | LitLoc (l: loc).
+| LitBool (b: bool) | LitInt (i: Z) | LitUnit | LitLoc (l: loc)
+| LitRAElem (p : ra_elem).
 
 Global Instance val_dec_eq : EqDecision val.
 Proof.
@@ -93,14 +173,17 @@ Qed.
 Definition val_has_typ (v : val) (t : typ) : Prop :=
   match v, t with
   | LitBool _, TpBool | LitInt _, TpInt | LitUnit, TpUnit | LitLoc _, TpLoc => True
+  | LitRAElem (existT r _), TpRA r' => r = r'
   | _, _ => False
   end.
 
 (* A fixed witness inhabitant of each type, used only to exhibit that a step
-   filling in non-deterministic local values is always possible. *)
+   filling in non-deterministic local values is always possible. For TpRA,
+   ra_id is exactly this witness -- the RA's own identity element. *)
 Definition canonical_val (t : typ) : val :=
   match t with
   | TpInt => LitInt 0 | TpBool => LitBool false | TpUnit => LitUnit | TpLoc => LitLoc (Loc 0)
+  | TpRA r => LitRAElem (existT r ra_id)
   end.
 
 Lemma canonical_val_has_typ t : val_has_typ (canonical_val t) t.
@@ -326,6 +409,7 @@ Definition un_op_eval (op : un_op) (v : val) : option val :=
   match op, v with
   | NotBoolOp, LitBool b => Some (LitBool (negb b))
   | NegOp, LitInt i => Some (LitInt (-i))
+  | RAValidOp, LitRAElem (existT r x) => Some (LitBool (bool_decide (valid x)))
   | _, _ => None
   end.
 
@@ -344,8 +428,58 @@ Definition bin_op_eval (op : bin_op) (v1 v2 : val) : option val :=
   | GeOp, LitInt i1, LitInt i2 => Some (LitBool (Z.leb i2 i1))
   | AndOp, LitBool b1, LitBool b2 => Some (LitBool (b1 && b2))
   | OrOp, LitBool b1, LitBool b2 => Some (LitBool (b1 || b2))
+  | RACompOp, LitRAElem (existT r1 x1), LitRAElem (existT r2 x2) =>
+      match decide (r1 = r2) with
+      | left Heq => Some (LitRAElem (existT r1 (comp x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+      | right _ => None
+      end
+  | RAFrameOp, LitRAElem (existT r1 x1), LitRAElem (existT r2 x2) =>
+      match decide (r1 = r2) with
+      | left Heq => Some (LitRAElem (existT r1 (frame x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+      | right _ => None
+      end
+  | RAFpuValidOp, LitRAElem (existT r1 x1), LitRAElem (existT r2 x2) =>
+      match decide (r1 = r2) with
+      | left Heq => Some (LitBool (bool_decide (fpuValid x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+      | right _ => None
+      end
   | _, _, _ => None
   end.
+
+(* "Same RA" closed-form reductions of un_op_eval/bin_op_eval, for when both
+   operands are already known to share one concrete r (as opposed to two
+   independently-destructed r1/r2 that merely happen to be propositionally
+   equal): un_op_eval/bin_op_eval's own `decide (r1 = r2)` doesn't reduce by
+   computation on an abstract r, since decide needs concrete arguments to
+   run -- UIP_dec is what lets an arbitrary proof of r = r collapse the
+   eq_rect regardless. *)
+Lemma un_op_eval_ra_valid (r : ra_name) (x : RA_carrier (ra_map r)) :
+  un_op_eval RAValidOp (LitRAElem (existT r x)) = Some (LitBool (bool_decide (valid x))).
+Proof. reflexivity. Qed.
+
+Lemma bin_op_eval_ra_comp (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) :
+  bin_op_eval RACompOp (LitRAElem (existT r x1)) (LitRAElem (existT r x2))
+  = Some (LitRAElem (existT r (comp x1 x2))).
+Proof.
+  simpl. destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
+
+Lemma bin_op_eval_ra_frame (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) :
+  bin_op_eval RAFrameOp (LitRAElem (existT r x1)) (LitRAElem (existT r x2))
+  = Some (LitRAElem (existT r (frame x1 x2))).
+Proof.
+  simpl. destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
+
+Lemma bin_op_eval_ra_fpuvalid (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) :
+  bin_op_eval RAFpuValidOp (LitRAElem (existT r x1)) (LitRAElem (existT r x2))
+  = Some (LitBool (bool_decide (fpuValid x1 x2))).
+Proof.
+  simpl. destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
 
 (* Expression evaluation *)
 Inductive expr_step : expr → stack_frame → expr → Prop :=

@@ -45,20 +45,11 @@ Global Parameter pred_set : gset pred_name.
 Definition inv_name := string.
 Global Parameter inv_set : gset inv_name.
 
-Class ResourceAlgebra (A: Type) := {
-  comp : A -> A -> A;
-  frame : A -> A -> A;
-  valid : A -> Prop;
-  fpuValid : A -> A -> Prop;
-  fpuAxiom : forall x y, fpuValid x y -> valid x /\ valid y /\ forall c, (valid (comp x c) -> valid (comp y c));
-}.
-
-
-Record RA_Pack := {
-  RA_carrier :> Type;
-  RA_carrier_eqdec :> EqDecision RA_carrier;
-  RA_inst :> ResourceAlgebra RA_carrier;
-}.
+(* ResourceAlgebra/RA_Pack/ra_name/ra_set/ra_map/ra_elem live in
+   simp_raven_lang/lang.v (re-exported here via `Require Export lang`
+   above): RA elements are ordinary program values (typ's TpRA, val's
+   LitRAElem below), not a ghost-only concept, so they belong at the base
+   of the language rather than in this spec layer. *)
 
 Parameter fld_set : gset lang.fld_name.
 
@@ -66,13 +57,44 @@ Record fld := Fld { fld_name_val : fld_name; fld_typ : typ }.
 
 Parameter ghost_map : loc -> fld_name -> gname.
 
+(* val mirrors lang.val exactly (see trnsl_lval/trnsl_val below), including
+   its LitRAElem case, so that isomorphism extends to RA elements too. *)
 Inductive val :=
-| LitBool (b: bool) | LitInt (i: Z) | LitUnit | LitLoc (l: loc).
+| LitBool (b: bool) | LitInt (i: Z) | LitUnit | LitLoc (l: loc)
+| LitRAElem (p : ra_elem).
 
-(* TODO: Figure out how to incorporate RA values *)
-Inductive LitRAElem (r : RA_Pack) (x : RA_carrier r): Type. 
+(* EqDecision val is needed already by val_beq right below (interp_lexpr's
+   EqOp/NeOp cases use val_beq, and interp_lexpr comes before LExpr's other
+   infrastructure), so it's placed here rather than where the original file
+   had it (further down, after interp_lexpr/lexpr_subst). *)
+Global Instance val_eq : EqDecision val.
+Proof.
+  refine (fun x y =>
+    match x, y with
+    | LitBool b1, LitBool b2 => cast_if (decide (b1 = b2))
+    | LitInt i1, LitInt i2 => cast_if (decide (i1 = i2))
+    | LitUnit, LitUnit => left eq_refl
+    | LitLoc l1, LitLoc l2 => cast_if (decide (l1 = l2))
+    | LitRAElem p1, LitRAElem p2 => cast_if (decide (p1 = p2))
+    | _, _ => right _
+    end).
+  all: try by f_equal.
+  all: try intros Heq; inversion Heq; auto.
+Qed.
 
-Scheme Equality for val.
+(* Hand-rolled in place of `Scheme Equality for val`: that command can't
+   derive a comparator for the LitRAElem case (its argument type ra_elem is
+   a sigma type, not something Scheme Equality's generator recognizes).
+   val_beq/internal_val_dec_bl/internal_val_dec_lb keep the exact names and
+   statement shapes Scheme Equality would have produced, since ~30 sites in
+   this file and trnsl.v already depend on them under these names. *)
+Definition val_beq (v1 v2 : val) : bool := bool_decide (v1 = v2).
+
+Lemma internal_val_dec_bl : forall v1 v2 : val, val_beq v1 v2 = true -> v1 = v2.
+Proof. intros v1 v2 H. unfold val_beq in H. by apply bool_decide_eq_true in H. Qed.
+
+Lemma internal_val_dec_lb : forall v1 v2 : val, v1 = v2 -> val_beq v1 v2 = true.
+Proof. intros v1 v2 H. unfold val_beq. by apply bool_decide_eq_true. Qed.
 
 Inductive LExpr :=
 | LVar (x : lvar)
@@ -143,6 +165,11 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
     | NegOp =>
       match interp_lexpr e mp with
       | Some (LitInt i) => Some (LitInt (-i))
+      | _ => None
+      end
+    | RAValidOp =>
+      match interp_lexpr e mp with
+      | Some (LitRAElem (existT r x)) => Some (LitBool (bool_decide (valid x)))
       | _ => None
       end
     end
@@ -226,6 +253,36 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       | Some (LitBool b1), Some (LitBool b2) => Some (LitBool (b1 || b2))
       | _, _ => None
       end
+
+    | RACompOp =>
+      match interp_lexpr e1 mp, interp_lexpr e2 mp with
+      | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
+          match decide (r1 = r2) with
+          | left Heq => Some (LitRAElem (existT r1 (comp x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | right _ => None
+          end
+      | _, _ => None
+      end
+
+    | RAFrameOp =>
+      match interp_lexpr e1 mp, interp_lexpr e2 mp with
+      | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
+          match decide (r1 = r2) with
+          | left Heq => Some (LitRAElem (existT r1 (frame x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | right _ => None
+          end
+      | _, _ => None
+      end
+
+    | RAFpuValidOp =>
+      match interp_lexpr e1 mp, interp_lexpr e2 mp with
+      | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
+          match decide (r1 = r2) with
+          | left Heq => Some (LitBool (bool_decide (fpuValid x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | right _ => None
+          end
+      | _, _ => None
+      end
     end
 
   | LIfE e1 e2 e3 =>
@@ -239,6 +296,44 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
   end.
 
 
+(* "Same RA" closed-form reductions of interp_lexpr's RA cases -- see
+   un_op_eval_ra_valid/bin_op_eval_ra_* in lang.v for why UIP_dec is needed
+   here rather than plain computation. *)
+Lemma interp_lexpr_ra_valid (r : ra_name) (x : RA_carrier (ra_map r)) (e : LExpr) (mp : symb_map) :
+  interp_lexpr e mp = Some (LitRAElem (existT r x)) ->
+  interp_lexpr (LUnOp RAValidOp e) mp = Some (LitBool (bool_decide (valid x))).
+Proof. intros H. simpl. rewrite H. reflexivity. Qed.
+
+Lemma interp_lexpr_ra_comp (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
+  interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
+  interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
+  interp_lexpr (LBinOp RACompOp e1 e2) mp = Some (LitRAElem (existT r (comp x1 x2))).
+Proof.
+  intros H1 H2. simpl. rewrite H1 H2.
+  destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
+
+Lemma interp_lexpr_ra_frame (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
+  interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
+  interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
+  interp_lexpr (LBinOp RAFrameOp e1 e2) mp = Some (LitRAElem (existT r (frame x1 x2))).
+Proof.
+  intros H1 H2. simpl. rewrite H1 H2.
+  destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
+
+Lemma interp_lexpr_ra_fpuvalid (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
+  interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
+  interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
+  interp_lexpr (LBinOp RAFpuValidOp e1 e2) mp = Some (LitBool (bool_decide (fpuValid x1 x2))).
+Proof.
+  intros H1 H2. simpl. rewrite H1 H2.
+  destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
+  rewrite (Eqdep_dec.UIP_dec (fun a b => decide (a = b)) Heq eq_refl). reflexivity.
+Qed.
+
 Definition LExpr_holds (le : LExpr) (mp : symb_map) : Prop :=
   match interp_lexpr le mp with
   | Some v => v = LitBool true
@@ -251,6 +346,7 @@ match v with
 | lang.LitInt i => LitInt i
 | lang.LitUnit => LitUnit
 | lang.LitLoc l => LitLoc l
+| lang.LitRAElem p => LitRAElem p
 end.
 
 Lemma trnsl_val_inj : forall v1 v2, trnsl_val v1 = trnsl_val v2 -> v1 = v2.
@@ -296,23 +392,6 @@ match expr with
 | LStuck => LStuck
 end.
 
-Global Instance ra_carrier_eqdec_instance (r : RA_Pack) : EqDecision (RA_carrier r) :=
-  RA_carrier_eqdec r.
-
-Global Instance val_eq : EqDecision val.
-Proof.
-  refine (fun x y =>
-    match x, y with
-    | LitBool b1, LitBool b2 => cast_if (decide (b1 = b2))
-    | LitInt i1, LitInt i2 => cast_if (decide (i1 = i2))
-    | LitUnit, LitUnit => left eq_refl
-    | LitLoc l1, LitLoc l2 => cast_if (decide (l1 = l2))
-    | _, _ => right _
-    end). 
-  all: try by f_equal.
-  all: try intros Heq; inversion Heq; auto.
-Qed.
-
 Global Instance val_countable : Countable val.
 Proof.
   refine (inj_countable'
@@ -320,13 +399,15 @@ Proof.
       | LitBool b => inl b
       | LitInt i  => inr (inl i)
       | LitUnit   => inr (inr (inl tt))
-      | LitLoc l  => inr (inr (inr l))
+      | LitLoc l  => inr (inr (inr (inl l)))
+      | LitRAElem p => inr (inr (inr (inr p)))
     end)
-    (λ x : bool + (Z + (unit + loc)), match x with
+    (λ x : bool + (Z + (unit + (loc + ra_elem))), match x with
       | inl b             => LitBool b
       | inr (inl i)       => LitInt i
       | inr (inr (inl _)) => LitUnit
-      | inr (inr (inr l)) => LitLoc l
+      | inr (inr (inr (inl l))) => LitLoc l
+      | inr (inr (inr (inr p))) => LitRAElem p
     end) _).
   intro v; destruct v; done.
 Qed.
@@ -428,7 +509,11 @@ Inductive stmt :=
    invariant stays shared (as with Iris's own inv_alloc), so there is no
    matching unfold/deallocate form. *)
 | FoldInv (inv: inv_name) (args : list lang.expr)
-| Fpu (e : lang.expr) (fld : fld_name) (RAPack : RA_Pack) (old_val : RA_carrier RAPack) (new_val : RA_carrier RAPack)
+(* old_val/new_val are lang.expr (not concrete RA_carrier values), mirroring
+   CAS's e2/e3 -- a real program expression, e.g. Var g or
+   BinOp RACompOp (Var g1) (Var g2), evaluated against the real stack frame
+   like any other value. See FPURule, which mirrors CASSuccRule exactly. *)
+| Fpu (e : lang.expr) (fld : fld_name) (r : ra_name) (old_val new_val : lang.expr)
 .
 
 Inductive assertion :=
@@ -437,7 +522,7 @@ Inductive assertion :=
 | LExprA (p: LExpr)
 | LPure (p : Prop)
 | LOwn (e: LExpr) (fld: fld_name) (chunk: val)
-| LGhostOwn (e: LExpr) (fld: fld_name) (RAPack: RA_Pack) (chunk: RA_carrier RAPack)
+| LGhostOwn (e: LExpr) (fld: fld_name) (r : ra_name) (chunk: RA_carrier (ra_map r))
 | LForall (v : var) (body : assertion)
 | LExists (v : var) (body : assertion)
 | LImpl (cond : LExpr) (body : assertion)
@@ -827,10 +912,11 @@ match v with
 | lang.LitInt _ => TpInt
 | lang.LitUnit => TpUnit
 | lang.LitLoc _ => TpLoc
+| lang.LitRAElem (existT r _) => TpRA r
 end.
 
 Lemma typeOf_val_has_typ v t : typeOf v = t <-> lang.val_has_typ v t.
-Proof. destruct v, t; simpl; split; done. Qed.
+Proof. destruct v as [ | | | | [r x] ], t; simpl; naive_solver. Qed.
 
 Fixpoint inf_expr (ρ: pvar_typs) (e: lang.expr) : option typ :=
 match e with
@@ -987,11 +1073,11 @@ Section Translation.
 
     Definition trnsl_lval (v: val) : lang.val :=
     match v with
-    | LitBool b => (lang.LitBool b) 
+    | LitBool b => (lang.LitBool b)
     | LitInt i => (lang.LitInt i)
     | LitUnit => (lang.LitUnit)
     | LitLoc l => (lang.LitLoc (lang.Loc l.(loc_car)))
-    (* | LitRAElem _ _ => None *)
+    | LitRAElem p => lang.LitRAElem p
     end.
 
     Lemma trnsl_lval_injective v1 v2 : trnsl_lval v1 = trnsl_lval v2 -> v1 = v2.
@@ -1001,7 +1087,8 @@ Section Translation.
       - simpl; intros; inversion H. done.
       - simpl; intros; inversion H. done.
       - simpl; intros. inversion H. destruct l, l0. simpl in H1; subst loc_car0. done.
-    Qed. 
+      - simpl; intros; inversion H. done.
+    Qed.
 
     Lemma trnsl_lval_trnsl_val_inverse y: trnsl_lval (trnsl_val y) = y.
     Proof.
@@ -2080,8 +2167,8 @@ Qed.
         (l#fld ↦{ 1 } (trnsl_lval chunk))
         )%I)%I
 
-    | LGhostOwn l_expr fld RAPack chunk => 
-      let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ RAPack in
+    | LGhostOwn l_expr fld RAPack chunk =>
+      let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map RAPack) in
       let chunkU := transport (Heq_car) chunk in
       let chunkGs := transport (f_equal cmra_car Heq_cmra) chunkU in 
       let HinG := inGs_inG i in
@@ -2166,7 +2253,7 @@ Proof.
   - (* LPure *) iIntros "_ H". iExact "H".
   - (* LOwn *) iIntros "_ H". iExact "H".
   - (* LGhostOwn *)
-    destruct (Γ RAPack) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+    destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
     iIntros "_ H". iExact "H".
   - (* LForall *)
     iIntros "#Hmon H" (v').
@@ -2382,6 +2469,7 @@ Section TypeInf.
       | TpInt, LitInt i => True
       | TpLoc, LitLoc l => True
       | TpUnit, LitUnit => True
+      | TpRA r, LitRAElem (existT r' _) => r = r'
       | _, _ => False
       end.
 
@@ -2408,7 +2496,8 @@ Section TypeInf.
         [ destruct (inf_expr ρ e) as [[]|] eqn:Htp_e; try discriminate H3;
           injection H3 as <-; rewrite (IHe le' TpBool eq_refl eq_refl); reflexivity
         | destruct (inf_expr ρ e) as [[]|] eqn:Htp_e; try discriminate H3;
-          injection H3 as <-; rewrite (IHe le' TpInt eq_refl eq_refl); reflexivity ].
+          injection H3 as <-; rewrite (IHe le' TpInt eq_refl eq_refl); reflexivity
+        | discriminate H3 ].
     - (* BinOp op e1 e2 *)
       destruct (trnsl_expr_lExpr stk e1) as [le1'|] eqn:Hle1'; [|discriminate H2].
       destruct (trnsl_expr_lExpr stk e2) as [le2'|] eqn:Hle2'; [|discriminate H2].
@@ -2430,7 +2519,8 @@ Section TypeInf.
              injection H3 as <-;
              rewrite (IHe1 le1' tp1 eq_refl eq_refl);
              rewrite (IHe2 le2' tp2 eq_refl eq_refl);
-             rewrite Htyp; reflexivity).
+             rewrite Htyp; reflexivity);
+        try discriminate H3.
     - (* IfE e1 e2 e3 *)
       destruct (trnsl_expr_lExpr stk e1) as [le1'|] eqn:Hle1'; [|discriminate H2].
       destruct (trnsl_expr_lExpr stk e2) as [le2'|] eqn:Hle2'; [|discriminate H2].
@@ -2461,7 +2551,8 @@ Section TypeInf.
     - (* LVar x *)
       injection Hinf as <-. exists (mp x). split; [done|].
       specialize (Hwf x).
-      destruct (σ x), (mp x); simpl in *; try contradiction; done.
+      destruct (σ x) as [ | | | | r], (mp x) as [ | | | | [r' x0]];
+        simpl in *; try contradiction; try done; congruence.
     - (* LVal v *)
       injection Hinf as <-. eauto.
     - (* LUnOp *)
@@ -2470,14 +2561,16 @@ Section TypeInf.
         destruct (inf_lexpr σ le) as [[]|]; try discriminate Hinf.
         injection Hinf as <-.
         destruct (IHle TpBool eq_refl) as (v & Hv & Htyp).
-        destruct v; simpl in Htyp; try discriminate Htyp.
+        destruct v as [ | | | |[]]; simpl in Htyp; try discriminate Htyp.
         eexists. rewrite Hv. split; done.
       + (* NegOp *)
         destruct (inf_lexpr σ le) as [[]|]; try discriminate Hinf.
         injection Hinf as <-.
         destruct (IHle TpInt eq_refl) as (v & Hv & Htyp).
-        destruct v; simpl in Htyp; try discriminate Htyp.
+        destruct v as [ | | | |[]]; simpl in Htyp; try discriminate Htyp.
         eexists. rewrite Hv. split; done.
+      + (* RAValidOp *)
+        discriminate Hinf.
     - (* LBinOp: arithmetic/comparison (TpInt × TpInt) and boolean (TpBool × TpBool) share structure *)
       destruct op; simpl in Hinf;
       (* AddOp | SubOp | MulOp | DivOp | ModOp | LtOp | GtOp | LeOp | GeOp:
@@ -2488,8 +2581,8 @@ Section TypeInf.
         injection Hinf as <-;
         destruct (IHle1 TpInt eq_refl) as (v1 & Hv1 & Htyp1);
         destruct (IHle2 TpInt eq_refl) as (v2 & Hv2 & Htyp2);
-        destruct v1; simpl in Htyp1; try discriminate Htyp1;
-        destruct v2; simpl in Htyp2; try discriminate Htyp2;
+        destruct v1 as [ | | | |[]]; simpl in Htyp1; try discriminate Htyp1;
+        destruct v2 as [ | | | |[]]; simpl in Htyp2; try discriminate Htyp2;
         eexists; rewrite Hv1 Hv2; split; done);
       (* EqOp | NeOp: subexprs must have the same (any) type *)
       try (
@@ -2507,9 +2600,10 @@ Section TypeInf.
         injection Hinf as <-;
         destruct (IHle1 TpBool eq_refl) as (v1 & Hv1 & Htyp1);
         destruct (IHle2 TpBool eq_refl) as (v2 & Hv2 & Htyp2);
-        destruct v1; simpl in Htyp1; try discriminate Htyp1;
-        destruct v2; simpl in Htyp2; try discriminate Htyp2;
-        eexists; rewrite Hv1 Hv2; split; done).
+        destruct v1 as [ | | | |[]]; simpl in Htyp1; try discriminate Htyp1;
+        destruct v2 as [ | | | |[]]; simpl in Htyp2; try discriminate Htyp2;
+        eexists; rewrite Hv1 Hv2; split; done);
+      try discriminate Hinf.
     - (* LIfE *)
       destruct (inf_lexpr σ le1) as [[]|]; try discriminate Hinf.
       destruct (inf_lexpr σ le2) as [tp2|] eqn:He2; try discriminate Hinf.
@@ -2518,7 +2612,7 @@ Section TypeInf.
       injection Hinf as <-.
       apply internal_typ_dec_bl in Hbeq. subst tp3.
       destruct (IHle1 TpBool eq_refl) as (v1 & Hv1 & Htyp1).
-      destruct v1; simpl in Htyp1; try discriminate Htyp1.
+      destruct v1 as [ | | | |[]]; simpl in Htyp1; try discriminate Htyp1.
       rewrite Hv1. destruct b.
       + exact (IHle2 tp2 eq_refl).
       + exact (IHle3 tp2 eq_refl).
@@ -2661,7 +2755,7 @@ Section TypeInf.
     injection Heq as <- <-.
     pose proof (Forall2_lookup_lr _ _ _ _ _ _ HF2 Hargs Hvals) as Htyp.
     rewrite <- Htyp. simpl.
-    destruct v; simpl; done.
+    destruct v as [ | | | |[]]; simpl; done.
   Qed.
 
   (* Connects the static proc_call_args_well_typed check on the caller's argument
@@ -2858,14 +2952,22 @@ Section RavenLogic.
         (FoldPred pred args) mask
       (LAnd (LStack stk) (LPred pred lexprs))
 
-  | FPURule ρ σ stk mask e l_expr fld RAPack old_val new_val :
+  (* Mirrors CASSuccRule exactly: e_old/e_new must translate to a literal
+     constant, matching CAS's own e2/e3 restriction (also literal-only) --
+     not a new limitation introduced by making Fpu's arguments lang.expr.
+     A caller whose old value is only known up to entailment (e.g. because
+     it names a ghost variable rather than being syntactically literal)
+     reaches this rule through WeakeningRule + FrameRule, same as CAS. *)
+  | FPURule ρ σ stk mask e l_expr fld r old_val new_val e_old e_new :
     trnsl_expr_lExpr stk e = Some l_expr ->
-    (RAPack.(RA_inst) ).(fpuValid) old_val new_val ->
+    trnsl_expr_lExpr stk e_old = Some (LVal (LitRAElem (existT r old_val))) ->
+    trnsl_expr_lExpr stk e_new = Some (LVal (LitRAElem (existT r new_val))) ->
+    fpuValid old_val new_val ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
-      (LAnd (LStack stk) (LGhostOwn l_expr fld RAPack old_val))
-        (Fpu e fld RAPack old_val new_val) mask
-        (LAnd (LStack stk) (LGhostOwn l_expr fld RAPack new_val))
+      (LAnd (LStack stk) (LGhostOwn l_expr fld r old_val))
+        (Fpu e fld r e_old e_new) mask
+        (LAnd (LStack stk) (LGhostOwn l_expr fld r new_val))
 
   | FrameRule ρ σ mask s p q r :
     RavenHoareTriple ρ σ
@@ -3023,17 +3125,17 @@ Section LExpr_embed.
         destruct IHe1 as [H1|H1]; destruct IHe2 as [H2|H2];
         [ left; rewrite H1; destruct op; reflexivity
         | left; rewrite H1; destruct op; reflexivity
-        | left; rewrite H1; rewrite H2; destruct op; destruct (interp_lexpr e1 mp) as [v1|]; try reflexivity; destruct v1; reflexivity
+        | left; rewrite H1; rewrite H2; destruct op; destruct (interp_lexpr e1 mp) as [v1|]; try reflexivity; destruct v1 as [ | | | |[]]; reflexivity
         | right; rewrite H1; rewrite H2; reflexivity ]
       | (* LIfE *)
         destruct IHe1 as [H1|H1];
         [ left; rewrite H1; reflexivity
         | rewrite H1; destruct (interp_lexpr e1 mp) as [v|];
-          [ destruct v as [b|i| |l];
+          [ destruct v as [b|i| |l|[]];
             [ destruct b;
               [ destruct IHe2 as [H2|H2]; [left; exact H2 | right; exact H2]
               | destruct IHe3 as [H3|H3]; [left; exact H3 | right; exact H3] ]
-            | left; reflexivity | left; reflexivity | left; reflexivity ]
+            | left; reflexivity | left; reflexivity | left; reflexivity | left; reflexivity ]
           | left; reflexivity ] ]
       | (* LStuck *) left; reflexivity ].
     destruct (decide (x = var)) as [-> | Hne].
@@ -3105,7 +3207,7 @@ Section AssertionsProperties.
     - (* LBinOp *) rewrite IHe1; rewrite IHe2. reflexivity.
     - (* LIfE *)
       rewrite IHe1.
-      destruct (interp_lexpr (lexpr_subst e1 M2) mp2) as [[b| | |]|]; try reflexivity.
+      destruct (interp_lexpr (lexpr_subst e1 M2) mp2) as [[b| | | |]|]; try reflexivity.
       destruct b; [exact IHe2 | exact IHe3].
     - (* LStuck *) reflexivity.
   Qed.
@@ -3152,7 +3254,7 @@ Section AssertionsProperties.
       have Hd2 : lexpr_fvars e2 ⊆ dom M1. { set_solver. }
       have Hd3 : lexpr_fvars e3 ⊆ dom M1. { set_solver. }
       rewrite (IHe1 Hd1).
-      destruct (interp_lexpr (lexpr_subst e1 M2) mp2) as [[b| | |]|]; try reflexivity.
+      destruct (interp_lexpr (lexpr_subst e1 M2) mp2) as [[b| | | |]|]; try reflexivity.
       destruct b.
       + rewrite (IHe2 Hd2). reflexivity.
       + rewrite (IHe3 Hd3). reflexivity.
@@ -3268,7 +3370,7 @@ Section AssertionsProperties.
         (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
       simpl in Hcongr |- *. rewrite Hcongr. tauto.
     - (* LGhostOwn *)
-      simpl. generalize (Γ RAPack).
+      simpl. generalize (Γ (ra_map r)).
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
       apply bi.exist_mono. intro l. apply bi.sep_mono; [| done].
       apply bi.pure_mono. unfold LExpr_holds.
@@ -3610,7 +3712,7 @@ Section AssertionsProperties.
     - (* LExprA *) iIntros "H". iExact "H".
     - (* LPure *) iIntros "H". iExact "H".
     - (* LOwn *) iIntros "H". iExact "H".
-    - (* LGhostOwn *) simpl. generalize (Γ RAPack).
+    - (* LGhostOwn *) simpl. generalize (Γ (ra_map r)).
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
       iIntros "H". iExact "H".
     - (* LForall *)
@@ -3706,7 +3808,7 @@ Section AssertionsProperties.
       rewrite trnsl_assertion_unfold. apply _.
     - (* LGhostOwn *)
       rewrite trnsl_assertion_unfold /trnsl_assertion_pre /=.
-      generalize (Γ RAPAck).
+      generalize (Γ (ra_map RAPAck)).
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
       apply bi.exist_timeless. intro l. apply bi.sep_timeless; [apply _ |].
       apply own_timeless. apply transport_cmra_discrete. apply _.

@@ -130,16 +130,22 @@ Section MainTranslation.
         injection Htrnsl as <-.
         destruct op; simpl in Hinterp.
         + (* NotBoolOp *)
-          destruct (interp_lexpr le1 mp) as [[b|n| |l]|] eqn:Hv1; try discriminate.
+          destruct (interp_lexpr le1 mp) as [[b|n| |l|p]|] eqn:Hv1; try discriminate.
           injection Hinterp as <-.
           apply UnOpStep with (v := lang.LitBool b).
           * exact (IHe le1 (LitBool b) eq_refl Hv1).
           * simpl. done.
         + (* NegOp *)
-          destruct (interp_lexpr le1 mp) as [[b|i| |l]|] eqn:Hv1; try discriminate.
+          destruct (interp_lexpr le1 mp) as [[b|i| |l|p]|] eqn:Hv1; try discriminate.
           injection Hinterp as <-.
           apply UnOpStep with (v := lang.LitInt i).
           * exact (IHe le1 (LitInt i) eq_refl Hv1).
+          * simpl. done.
+        + (* RAValidOp *)
+          destruct (interp_lexpr le1 mp) as [[b|n| |l|[r x]]|] eqn:Hv1; try discriminate.
+          injection Hinterp as <-.
+          apply UnOpStep with (v := lang.LitRAElem (existT r x)).
+          * exact (IHe le1 (LitRAElem (existT r x)) eq_refl Hv1).
           * simpl. done.
       - (* BinOp op e1 e2 *)
         destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [|discriminate].
@@ -147,16 +153,16 @@ Section MainTranslation.
         injection Htrnsl as <-.
         destruct op; simpl in Hinterp;
           (* Integer arithmetic ops: AddOp, SubOp, MulOp, DivOp, ModOp *)
-          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1]|] eqn:Hv1; try discriminate;
-               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2]|] eqn:Hv2; try discriminate;
+          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1|p1]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2|p2]|] eqn:Hv2; try discriminate;
                injection Hinterp as <-;
                apply BinOpStep with (v1 := lang.LitInt i1) (v2 := lang.LitInt i2);
                [ exact (IHe1 le1 (LitInt i1) eq_refl Hv1)
                | exact (IHe2 le2 (LitInt i2) eq_refl Hv2)
                | simpl; done ]);
           (* Comparison ops: LtOp, GtOp, LeOp, GeOp — result is LitBool *)
-          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1]|] eqn:Hv1; try discriminate;
-               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2]|] eqn:Hv2; try discriminate;
+          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1|p1]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2|p2]|] eqn:Hv2; try discriminate;
                injection Hinterp as <-;
                apply BinOpStep with (v1 := lang.LitInt i1) (v2 := lang.LitInt i2);
                [ exact (IHe1 le1 (LitInt i1) eq_refl Hv1)
@@ -179,20 +185,47 @@ Section MainTranslation.
                | exact (IHe2 le2 v2 eq_refl Hv2)
                | simpl; rewrite bool_decide_not; rewrite <- val_beq_bool_decide; done ]);
           (* Boolean ops: AndOp, OrOp *)
-          try (destruct (interp_lexpr le1 mp) as [[b1|n1| |l1]|] eqn:Hv1; try discriminate;
-               destruct (interp_lexpr le2 mp) as [[b2|n2| |l2]|] eqn:Hv2; try discriminate;
+          try (destruct (interp_lexpr le1 mp) as [[b1|n1| |l1|p1]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|n2| |l2|p2]|] eqn:Hv2; try discriminate;
                injection Hinterp as <-;
                apply BinOpStep with (v1 := lang.LitBool b1) (v2 := lang.LitBool b2);
                [ exact (IHe1 le1 (LitBool b1) eq_refl Hv1)
                | exact (IHe2 le2 (LitBool b2) eq_refl Hv2)
-               | simpl; done ]).
+               | simpl; done ]);
+          (* RACompOp *)
+          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1|[r1 x1]]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2|[r2 x2]]|] eqn:Hv2; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate Hinterp ];
+               injection Hinterp as <-;
+               apply BinOpStep with (v1 := lang.LitRAElem (existT r1 x1)) (v2 := lang.LitRAElem (existT r1 x2));
+               [ exact (IHe1 le1 (LitRAElem (existT r1 x1)) eq_refl Hv1)
+               | exact (IHe2 le2 (LitRAElem (existT r1 x2)) eq_refl Hv2)
+               | apply bin_op_eval_ra_comp ]);
+          (* RAFrameOp *)
+          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1|[r1 x1]]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2|[r2 x2]]|] eqn:Hv2; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate Hinterp ];
+               injection Hinterp as <-;
+               apply BinOpStep with (v1 := lang.LitRAElem (existT r1 x1)) (v2 := lang.LitRAElem (existT r1 x2));
+               [ exact (IHe1 le1 (LitRAElem (existT r1 x1)) eq_refl Hv1)
+               | exact (IHe2 le2 (LitRAElem (existT r1 x2)) eq_refl Hv2)
+               | apply bin_op_eval_ra_frame ]);
+          (* RAFpuValidOp *)
+          try (destruct (interp_lexpr le1 mp) as [[b1|i1| |l1|[r1 x1]]|] eqn:Hv1; try discriminate;
+               destruct (interp_lexpr le2 mp) as [[b2|i2| |l2|[r2 x2]]|] eqn:Hv2; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate Hinterp ];
+               injection Hinterp as <-;
+               apply BinOpStep with (v1 := lang.LitRAElem (existT r1 x1)) (v2 := lang.LitRAElem (existT r1 x2));
+               [ exact (IHe1 le1 (LitRAElem (existT r1 x1)) eq_refl Hv1)
+               | exact (IHe2 le2 (LitRAElem (existT r1 x2)) eq_refl Hv2)
+               | apply bin_op_eval_ra_fpuvalid ]).
       - (* IfE e1 e2 e3 *)
         destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [|discriminate].
         destruct (trnsl_expr_lExpr stk e2) as [le2|] eqn:Hle2; [|discriminate].
         destruct (trnsl_expr_lExpr stk e3) as [le3|] eqn:Hle3; [|discriminate].
         injection Htrnsl as <-.
         simpl in Hinterp.
-        destruct (interp_lexpr le1 mp) as [[b|n| |l]|] eqn:Hcond; try discriminate.
+        destruct (interp_lexpr le1 mp) as [[b|n| |l|p]|] eqn:Hcond; try discriminate.
         (* only LitBool b remains; now case split on the boolean *)
         destruct b; simpl in Hinterp.
         + (* condition = true *)
@@ -240,6 +273,11 @@ Section MainTranslation.
           injection H4 as H4.
           pose proof (IHe le1 (LitInt i) eq_refl H3) as Hle.
           rewrite Hle. simpl. f_equal. exact (trnsl_lval_injective (LitInt (-i)) lv H4).
+        + (* RAValidOp *)
+          simpl in H4. destruct v as [ | | | |[r x]]; try discriminate.
+          injection H4 as H4.
+          pose proof (IHe le1 (LitRAElem (existT r x)) eq_refl H3) as Hle.
+          rewrite Hle. simpl. f_equal. exact (trnsl_lval_injective (LitBool (bool_decide (valid x))) lv H4).
       - (* BinOp op e1 e2 *)
         destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [|discriminate].
         destruct (trnsl_expr_lExpr stk e2) as [le2|] eqn:Hle2; [|discriminate].
@@ -272,7 +310,34 @@ Section MainTranslation.
                rewrite bool_decide_not; f_equal;
                rewrite val_beq_bool_decide;
                rewrite trnsl_lval_trnsl_val_inverse; rewrite trnsl_lval_trnsl_val_inverse;
-               destruct (bool_decide (v1 = v2)); done).
+               destruct (bool_decide (v1 = v2)); done);
+          (* RACompOp *)
+          try (destruct v1 as [ | | | |[r1 x1]]; try discriminate;
+               destruct v2 as [ | | | |[r2 x2]]; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate H6 ];
+               injection H6 as H6;
+               symmetry in H6; apply (f_equal trnsl_val) in H6;
+               rewrite trnsl_val_trnsl_lval_inverse in H6; simpl in H6; subst lv;
+               simpl in Hle1', Hle2';
+               exact (interp_lexpr_ra_comp r1 x1 x2 le1 le2 mp Hle1' Hle2'));
+          (* RAFrameOp *)
+          try (destruct v1 as [ | | | |[r1 x1]]; try discriminate;
+               destruct v2 as [ | | | |[r2 x2]]; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate H6 ];
+               injection H6 as H6;
+               symmetry in H6; apply (f_equal trnsl_val) in H6;
+               rewrite trnsl_val_trnsl_lval_inverse in H6; simpl in H6; subst lv;
+               simpl in Hle1', Hle2';
+               exact (interp_lexpr_ra_frame r1 x1 x2 le1 le2 mp Hle1' Hle2'));
+          (* RAFpuValidOp *)
+          try (destruct v1 as [ | | | |[r1 x1]]; try discriminate;
+               destruct v2 as [ | | | |[r2 x2]]; try discriminate;
+               destruct (decide (r1 = r2)) as [<-|Hne]; [ | discriminate H6 ];
+               injection H6 as H6;
+               symmetry in H6; apply (f_equal trnsl_val) in H6;
+               rewrite trnsl_val_trnsl_lval_inverse in H6; simpl in H6; subst lv;
+               simpl in Hle1', Hle2';
+               exact (interp_lexpr_ra_fpuvalid r1 x1 x2 le1 le2 mp Hle1' Hle2')).
       - (* IfE e1 e2 e3 *)
         destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [|discriminate].
         destruct (trnsl_expr_lExpr stk e2) as [le2|] eqn:Hle2; [|discriminate].
@@ -386,23 +451,6 @@ Section MainTranslation.
       destruct (val_beq v v1) eqn:Hvb.
       - apply internal_val_dec_bl in Hvb. done.
       - inversion H1.
-    Qed.
-
-    (* The four lemmas below exploit the correctness lemmas that
-       [Scheme Equality for val] generates:
-         internal_val_dec_lb : v1 = v2  → val_beq v1 v2 = true
-         internal_val_dec_bl : val_beq v1 v2 = true → v1 = v2
-       For [internal_loc_beq_refl], note that [val_beq (LitLoc l) (LitLoc l)]
-       reduces definitionally to [internal_loc_beq l l], so the witness
-       produced by [internal_val_dec_lb] can be used directly. *)
-
-    Lemma internal_loc_beq_refl l :
-      internal_loc_beq l l = true.
-    Proof.
-      (* val_beq (LitLoc l) (LitLoc l)  ≡  internal_loc_beq l l  by reduction.
-         internal_val_dec_lb gives val_beq (LitLoc l) (LitLoc l) = true, which
-         Coq accepts as a proof of internal_loc_beq l l = true by δ-equality. *)
-      exact (internal_val_dec_lb (LitLoc l) (LitLoc l) eq_refl).
     Qed.
 
     Lemma val_beq_refl (v : val) : val_beq v v = true.
@@ -1046,9 +1094,8 @@ Section MainTranslation.
         { 
           iPureIntro. apply EqOp_refl. 
           unfold LExpr_holds. simpl. 
-          rewrite <- (fresh_var_trnsl_expr_invariant stk lvar_v e1 lexpr1 mp (LitBool true)); try done. rewrite Hlexpr1. 
-          assert (internal_loc_beq l l = true) as H_l_l. { apply internal_loc_beq_refl. } 
-          rewrite H_l_l. done.
+          rewrite <- (fresh_var_trnsl_expr_invariant stk lvar_v e1 lexpr1 mp (LitBool true)); try done. rewrite Hlexpr1.
+          rewrite val_beq_refl. done.
         }
 
          iPureIntro.
@@ -1160,7 +1207,7 @@ Section MainTranslation.
           pose proof (lexpr_typcheck_well_defined _ _ _ _ Henv Hlexpr_type_inf) as Hinterp_lexpr.
           destruct Hinterp_lexpr as [val0 Hinterp_lexpr].
           pose proof (interp_lexpr_typ_compat _ _ _ _ _ Henv Hlexpr_type_inf Hinterp_lexpr) as Hle_typ.
-          unfold typeOf in Hle_typ. destruct (trnsl_lval val0) eqn:Hle_val; try done.
+          unfold typeOf in Hle_typ. destruct (trnsl_lval val0) as [ | | | |[]] eqn:Hle_val; try done.
           unfold trnsl_lval in Hle_val. destruct (val0) eqn: Hle_val'; try done.
 
         destruct (trnsl_stmt s1) eqn:Hs1, (trnsl_stmt s2) eqn:Hs2; try done.
@@ -1680,22 +1727,22 @@ Section MainTranslation.
         (* FPU *)
         unfold trnsl_hoare_triple; simpl.
         setoid_rewrite trnsl_assertion_unfold.
-        specialize (RAPack_fpuValid Γ RAPack old_val new_val) as HRA_fpu.
-        
+        specialize (RAPack_fpuValid Γ (ra_map r) old_val new_val) as HRA_fpu.
+
         iIntros "[Hstack Hown]".
-        destruct (Γ RAPack) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]] eqn:H_RA_Pack.
+        destruct (Γ (ra_map r)) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]] eqn:H_RA_Pack.
         iDestruct "Hown" as (l) "[%Heq Hown]".
 
         iFrame.
 
-        apply (HRA_fpu) in H0.
+        apply (HRA_fpu) in H2.
 
         iMod (own_update _ 
           (transport (f_equal cmra_car Hindx) ((transport Heq_car old_val))) 
           (transport (f_equal cmra_car Hindx) ((transport Heq_car new_val)))
        with "Hown") as "Hown".
 
-       { apply transport_cmra_update. exact H0.  }
+       { apply transport_cmra_update. exact H2.  }
 
        iModIntro. rewrite H_RA_Pack. iExists l. iFrame. iPureIntro. exact Heq.
 
