@@ -1,6 +1,6 @@
 
 # General Guidelines
-- Do NOT ever make Git commits. 
+- Only make Git commits when the user explicitly asks for one in that specific instance.
 
 # Rocq/Iris Verification Rules
 
