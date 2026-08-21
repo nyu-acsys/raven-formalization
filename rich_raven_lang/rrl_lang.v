@@ -172,6 +172,11 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       | Some (LitRAElem (existT r x)) => Some (LitBool (bool_decide (valid x)))
       | _ => None
       end
+    | RAOfIntOp r =>
+      match interp_lexpr e mp with
+      | Some (LitInt z) => Some (LitRAElem (existT r (ra_of_int z)))
+      | _ => None
+      end
     end
   
   | LBinOp op e1 e2 =>
@@ -340,6 +345,24 @@ Definition LExpr_holds (le : LExpr) (mp : symb_map) : Prop :=
   | None => False
   end.
 
+(* Reverse direction of interp_lexpr_ra_fpuvalid: given the LHS's evaluated
+   value, extract the RHS's evaluated value (same ra_name, forced by
+   RAFpuValidOp's own decide-based mismatch handling) and the underlying
+   fpuValid fact, from the assertion-level RAFpuValidOp fact holding. *)
+Lemma interp_lexpr_ra_fpuvalid_inv (r : ra_name) (x1 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
+  interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
+  LExpr_holds (LBinOp RAFpuValidOp e1 e2) mp ->
+  exists x2 : RA_carrier (ra_map r), interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) /\ fpuValid x1 x2.
+Proof.
+  intros H1 Hholds.
+  unfold LExpr_holds in Hholds. simpl in Hholds. rewrite H1 in Hholds.
+  destruct (interp_lexpr e2 mp) as [[ | | | |[r2 x2]]|] eqn:He2; try contradiction.
+  destruct (decide (r = r2)) as [<-|Hne]; [ | contradiction].
+  exists x2. split; [reflexivity | ].
+  injection Hholds as Hholds.
+  apply bool_decide_eq_true in Hholds. exact Hholds.
+Qed.
+
 Definition trnsl_val (v: lang.val) : val :=
 match v with
 | lang.LitBool b => LitBool b
@@ -391,6 +414,26 @@ match expr with
 | LIfE e1 e2 e3 => LIfE (lexpr_subst e1 subst_map) (lexpr_subst e2 subst_map) (lexpr_subst e3 subst_map)
 | LStuck => LStuck
 end.
+
+(* Substituting v with a literal and interpreting under mp is the same as
+   interpreting unsubstituted under mp updated at v -- the LExpr-level fact
+   backing ExistsElimRule's soundness case. *)
+Lemma interp_lexpr_subst_var (e : LExpr) (v : lvar) (v' : val) (mp : symb_map) :
+  interp_lexpr (lexpr_subst e (<[v := LVal v']> ∅)) mp =
+  interp_lexpr e (fun y => if (y =? v)%string then v' else mp y).
+Proof.
+  induction e; simpl.
+  - (* LVar x *)
+    destruct (String.eqb x v) eqn:Hxv.
+    + apply String.eqb_eq in Hxv as ->. rewrite lookup_insert. reflexivity.
+    + apply String.eqb_neq in Hxv.
+      rewrite lookup_insert_ne; [ | congruence]. rewrite lookup_empty. reflexivity.
+  - (* LVal *) reflexivity.
+  - (* LUnOp *) rewrite IHe. reflexivity.
+  - (* LBinOp *) rewrite IHe1 IHe2. reflexivity.
+  - (* LIfE *) rewrite IHe1 IHe2 IHe3. reflexivity.
+  - (* LStuck *) reflexivity.
+Qed.
 
 Global Instance val_countable : Countable val.
 Proof.
@@ -521,11 +564,11 @@ Inductive assertion :=
 | LStack (σ : gmap lang.var lvar)
 | LExprA (p: LExpr)
 | LPure (p : Prop)
-| LOwn (e: LExpr) (fld: fld_name) (chunk: val)
-| LGhostOwn (e: LExpr) (fld: fld_name) (r : ra_name) (chunk: RA_carrier (ra_map r))
-| LForall (v : var) (body : assertion)
-| LExists (v : var) (body : assertion)
-| LImpl (cond : LExpr) (body : assertion)
+| LOwn (e: LExpr) (fld: fld_name) (chunk: LExpr)
+| LGhostOwn (e: LExpr) (fld: fld_name) (r : ra_name) (chunk: LExpr)
+| LForall (v : var) (t : typ) (body : assertion)
+| LExists (v : var) (t : typ) (body : assertion)
+| LIte (cond : LExpr) (then_ else_ : assertion)
 | LInv (inv_name : inv_name) (args : list LExpr)
 | LPred (pred_name : pred_name) (args : list LExpr)
 | LAnd (assert1 : assertion) (assert2 : assertion)
@@ -552,16 +595,21 @@ Definition proc_postcond_of (p : ProcRecord) :=
 Definition proc_body_of (p : ProcRecord) :=
   match p with Proc _ _ _ _ body => body end.
 
+(* Syntactic sugar: an implication is an if-then-else with a trivially-true
+   else branch. *)
+Definition LImpl (cond : LExpr) (body : assertion) : assertion :=
+  LIte cond body (LPure True).
+
 Fixpoint subst (ra: assertion) (mp: gmap var LExpr) : assertion := match ra with
 | LProc p p_e => LProc p p_e
 | LStack σ => LStack σ
 | LExprA e => LExprA (lexpr_subst e mp)
 | LPure p => LPure p
-| LOwn e fld chunk => LOwn (lexpr_subst e mp) fld chunk
-| LGhostOwn e fld RAPack chunk => LGhostOwn (lexpr_subst e mp) fld RAPack chunk
-| LForall vars body => LForall vars (subst body mp)
-| LExists vars body => LExists vars (subst body mp)
-| LImpl cond body => LImpl (lexpr_subst cond mp) (subst body mp)
+| LOwn e fld chunk => LOwn (lexpr_subst e mp) fld (lexpr_subst chunk mp)
+| LGhostOwn e fld RAPack chunk => LGhostOwn (lexpr_subst e mp) fld RAPack (lexpr_subst chunk mp)
+| LForall vars t body => LForall vars t (subst body mp)
+| LExists vars t body => LExists vars t (subst body mp)
+| LIte cond then_ else_ => LIte (lexpr_subst cond mp) (subst then_ mp) (subst else_ mp)
 | LInv inv_name args => 
     LInv inv_name (map (fun expr => lexpr_subst expr mp) args)
 | LPred pred_name args =>
@@ -632,15 +680,16 @@ Inductive StackFree : assertion → Prop :=
     StackFree (LOwn e fld chunk)
 | SF_GhostOwn e fld RAPAck chunk :
     StackFree (LGhostOwn e fld RAPAck chunk)
-| SF_Forall v body :
+| SF_Forall v t body :
     StackFree body →
-    StackFree (LForall v body)
-| SF_Exists v body :
+    StackFree (LForall v t body)
+| SF_Exists v t body :
     StackFree body →
-    StackFree (LExists v body)
-| SF_Impl cond body :
-    StackFree body →
-    StackFree (LImpl cond body)
+    StackFree (LExists v t body)
+| SF_Ite cond then_ else_ :
+    StackFree then_ →
+    StackFree else_ →
+    StackFree (LIte cond then_ else_)
 | SF_And a1 a2 :
     StackFree a1 →
     StackFree a2 →
@@ -662,22 +711,70 @@ Global Parameter proc_map : gmap proc_name ProcRecord.
 (* LExists binder variables of an assertion (does NOT descend into LInv/LPred bodies) *)
 Fixpoint assertion_exists_binders (a : assertion) : gset lvar :=
   match a with
-  | LExists v body => {[v]} ∪ assertion_exists_binders body
-  | LForall _ body => assertion_exists_binders body
-  | LImpl _ body => assertion_exists_binders body
+  | LExists v _ body => {[v]} ∪ assertion_exists_binders body
+  | LForall _ _ body => assertion_exists_binders body
+  | LIte _ then_ else_ => assertion_exists_binders then_ ∪ assertion_exists_binders else_
   | LAnd a1 a2 => assertion_exists_binders a1 ∪ assertion_exists_binders a2
   | _ => ∅
+  end.
+
+(* Per-(typ,val) compatibility check -- factored out of env_typ_well_defined
+   so it can be used standalone by LExists/LForall's own translation
+   (restricting the witness/domain to values matching the binder's declared
+   type) as well as by env_typ_well_defined itself. Moved ahead of Section
+   Translation (from its earlier home right after env_typ_well_defined) so
+   trnsl_assertion_str's LExists/LForall cases can use it. *)
+Definition typ_val_match (t : typ) (v : val) : Prop :=
+  match t, v with
+  | TpBool, LitBool _ => True
+  | TpInt, LitInt _ => True
+  | TpLoc, LitLoc _ => True
+  | TpUnit, LitUnit => True
+  | TpRA r, LitRAElem (existT r' _) => r = r'
+  | _, _ => False
+  end.
+
+(* Whether lvar v can influence a's translation under any mp -- i.e. whether
+   overriding mp at v is guaranteed to be a no-op for a's meaning. Unlike
+   elim_safe's subst-based predecessor this covers LStack too: symb_stk_to_stk_frm
+   reads its whole gmap, so freshness there means v never appears as one of
+   the stack's *values* (fresh_lvar's own condition), not that v is merely
+   absent from some LExpr leaf. LInv only needs v absent from its own arg
+   vector -- it's a leaf (never interprets its stored inv_body). LPred is
+   excluded outright: it's semantically the same "v absent from its args"
+   condition, but its recursion goes through the *global* pred_map table
+   rather than a structural subterm of a, so trnsl_assertion_mp_irrelevant's
+   plain induction on a can't produce an induction hypothesis for it. LExists's
+   own binder can shadow v (a self-shadowed occurrence, e.g. an invariant body
+   quantifying over the same lvar name as the ExistsElimRule instance being
+   applied to it, never reads the outer mp update at all -- see the ev =? v
+   branch of trnsl_assertion_mp_irrelevant's LExists case), so that case is a
+   disjunction rather than an unconditional recursion into body. *)
+Fixpoint lvar_fresh_in_assertion (v : lvar) (a : assertion) : Prop :=
+  match a with
+  | LProc _ _ => True
+  | LStack σ => forall v0, σ !! v0 ≠ Some v
+  | LExprA e => v ∉ lexpr_fvars e
+  | LPure _ => True
+  | LOwn e _ chunk => v ∉ lexpr_fvars e /\ v ∉ lexpr_fvars chunk
+  | LGhostOwn e _ _ chunk => v ∉ lexpr_fvars e /\ v ∉ lexpr_fvars chunk
+  | LForall _ _ body => lvar_fresh_in_assertion v body
+  | LExists ev _ body => ev = v \/ lvar_fresh_in_assertion v body
+  | LIte cond then_ else_ => v ∉ lexpr_fvars cond /\ lvar_fresh_in_assertion v then_ /\ lvar_fresh_in_assertion v else_
+  | LInv _ args => Forall (fun e => v ∉ lexpr_fvars e) args
+  | LPred _ _ => False
+  | LAnd a1 a2 => lvar_fresh_in_assertion v a1 /\ lvar_fresh_in_assertion v a2
   end.
 
 (* Free variables appearing in LExpr nodes of an assertion (does NOT descend into LInv/LPred bodies) *)
 Fixpoint assertion_lexpr_fvars (a : assertion) : gset lvar :=
   match a with
   | LExprA e => lexpr_fvars e
-  | LOwn e _ _ => lexpr_fvars e
-  | LGhostOwn e _ _ _ => lexpr_fvars e
-  | LForall _ body => assertion_lexpr_fvars body
-  | LExists _ body => assertion_lexpr_fvars body
-  | LImpl cond body => lexpr_fvars cond ∪ assertion_lexpr_fvars body
+  | LOwn e _ chunk => lexpr_fvars e ∪ lexpr_fvars chunk
+  | LGhostOwn e _ _ chunk => lexpr_fvars e ∪ lexpr_fvars chunk
+  | LForall _ _ body => assertion_lexpr_fvars body
+  | LExists _ _ body => assertion_lexpr_fvars body
+  | LIte cond then_ else_ => lexpr_fvars cond ∪ assertion_lexpr_fvars then_ ∪ assertion_lexpr_fvars else_
   | LInv _ args => ⋃ (lexpr_fvars <$> args)
   | LPred _ args => ⋃ (lexpr_fvars <$> args)
   | LAnd a1 a2 => assertion_lexpr_fvars a1 ∪ assertion_lexpr_fvars a2
@@ -687,11 +784,7 @@ Fixpoint assertion_lexpr_fvars (a : assertion) : gset lvar :=
 Lemma assertion_exists_binders_subst (a : assertion) (M : gmap lvar LExpr) :
   assertion_exists_binders (subst a M) = assertion_exists_binders a.
 Proof.
-  induction a; simpl; try reflexivity.
-  - rewrite IHa. reflexivity.
-  - rewrite IHa. reflexivity.
-  - rewrite IHa. reflexivity.
-  - rewrite IHa1 IHa2. reflexivity.
+  induction a; simpl; try reflexivity; try congruence.
 Qed.
 
 (* Substitution composes: if all fvars of e are in dom σ, then substituting
@@ -743,11 +836,11 @@ Lemma assertion_subst_compose (a : assertion) (σ M : gmap var LExpr) :
 Proof.
   induction a; simpl; intro Hfv; try done.
   - f_equal. apply lexpr_subst_compose. exact Hfv.
-  - f_equal. apply lexpr_subst_compose. exact Hfv.
-  - f_equal. apply lexpr_subst_compose. exact Hfv.
+  - f_equal; apply lexpr_subst_compose; set_solver.
+  - f_equal; apply lexpr_subst_compose; set_solver.
   - f_equal. apply IHa. exact Hfv.
   - f_equal. apply IHa. exact Hfv.
-  - f_equal; [apply lexpr_subst_compose | apply IHa]; set_solver.
+  - f_equal; [apply lexpr_subst_compose | apply IHa1 | apply IHa2]; set_solver.
   - (* LInv *) f_equal. rewrite map_map. apply Forall_fmap_ext_1.
     apply Forall_forall. intros e He.
     apply lexpr_subst_compose.
@@ -930,6 +1023,11 @@ match e with
 | UnOp NegOp e =>
   match inf_expr ρ e with
   | Some TpInt => Some TpInt
+  | _ => None
+  end
+| UnOp (RAOfIntOp r) e =>
+  match inf_expr ρ e with
+  | Some TpInt => Some (TpRA r)
   | _ => None
   end
 | BinOp (AddOp | SubOp | MulOp | DivOp | ModOp) e1 e2 =>
@@ -1431,6 +1529,16 @@ Section Translation.
   | FoldInv inv args => None'
   | Fpu e fld RAPack old_val new_val => None'
   end.
+
+(* Every registered procedure's own body actually translates -- ruling out
+   trnsl_stmt (proc_body_of r) = Error, which ProcCallRuleRet's soundness
+   case needs (a well-formed callee's body is, definitionally, one that
+   compiles; malformed statements should never have made it into proc_map in
+   the first place). Stated standalone (not a ProgramWF field) because
+   trnsl_stmt isn't defined yet at ProgramWF's own point in the file. An
+   explicit premise of raven_soundness, same status as ProgramWF itself. *)
+Definition proc_bodies_translate : Prop :=
+  map_Forall (λ _ r, trnsl_stmt (proc_body_of r) ≠ Error) proc_map.
 
   Ltac proj_fst H := (apply f_equal with (f := fst) in H).
   Ltac proj_snd H := (apply f_equal with (f := snd) in H).
@@ -2161,29 +2269,44 @@ Qed.
       (⌜LExpr_holds l_expr mp⌝%I)
     
     | LPure p => (⌜ p ⌝%I)
-    | LOwn l_expr fld chunk => 
-      (∃ l: lang.loc, (
-        ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗ 
+    (* chunk is an LExpr, not a concrete val: existentially quantify over the
+       concrete value it evaluates to, guarded by a purity fact. If chunk
+       doesn't evaluate (or isn't RA-typed with the right ra_name, for
+       LGhostOwn), no witness exists and the assertion is (correctly) False. *)
+    | LOwn l_expr fld chunk_expr =>
+      (∃ l: lang.loc, ∃ chunk : val, (
+        ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗
+        ⌜interp_lexpr chunk_expr mp = Some chunk⌝ ∗
         (l#fld ↦{ 1 } (trnsl_lval chunk))
         )%I)%I
 
-    | LGhostOwn l_expr fld RAPack chunk =>
+    | LGhostOwn l_expr fld RAPack chunk_expr =>
       let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map RAPack) in
-      let chunkU := transport (Heq_car) chunk in
-      let chunkGs := transport (f_equal cmra_car Heq_cmra) chunkU in 
       let HinG := inGs_inG i in
 
-      (∃ l : lang.loc, (⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗ (own (ghost_map l fld) chunkGs (inG0 := HinG)))%I)%I
-    | LForall v body => 
+      (∃ l : lang.loc, ∃ chunk : RA_carrier (ra_map RAPack), (
+        ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗
+        ⌜interp_lexpr chunk_expr mp = Some (LitRAElem (existT RAPack chunk))⌝ ∗
+        (own (ghost_map l fld) (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := HinG)))%I)%I
+    | LForall v _t body =>
        (∀ v':lang.val, (trnsl_assertion_str F body stk_id mp))%I
 
-    | LExists v body => 
-      (∃ v': val,
+    (* Restricted to witnesses matching t (the binder's declared type, per
+       the LExists/LForall AST's own type annotation) -- this is what lets
+       ExistsElimRule's soundness case get its witness's well-typedness for
+       free from destructuring the existential, rather than needing a
+       separate witness_well_typed side-condition proved per rule use. *)
+    | LExists v t body =>
+      (∃ v': val, ⌜typ_val_match t v'⌝ ∗
            (trnsl_assertion_str F body stk_id (λ x, if String.eqb x v then v' else mp x))
     )%I
     
-    | LImpl cnd body => 
-      (⌜LExpr_holds cnd mp⌝ -∗  (trnsl_assertion_str F body stk_id mp))%I
+    (* Generalizes LImpl's own translation (an implication is the special
+       case whose else_ branch, LPure True, makes the second conjunct
+       trivially provable regardless of cnd). *)
+    | LIte cnd then_ else_ =>
+      ((⌜LExpr_holds cnd mp⌝ -∗ (trnsl_assertion_str F then_ stk_id mp)) ∧
+       (⌜¬ LExpr_holds cnd mp⌝ -∗ (trnsl_assertion_str F else_ stk_id mp)))%I
 
     (* Nominal, and therefore a *base case*: an invariant assertion owns a
        discrete fragment naming the invariant and its argument vector.  It
@@ -2260,12 +2383,13 @@ Proof.
     iDestruct (IHa stk mp with "Hmon") as "IH".
     iDestruct ("H" $! v') as "H'". by iApply "IH".
   - (* LExists *)
-    iIntros "#Hmon H". iDestruct "H" as (v') "H". iExists v'.
+    iIntros "#Hmon H". iDestruct "H" as (v') "[%Htyp H]". iExists v'. iSplitR; [done|].
     iDestruct (IHa stk (λ x, if String.eqb x v then v' else mp x) with "Hmon") as "IH".
     by iApply "IH".
-  - (* LImpl *)
-    iIntros "#Hmon H %Hc".
-    iDestruct (IHa stk mp with "Hmon") as "IH". iApply "IH". by iApply "H".
+  - (* LIte *)
+    iIntros "#Hmon H". iSplit.
+    + iIntros "%Hc". iDestruct (IHa1 stk mp with "Hmon") as "IH1". iApply "IH1". iDestruct "H" as "[H _]". by iApply "H".
+    + iIntros "%Hc". iDestruct (IHa2 stk mp with "Hmon") as "IH2". iApply "IH2". iDestruct "H" as "[_ H]". by iApply "H".
   - (* LInv: base case, no recursive occurrence *)
     destruct (inv_map !! inv_name0); iIntros "_ H"; iExact "H".
   - (* LPred: the one genuinely recursive clause *)
@@ -2309,28 +2433,42 @@ Proof.
   apply bi.sep_proper; symmetry; apply trnsl_assertion_unfold.
 Qed.
 
-Lemma trnsl_assertion_forall v body stk mp :
-  trnsl_assertion (LForall v body) stk mp ⊣⊢
+Lemma trnsl_assertion_forall v t body stk mp :
+  trnsl_assertion (LForall v t body) stk mp ⊣⊢
   (∀ _ : lang.val, trnsl_assertion body stk mp).
 Proof.
-  rewrite (trnsl_assertion_unfold (LForall v body)) /trnsl_assertion_pre /=.
+  rewrite (trnsl_assertion_unfold (LForall v t body)) /trnsl_assertion_pre /=.
   apply bi.forall_proper. intros _. symmetry. apply trnsl_assertion_unfold.
 Qed.
 
-Lemma trnsl_assertion_exists v body stk mp :
-  trnsl_assertion (LExists v body) stk mp ⊣⊢
-  (∃ v' : val, trnsl_assertion body stk (λ x, if String.eqb x v then v' else mp x)).
+Lemma trnsl_assertion_exists v t body stk mp :
+  trnsl_assertion (LExists v t body) stk mp ⊣⊢
+  (∃ v' : val, ⌜typ_val_match t v'⌝ ∗ trnsl_assertion body stk (λ x, if String.eqb x v then v' else mp x)).
 Proof.
-  rewrite (trnsl_assertion_unfold (LExists v body)) /trnsl_assertion_pre /=.
-  apply bi.exist_proper. intros v'. symmetry. apply trnsl_assertion_unfold.
+  rewrite (trnsl_assertion_unfold (LExists v t body)) /trnsl_assertion_pre /=.
+  apply bi.exist_proper. intros v'. apply bi.sep_proper; [done|]. symmetry. apply trnsl_assertion_unfold.
+Qed.
+
+Lemma trnsl_assertion_ite cnd then_ else_ stk mp :
+  trnsl_assertion (LIte cnd then_ else_) stk mp ⊣⊢
+  (⌜LExpr_holds cnd mp⌝ -∗ trnsl_assertion then_ stk mp) ∧
+  (⌜¬ LExpr_holds cnd mp⌝ -∗ trnsl_assertion else_ stk mp).
+Proof.
+  rewrite (trnsl_assertion_unfold (LIte cnd then_ else_)) /trnsl_assertion_pre /=.
+  apply bi.and_proper; apply bi.wand_proper; try done; symmetry; apply trnsl_assertion_unfold.
 Qed.
 
 Lemma trnsl_assertion_impl cnd body stk mp :
   trnsl_assertion (LImpl cnd body) stk mp ⊣⊢
   (⌜LExpr_holds cnd mp⌝ -∗ trnsl_assertion body stk mp).
 Proof.
-  rewrite (trnsl_assertion_unfold (LImpl cnd body)) /trnsl_assertion_pre /=.
-  apply bi.wand_proper; [done|]. symmetry. apply trnsl_assertion_unfold.
+  unfold LImpl. rewrite trnsl_assertion_ite.
+  rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
+  iSplit.
+  - iIntros "[H _] %Hc". by iApply "H".
+  - iIntros "H". iSplit.
+    + iIntros "%Hc". by iApply "H".
+    + iIntros "%Hc". done.
 Qed.
 
 (* [LInv] now denotes a discrete ownership fragment, not an Iris [inv]. The
@@ -2373,6 +2511,150 @@ Proof.
     rewrite Hr. apply _.
 Qed.
 
+(* [LProc]'s own proc_tbl_chunk fragment is persistent (see its definition),
+   so the procedure-registration fact is freely shareable too -- needed so a
+   recursive call can keep re-supplying it, the same way an invariant fact
+   is freely shareable across an unbounded number of accesses. *)
+Global Instance trnsl_assertion_LProc_persistent p pe stk mp :
+  Persistent (trnsl_assertion (LProc p pe) stk mp).
+Proof.
+  rewrite (trnsl_assertion_unfold (LProc p pe)) /trnsl_assertion_pre /=.
+  destruct pe. destruct (trnsl_stmt body); apply _.
+Qed.
+
+(* Overriding mp at a lvar the assertion doesn't depend on (lvar_fresh_in_assertion)
+   leaves its translation unchanged. Unlike its subst-based predecessor this
+   covers LStack and LForall -- it never manipulates the AST via subst (a
+   no-op on LStack's own stored map, which is exactly why the old lemma had
+   to exclude it), just mp directly. LPred still needs excluding: its
+   recursion goes through the *global* pred_map table, not a structural
+   subterm of a, so a plain induction on a can't produce an induction
+   hypothesis for it (the existing subst_congr_cond/least_fixpoint_ind
+   machinery handles that shape of problem, but only for StackFree
+   assertions -- LStack is exactly what it excludes). Neither of this
+   lemma's two target use sites (an invariant body's own existential, or an
+   InvAccessBlockRule-style postcondition witness) needs LPred. *)
+Lemma trnsl_assertion_mp_irrelevant (v : lvar) (a : assertion) (v' : val) (stk : stack_id) (mp : symb_map) :
+  lvar_fresh_in_assertion v a ->
+  trnsl_assertion a stk (fun y => if (y =? v)%string then v' else mp y)
+  ≡ trnsl_assertion a stk mp.
+Proof.
+  revert mp.
+  induction a as
+    [ pn pe
+    | sg
+    | pexp
+    | pp
+    | oe ofld ochunk
+    | ge gfld gr gchunk
+    | fv ft fbody IHf
+    | ev et ebody IHe
+    | icond ithen IHi1 ielse IHi2
+    | ivn iargs
+    | pdn pargs
+    | a1 IH1 a2 IH2 ];
+    intros mp Hfresh; simpl in Hfresh.
+  - (* LProc *)
+    rewrite (trnsl_assertion_unfold (LProc pn pe))
+            (trnsl_assertion_unfold (LProc pn pe)) /trnsl_assertion_pre /=.
+    destruct pe. destruct (trnsl_stmt body); done.
+  - (* LStack *) simpl.
+    rewrite (trnsl_assertion_unfold (LStack sg)) (trnsl_assertion_unfold (LStack sg))
+            /trnsl_assertion_pre /=.
+    assert (symb_stk_to_stk_frm sg (fun y => if (y =? v)%string then v' else mp y)
+            = symb_stk_to_stk_frm sg mp) as Heq.
+    { unfold symb_stk_to_stk_frm. f_equal.
+      apply map_eq. intros v0.
+      rewrite !lookup_fmap.
+      destruct (sg !! v0) as [lv|] eqn:Hsg; simpl; [ | reflexivity].
+      f_equal. f_equal.
+      destruct (String.eqb_spec lv v) as [-> | _]; [ | reflexivity].
+      exfalso. exact (Hfresh v0 Hsg). }
+    rewrite Heq. done.
+  - (* LExprA *) simpl.
+    rewrite (trnsl_assertion_unfold (LExprA pexp))
+            (trnsl_assertion_unfold (LExprA pexp)) /trnsl_assertion_pre /=.
+    unfold LExpr_holds. rewrite (interp_lexpr_stable pexp mp v v' Hfresh). done.
+  - (* LPure *) simpl.
+    rewrite (trnsl_assertion_unfold (LPure pp)) (trnsl_assertion_unfold (LPure pp))
+            /trnsl_assertion_pre /=. done.
+  - (* LOwn *) simpl. destruct Hfresh as [Hfe Hfc].
+    rewrite (trnsl_assertion_unfold (LOwn oe ofld ochunk))
+            (trnsl_assertion_unfold (LOwn oe ofld ochunk)) /trnsl_assertion_pre /=.
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_stable oe mp v v' Hfe) (interp_lexpr_stable ochunk mp v v' Hfc).
+    done.
+  - (* LGhostOwn *) simpl. destruct Hfresh as [Hfe Hfc].
+    rewrite (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk))
+            (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
+    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_stable ge mp v v' Hfe) (interp_lexpr_stable gchunk mp v v' Hfc).
+    done.
+  - (* LForall: its own binder is already a no-op in trnsl_assertion_str
+       (trnsl_assertion_forall), so this is a direct recursion regardless of
+       whether fv = v. *)
+    rewrite (trnsl_assertion_forall fv ft fbody stk (fun y => if (y =? v)%string then v' else mp y))
+            (trnsl_assertion_forall fv ft fbody stk mp).
+    apply bi.forall_proper; intros _. exact (IHf mp Hfresh).
+  - (* LExists *)
+    rewrite (trnsl_assertion_exists ev et ebody stk (fun y => if (y =? v)%string then v' else mp y))
+            (trnsl_assertion_exists ev et ebody stk mp).
+    apply bi.exist_proper; intros v''. apply bi.sep_proper; [done|].
+    destruct (String.eqb_spec ev v) as [-> | Hne].
+    + (* shadowed: the outer update at v is immediately overwritten *)
+      assert ((fun y => if (y =? v)%string then v''
+                         else (fun z => if (z =? v)%string then v' else mp z) y)
+              = (fun y => if (y =? v)%string then v'' else mp y)) as Heq.
+      { apply functional_extensionality. intros y.
+        destruct (String.eqb_spec y v); reflexivity. }
+      rewrite Heq. done.
+    + (* distinct binders commute *)
+      destruct Hfresh as [Heqev | Hfresh]; [exfalso; exact (Hne Heqev) |].
+      assert ((fun y => if (y =? ev)%string then v''
+                         else (fun z => if (z =? v)%string then v' else mp z) y)
+              = (fun y => if (y =? v)%string then v'
+                          else (fun z => if (z =? ev)%string then v'' else mp z) y)) as Hswap.
+      { apply functional_extensionality. intros y.
+        destruct (String.eqb_spec y ev) as [-> | Hyev].
+        - rewrite (proj2 (String.eqb_neq ev v) Hne). reflexivity.
+        - reflexivity. }
+      rewrite Hswap. exact (IHe (fun y => if (y =? ev)%string then v'' else mp y) Hfresh).
+  - (* LIte *) destruct Hfresh as [Hfc [Hft Hfe]].
+    rewrite (trnsl_assertion_ite icond ithen ielse stk (fun y => if (y =? v)%string then v' else mp y))
+            (trnsl_assertion_ite icond ithen ielse stk mp).
+    unfold LExpr_holds. rewrite (interp_lexpr_stable icond mp v v' Hfc).
+    apply bi.and_proper; apply bi.wand_proper; try done.
+    + exact (IHi1 mp Hft).
+    + exact (IHi2 mp Hfe).
+  - (* LInv *) simpl.
+    rewrite (trnsl_assertion_unfold (LInv ivn iargs))
+            (trnsl_assertion_unfold (LInv ivn iargs)) /trnsl_assertion_pre /=.
+    destruct (inv_map !! ivn); [ | done].
+    apply bi.exist_proper; intros vs.
+    apply bi.sep_proper; [ | done].
+    apply bi.pure_proper.
+    revert vs Hfresh. induction iargs as [ | le0 iargs' IHl]; intros vs Hfresh.
+    + split; intros H; inversion H; subst; constructor.
+    + apply Forall_cons_1 in Hfresh as [Hfresh0 Hfresh'].
+      destruct vs as [ | v0 vs']; simpl.
+      * split; intros H; inversion H.
+      * split; intros H; inversion H as [|? ? ? ? Hh Ht]; subst.
+        -- constructor.
+           ++ rewrite (interp_lexpr_stable le0 mp v v' Hfresh0) in Hh. exact Hh.
+           ++ apply (IHl vs' Hfresh'); exact Ht.
+        -- constructor.
+           ++ rewrite (interp_lexpr_stable le0 mp v v' Hfresh0). exact Hh.
+           ++ apply (IHl vs' Hfresh'); exact Ht.
+  - (* LPred *) exfalso. exact Hfresh.
+  - (* LAnd *) destruct Hfresh as [Hf1 Hf2].
+    rewrite (trnsl_assertion_and a1 a2 stk (fun y => if (y =? v)%string then v' else mp y))
+            (trnsl_assertion_and a1 a2 stk mp).
+    apply bi.sep_proper; [exact (IH1 mp Hf1) | exact (IH2 mp Hf2)].
+Qed.
+
 Lemma trnsl_pred_validity' pred args stk_id mp :
   match pred_map !! pred with
   | Some pred_rec =>
@@ -2390,8 +2672,6 @@ Proof.
 Qed.
 
 
-
-  Definition entails P Q := forall stk_id mp, ∃ P' Q', trnsl_assertion P stk_id mp = P' /\ trnsl_assertion Q stk_id mp = Q' /\ (P' ⊢  Q')%I.
 
 End Translation.
 
@@ -2425,6 +2705,11 @@ Section TypeInf.
   | LUnOp NegOp e =>
     match inf_lexpr σ e with
     | Some TpInt => Some TpInt
+    | _ => None
+    end
+  | LUnOp (RAOfIntOp r) e =>
+    match inf_lexpr σ e with
+    | Some TpInt => Some (TpRA r)
     | _ => None
     end
 
@@ -2463,7 +2748,7 @@ Section TypeInf.
 
 
   Definition env_typ_well_defined (σ : lvar_typs) (mp : symb_map) :=
-      forall lv, 
+      forall lv,
       match (σ lv), (mp lv) with
       | TpBool, LitBool b => True
       | TpInt, LitInt i => True
@@ -2472,6 +2757,23 @@ Section TypeInf.
       | TpRA r, LitRAElem (existT r' _) => r = r'
       | _, _ => False
       end.
+
+
+  (* env_typ_well_defined survives an mp-update at v, provided the new value
+     has v's own declared type -- the only new obligation ExistsElimRule's
+     soundness case needs when it re-interprets its premise at mp[v:=v']
+     for the witness v' an incoming existential actually produced. *)
+  Lemma env_typ_well_defined_update (σ : lvar_typs) (mp : symb_map) (v : lvar) (v' : val) :
+    env_typ_well_defined σ mp ->
+    typ_val_match (σ v) v' ->
+    env_typ_well_defined σ (fun y => if (y =? v)%string then v' else mp y).
+  Proof.
+    intros Henv Htyp lv. destruct (String.eqb_spec lv v) as [-> | Hne].
+    - simpl.
+      unfold typ_val_match in Htyp.
+      destruct (σ v); destruct v' as [b|i| |l|[r2 x]]; try done.
+    - simpl. exact (Henv lv).
+  Qed.
 
 
   Lemma lexpr_expr_typ_compat ρ σ stk e le tp :
@@ -2497,7 +2799,9 @@ Section TypeInf.
           injection H3 as <-; rewrite (IHe le' TpBool eq_refl eq_refl); reflexivity
         | destruct (inf_expr ρ e) as [[]|] eqn:Htp_e; try discriminate H3;
           injection H3 as <-; rewrite (IHe le' TpInt eq_refl eq_refl); reflexivity
-        | discriminate H3 ].
+        | discriminate H3
+        | destruct (inf_expr ρ e) as [[]|] eqn:Htp_e; try discriminate H3;
+          injection H3 as <-; rewrite (IHe le' TpInt eq_refl eq_refl); reflexivity ].
     - (* BinOp op e1 e2 *)
       destruct (trnsl_expr_lExpr stk e1) as [le1'|] eqn:Hle1'; [|discriminate H2].
       destruct (trnsl_expr_lExpr stk e2) as [le2'|] eqn:Hle2'; [|discriminate H2].
@@ -2571,6 +2875,12 @@ Section TypeInf.
         eexists. rewrite Hv. split; done.
       + (* RAValidOp *)
         discriminate Hinf.
+      + (* RAOfIntOp *)
+        destruct (inf_lexpr σ le) as [[]|]; try discriminate Hinf.
+        injection Hinf as <-.
+        destruct (IHle TpInt eq_refl) as (v & Hv & Htyp).
+        destruct v as [ |i| | |[]]; simpl in Htyp; try discriminate Htyp.
+        eexists. rewrite Hv. split; done.
     - (* LBinOp: arithmetic/comparison (TpInt × TpInt) and boolean (TpBool × TpBool) share structure *)
       destruct op; simpl in Hinf;
       (* AddOp | SubOp | MulOp | DivOp | ModOp | LtOp | GtOp | LeOp | GeOp:
@@ -2629,6 +2939,23 @@ Section TypeInf.
     intros Hwf Hinf Heval.
     destruct (interp_lexpr_well_typed σ le mp tp Hwf Hinf) as (val' & Hval' & Htyp).
     rewrite Hval' in Heval. injection Heval as <-. exact Htyp.
+  Qed.
+
+  (* Restates interp_lexpr_typ_compat's raw typeOf fact as typ_val_match --
+     what lets LExists's own type-restricted translation (see its
+     trnsl_assertion_str case) get a fresh-lvar rule's witness well-typed for
+     free, as long as the rule ties its lvar to an LExpr whose inf_lexpr type
+     it already knows (e.g. HeapReadRule's chunk parameter), rather than
+     needing a bespoke witness_well_typed-style proof per rule. *)
+  Lemma interp_lexpr_well_typed_match (σ : lvar_typs) (le : LExpr) (tp : typ) (val : val) (mp : symb_map) :
+    env_typ_well_defined σ mp ->
+    inf_lexpr σ le = Some tp ->
+    interp_lexpr le mp = Some val ->
+    typ_val_match tp val.
+  Proof.
+    intros Hwf Hinf Heval.
+    pose proof (interp_lexpr_typ_compat σ le tp val mp Hwf Hinf Heval) as Htyp.
+    destruct val as [b|i| |l|[r x]]; simpl in Htyp; subst; done.
   Qed.
 
   Lemma lexpr_typcheck_well_defined σ mp le tp :
@@ -2786,6 +3113,83 @@ Section TypeInf.
   Qed.
 
 
+(* entails is parameterized by sigma and only has to hold at mp's that are
+   well-typed w.r.t. it -- moved here (past TypeInf) so it can state that
+   requirement via env_typ_well_defined. This is what lets WeakeningRule's
+   own entails premises use Henv (already in scope wherever a
+   RavenHoareTriple derivation is checked for soundness) to justify things
+   like introducing an existential over an already-known, well-typed value
+   -- something an unconditional-over-all-mp entails could never prove,
+   since nothing stops an ill-typed mp from violating the witness's own
+   typ_val_match side condition. *)
+Definition entails (σ : lvar_typs) P Q :=
+  forall stk_id mp, env_typ_well_defined σ mp ->
+  ∃ P' Q', trnsl_assertion P stk_id mp = P' /\ trnsl_assertion Q stk_id mp = Q' /\ (P' ⊢  Q')%I.
+
+(* Commutes a fixed-stack LAnd past a nested LExists into a single top-level
+   LExists -- lets the new, subst-free ExistsElimRule (which only eliminates
+   a top-level LExists) still reach an existential nested under
+   LAnd (LStack stk) (LAnd _ p), the shape an invariant/predicate body
+   naturally appears in via InvAccessBlockRule/etc. Needs v fresh for both
+   stk and p, so overriding mp at v (LExists's own translation) leaves them
+   untouched -- trnsl_assertion_mp_irrelevant does the rest. *)
+Lemma entails_and_stack_exists_swap (σ : lvar_typs) (stk : stack) (v : lvar) (t : typ) (body p : assertion) :
+  fresh_lvar stk v ->
+  lvar_fresh_in_assertion v p ->
+  entails σ (LAnd (LStack stk) (LAnd (LExists v t body) p))
+          (LExists v t (LAnd (LStack stk) (LAnd body p))).
+Proof.
+  intros Hfresh_stk Hfresh_p stk_id mp Henv.
+  eexists _, _. split; [reflexivity|]. split; [reflexivity|].
+  rewrite trnsl_assertion_and trnsl_assertion_and trnsl_assertion_exists trnsl_assertion_exists.
+  iIntros "[Hstk [[%v' [%Htyp Hbody]] Hp]]".
+  iExists v'. iSplitR; [done|].
+  rewrite trnsl_assertion_and trnsl_assertion_and.
+  rewrite (trnsl_assertion_mp_irrelevant v (LStack stk) v' stk_id mp Hfresh_stk).
+  rewrite (trnsl_assertion_mp_irrelevant v p v' stk_id mp Hfresh_p).
+  iFrame.
+Qed.
+
+(* Simpler 2-way version of the above, without a fixed LStack conjunct in
+   front -- lets a fresh-lvar rule's own LExists postcondition (e.g.
+   VarAssignmentRule's) absorb a sibling frame fact directly. *)
+Lemma entails_exists_and_swap (σ : lvar_typs) (v : lvar) (t : typ) (body p : assertion) :
+  lvar_fresh_in_assertion v p ->
+  entails σ (LAnd (LExists v t body) p) (LExists v t (LAnd body p)).
+Proof.
+  intros Hfresh_p stk_id mp Henv.
+  eexists _, _. split; [reflexivity|]. split; [reflexivity|].
+  rewrite trnsl_assertion_and trnsl_assertion_exists trnsl_assertion_exists.
+  iIntros "[[%v' [%Htyp Hbody]] Hp]".
+  iExists v'. iSplitR; [done|].
+  rewrite trnsl_assertion_and.
+  rewrite (trnsl_assertion_mp_irrelevant v p v' stk_id mp Hfresh_p).
+  iFrame.
+Qed.
+
+(* Introduces a fresh existential over an already-known value: v' := mp v,
+   justified by env_typ_well_defined + sigma v = t (Henv gives exactly the
+   typ_val_match side condition LExists's own translation needs). The
+   entails-unconditional-over-mp form of this is NOT provable (nothing
+   constrains mp v to be well-typed without Henv) -- this is exactly why
+   entails is parameterized by sigma/Henv in the first place. *)
+Lemma entails_exists_intro (σ : lvar_typs) (v : lvar) (t : typ) (X : assertion) :
+  σ v = t ->
+  entails σ X (LExists v t X).
+Proof.
+  intros Hty stk_id mp Henv.
+  eexists _, _. split; [reflexivity|]. split; [reflexivity|].
+  rewrite trnsl_assertion_exists.
+  assert ((fun y => if (y =? v)%string then mp v else mp y) = mp) as Hself.
+  { apply functional_extensionality. intros y.
+    destruct (String.eqb_spec y v) as [->|]; reflexivity. }
+  iIntros "H".
+  iExists (mp v). iSplitR.
+  - iPureIntro. specialize (Henv v). rewrite Hty in Henv.
+    destruct (σ v), (mp v); simpl in *; try done.
+  - rewrite Hself. iExact "H".
+Qed.
+
 End TypeInf.
 
 
@@ -2793,7 +3197,7 @@ Section RavenLogic.
 
   Fixpoint field_list_to_assertion lexpr fld_vals  := match fld_vals with
   | [] => LPure true
-  | (fld,val) :: fld_vals => LAnd (LOwn lexpr fld (trnsl_val val)) (field_list_to_assertion lexpr fld_vals)
+  | (fld,val) :: fld_vals => LAnd (LOwn lexpr fld (LVal (trnsl_val val))) (field_list_to_assertion lexpr fld_vals)
   end.
 
   Inductive RavenHoareTriple :
@@ -2802,43 +3206,60 @@ Section RavenLogic.
       stmt -> maskAnnot ->
   assertion -> Prop :=
 
-  | VarAssignmentRule ρ σ stk mask v lv e lexpr :
+  | VarAssignmentRule ρ σ stk mask v lv e lexpr t :
     trnsl_expr_lExpr stk e = Some lexpr ->
+    inf_expr ρ e = Some t ->
     fresh_lvar stk lv ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LStack stk)
         (Assign v e) mask
-      (LExists lv
+      (LExists lv t
         (LAnd
           (LStack (<[v := lv]> stk))
           (LExprA (LBinOp EqOp (LVar lv) lexpr))
         )
       )
 
-  | HeapReadRule ρ σ stk mask x e val fld lexpr_e lvar_x  :
+  (* chunk is an LExpr (not a concrete val), mirroring HeapWriteRule/
+     CASSuccRule/FPURule: the field's currently-owned chunk need not be a
+     literal (e.g. it may be an invariant's own existentially-bound
+     witness). Reused unchanged in the postcondition, so -- as with
+     CASFailRule's old_chunk -- needs lvar_x ∉ its fvars to justify that its
+     evaluated value is stable under the postcondition's stack update. *)
+  | HeapReadRule ρ σ stk mask x e chunk fld lexpr_e lvar_x t :
     trnsl_expr_lExpr stk e = Some lexpr_e ->
+    inf_lexpr σ chunk = Some t ->
     fresh_lvar stk lvar_x ->
+    lvar_x ∉ lexpr_fvars chunk ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
-      (LAnd (LStack stk) (LOwn lexpr_e fld val))
+      (LAnd (LStack stk) (LOwn lexpr_e fld chunk))
         (FldRd x e fld) mask
-      (LExists lvar_x (LAnd
+      (LExists lvar_x t (LAnd
         (LStack (<[x := lvar_x]> stk))
         (LAnd
-          (LOwn lexpr_e fld val)
-          (LExprA (LBinOp EqOp (LVar lvar_x) (LVal val)))
+          (LOwn lexpr_e fld chunk)
+          (LExprA (LBinOp EqOp (LVar lvar_x) chunk))
         )
       ))
 
-  | HeapWriteRule ρ σ stk mask v fld e old_val new_val lv :
+  (* e need not translate to a literal LVal: lexpr (e.g. a variable holding a
+     previously-read value) becomes the new chunk directly, since chunk is
+     itself an LExpr -- no separate equality-fact conjunct needed. The old
+     chunk's evaluability comes for free from the precondition (unpacking
+     LOwn's own existential); the new chunk (going into the postcondition)
+     doesn't have a givens to unpack, so expr_well_defined is required
+     explicitly, mirroring CASSuccRule's inf_expr premise for its location. *)
+  | HeapWriteRule ρ σ stk mask v fld e old_chunk lv lexpr :
     stk !! v = Some lv ->
-    trnsl_expr_lExpr stk e = Some (LVal new_val) ->
+    trnsl_expr_lExpr stk e = Some lexpr ->
+    expr_well_defined ρ e ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
-      (LAnd (LStack stk) (LOwn (LVar lv) fld old_val))
+      (LAnd (LStack stk) (LOwn (LVar lv) fld old_chunk))
         (FldWr v fld e) mask
-      (LAnd (LStack stk) (LOwn (LVar lv) fld new_val))
+      (LAnd (LStack stk) (LOwn (LVar lv) fld lexpr))
 
 
   | HeapAllocRule ρ σ stk mask x fld_vals lvar_x :
@@ -2848,7 +3269,7 @@ Section RavenLogic.
     RavenHoareTriple ρ σ
        (LStack stk)
         (Alloc x fld_vals) mask
-      (LExists lvar_x (LAnd (LStack (<[x := lvar_x]> stk)) (field_list_to_assertion (LVar lvar_x) fld_vals)))
+      (LExists lvar_x TpLoc (LAnd (LStack (<[x := lvar_x]> stk)) (field_list_to_assertion (LVar lvar_x) fld_vals)))
 
   | ProcCallRuleRet ρ σ stk mask x proc_name args lexprs lvar_x proc_record :
     fresh_lvar stk lvar_x ->
@@ -2858,9 +3279,9 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
     let subst_map := list_to_map (zip (proc_args_of proc_record).*1 lexprs) in
     RavenHoareTriple ρ σ
-      (LAnd (LStack stk) (LAnd (LProc proc_name proc_record) (subst (proc_precond_of proc_record) subst_map)))
+      (LAnd (LStack stk) (subst (proc_precond_of proc_record) subst_map))
         (Call x proc_name args) mask
-      (LExists lvar_x (LAnd (LStack (<[x := lvar_x]> stk)) (subst (proc_postcond_of proc_record) (<[ "#ret_val" := LVar lvar_x]> subst_map))))
+      (LExists lvar_x (ρ x) (LAnd (LStack (<[x := lvar_x]> stk)) (subst (proc_postcond_of proc_record) (<[ "#ret_val" := LVar lvar_x]> subst_map))))
 
   | SequenceRule ρ σ mask a1 c1 a2 c2 a3 :
     RavenHoareTriple ρ σ
@@ -2878,42 +3299,85 @@ Section RavenLogic.
         (Seq c1 c2) mask
       a3
 
-  | CondRule ρ σ stk1 stk2 mask e s1 s2 p q lexpr :
+  (* Q is a fully generic shared postcondition (not decomposed into a fixed
+     LStack stk2 plus a rest q): the two branches need not leave the stack
+     in the same shape (e.g. one calls a procedure, binding a fresh result
+     variable into the stack, while the other is a no-op Skip that doesn't)
+     -- each branch is free to reach that same Q via its own route (e.g. an
+     unused LExists wrapping introduced via entails_exists_intro on one
+     side, and entails_exists_mono weakening away a real stack extension on
+     the other), rather than being forced to agree on one concrete stk2.
+     This matches wp_if_t/wp_if_f's own operational shape already: their
+     own postcondition parameter is a fully generic iProp, with no
+     stack/rest split required. *)
+  | CondRule ρ σ stk1 mask e s1 s2 p Q lexpr :
     trnsl_expr_lExpr stk1 e = Some lexpr ->
     inf_expr ρ e = Some TpBool ->
     stk_type_compat ρ σ stk1 ->
-    stk_type_compat ρ σ stk2 ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) (LAnd p (LExprA (lexpr))) )
         s1 mask
-      (LAnd (LStack stk2) q)
+      Q
     ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) (LAnd p (LExprA (LUnOp NotBoolOp lexpr))))
         s2 mask
-      (LAnd (LStack stk2) q)
+      Q
     ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) p)
         (IfS e s1 s2) mask
-      (LAnd (LStack stk2) q)
+      Q
 
-  | InvAccessBlockRule ρ σ stk mask inv args stmt inv_record p q lexprs :
+  (* stk' (rather than stk again) in the inner triple's postcondition: the
+     wrapped stmt is free to change the stack (e.g. a FldRd/CAS/Call binding
+     a fresh result var), and that stack delta threads out to the outer
+     conclusion's own postcondition. Sound because the invariant's own
+     truth (subst inv_body subst_map) depends only on lexprs/mp, never on
+     the stack, so it doesn't care what the stack becomes across the
+     block.
+
+     The whole postcondition is further wrapped in LExists lv on both
+     sides (lv free to occur inside stk', the "reuse the fresh lvar as its
+     own existential binder" pattern already used by HeapReadRule/
+     CASSuccRule/VarAssignmentRule): a wrapped FldRd/CAS/Call's own natural
+     postcondition puts its fresh result lvar's binding *inside* the very
+     LStack that names it (stk[x:=lvar_x]), so LStack itself becomes
+     lv-dependent -- entails alone can't pull it out from under the
+     existential (that would need evaluating LStack at a different mp than
+     the rest), so the block rule has to carry the existential through
+     instead of requiring a fixed stk'.
+
+     The earlier, non-existential shape (stk' fixed, no LExists) is not
+     lost: whenever stk'/q don't mention lv, entails (LAnd (LStack stk')
+     (LAnd body q)) (LExists lv (LAnd (LStack stk') (LAnd body q))) holds
+     (introducing an unused existential is free), so that shape is
+     recoverable via WeakeningRule for any lv fresh enough for both this
+     rule's own premise and that side condition. *)
+  | InvAccessBlockRule ρ σ stk stk' mask inv args stmt inv_record p q lv t lexprs :
     (map (fun arg => trnsl_expr_lExpr stk arg) args) = (map (fun lexpr => Some lexpr) lexprs) ->
     inv ∈ mask ->
     inv_map !! inv = Some inv_record ->
     length lexprs = length inv_record.(inv_args) ->
     stk_type_compat ρ σ stk ->
     let subst_map := list_to_map (zip inv_record.(inv_args) lexprs) in
+    (* lv is chosen fresh w.r.t. stk, matching HeapReadRule/CASSuccRule's
+       own fresh_lvar premise for the very same lvar -- needed so the
+       invariant's own substituted truth, and the lexprs naming it, stay
+       stable across the mp-update the existential introduces. t (lv's own
+       type) is simply carried through unchanged from the wrapped
+       statement's own conclusion -- this rule doesn't introduce lv itself,
+       just re-closes the invariant around whatever produced it. *)
+    fresh_lvar stk lv ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (subst inv_record.(inv_body) subst_map) p))
         stmt (mask ∖ {[inv]})
-      (LAnd (LStack stk) (LAnd (subst inv_record.(inv_body) subst_map) q)) ->
+      (LExists lv t (LAnd (LStack stk') (LAnd (subst inv_record.(inv_body) subst_map) q))) ->
 
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (LInv inv lexprs) p))
         (InvAccessBlock inv args stmt ) mask
-      (LAnd (LStack stk) (LAnd (LInv inv lexprs) q))
+      (LExists lv t (LAnd (LStack stk') (LAnd (LInv inv lexprs) q)))
 
   (* Establishing an invariant: trade its (instantiated) body for the nominal
      [LInv] fact.  There is deliberately no converse rule -- once shared, an
@@ -2952,22 +3416,26 @@ Section RavenLogic.
         (FoldPred pred args) mask
       (LAnd (LStack stk) (LPred pred lexprs))
 
-  (* Mirrors CASSuccRule exactly: e_old/e_new must translate to a literal
-     constant, matching CAS's own e2/e3 restriction (also literal-only) --
-     not a new limitation introduced by making Fpu's arguments lang.expr.
-     A caller whose old value is only known up to entailment (e.g. because
-     it names a ghost variable rather than being syntactically literal)
-     reaches this rule through WeakeningRule + FrameRule, same as CAS. *)
-  | FPURule ρ σ stk mask e l_expr fld r old_val new_val e_old e_new :
+  (* e_old/e_new need not translate to literal constants: lexpr_old/lexpr_new
+     (e.g. a variable holding a previously-read RA value, or an expression
+     built from comp/frame over one) become the ghost chunks directly, since
+     chunk is itself an LExpr. fpuValid is checked at the assertion level via
+     RAFpuValidOp instead of a separate Coq-level Prop premise, so no
+     old_val/new_val metavariables are needed at all. lexpr_old's evaluability
+     comes for free from the precondition; lexpr_new (going into the
+     postcondition) needs its own typing premise, as in CASSuccRule/
+     HeapWriteRule. *)
+  | FPURule ρ σ stk mask e l_expr fld r e_old e_new lexpr_old lexpr_new :
     trnsl_expr_lExpr stk e = Some l_expr ->
-    trnsl_expr_lExpr stk e_old = Some (LVal (LitRAElem (existT r old_val))) ->
-    trnsl_expr_lExpr stk e_new = Some (LVal (LitRAElem (existT r new_val))) ->
-    fpuValid old_val new_val ->
+    trnsl_expr_lExpr stk e_old = Some lexpr_old ->
+    trnsl_expr_lExpr stk e_new = Some lexpr_new ->
+    inf_expr ρ e_new = Some (TpRA r) ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
-      (LAnd (LStack stk) (LGhostOwn l_expr fld r old_val))
+      (LAnd (LStack stk) (LAnd (LGhostOwn l_expr fld r lexpr_old)
+                                (LExprA (LBinOp RAFpuValidOp lexpr_old lexpr_new))))
         (Fpu e fld r e_old e_new) mask
-        (LAnd (LStack stk) (LGhostOwn l_expr fld r new_val))
+        (LAnd (LStack stk) (LGhostOwn l_expr fld r lexpr_new))
 
   | FrameRule ρ σ mask s p q r :
     RavenHoareTriple ρ σ
@@ -2986,8 +3454,8 @@ Section RavenLogic.
         c mask
       q
     ->
-    entails p' p ->
-    entails q q' ->
+    entails σ p' p ->
+    entails σ q q' ->
 
     RavenHoareTriple ρ σ
       p'
@@ -3001,28 +3469,75 @@ Section RavenLogic.
         SkipS mask
       (LAnd (LStack stk) p)
 
-  | CASSuccRule ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 old_val new_val :
+  (* Consolidates the old CASSuccRule/CASFailRule (see git history) into one:
+     the precondition no longer forces the owned chunk to already equal e2
+     (which required knowing, before the atomic step, which outcome would
+     occur -- unknowable in general when old_chunk is an invariant's own
+     existential witness, e.g. counterInv's "v", genuinely independent of
+     whatever value a prior read compared against). old_chunk is a fully
+     generic LExpr; the postcondition's own LIte branches on the *same*
+     equality the CAS itself decides operationally (old_chunk = lexpr2),
+     covering both outcomes in a single rule so the caller decides which
+     branch applies only *after* seeing lvar_v's own value. e2/e3 need not
+     translate to literal constants (see HeapWriteRule/FPURule's identical
+     generalization): lexpr2/lexpr3 become the compared value / new chunk
+     directly, since chunk is itself an LExpr. lvar_v ∉ old_chunk's fvars
+     justifies that its evaluated value is stable under the postcondition's
+     stack update (needed for the failure branch, which reuses old_chunk
+     unchanged; the success branch introduces a fresh chunk expression, so
+     doesn't need this). Unlike the old CASSuccRule, e2's evaluatedness is no
+     longer free from the precondition (which used to force old_chunk =
+     lexpr2 literally), so it now needs its own expr_well_defined premise,
+     just like e3's. *)
+  | CASRule ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk :
     fresh_lvar stk lvar_v ->
     inf_expr ρ e1 = Some (TpLoc) ->
+    expr_well_defined ρ e2 ->
+    expr_well_defined ρ e3 ->
+    lvar_v ∉ lexpr_fvars old_chunk ->
     trnsl_expr_lExpr stk e1 = Some lexpr1 ->
-    trnsl_expr_lExpr stk e2 = Some (LVal old_val) ->
-    trnsl_expr_lExpr stk e3 = Some (LVal new_val) ->
+    trnsl_expr_lExpr stk e2 = Some lexpr2 ->
+    trnsl_expr_lExpr stk e3 = Some lexpr3 ->
     stk_type_compat ρ σ stk ->
       RavenHoareTriple ρ σ
-        (LAnd (LStack stk) (LOwn lexpr1 fld old_val))
+        (LAnd (LStack stk) (LOwn lexpr1 fld old_chunk))
           (CAS v e1 fld e2 e3) mask
-        (LExists lvar_v (LAnd (LStack (<[v := lvar_v]> stk)) (LAnd (LOwn lexpr1 fld new_val) (LExprA (LBinOp EqOp (LVar lvar_v) (LVal (LitBool true)))))) )
+        (LExists lvar_v TpBool (LAnd (LStack (<[v := lvar_v]> stk))
+          (LIte (LBinOp EqOp old_chunk lexpr2)
+            (LAnd (LOwn lexpr1 fld lexpr3) (LExprA (LBinOp EqOp (LVar lvar_v) (LVal (LitBool true)))))
+            (LAnd (LOwn lexpr1 fld old_chunk) (LExprA (LBinOp EqOp (LVar lvar_v) (LVal (LitBool false))))))))
 
-  | CASFailRule ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 old_val old_val2 :
-    fresh_lvar stk lvar_v ->
-    inf_expr ρ e1 = Some (TpLoc) ->
-    trnsl_expr_lExpr stk e1 = Some lexpr1 ->
-    trnsl_expr_lExpr stk e2 = Some (LVal old_val2) ->
-    stk_type_compat ρ σ stk ->
-      RavenHoareTriple ρ σ
-        (LAnd (LStack stk) (LAnd (LOwn lexpr1 fld old_val) (LExprA (LUnOp NotBoolOp (LBinOp EqOp (LVal old_val) (LVal old_val2))))))
-          (CAS v e1 fld e2 e3) mask
-        (LExists lvar_v (LAnd (LStack (<[v := lvar_v]> stk)) (LAnd (LOwn lexpr1 fld old_val) (LExprA (LBinOp EqOp (LVar lvar_v) (LVal (LitBool false)))))))
+  (* Standard Hoare-logic exists-elimination, at the top of the precondition:
+     unfolding an invariant/predicate whose body ties two ownership facts
+     together via a shared witness (e.g. counterInv's
+     `exists v: Int, own(h, v) && own(c, v)`), or an earlier statement's own
+     witness-carrying postcondition (e.g. CASSuccRule's own conclusion, which
+     an immediately following statement needs to consume via SequenceRule),
+     produces an LExists that no other rule can consume directly.
+     Deliberately subst-free (contrast the old, retired rule of this name):
+     body keeps v as an ordinary free lvar in both premise and conclusion,
+     so the soundness proof re-interprets the *same* derivation at mp[v:=v']
+     rather than needing an AST-level substitution -- which is what lets this
+     one rule handle LStack-containing bodies too (subst is a no-op on
+     LStack's own stored map, see lvar_fresh_in_assertion's comment), unlike
+     its predecessor which had to shut those out via elim_safe. Re-entering
+     the premise's own soundness obligation at mp[v:=v'] needs v' to have
+     v's declared type t; since LExists's own translation now restricts its
+     witness to typ_val_match t (see trnsl_assertion_str's LExists case),
+     that comes for free from destructuring the incoming existential -- no
+     separate witness_well_typed side-condition needed any more (contrast
+     this rule's own previous version). Callers needing the old
+     LAnd (LStack stk) (LAnd (LExists v body) p) shape get there via a
+     separate, purely structural commuting entailment (v fresh for stk/p),
+     rather than baking it into the core rule. *)
+  | ExistsElimRule ρ σ mask v t body c q :
+    σ v = t ->
+    lvar_fresh_in_assertion v q ->
+    RavenHoareTriple ρ σ body c mask q ->
+    RavenHoareTriple ρ σ
+      (LExists v t body)
+        c mask
+      q
   .
 
 End RavenLogic.
@@ -3362,23 +3877,39 @@ Section AssertionsProperties.
       tauto.
     - (* LPure *) iIntros "H". iExact "H".
     - (* LOwn *)
-      apply bi.exist_mono. intro l. apply bi.sep_mono; [| done].
-      apply bi.pure_mono. unfold LExpr_holds.
-      have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
-      { simpl. set_solver. }
-      have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
-        (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
-      simpl in Hcongr |- *. rewrite Hcongr. tauto.
+      apply bi.exist_mono. intro l.
+      apply bi.exist_mono. intro chunk0.
+      apply bi.sep_mono.
+      { apply bi.pure_mono. unfold LExpr_holds.
+        have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
+        { simpl. set_solver. }
+        have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
+          (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
+        simpl in Hcongr |- *. rewrite Hcongr. tauto. }
+      apply bi.sep_mono; [| done].
+      apply bi.pure_mono. intro Hchunk.
+      have Hfv_dom2 : lexpr_fvars chunk ⊆ dom M1. { simpl. set_solver. }
+      have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
+        chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
+      rewrite <- Hcongr2. exact Hchunk.
     - (* LGhostOwn *)
       simpl. generalize (Γ (ra_map r)).
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-      apply bi.exist_mono. intro l. apply bi.sep_mono; [| done].
-      apply bi.pure_mono. unfold LExpr_holds.
-      have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
-      { simpl. set_solver. }
-      have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
-        (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
-      simpl in Hcongr |- *. rewrite Hcongr. tauto.
+      apply bi.exist_mono. intro l.
+      apply bi.exist_mono. intro chunk0.
+      apply bi.sep_mono.
+      { apply bi.pure_mono. unfold LExpr_holds.
+        have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
+        { simpl. set_solver. }
+        have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
+          (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
+        simpl in Hcongr |- *. rewrite Hcongr. tauto. }
+      apply bi.sep_mono; [| done].
+      apply bi.pure_mono. intro Hchunk.
+      have Hfv_dom2 : lexpr_fvars chunk ⊆ dom M1. { simpl. set_solver. }
+      have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
+        chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
+      rewrite <- Hcongr2. exact Hchunk.
     - (* LForall: does not update mp *)
       inversion Hsf.
       apply bi.forall_mono. intro v'.
@@ -3388,30 +3919,34 @@ Section AssertionsProperties.
     - (* LExists: updates mp at the binder; freshness from HbA1/HbA2 *)
       inversion Hsf. subst.
       apply bi.exist_mono. intro v'.
-      etrans; [| apply bi.equiv_entails_1_1,
-                 (trnsl_assertion_unfold (subst a0 M2) stk
-                    (λ x, if (x =? v)%string then v' else mp2 x))].
+      apply bi.sep_mono; [done|].
       have Hv1 : v ∉ lexpr_map_fvars M1. { set_solver. }
       have Hv2 : v ∉ lexpr_map_fvars M2. { set_solver. }
       have Hbase' : ∀ x, x ∈ dom M1 →
         eval_lvar M1 (fun y => if (y =? v)%string then v' else mp1 y) x =
         eval_lvar M2 (fun y => if (y =? v)%string then v' else mp2 y) x.
       { intros x Hx. exact (Hstab mp1 mp2 Hbase v Hv1 Hv2 v' x Hx). }
+      etrans; [| apply bi.equiv_entails_1_1,
+                 (trnsl_assertion_unfold (subst a0 M2) stk
+                    (fun y => if (y =? v)%string then v' else mp2 y))].
       apply (IHa0 M1 M2 stk
         (fun y => if (y =? v)%string then v' else mp1 y)
         (fun y => if (y =? v)%string then v' else mp2 y)).
       split_and!; try assumption; set_solver.
-    - (* LImpl *)
+    - (* LIte *)
       inversion Hsf. subst.
       have Hfv_cond : lexpr_fvars cond ⊆ dom M1. { set_solver. }
-      have Hfv_body : assertion_lexpr_fvars a0 ⊆ dom M1. { set_solver. }
-      apply bi.wand_mono.
-      + apply bi.pure_mono. unfold LExpr_holds.
-        rewrite (interp_lexpr_lexpr_subst_eval_lvar_congr_dom cond M1 M2 mp1 mp2
-                   Hfv_cond Hbase). tauto.
-      + etrans; [| apply bi.equiv_entails_1_1,
-                   (trnsl_assertion_unfold (subst a0 M2) stk mp2)].
-        apply (IHa0 M1 M2 stk mp1 mp2). by split_and!.
+      apply bi.and_mono.
+      + apply bi.wand_mono.
+        * apply bi.pure_mono. unfold LExpr_holds.
+          rewrite (interp_lexpr_lexpr_subst_eval_lvar_congr_dom cond M1 M2 mp1 mp2 Hfv_cond Hbase). tauto.
+        * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_1 M2) stk mp2)].
+          apply (IHa0_1 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
+      + apply bi.wand_mono.
+        * apply bi.pure_mono. unfold LExpr_holds.
+          rewrite (interp_lexpr_lexpr_subst_eval_lvar_congr_dom cond M1 M2 mp1 mp2 Hfv_cond Hbase). tauto.
+        * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_2 M2) stk mp2)].
+          apply (IHa0_2 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
     - (* LInv: a leaf -- only the argument evaluations must be transferred *)
       simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       apply bi.exist_mono. intro vs. apply bi.sep_mono; [| done].
@@ -3721,13 +4256,18 @@ Section AssertionsProperties.
       by apply (IHa stk stk' mp).
     - (* LExists *)
       inversion Hsf. apply bi.exist_mono. intro v'.
+      apply bi.sep_mono; [done|].
       etrans; [| apply bi.equiv_entails_1_1,
                  (trnsl_assertion_unfold a stk' (λ x, if (x =? v)%string then v' else mp x))].
       by apply (IHa stk stk' (λ x, if (x =? v)%string then v' else mp x)).
-    - (* LImpl *)
-      inversion Hsf. apply bi.wand_mono; [done |].
-      etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold a stk' mp)].
-      by apply (IHa stk stk' mp).
+    - (* LIte *)
+      inversion Hsf. subst. apply bi.and_mono.
+      + apply bi.wand_mono; [done |].
+        etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold a1 stk' mp)].
+        by apply (IHa1 stk stk' mp).
+      + apply bi.wand_mono; [done |].
+        etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold a2 stk' mp)].
+        by apply (IHa2 stk stk' mp).
     - (* LInv: a leaf, independent of the stack *)
       simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       iIntros "H". iExact "H".
@@ -3810,14 +4350,20 @@ Section AssertionsProperties.
       rewrite trnsl_assertion_unfold /trnsl_assertion_pre /=.
       generalize (Γ (ra_map RAPAck)).
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-      apply bi.exist_timeless. intro l. apply bi.sep_timeless; [apply _ |].
+      apply bi.exist_timeless. intro l.
+      apply bi.exist_timeless. intro chunk0.
+      apply bi.sep_timeless; [apply _ |].
+      apply bi.sep_timeless; [apply _ |].
       apply own_timeless. apply transport_cmra_discrete. apply _.
     - (* LForall *)
       rewrite trnsl_assertion_forall. apply bi.forall_timeless. intros _. apply IHHsf.
     - (* LExists *)
-      rewrite trnsl_assertion_exists. apply bi.exist_timeless. intros v'. apply IHHsf.
-    - (* LImpl *)
-      rewrite trnsl_assertion_impl. apply bi.wand_timeless. apply IHHsf.
+      rewrite trnsl_assertion_exists. apply bi.exist_timeless. intros v'.
+      apply bi.sep_timeless; [apply _ | apply IHHsf].
+    - (* LIte *)
+      rewrite trnsl_assertion_ite. apply bi.and_timeless.
+      + apply bi.wand_timeless. apply IHHsf1.
+      + apply bi.wand_timeless. apply IHHsf2.
     - (* LAnd *)
       rewrite trnsl_assertion_and. apply bi.sep_timeless; [apply IHHsf1 | apply IHHsf2].
     - (* LInv: a discrete ownership fragment *)

@@ -3,6 +3,11 @@ From stdpp Require Import gmap list sets countable.
 Require Import Eqdep_dec.
 From iris.program_logic Require Export language ectx_language ectxi_language.
 
+(* Named here, ahead of bin_op/un_op, purely so RAOfIntOp below can be
+   parameterized by it; see ResourceAlgebra for what a name actually
+   resolves to (ra_map) and why RAs are named rather than embedded inline. *)
+Definition ra_name := string.
+
 Inductive bin_op : Set :=
 | AddOp | SubOp | MulOp | DivOp | ModOp
 | EqOp | NeOp | LtOp
@@ -14,7 +19,12 @@ Inductive bin_op : Set :=
 Inductive un_op : Set :=
 | NotBoolOp | NegOp
 (* valid : RA -> Bool *)
-| RAValidOp.
+| RAValidOp
+(* Embeds an integer as RA r's element, via that RA's own ra_of_int (which
+   may decline, e.g. an RA with no natural integer embedding). Generic
+   across every RA -- what ra_of_int actually does is a per-RA instance
+   choice, made entirely by whoever registers that RA_Pack. *)
+| RAOfIntOp (r : ra_name).
 
 (* Resource algebras usable as RA-typed program values (see typ/val below).
    Defined here, at the base of the language, rather than in the ghost/spec
@@ -35,6 +45,13 @@ Class ResourceAlgebra (A: Type) := {
      comp), and gives canonical_val below a natural witness value. *)
   ra_id : A;
   ra_id_comp : forall x, comp ra_id x = x;
+  (* How this RA embeds an integer as one of its elements -- backs
+     RAOfIntOp. Total: an RA with no natural reading of some (or any)
+     integer as one of its elements (e.g. a token or exclusive-lock-state
+     RA) falls back to ra_id for those inputs, rather than getting stuck --
+     keeps RAOfIntOp on par with every other un_op (NotBoolOp/NegOp), whose
+     typing rule can promise it always evaluates a well-typed operand. *)
+  ra_of_int : Z -> A;
 }.
 
 Record RA_Pack := {
@@ -59,7 +76,6 @@ Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) 
    layer. Naming RAs (rather than embedding RA_Pack values inline in
    typ/val) is what makes equality of RA-typed values decidable: ra_name is
    just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
-Definition ra_name := string.
 Global Parameter ra_set : gset ra_name.
 Global Parameter ra_map : ra_name -> RA_Pack.
 
@@ -117,11 +133,20 @@ Qed.
 Global Instance un_op_eq_decision : EqDecision un_op.
 Proof. solve_decision. Qed.
 
+(* RAOfIntOp carries an ra_name payload, so (unlike the other, nullary
+   constructors) it can't be squeezed into a bare nat tag: encode into
+   nat + ra_name instead, both already Countable. *)
 Global Instance un_op_countable : Countable un_op.
 Proof.
-  refine (inj_countable'
-    (λ op, match op with NotBoolOp => 0 | NegOp => 1 | RAValidOp => 2 end : nat)
-    (λ n, match n with 0 => NotBoolOp | 1 => NegOp | _ => RAValidOp end) _).
+  refine (inj_countable
+    (λ op, match op with
+      | NotBoolOp => inl 0 | NegOp => inl 1 | RAValidOp => inl 2
+      | RAOfIntOp r => inr r
+      end : nat + ra_name)
+    (λ x, match x with
+      | inl 0 => Some NotBoolOp | inl 1 => Some NegOp | inl _ => Some RAValidOp
+      | inr r => Some (RAOfIntOp r)
+      end) _).
   intros []; done.
 Qed.
 
@@ -410,6 +435,7 @@ Definition un_op_eval (op : un_op) (v : val) : option val :=
   | NotBoolOp, LitBool b => Some (LitBool (negb b))
   | NegOp, LitInt i => Some (LitInt (-i))
   | RAValidOp, LitRAElem (existT r x) => Some (LitBool (bool_decide (valid x)))
+  | RAOfIntOp r, LitInt z => Some (LitRAElem (existT r (ra_of_int z)))
   | _, _ => None
   end.
 

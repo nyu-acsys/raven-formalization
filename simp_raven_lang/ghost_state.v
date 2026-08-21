@@ -130,8 +130,17 @@ Section definitions.
   Definition stack_frame_own (stk_id : stack_id) (stk_frm : stack_frame)  := 
     own heap_stack_name (◯ (to_stackR ({[stk_id := stk_frm]} ))).
 
+  (* Persistent (discarded-fraction) read-only fragment, not the default
+     full-ownership points-to: the proc table is a static, never-changing
+     part of the program (no rule ever allocates/updates a proc_tbl_chunk),
+     and a recursive call needs to keep re-supplying wp_call's own
+     proc_tbl_chunk precondition arbitrarily many times, which only a
+     duplicable fact can do. *)
   Definition proc_tbl_chunk (p : proc_name) (proc : proc) : iProp Σ :=
-    p ↪[heap_proctbl_name] proc.
+    p ↪[heap_proctbl_name]□ proc.
+
+  Global Instance proc_tbl_chunk_persistent p proc : Persistent (proc_tbl_chunk p proc).
+  Proof. apply _. Qed.
 
   Lemma heap_update σ l f x v0:
     (● ((λ v1 : lang.val, to_heap_cellR v1) <$> global_heap σ)
