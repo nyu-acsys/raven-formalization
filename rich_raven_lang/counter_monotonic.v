@@ -1,11 +1,11 @@
 (* Example: encoding of test/concurrent/counter/counter_monotonic.rav
    (a monotone counter backed by a simplified Auth[MaxNat]-style resource
    algebra) against rrl_lang.v/lang.v, together with a RavenHoareTriple
-   derivation for incr/read. make() is out of scope: counterInv(x) is taken
-   as a given precondition, as authorized by the user. *)
+   derivation for incr/read/make. *)
 From stdpp Require Import gmap.
 From raven_iris.simp_raven_lang Require Import lang.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
+Require Import Coq.Logic.FunctionalExtensionality.
 
 (* ----------------------------------------------------------------------- *)
 (* The resource algebra: a plain monotone nat -- comp/frame is max, every
@@ -263,7 +263,7 @@ Proof.
           /trnsl_assertion_pre /=.
   destruct (Γ (ra_map h_ra)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓ.
   iIntros "Hown Hghost".
-  iDestruct "Hghost" as (l chunk) "[%Heql [%Heval Hghost]]".
+  iDestruct "Hghost" as (l chunk γ) "[%Heql [%Heval [Hmap Hghost]]]".
   assert (typ_val_match TpInt v') as Htyp.
   { destruct v' as [b|z| |lc|[r x0]]; simpl in Heval; try discriminate; done. }
   iExists v'. iSplitR; [done|].
@@ -273,8 +273,8 @@ Proof.
   rewrite (trnsl_assertion_unfold (LOwn (LVar "x") "c" (LVar "v"))) /trnsl_assertion_pre /=.
   iEval (rewrite (trnsl_assertion_unfold (LOwn (LVar "x") "c" (LVal v'))) /trnsl_assertion_pre /=) in "Hown".
   simpl.
-  iSplitL "Hghost".
-  - iExists l, chunk. iFrame "Hghost". iPureIntro. split; [exact Heql | ].
+  iSplitL "Hmap Hghost".
+  - iExists l, chunk, γ. iFrame "Hmap Hghost". iPureIntro. split; [exact Heql | ].
     unfold LExpr_holds in Heql |- *. simpl. exact Heval.
   - iExact "Hown".
 Qed.
@@ -1360,4 +1360,168 @@ Proof.
                     +++ exact incr_retry_step.
                     +++ apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_true_elim _)].
                     +++ exact (entails_refl _).
+Qed.
+
+(* ----------------------------------------------------------------------- *)
+(* make(): returns (x: Ref), ensures counterInv(x). No requires-clause and
+   no args -- "x" here is both the freshly allocated location's own pvar
+   (introduced by the Alloc statement itself, exactly as the source's own
+   "returns (x: Ref)" clause introduces it, with no separate "#ret_val"
+   ever needed since nothing in the body runs after the fold) and, reusing
+   stk0's own pvar-"x"-to-lvar-"x" naming convention, its lvar too, so
+   counterInv_body's own repack lemmas (trnsl_repack_counterInv, hardcoded
+   to "x") apply directly with no generalization needed. The proc's own
+   postcondition existentially quantifies over that same location, so
+   nothing beyond this file's existing rho/sigma/entails machinery (both
+   already keyed at "x" : TpLoc) is needed either -- only a fresh, empty
+   entry stack (make has no args, unlike read/incr). *)
+
+Definition stk_make0 : stack := ∅.
+
+Lemma stk_type_compat_stk_make0 : stk_type_compat rho sigma stk_make0.
+Proof. intros v lv Hv. unfold stk_make0 in Hv. rewrite lookup_empty in Hv. discriminate. Qed.
+
+Lemma fresh_lvar_stk_make0 (lv : lvar) : fresh_lvar stk_make0 lv.
+Proof. intros v0 Heq. unfold stk_make0 in Heq. rewrite lookup_empty in Heq. discriminate. Qed.
+
+(* The ghost cell's initial value, at the generic ra_of_int operation for
+   h_ra's own RA instance -- matches RAOfIntOp's own interp_lexpr semantics
+   exactly (both resolve the very same ResourceAlgebra instance for
+   RA_carrier (ra_map h_ra)), so no dependent-type transport is ever needed
+   to relate the two. *)
+Definition h0 : RA_carrier (ra_map h_ra) := ra_of_int 0.
+
+Lemma h0_valid : (RA_inst (ra_map h_ra)).(valid) h0.
+Proof. unfold h0. rewrite ra_map_h_ra. simpl. exact I. Qed.
+
+Definition make_body : stmt :=
+  Seq
+    (Alloc "x" [("c", lang.LitInt 0)])
+    (FoldInv "counterInv" [Var "x"]).
+
+Definition make_precond : assertion := LPure True.
+Definition make_postcond : assertion := LExists "x" TpLoc (LInv "counterInv" [LVar "x"]).
+
+Definition make_record : ProcRecord :=
+  Proc [] [("x", TpLoc)] make_precond make_postcond make_body.
+
+Axiom proc_map_make : proc_map !! "make" = Some make_record.
+
+(* Folds the two field-initialization lists HeapAllocRule's own conclusion
+   produces (one real, one ghost) down into counterInv_body -- the
+   allocation-time counterpart of entails_repack_counterInv, which folds
+   the very same two facts back once they've been read out of an
+   already-open invariant instead. *)
+Lemma entails_alloc_fields_to_counterInv :
+  entails
+    (LAnd (field_list_to_assertion (LVar "x") [("c", lang.LitInt 0)])
+          (field_list_to_ghost_assertion (LVar "x") [("h", existT h_ra h0)]))
+    (LAnd counterInv_body (LPure True)).
+Proof.
+  apply entails_intro. intros stk mp Henv.
+  simpl.
+  rewrite !trnsl_assertion_and.
+  iIntros "[[Hown _] [Hghost _]]".
+  iDestruct (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
+    (LVal (LitRAElem (existT h_ra h0))) (LUnOp (RAOfIntOp h_ra) (LVal (LitInt 0))) stk mp
+    eq_refl with "Hghost") as "Hghost'".
+  rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
+  iSplitL "Hown Hghost'".
+  - iApply (trnsl_repack_counterInv (LitInt 0) stk mp with "Hown Hghost'").
+  - done.
+Qed.
+
+Lemma make_alloc_step :
+  RavenHoareTriple rho sigma
+    (LStack stk_make0)
+      (Alloc "x" [("c", lang.LitInt 0)]) cmask
+    (LExists "x" TpLoc (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))).
+Proof.
+  eapply WeakeningRule.
+  - apply (HeapAllocRule rho sigma stk_make0 cmask "x"
+      [("c", lang.LitInt 0)] [("h", existT h_ra h0)] "x").
+    + apply fresh_lvar_stk_make0.
+    + constructor; [set_solver | constructor].
+    + constructor; [set_solver | constructor].
+    + discriminate.
+    + constructor; [exact h0_valid | constructor].
+    + exact stk_type_compat_stk_make0.
+  - exact (entails_refl _).
+  - apply (entails_exists_mono "x" TpLoc _ _ eq_refl
+      (entails_and_mono _ _ _ _ (entails_refl (LStack (<["x":="x"]> stk_make0)))
+        entails_alloc_fields_to_counterInv)).
+Qed.
+
+(* fold counterInv(x): InvAllocRule at the freshly allocated location, with
+   counterInv_body's own "x" substituted to itself (subst_map is the
+   identity map {"x" := LVar "x"} here, exactly as at every other
+   InvAccessBlockRule/InvAllocRule call site in this file that reuses
+   stk0's pvar-"x"-to-lvar-"x" naming), so subst counterInv_body {"x" :=
+   LVar "x"} reduces to counterInv_body itself via simpl. *)
+Lemma make_foldinv_step :
+  RavenHoareTriple rho sigma
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
+      (FoldInv "counterInv" [Var "x"]) cmask
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))).
+Proof.
+  apply (InvAllocRule rho sigma (<["x":="x"]> stk_make0) cmask "counterInv" [Var "x"]
+    counterInv_record (LPure True) [LVar "x"]).
+  - reflexivity.
+  - set_solver.
+  - exact inv_map_counterInv.
+  - reflexivity.
+  - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
+Qed.
+
+(* Drops the entry stack and the trailing LPure True, then re-introduces
+   the allocated location as make_postcond's own existential -- the
+   "x"-self-update this needs (LExists's own translation re-evaluates its
+   body at mp["x":=mp "x"]) is exactly what entails_exists_intro already
+   isolates, mirrored here directly since going through it would need
+   restating this as a bare LInv fact first anyway. *)
+Lemma entails_make_foldinv_post :
+  entails
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
+    make_postcond.
+Proof.
+  apply entails_intro. intros stk mp Henv.
+  unfold make_postcond.
+  rewrite trnsl_assertion_and trnsl_assertion_and trnsl_assertion_exists.
+  iIntros "[_ [Hinv _]]".
+  assert ((fun y => if (y =? "x")%string then mp "x" else mp y) = mp) as Hself.
+  { apply functional_extensionality. intros y. destruct (String.eqb_spec y "x") as [->|]; reflexivity. }
+  iExists (mp "x"). iSplitR.
+  - iPureIntro. specialize (Henv "x"). simpl in Henv.
+    destruct (mp "x"); simpl in *; try done.
+  - rewrite Hself. iExact "Hinv".
+Qed.
+
+(* make's full body: HeapAllocRule followed by InvAllocRule, mirroring
+   read_body_step's own SequenceRule/ExistsElimRule shape -- the only
+   structural difference is that the allocated location's own existential
+   (the "x" HeapAllocRule introduces) survives all the way into
+   make_postcond instead of being dropped, since it *is* what make
+   returns. *)
+Lemma make_body_step :
+  RavenHoareTriple rho sigma
+    (LAnd (LStack stk_make0) make_precond)
+      make_body cmask
+    make_postcond.
+Proof.
+  unfold make_body, make_precond.
+  eapply SequenceRule.
+  - eapply WeakeningRule.
+    + exact make_alloc_step.
+    + exact (entails_and_true_elim (LStack stk_make0)).
+    + exact (entails_refl _).
+  - apply (ExistsElimRule rho sigma cmask "x" TpLoc
+      (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
+      (FoldInv "counterInv" [Var "x"])
+      make_postcond).
+    + reflexivity.
+    + unfold make_postcond. simpl. left. reflexivity.
+    + eapply WeakeningRule.
+      * exact make_foldinv_step.
+      * exact (entails_refl _).
+      * exact entails_make_foldinv_post.
 Qed.
