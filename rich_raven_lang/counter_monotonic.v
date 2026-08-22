@@ -120,6 +120,7 @@ Definition sigma : lvar_typs := fun lv =>
   | "l_res" => TpBool
   | "l_ret" => TpInt
   | "l_call" => TpUnit
+  | "l_x_ret" => TpLoc
   | _ => TpUnit
   end.
 
@@ -599,8 +600,12 @@ Definition incr_precond : assertion := LInv "counterInv" [LVar "x"].
    (including incr's own recursive self-call) keeps their copy for free. *)
 Definition incr_postcond : assertion := LPure True.
 
+(* "#ret_val" must be declared (pwf_proc_ret_val_declared) even though incr
+   never assigns it: incr's own contract (incr_postcond = LPure True) says
+   nothing about it, so its non-deterministically-chosen entry value is
+   simply never touched or observed -- same status as a void return. *)
 Definition incr_record : ProcRecord :=
-  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool)]
+  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool); ("#ret_val", TpUnit)]
     incr_precond incr_postcond incr_body.
 
 Axiom proc_map_incr : proc_map !! "incr" = Some incr_record.
@@ -1397,13 +1402,22 @@ Proof. unfold h0. rewrite ra_map_h_ra. simpl. exact I. Qed.
 Definition make_body : stmt :=
   Seq
     (Alloc "x" [("c", lang.LitInt 0)])
-    (FoldInv "counterInv" [Var "x"]).
+    (Seq (FoldInv "counterInv" [Var "x"])
+         (Assign "#ret_val" (Var "x"))).
 
 Definition make_precond : assertion := LPure True.
-Definition make_postcond : assertion := LExists "x" TpLoc (LInv "counterInv" [LVar "x"]).
+(* No existential: "#ret_val" is a placeholder for the call's own fresh
+   result lvar, substituted in by whoever consumes make_record's contract
+   (see all_proc_specs_valid_raven's own <["#ret_val":=LVar lv_final]>
+   substitution). Unlike the old "x"-existential shape, this has no
+   top-level LExists binder -- required by ProgramWF's own
+   pwf_proc_binders_fresh field, an unconditional forall over substitution
+   maps that a top-level binder could never satisfy (pick a map sending some
+   key to LVar "x" to violate disjointness). *)
+Definition make_postcond : assertion := LInv "counterInv" [LVar "#ret_val"].
 
 Definition make_record : ProcRecord :=
-  Proc [] [("x", TpLoc)] make_precond make_postcond make_body.
+  Proc [] [("x", TpLoc); ("#ret_val", TpLoc)] make_precond make_postcond make_body.
 
 Axiom proc_map_make : proc_map !! "make" = Some make_record.
 
@@ -1473,40 +1487,105 @@ Proof.
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
 Qed.
 
-(* Drops the entry stack and the trailing LPure True, then re-introduces
-   the allocated location as make_postcond's own existential -- the
-   "x"-self-update this needs (LExists's own translation re-evaluates its
-   body at mp["x":=mp "x"]) is exactly what entails_exists_intro already
-   isolates, mirrored here directly since going through it would need
-   restating this as a bare LInv fact first anyway. *)
-Lemma entails_make_foldinv_post :
-  entails
-    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
-    make_postcond.
+(* Congruence for LInv's own translation: like LOwn/LGhostOwn's own interp
+   congruence lemmas (trnsl_assertion_lown_interp_congr,
+   trnsl_assertion_lghostown_interp_congr), an LInv's translation depends on
+   its args only through their interp_lexpr value (see
+   trnsl_assertion_LInv_some), so an argument list agreeing pointwise on
+   interp translates identically. *)
+Lemma trnsl_assertion_linv_interp_congr (inv' : inv_name) (args1 args2 : list LExpr) stk mp :
+  Forall2 (fun e1 e2 => interp_lexpr e1 mp = interp_lexpr e2 mp) args1 args2 ->
+  trnsl_assertion (LInv inv' args1) stk mp ⊢ trnsl_assertion (LInv inv' args2) stk mp.
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  unfold make_postcond.
-  rewrite trnsl_assertion_and trnsl_assertion_and trnsl_assertion_exists.
-  iIntros "[_ [Hinv _]]".
-  assert ((fun y => if (y =? "x")%string then mp "x" else mp y) = mp) as Hself.
-  { apply functional_extensionality. intros y. destruct (String.eqb_spec y "x") as [->|]; reflexivity. }
-  iExists (mp "x"). iSplitR.
-  - iPureIntro. specialize (Henv "x"). simpl in Henv.
-    destruct (mp "x"); simpl in *; try done.
-  - rewrite Hself. iExact "Hinv".
+  intros Heq.
+  rewrite (trnsl_assertion_unfold (LInv inv' args1)) (trnsl_assertion_unfold (LInv inv' args2))
+    /trnsl_assertion_pre /=.
+  destruct (inv_map !! inv'); [ | done].
+  iIntros "[%vs [%Hev Hown]]".
+  iExists vs. iSplitR; [ | iFrame].
+  iPureIntro.
+  revert vs Hev. induction Heq as [| e1 e2 args1' args2' Hh Ht IH]; intros vs Hev.
+  - inversion Hev; subst. constructor.
+  - inversion Hev as [| ? v0 ? vs' Hh' Ht']; subst.
+    constructor; [rewrite <- Hh; exact Hh' | exact (IH vs' Ht')].
 Qed.
 
-(* make's full body: HeapAllocRule followed by InvAllocRule, mirroring
-   read_body_step's own SequenceRule/ExistsElimRule shape -- the only
-   structural difference is that the allocated location's own existential
-   (the "x" HeapAllocRule introduces) survives all the way into
-   make_postcond instead of being dropped, since it *is* what make
-   returns. *)
+(* make's own Assign "#ret_val" (Var "x") step: bare VarAssignmentRule,
+   picking "l_x_ret" (typed TpLoc in sigma) as the assignment's own fresh
+   witness. Mirrors read_assign_inner_step/incr_assign_inner_step exactly. *)
+Lemma make_assign_inner_step :
+  RavenHoareTriple rho sigma
+    (LStack (<["x":="x"]> stk_make0))
+      (Assign "#ret_val" (Var "x")) cmask
+    (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+                             (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))))).
+Proof.
+  apply (VarAssignmentRule rho sigma (<["x":="x"]> stk_make0) cmask "#ret_val" "l_x_ret"
+    (Var "x") (LVar "x") TpLoc).
+  - reflexivity.
+  - reflexivity.
+  - apply fresh_lvar_extend; [apply fresh_lvar_stk_make0 | discriminate].
+  - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
+Qed.
+
+(* Frames counterInv's own LInv fact (established by make_foldinv_step)
+   through the Assign, then rewrites the LInv's own argument from "x" (the
+   local pvar holding the allocation) to "l_x_ret" (the assignment's own
+   fresh witness, standing for the eventual "#ret_val") using the equality
+   fact VarAssignmentRule's own conclusion provides -- mirrors
+   incr_ghostown_v_to_l_v1's rewrite, just for LInv instead of LGhostOwn.
+   The rewrite happens *inside* the "l_x_ret" existential throughout (via
+   entails_exists_mono), rather than trying to eliminate that existential:
+   unlike every other fresh witness this file discards once consumed,
+   "l_x_ret" is exactly the value the whole point of this step is to
+   expose, so it must survive in the conclusion, not vanish from it --
+   ExistsElimRule could never reach a target that itself mentions "l_x_ret"
+   freely, since that name would then denote the ambient mp, not the
+   witness just bound (this is why make_postcond, unlike read/incr's own
+   LPure True, cannot be reached directly here: bridging "l_x_ret" to the
+   "#ret_val" placeholder is exactly the job of the later step that
+   connects make_body_step to all_proc_specs_valid_raven's own
+   ∃ stk0' lv_final, via its <["#ret_val":=LVar lv_final]> substitution). *)
+Lemma make_assign_step :
+  RavenHoareTriple rho sigma
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
+      (Assign "#ret_val" (Var "x")) cmask
+    (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
+Proof.
+  eapply WeakeningRule.
+  - apply (FrameRule rho sigma cmask (Assign "#ret_val" (Var "x"))
+      (LStack (<["x":="x"]> stk_make0))
+      (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+                               (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x")))))
+      (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))
+      make_assign_inner_step).
+  - exact (entails_refl _).
+  - eapply entails_trans.
+    + apply entails_exists_and_swap.
+      simpl. split; [apply Forall_singleton; set_solver | exact I].
+    + apply (entails_exists_mono "l_x_ret" TpLoc _ _ eq_refl).
+      apply entails_intro. intros stk mp Henv.
+      rewrite !trnsl_assertion_and
+        (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x")))) /trnsl_assertion_pre /=.
+      iIntros "[[_ %Heq] [Hinv _]]".
+      unfold LExpr_holds in Heq. simpl in Heq.
+      injection Heq as Heq. unfold val_beq in Heq. apply bool_decide_eq_true_1 in Heq.
+      iApply (trnsl_assertion_linv_interp_congr "counterInv" [LVar "x"] [LVar "l_x_ret"] stk mp
+        ltac:(constructor; [simpl; congruence | constructor]) with "Hinv").
+Qed.
+
+(* make's full body: HeapAllocRule, then InvAllocRule, then the Assign that
+   exposes the allocated/folded location as "#ret_val"'s own fresh witness
+   -- mirrors read_body_step's own SequenceRule/ExistsElimRule shape for
+   the alloc, with one more SequenceRule stage folded in for the trailing
+   Assign. Concludes at an "l_x_ret"-existential, not raw make_postcond
+   itself -- see make_assign_step's own comment for why the latter is
+   unreachable directly from a derivation. *)
 Lemma make_body_step :
   RavenHoareTriple rho sigma
     (LAnd (LStack stk_make0) make_precond)
       make_body cmask
-    make_postcond.
+    (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
 Proof.
   unfold make_body, make_precond.
   eapply SequenceRule.
@@ -1516,12 +1595,11 @@ Proof.
     + exact (entails_refl _).
   - apply (ExistsElimRule rho sigma cmask "x" TpLoc
       (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
-      (FoldInv "counterInv" [Var "x"])
-      make_postcond).
+      (Seq (FoldInv "counterInv" [Var "x"]) (Assign "#ret_val" (Var "x")))
+      (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"]))).
     + reflexivity.
-    + unfold make_postcond. simpl. left. reflexivity.
-    + eapply WeakeningRule.
+    + simpl. right. apply Forall_singleton. set_solver.
+    + eapply SequenceRule.
       * exact make_foldinv_step.
-      * exact (entails_refl _).
-      * exact entails_make_foldinv_post.
+      * exact make_assign_step.
 Qed.
