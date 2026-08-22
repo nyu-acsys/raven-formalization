@@ -23,6 +23,23 @@ Section MainTranslation.
     Definition inv_set_to_namespace (s : gset inv_name) : coPset :=
       set_fold (λ inv acc, acc ∪ ↑(inv_namespace_map inv)) ∅ s.
 
+    (* The mask every trnsl_hoare_triple WP goal actually runs at: the
+       user-declared Raven invariants named by msk, plus the ghost heap's
+       own namespace, always -- Wghost is a built-in, like state_interp,
+       not something a Raven program's own mask annotation gates (no rule
+       ever puts ghost_heap_namespace into an inv_set/mask, since it isn't
+       a user-declared invariant at all). *)
+    Definition trnsl_mask (msk : maskAnnot) : coPset :=
+      inv_set_to_namespace msk ∪ ↑ghost_heap_namespace.
+
+    Lemma inv_set_to_namespace_subseteq_trnsl_mask msk :
+      inv_set_to_namespace msk ⊆ trnsl_mask msk.
+    Proof. rewrite /trnsl_mask. set_solver. Qed.
+
+    Lemma ghost_heap_namespace_subseteq_trnsl_mask msk :
+      ↑ghost_heap_namespace ⊆ trnsl_mask msk.
+    Proof. rewrite /trnsl_mask. set_solver. Qed.
+
     Lemma inv_map_subseteq invr mask:
       invr ∈ mask -> ↑(inv_namespace_map invr) ⊆ inv_set_to_namespace mask.
     Proof.
@@ -389,7 +406,7 @@ Section MainTranslation.
           match (trnsl_assertion p stk_id mp),
                 (trnsl_assertion q stk_id mp) with
           | p', q' =>
-            p' ={inv_set_to_namespace msk}=∗ q'
+            p' ={trnsl_mask msk}=∗ q'
           end
 
         | Some' s =>
@@ -397,7 +414,7 @@ Section MainTranslation.
                 (trnsl_assertion q stk_id mp) with
           | p', q' =>
             {{{ p' }}}
-              to_rtstmt stk_id s @ (inv_set_to_namespace msk)
+              to_rtstmt stk_id s @ (trnsl_mask msk)
             {{{ RET lang.LitUnit; q'}}}
           end
         end
@@ -416,6 +433,13 @@ Section MainTranslation.
       intros Hin. rewrite /all_inv_worlds.
       iIntros "H". by iApply (big_sepS_elem_of with "H").
     Qed.
+
+    (* Ghost-heap world: the calculus has no rule that could establish it
+       either (Wghost, like Winv, is never allocated by any rule -- see
+       Wghost_alloc, the only consumer, inside HeapAllocRule's soundness
+       case), so it's an explicit premise of raven_soundness, same status
+       as all_inv_worlds. *)
+    Definition Wghost_world : iProp rrl_lang.Σ := inv ghost_heap_namespace Wghost.
 
     (* The proc-table registration for every procedure, mirroring
        all_inv_worlds's own role: the calculus has no rule that could
@@ -659,7 +683,7 @@ Section MainTranslation.
       ⌜∀ ret_val, trnsl_assertion (subst (proc_postcond_of proc_record) (<["#ret_val" := LVal (trnsl_val (ret_val))]> subst_map')) stk_id mp ≡ postcond ret_val⌝ -∗
 
       ⌜(trnsl_stmt (proc_body_of proc_record) = Some' stmt) \/ (trnsl_stmt (proc_body_of proc_record) = None' /\ stmt = lang.SkipS)⌝ -∗
-      {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ (inv_set_to_namespace msk)
+      {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ (trnsl_mask msk)
         {{{ RET lang.LitUnit; ∃ ret_val stk_frm'', stack_own[stk_id, stk_frm''] ∗ ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗ postcond ret_val }}}.
 
     (* Raven counterpart of all_proc_specs_valid_iris: every procedure's own
@@ -811,15 +835,17 @@ Section MainTranslation.
       (Hwf : ProgramWF) (Hpbt : proc_bodies_translate) :
       stmt_well_defined ρ cmd ->
       msk ⊆ inv_set ->
-       □ all_inv_worlds ∗ □ all_proc_tbl_chunks ∗ ▷ (all_proc_specs_valid_iris σ) ∗ ⌜RavenHoareTriple ρ σ p cmd msk q⌝
+       □ all_inv_worlds ∗ □ Wghost_world ∗ □ all_proc_tbl_chunks ∗ ▷ (all_proc_specs_valid_iris σ) ∗ ⌜RavenHoareTriple ρ σ p cmd msk q⌝
       ⊢  (∀ mp, ⌜env_typ_well_defined σ mp⌝ -∗ trnsl_hoare_triple stk_id p msk cmd q mp).
     Proof.
-      iIntros (Hwelldef Hmask_sub) "[#Hworlds [#HprocTbl [#Calls %H]]]".
+      iIntros (Hwelldef Hmask_sub) "[#Hworlds [#Hgworld [#HprocTbl [#Calls %H]]]]".
       iInduction H as
       [ ρ σ stk mask v lv e lexpr t Htrnsl Hinf Hfresh Hstkcompat |
       ρ σ stk mask x e rdchunk fld lexpr_e lvar_x t Htrnsl Htyp Hfresh Hnotin Hstkcompat
       | ρ σ stk mask v fld e old_chunk lv lexpr Hatm HLexpr1 Hwd
-      | | | |
+      | ρ σ stk mask x fld_vals ghost_fld_vals lvar_x
+        Hfresh HNoDupFV HNoDupGFV HgfvFsNe HgfvValid Hstkcompat
+      | | |
       | ρ σ stk stk' mask invr args stmt inv_record p q lv0 t0 lexprs Hargs Hinv_mask Hinv_record Hinv_len Hstk_tp subst Hlvfresh Hbody IHHbody
       | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_mask Hinv_record Hinv_len Hstk_tp subst
       | | | | | |
@@ -880,11 +906,15 @@ Section MainTranslation.
 
         inversion Hwelldef as [ | | | | | | | | | | | | | rho' inv' args' stmt' HInvSet HargsWellDef HBodywelldef | | ];
           subst stmt' args'.
-        have Hsub : ↑(inv_namespace_map invr) ⊆ inv_set_to_namespace mask.
-        { apply inv_map_subseteq; done. }
-        have HInvs : inv_set_to_namespace (mask ∖ {[invr]})
-                   = inv_set_to_namespace mask ∖ ↑inv_namespace_map invr.
-        { apply (inv_map_set_minus_subseteq Hwf); done. }
+        have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
+        { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
+        have HInvs : trnsl_mask (mask ∖ {[invr]}) = trnsl_mask mask ∖ ↑inv_namespace_map invr.
+        { rewrite /trnsl_mask.
+          have HInvs' : inv_set_to_namespace (mask ∖ {[invr]})
+                      = inv_set_to_namespace mask ∖ ↑inv_namespace_map invr.
+          { apply (inv_map_set_minus_subseteq Hwf); done. }
+          have Hdisj := Hwf.(pwf_ghost_heap_namespace_disjoint_inv) invr HInvSet.
+          rewrite HInvs'. set_solver. }
         iDestruct (all_inv_worlds_elem invr HInvSet with "Hworlds") as "#Hiw".
 
         destruct (trnsl_stmt (InvAccessBlock invr args stmt)) eqn:Ht.
@@ -1003,8 +1033,8 @@ Section MainTranslation.
         unfold trnsl_hoare_triple. simpl.
         inversion Hwelldef as [ | | | | | | | | | | | | | | rho' inv' args' HInvSet HargsWellDef | ];
           subst args'.
-        have Hsub : ↑(inv_namespace_map invr) ⊆ inv_set_to_namespace mask.
-        { apply inv_map_subseteq; done. }
+        have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
+        { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
         iDestruct (all_inv_worlds_elem invr HInvSet with "Hworlds") as "Hiw".
         destruct (args_interp_values ρ σ stk mp args lexprs Hstk_tp Henv HargsWellDef Hargs)
           as [vs HF2].
@@ -1172,35 +1202,80 @@ Section MainTranslation.
         iIntros (Φ).
         iModIntro.
         iIntros "Hstack HΦ".
-        iApply (wp_alloc with "[Hstack]") .
-        - done.
+        iApply wp_fupd.
+        iApply (wp_alloc _ _ fld_vals ghost_fld_vals.*1 _ _ with "[Hstack]") .
+        - exact HNoDupFV.
+        - exact HNoDupGFV.
+        - intro Hne. apply HgfvFsNe. intro Heq. apply Hne. rewrite Heq. done.
         - setoid_rewrite trnsl_assertion_unfold. iFrame.
         - iNext.
           iIntros "Hpost".
-          iDestruct "Hpost" as (l) "[Hstk [Hhp _]]".
-          iApply "HΦ". iFrame.
+          iDestruct "Hpost" as (l) "[Hstk [Hhp [Hgfrag _]]]".
+          set (mp' := (λ x0 : lvar, if (x0 =? lvar_x)%string then LitLoc l else mp x0)).
+
+          (* Ghost fields: mint a fresh ghost cell per (fld, r, x) triple,
+             consuming Hgfrag's reservation for that key one at a time,
+             mirroring the real-field induction below but via Wghost_alloc
+             (a fancy update -- hence wp_fupd above) instead of a bare
+             field_list_to_iprop fact. *)
+          iAssert (|={trnsl_mask mask}=> trnsl_assertion (field_list_to_ghost_assertion (LVar lvar_x) ghost_fld_vals) stk_id mp')%I
+            with "[Hgfrag]" as "Hghost".
+          { iInduction ghost_fld_vals as [ | [gfld [r gx]] gfvs'] "IHg".
+            - iModIntro. setoid_rewrite trnsl_assertion_unfold. done.
+            - simpl.
+              inversion HNoDupGFV as [| ? ? HgNotIn HgNoDup'].
+              have Hgcons_ne : (gfld, existT r gx) :: gfvs' ≠ ([] : list (fld_name * ra_elem)).
+              { discriminate. }
+              have Hfvne : fld_vals ≠ [] := HgfvFsNe Hgcons_ne.
+              iPoseProof ("IHg" $! HgNoDup' (λ _, Hfvne) (Forall_inv_tail HgfvValid)) as "IHg2".
+              iClear "IHg".
+              rewrite (ghost_dom_frag_insert (heap_addr_constr l gfld)
+                (list_to_set (map (heap_addr_constr l) gfvs'.*1))); [ | set_solver].
+              iDestruct "Hgfrag" as "[Hgfrag1 Hgfragr]".
+              iMod ("IHg2" with "Hgfragr") as "Hrest".
+              destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓeq.
+              pose proof (Wghost_alloc (trnsl_mask mask) r l gfld gx (Forall_inv HgfvValid)) as HWalloc.
+              rewrite HΓeq in HWalloc.
+              specialize (HWalloc (ghost_heap_namespace_subseteq_trnsl_mask mask)).
+              iMod (HWalloc with "Hgworld Hgfrag1") as (γ) "[Hmap Hown]".
+              iModIntro.
+              setoid_rewrite trnsl_assertion_unfold.
+              simpl.
+              rewrite HΓeq.
+              iSplitL "Hmap Hown".
+              + iExists l, gx, γ.
+                iSplitR; [| iSplitR; [done | iFrame]].
+                iPureIntro. unfold LExpr_holds. simpl.
+                subst mp'. simpl. rewrite String.eqb_refl val_beq_refl. done.
+              + iExact "Hrest".
+          }
+          iMod "Hghost" as "Hghost".
+
+          iApply "HΦ". iModIntro. iFrame.
           setoid_rewrite trnsl_assertion_unfold.
           iExists (LitLoc l).
           iSplitR; [done|].
-          set (mp' := (λ x0 : lvar, if (x0 =? lvar_x)%string then LitLoc l else mp x0)).
+          simpl.
+          iFrame "Hghost".
 
+          clear HgfvFsNe HNoDupGFV HgfvValid.
           iInduction fld_vals as [ | ] "IH".
-          
+
           + simpl. iFrame. rewrite fresh_mp_rewrite_symb_stk_to_stk_frm_compat; try done.
-          unfold symb_stk_to_stk_frm. simpl. 
+          unfold symb_stk_to_stk_frm. simpl.
           assert (lang.LitLoc l = lang.LitLoc {| loc_car := loc_car l |}) as H1'.
           {  destruct l. simpl. done. }
           rewrite <- H1'. iFrame.
 
           + simpl. destruct a as [fld val].
           assert (stmt_well_defined ρ (Alloc x fld_vals)) as Hwell_def'. { apply (alloc_stmt_well_defined _ _ fld val). exact Hwelldef. }
-          
-            * simpl. 
+
+            * simpl.
               iPoseProof ("IH" with "[%]") as "IH2"; try done.
               iClear "IH".
               iDestruct "Hhp" as "[Hhpl Hhpfvs]".
-              inversion H0.
-              iPoseProof ("IH2" $! H5 with "Hstk Hhpfvs") as "[IH3 IH3']".
+              inversion HNoDupFV as [| ? ? Hnotin_fv Hnodup_fv_tail].
+              iPoseProof ("IH2" $! Hnodup_fv_tail with "Hstk Hhpfvs") as "[IH3 IH3']".
               iFrame. iExists l, (trnsl_val val).
               assert (trnsl_lval (trnsl_val val) = val) as H1'. { apply trnsl_lval_trnsl_val_inverse. }
               rewrite H1'. iFrame.
@@ -1470,7 +1545,7 @@ Section MainTranslation.
             iMod "Hpost" as "HQ". iModIntro. iFrame.
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1489,7 +1564,7 @@ Section MainTranslation.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1508,7 +1583,7 @@ Section MainTranslation.
 
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1524,7 +1599,7 @@ Section MainTranslation.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1545,7 +1620,7 @@ Section MainTranslation.
 
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1561,7 +1636,7 @@ Section MainTranslation.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (inv_set_to_namespace mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
@@ -1975,7 +2050,7 @@ Section MainTranslation.
         iIntros "[Hstack [Hown %Hfpv]]".
         pose proof (RAPack_fpuValid Γ (ra_map r)) as HRA_fpu.
         destruct (Γ (ra_map r)) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]] eqn:H_RA_Pack.
-        iDestruct "Hown" as (l chunk_old) "[%Heq [%Hown_eval Hown]]".
+        iDestruct "Hown" as (l chunk_old γ) "[%Heq [%Hown_eval [Hmap Hown]]]".
         destruct (interp_lexpr_ra_fpuvalid_inv r chunk_old lexpr_old lexpr_new mp Hown_eval Hfpv)
           as [chunk_new [Hnew_eval Hfpu]].
 
@@ -1990,7 +2065,7 @@ Section MainTranslation.
 
        { apply transport_cmra_update. exact Hfpu.  }
 
-       iModIntro. rewrite H_RA_Pack. iExists l, chunk_new. iFrame.
+       iModIntro. rewrite H_RA_Pack. iExists l, chunk_new, γ. iFrame.
        iPureIntro. split; [exact Heq | exact Hnew_eval].
 
       }
@@ -2050,6 +2125,10 @@ Section MainTranslation.
          premise recording how the ghost state was set up, exactly as
          [Hbodies] records that every procedure body was verified. *)
       (Hworlds : ⊢ all_inv_worlds)
+      (* Same status as Hworlds, for the ghost heap (see Wghost_world's own
+         comment): no rule ever produces it, only HeapAllocRule's soundness
+         case (via Wghost_alloc) ever consumes it. *)
+      (Hgworlds : ⊢ Wghost_world)
       (* Every procedure's own registration is established, and its body
          actually compiles -- same status as Hworlds: no rule ever produces
          proc_tbl_chunk (ProcCallRuleRet needs it purely to satisfy wp_call's
@@ -2339,6 +2418,8 @@ Section MainTranslation.
       { iSplitR.
         { iModIntro. iApply Hworlds. }
         iSplitR.
+        { iModIntro. iApply Hgworlds. }
+        iSplitR.
         { iModIntro. iApply Hwtbl. }
         iSplitR.
         { iApply "IH". }
@@ -2381,7 +2462,7 @@ Section MainTranslation.
         iApply (wp_skip
           (∃ ret_val0 stk_frm'', stack_own[stk_id, stk_frm''] ∗
              ⌜locals stk_frm'' !! "#ret_val" = Some ret_val0⌝ ∗ postcond ret_val0)%I
-          (inv_set_to_namespace msk) stk_id with "[Hpost_stk Hpost_pred]").
+          (trnsl_mask msk) stk_id with "[Hpost_stk Hpost_pred]").
         { iExists ret_val, (symb_stk_to_stk_frm stk0' mp0). iFrame "Hpost_stk".
           iSplitR.
           - iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.

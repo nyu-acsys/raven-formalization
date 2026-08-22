@@ -5,7 +5,7 @@ From stdpp Require Import gmap list sets coPset.
 From stdpp Require Import namespaces.
 
 From iris Require Import options.
-From iris.algebra Require Import ofe cmra agree auth gset.
+From iris.algebra Require Import ofe cmra agree auth gset gmap.
 From iris.bi.lib Require Import fixpoint_mono.
 From iris.base_logic.lib Require Export own.
 From iris.base_logic.lib Require Import ghost_map.
@@ -30,7 +30,26 @@ Class inGs {I : Type} (Σ : gFunctors) (Gs : I → cmra) := {
 
 Context {I : Type}.
 Context (Gs : I → cmra).
-Context `{!inGs Σ Gs}. 
+Context `{!inGs Σ Gs}.
+(* Backing resource for the ghost heap (Wghost, below): one authoritative
+   map per ambient RA slot i, keyed by (loc, fld_name) via heap_addr,
+   holding elements of the very same Gs i that Γ already embeds RA_carrier
+   values into. This lets LGhostOwn's translation reuse Γ's existing
+   RA_Pack ↦ i embedding unchanged, just wrapped in one extra
+   auth/gmap layer.
+
+   The map only ever stores *gnames* (agreement-typed, never updated after
+   insertion), not RA elements directly: each (loc, fld) key names a
+   freshly own_alloc'd gname, and the actual RA ownership still lives at
+   that gname directly via a bare own, exactly as in the original
+   ghost_map design. This keeps FPURule's frame-preserving update a bare
+   own_update with no map/auth involvement at all -- updating a map
+   fragment in place would need a *local* update accounting for whatever
+   else is framed at that key (e.g. an invariant's own share of the same
+   RA cell), which a bare RA-level ~~> update doesn't in general provide.
+   The map's only job is solving the freshness/naming problem; RA-level
+   sharing is entirely delegated back to the RA itself, same as before. *)
+Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
 Context `{!simpLangG Σ}.
 
@@ -55,7 +74,18 @@ Parameter fld_set : gset lang.fld_name.
 
 Record fld := Fld { fld_name_val : fld_name; fld_typ : typ }.
 
-Parameter ghost_map : loc -> fld_name -> gname.
+(* Ghost heap: one standing authoritative gname->gname map (see Wghost,
+   Section GhostHeapWorld below), not a bare per-(loc,fld) gname --
+   own_alloc can only ever hand out a fresh, existentially-chosen name,
+   never one chosen in advance, so a specific (l, fld) can't be given
+   ownership directly. Instead, HeapAllocRule own_alloc's a genuinely
+   fresh gname per ghost field and records the (l,fld) -> gname binding by
+   growing this one standing authoritative map; the RA ownership itself
+   still lives at that freshly-minted gname via a bare own, exactly as in
+   the original design, so FPURule's update never touches this map at
+   all. *)
+Parameter ghost_heap_name : gname.
+Parameter ghost_heap_namespace : namespace.
 
 (* val mirrors lang.val exactly (see trnsl_lval/trnsl_val below), including
    its LitRAElem case, so that isomorphism extends to RA elements too. *)
@@ -996,6 +1026,15 @@ Record ProgramWF : Prop := {
     ∀ inv1 inv2 : inv_name,
       inv1 ∈ inv_set → inv2 ∈ inv_set → inv1 ≠ inv2 →
         (inv_namespace_map inv1) ## (inv_namespace_map inv2);
+
+  (* ── Ghost heap namespace ─────────────────────────────────────────────── *)
+  (* Wghost's own namespace is disjoint from every user invariant's, so
+     Wghost and any Winv inv' can always be opened together without
+     namespace collisions. *)
+  pwf_ghost_heap_namespace_disjoint_inv :
+    ∀ inv' : inv_name,
+      inv' ∈ inv_set →
+        ghost_heap_namespace ## (inv_namespace_map inv');
 }.
 
 (* Type inference for expressions---placed here so expr_well_defined can use it. *)
@@ -2280,14 +2319,28 @@ Qed.
         (l#fld ↦{ 1 } (trnsl_lval chunk))
         )%I)%I
 
+    (* Fragment of Wghost's authoritative map (see Section GhostHeapWorld,
+       below), keyed by (l, fld) via heap_addr -- not a bare per-key own, so
+       that HeapAllocRule can *mint* fresh ghost ownership by growing one
+       standing authoritative resource, the same way LOwn's own fragments
+       come from growing heap_interp. *)
+    (* γ names a freshly own_alloc'd ghost cell for this (l, fld) key,
+       recorded once and for all in Wghost's own standing map (see Section
+       GhostHeapWorld below) -- the map only ever holds this naming
+       binding, agreement-typed and never updated post-insertion; the
+       actual RA ownership lives directly at γ via a bare own, exactly as
+       in the original ghost_map design, so FPURule's frame-preserving
+       update never has to touch the map at all. *)
     | LGhostOwn l_expr fld RAPack chunk_expr =>
       let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map RAPack) in
       let HinG := inGs_inG i in
 
-      (∃ l : lang.loc, ∃ chunk : RA_carrier (ra_map RAPack), (
+      (∃ l : lang.loc, ∃ chunk : RA_carrier (ra_map RAPack), ∃ γ : gname, (
         ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗
         ⌜interp_lexpr chunk_expr mp = Some (LitRAElem (existT RAPack chunk))⌝ ∗
-        (own (ghost_map l fld) (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := HinG)))%I)%I
+        own ghost_heap_name
+           (◯ {[ heap_addr_constr l fld := to_agree γ ]} : authR (gmapUR heap_addr (agreeR gnameO))) ∗
+        (own γ (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := HinG))))%I
     | LForall v _t body =>
        (∀ v':lang.val, (trnsl_assertion_str F body stk_id mp))%I
 
@@ -3200,6 +3253,18 @@ Section RavenLogic.
   | (fld,val) :: fld_vals => LAnd (LOwn lexpr fld (LVal (trnsl_val val))) (field_list_to_assertion lexpr fld_vals)
   end.
 
+  (* Ghost-field counterpart of field_list_to_assertion, for
+     HeapAllocRule's second, ghost-field initialization list: each triple
+     (fld, r, x) contributes an LGhostOwn fact for a freshly-minted ghost
+     cell holding x : RA_carrier (ra_map r). *)
+  Fixpoint field_list_to_ghost_assertion lexpr (ghost_fld_vals : list (fld_name * ra_elem)) :=
+    match ghost_fld_vals with
+    | [] => LPure true
+    | (fld, existT r x) :: ghost_fld_vals =>
+        LAnd (LGhostOwn lexpr fld r (LVal (LitRAElem (existT r x))))
+             (field_list_to_ghost_assertion lexpr ghost_fld_vals)
+    end.
+
   Inductive RavenHoareTriple :
   pvar_typs -> lvar_typs ->
   assertion ->
@@ -3262,14 +3327,32 @@ Section RavenLogic.
       (LAnd (LStack stk) (LOwn (LVar lv) fld lexpr))
 
 
-  | HeapAllocRule ρ σ stk mask x fld_vals lvar_x :
+  (* ghost_fld_vals is a second, ghost-field initialization list, alongside
+     the real fld_vals -- not itself part of Alloc's own AST (Alloc's
+     fs list stays real-fields-only, matching AllocStep's operational
+     semantics, which never touches ghost state at all). Each ghost field
+     mints a genuinely fresh ghost cell (see Wghost_alloc), so this list
+     need not correspond to anything already present anywhere; freshness
+     of the newly-allocated location is what makes it sound, exactly as
+     for fld_vals's own real fields. The reservation that backs this
+     freshness (ghost_dom, see simp_raven_lang/ghost_state.v) is grown by
+     wp_alloc in lockstep with the real heap, at the very same fresh_loc,
+     which needs the real heap to actually grow too whenever ghost fields
+     are being allocated -- hence fld_vals must be nonempty whenever
+     ghost_fld_vals is. *)
+  | HeapAllocRule ρ σ stk mask x fld_vals ghost_fld_vals lvar_x :
     fresh_lvar stk lvar_x ->
     NoDup fld_vals.*1 ->
+    NoDup ghost_fld_vals.*1 ->
+    (ghost_fld_vals ≠ [] -> fld_vals ≠ []) ->
+    Forall (λ fgv, (RA_inst (ra_map (projT1 fgv.2))).(valid) (projT2 fgv.2)) ghost_fld_vals ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
        (LStack stk)
         (Alloc x fld_vals) mask
-      (LExists lvar_x TpLoc (LAnd (LStack (<[x := lvar_x]> stk)) (field_list_to_assertion (LVar lvar_x) fld_vals)))
+      (LExists lvar_x TpLoc (LAnd (LStack (<[x := lvar_x]> stk))
+        (LAnd (field_list_to_assertion (LVar lvar_x) fld_vals)
+              (field_list_to_ghost_assertion (LVar lvar_x) ghost_fld_vals))))
 
   | ProcCallRuleRet ρ σ stk mask x proc_name args lexprs lvar_x proc_record :
     fresh_lvar stk lvar_x ->
@@ -3897,6 +3980,7 @@ Section AssertionsProperties.
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
       apply bi.exist_mono. intro l.
       apply bi.exist_mono. intro chunk0.
+      apply bi.exist_mono. intro γ.
       apply bi.sep_mono.
       { apply bi.pure_mono. unfold LExpr_holds.
         have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
@@ -4352,9 +4436,13 @@ Section AssertionsProperties.
       intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
       apply bi.exist_timeless. intro l.
       apply bi.exist_timeless. intro chunk0.
+      apply bi.exist_timeless. intro γ.
       apply bi.sep_timeless; [apply _ |].
       apply bi.sep_timeless; [apply _ |].
-      apply own_timeless. apply transport_cmra_discrete. apply _.
+      apply bi.sep_timeless; [apply _ |].
+      apply own_timeless.
+      have HdisGi : CmraDiscrete (Gs i). { rewrite -Heq_cmra. exact Hdis. }
+      apply _.
     - (* LForall *)
       rewrite trnsl_assertion_forall. apply bi.forall_timeless. intros _. apply IHHsf.
     - (* LExists *)
@@ -4612,7 +4700,99 @@ Section InvariantWorld.
 
 End InvariantWorld.
 
+(* The ghost heap: one standing authoritative (loc,fld) -> gname naming
+   map. HeapAllocRule mints a genuinely fresh gname (own_alloc, no chosen
+   name needed) for each ghost field it allocates and grows this map to
+   record the binding; FPURule never touches this map at all, since RA
+   ownership lives directly at that gname via a bare own, exactly as in
+   the pre-existing ghost_map design (see the comment on LGhostOwn's own
+   translation above for why: updating a map fragment in place would need
+   a genuine local update accounting for whatever else is framed at that
+   key, which a bare RA-level ~~> doesn't in general provide -- the map's
+   only job is solving the freshness/naming problem). Mirrors Winv's own
+   invariant-wrapped, growable-via-iInv pattern above. *)
+Section GhostHeapWorld.
 
+  Definition Wghost : iProp Σ :=
+    (∃ M : gmap heap_addr gname,
+       own ghost_heap_name (● (to_agree <$> M) : authR (gmapUR heap_addr (agreeR gnameO))) ∗
+       [∗ set] a ∈ dom M, ghost_dom_frag {[a]})%I.
+
+  Global Instance Wghost_timeless : Timeless Wghost.
+  Proof. rewrite /Wghost. apply _. Qed.
+
+  (* Two reservations of the same (loc, fld) key can't coexist: ghost_dom's
+     value type is exclR unitO, so the map fragment is exclusive at each
+     key, exactly like heap_cellR's full fraction is for the real heap. *)
+  Lemma ghost_dom_frag_excl (a : heap_addr) :
+    ghost_dom_frag {[a]} -∗ ghost_dom_frag {[a]} -∗ False.
+  Proof.
+    rewrite /ghost_dom_frag.
+    iIntros "H1 H2".
+    iDestruct (own_valid_2 with "H1 H2") as %Hval.
+    apply auth_frag_valid_1 in Hval.
+    rewrite gset_to_gmap_singleton singleton_op singleton_valid in Hval.
+    done.
+  Qed.
+
+  Lemma transport_cmra_valid {A B : cmra} (p : A = B) (x : cmra_car A) :
+    ✓ x → ✓ (transport (f_equal cmra_car p) x).
+  Proof. destruct p. simpl. done. Qed.
+
+  (* Establishing a fresh ghost cell: own_alloc a genuinely fresh gname γ
+     holding the initial RA chunk directly (exactly as the original
+     ghost_map design would have owned it), then, given the ghost_dom_frag
+     reservation wp_alloc just produced for (l, fld) (grown in lockstep
+     with the real heap, at the same fresh_loc, so it's guaranteed fresh
+     -- see ghost_dom_alloc_valid_sets), open Wghost, rule out (l, fld)
+     already being in its domain via ghost_dom_frag_excl, and record the
+     (l,fld) -> γ binding, handing the caller back both pieces in exactly
+     the shape LGhostOwn's own translation expects. *)
+  Lemma Wghost_alloc (E : coPset) (r : ra_name) (l : loc) (fld : fld_name)
+      (chunk : RA_carrier (ra_map r)) (Hchunk_valid : (RA_inst (ra_map r)).(valid) chunk) :
+    let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map r) in
+    ↑ghost_heap_namespace ⊆ E →
+    inv ghost_heap_namespace Wghost -∗
+    ghost_dom_frag {[heap_addr_constr l fld]}
+    ={E}=∗
+    ∃ γ : gname,
+      own ghost_heap_name (◯ {[ heap_addr_constr l fld := to_agree γ ]} : authR (gmapUR heap_addr (agreeR gnameO))) ∗
+      own γ (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := inGs_inG i).
+  Proof.
+    destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓeq.
+    intros HE.
+    iIntros "#Hinv Hwit".
+    iMod (own_alloc (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk))) as (γ) "Hγ".
+    { apply transport_cmra_valid.
+      change (@cmra.valid (cmra_car (ucmra_cmraR U)) (cmra_valid (ucmra_cmraR U))) with (ucmra_valid U).
+      rewrite Hvalid.
+      apply eq_rect_transport_valid_inv. exact Hchunk_valid. }
+    iMod (inv_acc_timeless with "Hinv") as "[HW Hclose]"; [exact HE |].
+    iEval (rewrite /Wghost) in "HW".
+    iDestruct "HW" as (M) "[Hauth Hbig]".
+    destruct (decide (heap_addr_constr l fld ∈ dom M)) as [Hin | Hnin].
+    - iDestruct (big_sepS_elem_of _ _ (heap_addr_constr l fld) Hin with "Hbig") as "Hwit'".
+      iDestruct (ghost_dom_frag_excl with "Hwit Hwit'") as "[]".
+    - have Hfresh : M !! (heap_addr_constr l fld) = None := not_elem_of_dom_1 _ _ Hnin.
+      iMod (own_update _ _
+        ((● (to_agree <$> (<[ heap_addr_constr l fld := γ ]> M))
+          ⋅ ◯ {[ heap_addr_constr l fld := to_agree γ ]})
+         : authR (gmapUR heap_addr (agreeR gnameO)))
+        with "Hauth") as "[Hauth Hfrag]".
+      { rewrite fmap_insert. apply auth_update_alloc.
+        apply alloc_singleton_local_update; [| done].
+        rewrite lookup_fmap Hfresh. done. }
+      iAssert Wghost with "[Hauth Hbig Hwit]" as "HW".
+      { iEval (rewrite /Wghost).
+        iExists (<[heap_addr_constr l fld := γ]> M).
+        iFrame "Hauth".
+        rewrite dom_insert_L.
+        rewrite big_sepS_union; [| apply disjoint_singleton_l; exact Hnin].
+        iFrame "Hbig". rewrite big_sepS_singleton. iExact "Hwit". }
+      iMod ("Hclose" with "HW") as "_". iModIntro. iExists γ. iFrame.
+  Qed.
+
+End GhostHeapWorld.
 
 Lemma transport_cmra_update {A B} (p : A = B) (x y : (cmra_car A)) :
   x ~~> y → transport (f_equal cmra_car p) x ~~> transport (f_equal cmra_car p) y.

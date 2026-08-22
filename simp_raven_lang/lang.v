@@ -253,6 +253,9 @@ Proof.
   intros [l f]. done.
 Qed.
 
+Definition heap_addr_loc (a : heap_addr) : loc :=
+  match a with heap_addr_constr l _ => l end.
+
 (* Heap maps locations to field-value pairs *)
 Definition heap := gmap heap_addr val.
 

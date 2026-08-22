@@ -38,6 +38,16 @@ Definition heapUR : ucmra :=
 Definition stackUR :=
   gmapUR stack_id (exclR stack_frame).
 
+(* Purely a freshness-tracking resource for rich_raven_lang's ghost heap
+   (see Wghost in rrl_lang.v): grown by wp_alloc in lockstep with the real
+   heap, at the very same fresh_loc, so that rrl_lang.v's own standing
+   ghost-naming invariant can prove a freshly-allocated location's ghost
+   keys were never claimed before -- via plain exclusivity here -- without
+   needing to know anything about RAs, Γ, or ghost values at all (those
+   stay entirely at the rich_raven_lang layer). *)
+Definition ghost_domUR : ucmra :=
+  gmapUR heap_addr (exclR unitO).
+
 Class heapG Σ := HeapG {
   heap_heap_inG :: inG Σ (authR heapUR);
   heap_heap_name : gname;
@@ -45,6 +55,8 @@ Class heapG Σ := HeapG {
   heap_stack_name : gname;
   heap_proctbl_inG :: ghost_mapG Σ proc_name proc;
   heap_proctbl_name : gname;
+  heap_ghostdom_inG :: inG Σ (authR ghost_domUR);
+  heap_ghostdom_name : gname;
 }.
 
 Definition state_wf (σ : state) : Prop :=
@@ -120,8 +132,33 @@ Section definitions.
   Definition stack_interp (stack : gmap stack_id stack_frame) : iProp Σ :=
     own heap_stack_name (● (to_stackR stack)).
 
+  Definition ghost_dom_interp (D : gset heap_addr) : iProp Σ :=
+    own heap_ghostdom_name (● (gset_to_gmap (Excl ()) D : ghost_domUR)).
+
+  Definition ghost_dom_frag (D : gset heap_addr) : iProp Σ :=
+    own heap_ghostdom_name (◯ (gset_to_gmap (Excl ()) D : ghost_domUR)).
+
+  (* Splits a reservation fragment for a freshly-grown key off the rest,
+     mirroring how a batch-allocated heap fragment splits into per-field
+     pieces (see wp_alloc's own induction over fs). *)
+  Lemma ghost_dom_frag_insert (a : heap_addr) (D : gset heap_addr) (Hnotin : a ∉ D) :
+    ghost_dom_frag ({[a]} ∪ D) ⊣⊢ ghost_dom_frag {[a]} ∗ ghost_dom_frag D.
+  Proof.
+    rewrite /ghost_dom_frag.
+    rewrite gset_to_gmap_union_singleton.
+    rewrite -own_op -auth_frag_op.
+    have Hnone : gset_to_gmap (Excl ()) D !! a = None.
+    { rewrite lookup_gset_to_gmap_None. exact Hnotin. }
+    rewrite (insert_singleton_op (gset_to_gmap (Excl ()) D) a (Excl ()) Hnone).
+    rewrite gset_to_gmap_singleton.
+    reflexivity.
+  Qed.
+
   Definition state_interp (σ : state) : iProp Σ :=
-  heap_interp σ.(global_heap) ∗ proc_tbl_interp σ.(procs) ∗ stack_interp σ.(stack) ∗ ⌜state_wf σ⌝.
+  heap_interp σ.(global_heap) ∗ proc_tbl_interp σ.(procs) ∗ stack_interp σ.(stack) ∗
+  (∃ D : gset heap_addr, ghost_dom_interp D ∗
+     ⌜∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size σ.(global_heap)))%Z⌝) ∗
+  ⌜state_wf σ⌝.
 
 
   Definition heap_maps_to (l : loc) (fld : fld_name) (q : Qp) (v : val) :=
@@ -366,6 +403,92 @@ Section updates.
         apply H_NotIn. apply elem_of_cons. left. exact (eq_sym Hfld).
   Qed.
 
+  (* Grows the ghost-domain reservation set by one fresh key per name in
+     gfs, all at the just-picked l -- mirrors heap_alloc_valid's own
+     structure exactly, but keyed by field name alone (no value payload:
+     this resource exists purely to let rrl_lang.v's Wghost invariant
+     prove freshness, see the comment on ghost_domUR above). *)
+  Lemma ghost_dom_alloc_valid :
+    ∀ (gfs : list fld_name) (D : gset heap_addr) (l : loc) (h : heap),
+    NoDup gfs →
+    l = fresh_loc h →
+    (∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size h))%Z) →
+    let D_map := gset_to_gmap (Excl ()) D in
+    let D_map' := fold_right
+        (λ fld acc, <[heap_addr_constr l fld := Excl ()]> acc)
+      D_map gfs in
+    let new_keys_map := fold_right
+        (λ fld acc, <[heap_addr_constr l fld := Excl ()]> acc)
+      (∅ : gmap heap_addr (exclR unitO)) gfs in
+    ● (D_map : ghost_domUR) ~~> ● (D_map' : ghost_domUR) ⋅ ◯ (new_keys_map : ghost_domUR).
+  Proof.
+    induction gfs as [ | fld gfs' IH].
+
+    - intros D l h HNoDup Hl HD D_map D_map' new_keys_map.
+      simpl in D_map', new_keys_map. subst D_map' new_keys_map.
+      apply auth_update_alloc.
+      have Heq : ucmra_unit ghost_domUR = (∅ : gmap heap_addr (exclR unitO)). { done. }
+      rewrite Heq. done.
+
+    - intros D l h HNoDup Hl HD D_map D_map' new_keys_map. simpl in D_map', new_keys_map.
+      inversion HNoDup as [| ? ? H_NotIn H_NoDup'].
+      specialize (IH D l h H_NoDup' Hl HD).
+      unfold D_map in IH.
+      rewrite IH.
+      unfold D_map', new_keys_map. unfold D_map.
+      apply auth_update.
+      apply alloc_local_update.
+      { have Hfresh1 : gset_to_gmap (Excl ()) D !! heap_addr_constr l fld = None.
+        { apply lookup_gset_to_gmap_None. intro Hin.
+          have Hlt := HD _ Hin. simpl in Hlt. rewrite Hl in Hlt. unfold fresh_loc in Hlt.
+          simpl in Hlt. lia. }
+        have Hfresh2 : ∀ gfs0, fld ∉ gfs0 → (fold_right
+            (λ fld' acc, <[heap_addr_constr l fld' := Excl ()]> acc)
+          (gset_to_gmap (Excl ()) D) gfs0) !! heap_addr_constr l fld = None.
+        { intro gfs0. induction gfs0 as [| fld' gfs'' IH2].
+          - intros _. exact Hfresh1.
+          - intros H_NotIn'. simpl. rewrite lookup_insert_ne.
+            + apply IH2. intro Hin. apply H_NotIn'. apply elem_of_cons. right. exact Hin.
+            + intro Heq. apply H_NotIn'. apply elem_of_cons. left. congruence. }
+        apply Hfresh2. exact H_NotIn. }
+      { done. }
+  Qed.
+
+  Lemma fold_insert_excl_gset_to_gmap (l : loc) (gfs : list fld_name) (D : gset heap_addr) :
+    fold_right (λ fld acc, <[heap_addr_constr l fld := Excl ()]> acc) (gset_to_gmap (Excl ()) D) gfs
+    = gset_to_gmap (Excl ()) (D ∪ list_to_set (map (heap_addr_constr l) gfs)).
+  Proof.
+    induction gfs as [| fld gfs' IH].
+    - simpl. rewrite right_id_L. done.
+    - simpl. rewrite IH.
+      have Hseteq : D ∪ ({[heap_addr_constr l fld]} ∪ list_to_set (map (heap_addr_constr l) gfs'))
+                  = {[heap_addr_constr l fld]} ∪ (D ∪ list_to_set (map (heap_addr_constr l) gfs')).
+      { set_solver. }
+      rewrite Hseteq.
+      rewrite gset_to_gmap_union_singleton. done.
+  Qed.
+
+  (* Set-indexed restatement of ghost_dom_alloc_valid, for callers (wp_alloc)
+     that want to talk about "the set of freshly-reserved ghost keys"
+     directly rather than the fold_right-accumulated map. *)
+  Lemma ghost_dom_alloc_valid_sets (gfs : list fld_name) (D : gset heap_addr) (l : loc) (h : heap) :
+    NoDup gfs →
+    l = fresh_loc h →
+    (∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size h))%Z) →
+    let new_keys := list_to_set (map (heap_addr_constr l) gfs) : gset heap_addr in
+    ● (gset_to_gmap (Excl ()) D : ghost_domUR) ~~>
+    ● (gset_to_gmap (Excl ()) (D ∪ new_keys) : ghost_domUR) ⋅ ◯ (gset_to_gmap (Excl ()) new_keys : ghost_domUR).
+  Proof.
+    intros HNoDup Hl HD new_keys.
+    have H := ghost_dom_alloc_valid gfs D l h HNoDup Hl HD.
+    simpl in H.
+    rewrite (fold_insert_excl_gset_to_gmap l gfs D) in H.
+    rewrite <- (gset_to_gmap_empty (Excl ())) in H.
+    rewrite (fold_insert_excl_gset_to_gmap l gfs ∅) in H.
+    rewrite left_id_L in H.
+    exact H.
+  Qed.
+
   Lemma heap_alloc_valid :
     ∀ fs σ,
     NoDup fs.*1 →
@@ -438,6 +561,29 @@ Section updates.
     - exact (swf_ret_val_bound Hwf).
   Qed.
 
+  (* Companion to state_wf_update_heap_overwrite: ghost_dom's own bound is
+     stated purely in terms of size (global_heap σ), so it survives any
+     step that doesn't change the real heap's size unchanged -- reproved
+     explicitly at each such step, mirroring how state_wf itself is
+     reproved rather than framed automatically (its bound is likewise
+     σ-dependent). *)
+  Lemma ghost_dom_bound_size_eq (σ σ' : state) (D : gset heap_addr)
+      (Hsize : size (global_heap σ') = size (global_heap σ))
+      (HD : ∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z) :
+      ∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ')))%Z.
+  Proof. intros a Ha. rewrite Hsize. exact (HD a Ha). Qed.
+
+  Lemma ghost_dom_bound_update_heap_overwrite (σ : state) (l : loc) (fld : fld_name) (v old_v : val)
+      (D : gset heap_addr)
+      (Hpresent : lookup_heap σ l fld = Some old_v)
+      (HD : ∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z) :
+      ∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap (update_heap σ l fld v))))%Z.
+  Proof.
+    apply (ghost_dom_bound_size_eq σ (update_heap σ l fld v) D); [| exact HD].
+    unfold lookup_heap in Hpresent. unfold update_heap. simpl.
+    apply map_size_insert_Some. exists old_v. exact Hpresent.
+  Qed.
+
   Lemma state_wf_update_lvar (σ : state) (x : var) (stk_id : stack_id) (v : val)
       (Hwf : state_wf σ) :
       state_wf (update_lvar σ x stk_id v).
@@ -471,6 +617,46 @@ Section updates.
     induction fs as [| [f v] fs' IH].
     - simpl. lia.
     - simpl. etransitivity; [exact IH | apply heap_size_insert_le].
+  Qed.
+
+  (* When fs is nonempty, allocating it strictly grows the heap's size
+     past l's own loc_car -- used to justify that the fresh ghost keys
+     wp_alloc reserves (all at l too) are bounded by the post-alloc heap
+     size, exactly like every real field just inserted at l already is. *)
+  Lemma fresh_loc_lt_size_alloc_nonempty (σ : state) (l : loc)
+      (fld0 : fld_name) (val0 : val) (fs' : list (fld_name * val))
+      (Hl : l = fresh_loc (global_heap σ))
+      (HNotIn : fld0 ∉ fs'.*1)
+      (Hwf : state_wf σ) :
+      (l.(loc_car) < Z.of_nat (size
+        (global_heap (update_heap (foldr (λ f_v acc, update_heap acc l f_v.1 f_v.2) σ fs') l fld0 val0))))%Z.
+  Proof.
+    set (σ0 := foldr (λ f_v acc, update_heap acc l f_v.1 f_v.2) σ fs').
+    have Hnotmem : global_heap σ0 !! heap_addr_constr l fld0 = None.
+    { apply (foldr_update_heap_not_mem l fld0 fs' σ HNotIn).
+      rewrite Hl. apply (fresh_loc_is_fresh _ _ (swf_heap_bounded Hwf)). }
+    unfold update_heap. simpl.
+    have Hsize : size (<[heap_addr_constr l fld0 := val0]> (global_heap σ0)) = S (size (global_heap σ0)).
+    { apply map_size_insert_None. exact Hnotmem. }
+    rewrite Hsize.
+    have Hle := foldr_heap_size_le σ l fs'.
+    fold σ0 in Hle.
+    have Hlcar : l.(loc_car) = Z.of_nat (size (global_heap σ)).
+    { rewrite Hl. unfold fresh_loc. reflexivity. }
+    rewrite Hlcar. lia.
+  Qed.
+
+  Lemma fresh_loc_lt_size_alloc_nonempty' (σ : state) (l : loc) (fs : list (fld_name * val))
+      (Hl : l = fresh_loc (global_heap σ))
+      (HNoDup : NoDup fs.*1)
+      (Hne : fs ≠ [])
+      (Hwf : state_wf σ) :
+      (l.(loc_car) < Z.of_nat (size
+        (global_heap (foldr (λ f_v acc, update_heap acc l f_v.1 f_v.2) σ fs))))%Z.
+  Proof.
+    destruct fs as [| [fld0 val0] fs']; [done |].
+    simpl in HNoDup. have HNotIn := NoDup_cons_1_1 _ _ HNoDup.
+    exact (fresh_loc_lt_size_alloc_nonempty σ l fld0 val0 fs' Hl HNotIn Hwf).
   Qed.
 
   Lemma state_wf_alloc_step (σ : state) (l : loc) (fs : list (fld_name * val))
