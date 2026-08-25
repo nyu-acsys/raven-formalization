@@ -699,6 +699,7 @@ Section MainTranslation.
         ∀ (dll : proc_entry_lvars σ proc_record),
           ∃ stk0' lv_final,
             stk0' !! "#ret_val" = Some lv_final ∧
+            ¬ is_reserved lv_final ∧
             RavenHoareTriple ρ σ
               (LAnd (LStack (assoc_map (proc_args_of proc_record ++ proc_locals_of proc_record).*1
                                         (dll_args dll ++ dll_locals dll)))
@@ -732,18 +733,6 @@ Section MainTranslation.
       apply interp_lexpr_stable. exact (proj1 (lexpr_map_fvars_spec M lv) Hlv x e HMx).
     Qed.
 
-    Lemma eval_lvar_stab_generic (M : gmap lvar LExpr) (q1 q2 : symb_map) :
-      (forall x, x ∈ dom M -> eval_lvar M q1 x = eval_lvar M q2 x) ->
-      forall (v : lvar), v ∉ lexpr_map_fvars M ->
-      forall (v' : val) (x : lvar), x ∈ dom M ->
-      eval_lvar M (fun y => if (y =? v)%string then v' else q1 y) x =
-      eval_lvar M (fun y => if (y =? v)%string then v' else q2 y) x.
-    Proof.
-      intros Hbase v Hv v' x Hx.
-      rewrite (eval_lvar_base_stable M q1 v v' x Hv Hx) (eval_lvar_base_stable M q2 v v' x Hv Hx).
-      exact (Hbase x Hx).
-    Qed.
-
     (* Every lexpr InvAccessBlockRule's own call-site args translate to is
        fvar-disjoint from a stk-fresh lvar -- lifts
        trnsl_expr_lExpr_fresh_lvar (single expr) across the whole args/
@@ -773,6 +762,111 @@ Section MainTranslation.
       apply elem_of_list_In. exact Hke.
     Qed.
 
+    (* lexpr_map_fvars of a zip-built substitution map avoids the reserved
+       namespace outright, given a Forall fact over the lexprs themselves
+       (now always a local premise of whichever RavenHoareTriple rule
+       supplies them, e.g. InvAccessBlockRule/InvAllocRule/ProcCallRuleRet --
+       see local/binders.md) -- the exact shape inv_body_bridge's own
+       Hlexprs_ok parameter needs, for any key list (inv_args, pred_args,
+       ...), so every direct inv_body_bridge/PredBodyWF-style call site can
+       build its own argument with this one lemma. *)
+    Lemma lexpr_map_fvars_zip_no_reserved (ks : list lvar) (lexprs : list LExpr)
+        (Hlexprs_ok : Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs) :
+      ∀ v, v ∈ lexpr_map_fvars (list_to_map (zip ks lexprs) : gmap lvar LExpr) → ¬ is_reserved v.
+    Proof.
+      intros v Hv.
+      have Hv' := lexpr_map_fvars_zip_subseteq ks lexprs v Hv.
+      apply elem_of_union_list in Hv' as [X [HX HvX]].
+      apply elem_of_list_fmap in HX as [le [-> Hle]].
+      exact (proj1 (Forall_forall _ _) Hlexprs_ok le Hle v HvX).
+    Qed.
+
+    (* Builds a subst_map_avoids_reserved fact for a zip-built substitution
+       map wholesale, from the two Forall facts every call site (invariant
+       args, predicate args, proc-call args, ...) already establishes
+       separately: formal-argument names never reserved (dom side, via
+       pwf_*_args_not_reserved), and no actual argument lexpr mentions a
+       reserved lvar (values side -- now a local premise of whichever
+       RavenHoareTriple rule supplies lexprs, e.g. InvAccessBlockRule/
+       InvAllocRule/ProcCallRuleRet, see local/binders.md). *)
+    Lemma subst_map_avoids_reserved_of_lexprs (ks : list lvar) (lexprs : list LExpr)
+        (Hks : Forall (fun a => ¬ is_reserved a) ks)
+        (Hvs : Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs) :
+      subst_map_avoids_reserved (list_to_map (zip ks lexprs) : gmap lvar LExpr).
+    Proof.
+      split.
+      - intros v Hv. apply elem_of_dom in Hv as [e He].
+        apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+        exact (proj1 (Forall_forall _ _) Hks v He).
+      - intros v Hv.
+        have Hv' := lexpr_map_fvars_zip_subseteq ks lexprs v Hv.
+        apply elem_of_union_list in Hv' as [X [HX HvX]].
+        apply elem_of_list_fmap in HX as [le [-> Hle]].
+        exact (proj1 (Forall_forall _ _) Hvs le Hle v HvX).
+    Qed.
+
+    (* "#ret_val" is never reserved -- disjoint namespaces ("#" vs "$"),
+       needed wherever a subst map gets extended with a "#ret_val" slot
+       (ProcCallRuleRet's postcondition side) and dom-avoids-reserved has
+       to survive that extension. *)
+    Lemma ret_val_not_reserved : ¬ is_reserved "#ret_val".
+    Proof. unfold is_reserved. simpl. discriminate. Qed.
+
+    (* dom-avoids-reserved survives extending a map with one more,
+       itself-non-reserved key. *)
+    Lemma dom_insert_not_reserved (M : gmap lvar LExpr) (k : lvar) (e : LExpr) :
+      ¬ is_reserved k ->
+      (∀ v, v ∈ dom M → ¬ is_reserved v) ->
+      ∀ v, v ∈ dom (<[k := e]> M) → ¬ is_reserved v.
+    Proof.
+      intros Hk HM v Hv. apply elem_of_dom in Hv as [e' He'].
+      destruct (decide (v = k)) as [-> | Hne].
+      - exact Hk.
+      - rewrite lookup_insert_ne in He'; [| congruence].
+        apply HM. apply elem_of_dom. exists e'. exact He'.
+    Qed.
+
+    (* subst_map_avoids_reserved survives extending a map with one more
+       binding, given the new key and the new value's own fvars are both
+       reserved-free -- the "#ret_val" extension ProcCallRuleRet's own
+       postcondition subst map needs on top of the ordinary args map. *)
+    Lemma subst_map_avoids_reserved_insert (M : gmap lvar LExpr) (k : lvar) (e : LExpr) :
+      ¬ is_reserved k ->
+      (∀ v, v ∈ lexpr_fvars e → ¬ is_reserved v) ->
+      subst_map_avoids_reserved M ->
+      subst_map_avoids_reserved (<[k := e]> M).
+    Proof.
+      intros Hk He Hm. split.
+      - exact (dom_insert_not_reserved M k e Hk (proj1 Hm)).
+      - intros v Hv.
+        apply lexpr_map_fvars_insert_subseteq in Hv.
+        apply elem_of_union in Hv as [Hin | Hin]; [exact (He v Hin) | exact (proj2 Hm v Hin)].
+    Qed.
+
+    (* A list of bare LVal literals trivially avoids the reserved namespace
+       (LVal has no free variables at all) -- the "values" side of
+       subst_map_avoids_reserved for any value-instantiated substitution
+       map (e.g. proc-call arg_vals, mirroring inv_body_bridge's
+       inv_arg_map/Hnofv). *)
+    Lemma lval_list_no_reserved {A} (l : list A) (f : A -> val) :
+      Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) (map (fun w => LVal (f w)) l).
+    Proof.
+      induction l as [| w l' IH]; simpl; constructor; [| exact IH].
+      intros v Hv. simpl in Hv. set_solver.
+    Qed.
+
+    (* Same, for a list of bare LVar-wrapped lvars, given they're
+       themselves already known reserved-free (e.g. dll_args_not_reserved,
+       for a proc's own entry lvars). *)
+    Lemma lvar_list_no_reserved (l : list lvar) :
+      Forall (fun lv => ¬ is_reserved lv) l ->
+      Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) (map LVar l).
+    Proof.
+      intro Hl. induction l as [| lv l' IH]; simpl; constructor.
+      - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact (Forall_inv Hl).
+      - apply IH. exact (Forall_inv_tail Hl).
+    Qed.
+
     (* Forall2's own interp_lexpr equations are stable under an mp-update at
        a var none of the lexprs mention. *)
     Lemma forall2_interp_stable (lexprs : list LExpr) (vs : list val) (mp : symb_map) (lv : lvar) (v' : val) :
@@ -787,21 +881,26 @@ Section MainTranslation.
 
     (* subst inv_body subst_map's own translated truth doesn't change under
        an mp-update at a var lv not mentioned by subst_map's own values (see
-       InvAccessBlockRule's lv-freshness premise). *)
+       InvAccessBlockRule's lv-freshness premise). M1 = M2 = M throughout, so
+       this is exactly trnsl_assertion_mp_irrelevant_reserved's use case --
+       simpler than the old trnsl_assertion_subst_congr-based proof, which
+       needed an Hbase covering reserved names too (now gone, see
+       local/binders.md's "Session 3"). *)
     Lemma trnsl_assertion_subst_lv_stable (Hwf : ProgramWF) (a : assertion) (M : gmap lvar LExpr)
         (lv : lvar) (v' : val) stk_id mp :
       StackFree a ->
-      assertion_exists_binders a ## lexpr_map_fvars M ->
-      assertion_lexpr_fvars a ⊆ dom M ->
+      assertion_exists_binders a ## (dom M ∪ lexpr_map_fvars M) ->
+      assertion_true_fvars a ⊆ dom M ->
+      subst_map_avoids_reserved M ->
       lv ∉ lexpr_map_fvars M ->
       trnsl_assertion (subst a M) stk_id (fun y => if (y =? lv)%string then v' else mp y)
       ≡ trnsl_assertion (subst a M) stk_id mp.
     Proof.
-      intros Hsf Hbind Hfv Hlv.
-      apply (trnsl_assertion_subst_congr Hwf a M M stk_id
-               (fun y => if (y =? lv)%string then v' else mp y) mp); try done.
-      - intros q1 q2 Hag v0 Hv1 Hv2 v'' x Hx. exact (eval_lvar_stab_generic M q1 q2 Hag v0 Hv1 v'' x Hx).
-      - intros x Hx. exact (eval_lvar_base_stable M mp lv v' x Hlv Hx).
+      intros Hsf Hbind Hfv Hmr Hlv.
+      apply (trnsl_assertion_mp_irrelevant_reserved Hwf a M stk_id
+               (fun y => if (y =? lv)%string then v' else mp y) mp Hsf Hbind Hmr).
+      intros x Hx.
+      exact (eval_lvar_base_stable M mp lv v' x Hlv (Hfv x Hx)).
     Qed.
 
     (* mp is quantified here, inside the entailment (Iris-level ∀), rather
@@ -846,8 +945,8 @@ Section MainTranslation.
       | ρ σ stk mask x fld_vals ghost_fld_vals lvar_x
         Hfresh HNoDupFV HNoDupGFV HgfvFsNe HgfvValid Hstkcompat
       | | |
-      | ρ σ stk stk' mask invr args stmt inv_record p q lv0 t0 lexprs Hargs Hinv_mask Hinv_record Hinv_len Hstk_tp subst Hlvfresh Hbody IHHbody
-      | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_mask Hinv_record Hinv_len Hstk_tp subst
+      | ρ σ stk stk' mask invr args stmt inv_record p q lv0 t0 lexprs Hargs Hinv_mask Hinv_record Hinv_len Hlexprs_res Hstk_tp subst Hlvfresh Hlv0_res Hbody IHHbody
+      | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_mask Hinv_record Hinv_len Hlexprs_res Hstk_tp subst
       | | | | | |
       | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk Hfresh Hinf Hwd2 Hwd3 Hnotin Htrnsl1 Htrnsl2 Htrnsl3 Hstkcompat
       | ρ σ mask v t body c q Hsigma Hqfresh ] "IH";
@@ -934,6 +1033,7 @@ Section MainTranslation.
           iMod (Winv_open Hwf _ invr inv_record vs Hinv_record Hlenvs Hsub
                  with "Hiw Hfrag") as "[Hbody Hclose]".
           have Hbridge := inv_body_bridge Hwf invr inv_record lexprs vs stk_id mp
+            (lexpr_map_fvars_zip_no_reserved inv_record.(inv_args) lexprs Hlexprs_res)
             Hinv_record Hinv_len HF2.
           iEval (rewrite <- Hbridge) in "Hbody".
           iPoseProof ("IH" with "[%] [%]") as "IH1".
@@ -950,16 +1050,26 @@ Section MainTranslation.
           iDestruct "IH2" as "[Hstk [Hbody' Hq]]".
           have Hdom_sm : dom subst = list_to_set inv_record.(inv_args).
           { apply dom_list_to_map_zip. lia. }
-          have Hfv_sm : assertion_lexpr_fvars (inv_body inv_record) ⊆ dom subst.
-          { rewrite Hdom_sm. exact (Hwf.(pwf_inv_fvars_scoped) invr inv_record Hinv_record). }
+          have Hfv_sm : assertion_true_fvars (inv_body inv_record) ⊆ dom subst.
+          { rewrite Hdom_sm. exact (Hwf.(pwf_inv_fvars_closed) invr inv_record Hinv_record). }
           have Hlv_lexprs : Forall (fun le => lv0 ∉ lexpr_fvars le) lexprs.
           { exact (lexpr_list_fresh_lvar stk args lexprs lv0 Hargs Hlvfresh). }
           have Hlv_sm : lv0 ∉ lexpr_map_fvars subst.
           { exact (lexpr_map_fvars_zip_bound inv_record.(inv_args) lexprs lv0 Hlv_lexprs). }
+          have Hmr_sm : subst_map_avoids_reserved subst.
+          { apply subst_map_avoids_reserved_of_lexprs.
+            - exact (Hwf.(pwf_inv_args_not_reserved) invr inv_record Hinv_record).
+            - exact Hlexprs_res. }
+          have Hbind_sm : assertion_exists_binders (inv_body inv_record) ##
+            (dom subst ∪ lexpr_map_fvars subst).
+          { apply reserved_disjoint_dom.
+            - exact (Hwf.(pwf_inv_binders_reserved) invr inv_record Hinv_record).
+            - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                [exact (proj1 Hmr_sm v Hv) | exact (proj2 Hmr_sm v Hv)]. }
           iEval (rewrite (trnsl_assertion_subst_lv_stable Hwf (inv_body inv_record) subst lv0 v' stk_id mp
             (Hwf.(pwf_inv_body_stack_free) invr inv_record Hinv_record)
-            (Hwf.(pwf_inv_binders_fresh) invr inv_record subst Hinv_record)
-            Hfv_sm Hlv_sm)) in "Hbody'".
+            Hbind_sm
+            Hfv_sm Hmr_sm Hlv_sm)) in "Hbody'".
           iEval (rewrite Hbridge) in "Hbody'".
           iMod ("Hclose" with "Hbody'") as "_".
           iModIntro.
@@ -988,6 +1098,7 @@ Section MainTranslation.
           iMod (Winv_open Hwf _ invr inv_record vs Hinv_record Hlenvs Hsub
                  with "Hiw Hfrag") as "[Hbody Hclose]".
           have Hbridge := inv_body_bridge Hwf invr inv_record lexprs vs stk_id mp
+            (lexpr_map_fvars_zip_no_reserved inv_record.(inv_args) lexprs Hlexprs_res)
             Hinv_record Hinv_len HF2.
           iEval (rewrite <- Hbridge) in "Hbody".
           rewrite <- HInvs.
@@ -1004,16 +1115,26 @@ Section MainTranslation.
           iDestruct "Hpost" as "[Hstk [Hbody' Hq]]".
           have Hdom_sm : dom subst = list_to_set inv_record.(inv_args).
           { apply dom_list_to_map_zip. lia. }
-          have Hfv_sm : assertion_lexpr_fvars (inv_body inv_record) ⊆ dom subst.
-          { rewrite Hdom_sm. exact (Hwf.(pwf_inv_fvars_scoped) invr inv_record Hinv_record). }
+          have Hfv_sm : assertion_true_fvars (inv_body inv_record) ⊆ dom subst.
+          { rewrite Hdom_sm. exact (Hwf.(pwf_inv_fvars_closed) invr inv_record Hinv_record). }
           have Hlv_lexprs : Forall (fun le => lv0 ∉ lexpr_fvars le) lexprs.
           { exact (lexpr_list_fresh_lvar stk args lexprs lv0 Hargs Hlvfresh). }
           have Hlv_sm : lv0 ∉ lexpr_map_fvars subst.
           { exact (lexpr_map_fvars_zip_bound inv_record.(inv_args) lexprs lv0 Hlv_lexprs). }
+          have Hmr_sm : subst_map_avoids_reserved subst.
+          { apply subst_map_avoids_reserved_of_lexprs.
+            - exact (Hwf.(pwf_inv_args_not_reserved) invr inv_record Hinv_record).
+            - exact Hlexprs_res. }
+          have Hbind_sm : assertion_exists_binders (inv_body inv_record) ##
+            (dom subst ∪ lexpr_map_fvars subst).
+          { apply reserved_disjoint_dom.
+            - exact (Hwf.(pwf_inv_binders_reserved) invr inv_record Hinv_record).
+            - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                [exact (proj1 Hmr_sm v Hv) | exact (proj2 Hmr_sm v Hv)]. }
           iEval (rewrite (trnsl_assertion_subst_lv_stable Hwf (inv_body inv_record) subst lv0 v' stk_id mp
             (Hwf.(pwf_inv_body_stack_free) invr inv_record Hinv_record)
-            (Hwf.(pwf_inv_binders_fresh) invr inv_record subst Hinv_record)
-            Hfv_sm Hlv_sm)) in "Hbody'".
+            Hbind_sm
+            Hfv_sm Hmr_sm Hlv_sm)) in "Hbody'".
           iEval (rewrite Hbridge) in "Hbody'".
           rewrite HInvs.
           iMod ("Hclose" with "Hbody'") as "_".
@@ -1044,6 +1165,7 @@ Section MainTranslation.
         rewrite (trnsl_assertion_LInv_some invr inv_record lexprs stk_id mp Hinv_record).
         iIntros "[Hstk [Hbody Hu]]".
         have Hbridge := inv_body_bridge Hwf invr inv_record lexprs vs stk_id mp
+          (lexpr_map_fvars_zip_no_reserved inv_record.(inv_args) lexprs Hlexprs_res)
           Hinv_record Hinv_len HF2.
         rewrite Hbridge.
         iMod (Winv_alloc Hwf _ invr inv_record vs Hinv_record Hlenvs Hsub
@@ -1678,9 +1800,10 @@ Section MainTranslation.
           (* Save stk_type_compat before clearing *)
           assert (Hstk_compat: stk_type_compat ρ σ stk) by assumption.
           (* Prove existence of arg_vals *)
-          clear Hwelldef H1 H4 H11 H13.
+          clear Hwelldef H1 H6 H13 H15.
           clear subst_map.
-          revert lexprs H2 H12.
+          clear H5.
+          revert lexprs H2 H14.
           induction args as [| a args IH]; intros lexprs H2 H12.
           - simpl in H2. destruct lexprs; [ | discriminate ]. exists nil. constructor.
           - simpl in H2. destruct lexprs as [| l lexprs']; [ discriminate | ].
@@ -1704,7 +1827,7 @@ Section MainTranslation.
 
         assert (Forall2 (λ expr val, interp_lexpr expr mp = Some (trnsl_val val)) lexprs arg_vals) as Hlexprs_arg_vals.
           {
-            clear Hwelldef H1 H4 H11 H12 H13 subst_map.
+            clear Hwelldef H1 H5 H6 H13 H14 H15 subst_map.
             revert args arg_vals H2 Harg_vals.
             induction lexprs as [| le lexprs IH]; intros args arg_vals H2 Harg_vals.
             - destruct args; [| discriminate]. inversion Harg_vals. constructor.
@@ -1722,14 +1845,14 @@ Section MainTranslation.
         destruct proc_record as [proc_args proc_locals proc_pre proc_post proc_body] eqn:Hproc_record.
 
         assert (proc_entry = Proc proc_args proc_locals proc_pre proc_post proc_body) as Hpe.
-        { rewrite H0 in H9. injection H9 as <-. done. }
-        rewrite Hpe in H13.
+        { rewrite H0 in H11. injection H11 as <-. done. }
+        rewrite Hpe in H15.
 
         assert (Forall2 (λ arg_decl val, typeOf val = snd arg_decl)
                   (proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body)) arg_vals)
           as Harg_vals_typed.
         { apply (proc_call_args_typed_result ρ σ stk mp args lexprs arg_vals
-            (Proc proc_args proc_locals proc_pre proc_post proc_body) H3 Henv H13 H2 Hlexprs_arg_vals). }
+            (Proc proc_args proc_locals proc_pre proc_post proc_body) H3 Henv H15 H2 Hlexprs_arg_vals). }
 
         set (trnsl_assertion (subst proc_pre subst_map) stk_id mp) as u1.
 
@@ -1741,7 +1864,7 @@ Section MainTranslation.
         
         {
           (* proc_body = Skip *)
-        inversion H4; subst s.
+        inversion H6; subst s.
         iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold.
 
         iIntros "[Hstk Hu1] HΦ".
@@ -1793,10 +1916,18 @@ Section MainTranslation.
           assert (trnsl_assertion (subst proc_pre subst_map') stk_id mp ≡ proc_frame_pre) as Hproc_frame_pre.
           { subst proc_frame_pre. reflexivity. }
 
+          have Hmr_dom' : ∀ v, v ∈ dom subst_map' → ¬ is_reserved v.
+          { intros v Hv. apply elem_of_dom in Hv as [e He].
+            apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+            exact (proj1 (Forall_forall _ _)
+                     (Hwf.(pwf_proc_args_not_reserved) proc_name
+                        (Proc proc_args proc_locals proc_pre proc_post proc_body) H0) v He). }
+
           have Hproc_frame_pre' : trnsl_assertion (subst proc_pre subst_map') stk_id' mp ≡ proc_frame_pre.
           { etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
-              apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
+              apply (stack_free_assertion_subst Hwf _ _ Hmr_dom').
+              destruct Hspec_StackFree; done.
             - exact Hproc_frame_pre. }
 
           iSpecialize ("Hproc" with "[%]"). { exact Harg_vals_typed. }
@@ -1807,7 +1938,10 @@ Section MainTranslation.
               trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
           { intros ret_val. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
-              apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
+              apply (stack_free_assertion_subst Hwf _ _
+                       (dom_insert_not_reserved subst_map' "#ret_val" (LVal (trnsl_val ret_val))
+                          ret_val_not_reserved Hmr_dom')).
+              destruct Hspec_StackFree; done.
             - reflexivity. }
 
           iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_post_all. }
@@ -1825,19 +1959,46 @@ Section MainTranslation.
           {
             iFrame.
 
-            have HfvA : assertion_lexpr_fvars proc_pre ⊆ dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
-            { have Hfv := proj1 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0).
-              have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
-              rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hfv. }
+            have Hmr1 : subst_map_avoids_reserved (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
+            { apply subst_map_avoids_reserved_of_lexprs.
+              - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                         (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+              - exact H5. }
+            have Hmr2 : subst_map_avoids_reserved
+              (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
+            { apply subst_map_avoids_reserved_of_lexprs.
+              - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                         (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+              - exact (lval_list_no_reserved arg_vals trnsl_val). }
+            have HbA_M1 : assertion_exists_binders proc_pre ##
+              (dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) ∪
+               lexpr_map_fvars (list_to_map (zip proc_args.*1 lexprs))).
+            { apply reserved_disjoint_dom.
+              - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+              - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                  [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+            have HbA_M2 : assertion_exists_binders proc_pre ##
+              (dom (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr) ∪
+               lexpr_map_fvars (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))).
+            { apply reserved_disjoint_dom.
+              - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+              - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                  [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
+            have HfvA : ∀ v, v ∈ assertion_lexpr_fvars proc_pre →
+              v ∈ dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) ∨ is_reserved v.
+            { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
+              intros v Hv.
+              destruct (proj1 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0) v Hv) as [Hin | Hin].
+              - left. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hin.
+              - right. exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0) v Hin). }
             have HdomEq : dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) = dom (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
             { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
               have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ HlocalsDef. lia. }
               rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
             pose proof (trnsl_assertion_w_lexpr_subst proc_pre lexprs proc_args.*1 arg_vals stk_id mp u1 proc_frame_pre
               Hwf (proj1 Hspec_StackFree)
-              (proj1 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-              (proj1 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-              HfvA HdomEq
+              HbA_M1 HbA_M2
+              HfvA HdomEq Hmr1 Hmr2
               Hlexprs_arg_vals Hproc_pre Hproc_frame_pre) as Himpl.
             iApply Himpl. iFrame.
           }
@@ -1870,19 +2031,62 @@ Section MainTranslation.
             iSplitR "Hq".
             { rewrite fresh_mp_rewrite_symb_stk_to_stk_frm_compat; try done. rewrite trnsl_lval_trnsl_val_inverse. iFrame. }
 
-            { have HfvA : assertion_lexpr_fvars proc_post ⊆ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)).
-              { have Hfv := proj2 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0).
-                have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
-                rewrite dom_insert_L. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hfv. }
+            { have Hmr1_base : subst_map_avoids_reserved (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
+              { apply subst_map_avoids_reserved_of_lexprs.
+                - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                           (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+                - exact H5. }
+              have Hmr2_base : subst_map_avoids_reserved
+                (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
+              { apply subst_map_avoids_reserved_of_lexprs.
+                - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                           (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+                - exact (lval_list_no_reserved arg_vals trnsl_val). }
+              have Hlvar_x_ok : ¬ is_reserved lvar_x := H4.
+              have Hargs_ok : Forall (λ a, ¬ is_reserved a) proc_args.*1 :=
+                Hwf.(pwf_proc_args_not_reserved) proc_name
+                  (Proc proc_args proc_locals proc_pre proc_post proc_body) H0.
+              have Hmr1 : subst_map_avoids_reserved (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)).
+              { apply subst_map_avoids_reserved_insert.
+                - exact ret_val_not_reserved.
+                - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact Hlvar_x_ok.
+                - exact Hmr1_base. }
+              have Hmr2 : subst_map_avoids_reserved (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)).
+              { apply subst_map_avoids_reserved_insert.
+                - exact ret_val_not_reserved.
+                - intros v Hv. simpl in Hv. set_solver.
+                - exact Hmr2_base. }
+              have HbA_M1 : assertion_exists_binders proc_post ##
+                (dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) ∪
+                 lexpr_map_fvars (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs)))).
+              { apply reserved_disjoint_dom.
+                - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+                - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                    [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+              have HbA_M2 : assertion_exists_binders proc_post ##
+                (dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)) ∪
+                 lexpr_map_fvars (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))))).
+              { apply reserved_disjoint_dom.
+                - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+                - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                    [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
+              have HfvA : ∀ v, v ∈ assertion_lexpr_fvars proc_post →
+                v ∈ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) ∨ is_reserved v.
+              { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
+                intros v Hv.
+                destruct (proj2 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0) v Hv) as [Hin | Hin].
+                - left. rewrite dom_insert_L. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hin.
+                - right. exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0) v Hin). }
               have HdomEq : dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) = dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)).
               { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 rewrite !dom_insert_L. rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
               pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u (proc_frame_post ret_val)
                 Hwf (proj2 Hspec_StackFree)
-                (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-                (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-                HfvA HdomEq (fresh_lvar_not_in_lexpr_map_fvars_zip stk args lexprs proc_args.*1 lvar_x H2 H)
+                HbA_M1 HbA_M2
+                HfvA HdomEq Hmr1 Hmr2
+                (fresh_lvar_not_in_lexpr_map_fvars_zip stk args lexprs proc_args.*1 lvar_x H2 H)
+                Hlvar_x_ok Hargs_ok
                 H Hlexprs_arg_vals Hpost Hproc_frame_post) as Himpl.
               setoid_rewrite <- trnsl_assertion_unfold. iApply Himpl. iFrame. }
           }
@@ -1896,7 +2100,7 @@ Section MainTranslation.
 
         {
           (* proc_body != Skip *)
-        inversion H4; subst s.
+        inversion H6; subst s.
         iIntros (Φ). iModIntro.
         setoid_rewrite trnsl_assertion_unfold.
 
@@ -1948,10 +2152,18 @@ Section MainTranslation.
             exists val. split; [exact Hlk |]. apply typeOf_val_has_typ. exact Hty. }
           iSpecialize ("Hproc" with "[%]"). { exact Hdom_val. }
 
+          have Hmr_dom' : ∀ v, v ∈ dom subst_map' → ¬ is_reserved v.
+          { intros v Hv. apply elem_of_dom in Hv as [e He].
+            apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+            exact (proj1 (Forall_forall _ _)
+                     (Hwf.(pwf_proc_args_not_reserved) proc_name
+                        (Proc proc_args proc_locals proc_pre proc_post proc_body) H0) v He). }
+
           have Hproc_frame_pre' : trnsl_assertion (subst proc_pre subst_map') stk_id' mp ≡ proc_frame_pre.
           { etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
-              apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
+              apply (stack_free_assertion_subst Hwf _ _ Hmr_dom').
+              destruct Hspec_StackFree; done.
             - exact Hproc_frame_pre. }
 
           iSpecialize ("Hproc" with "[%]"). { exact Harg_vals_typed. }
@@ -1962,7 +2174,10 @@ Section MainTranslation.
               trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
           { intros ret_val. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
-              apply (stack_free_assertion_subst Hwf). destruct Hspec_StackFree; done.
+              apply (stack_free_assertion_subst Hwf _ _
+                       (dom_insert_not_reserved subst_map' "#ret_val" (LVal (trnsl_val ret_val))
+                          ret_val_not_reserved Hmr_dom')).
+              destruct Hspec_StackFree; done.
             - reflexivity. }
 
           iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_post_all. }
@@ -1979,19 +2194,46 @@ Section MainTranslation.
 
           {
             iFrame.
-            have HfvA : assertion_lexpr_fvars proc_pre ⊆ dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
-            { have Hfv := proj1 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0).
-              have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
-              rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hfv. }
+            have Hmr1 : subst_map_avoids_reserved (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
+            { apply subst_map_avoids_reserved_of_lexprs.
+              - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                         (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+              - exact H5. }
+            have Hmr2 : subst_map_avoids_reserved
+              (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
+            { apply subst_map_avoids_reserved_of_lexprs.
+              - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                         (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+              - exact (lval_list_no_reserved arg_vals trnsl_val). }
+            have HbA_M1 : assertion_exists_binders proc_pre ##
+              (dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) ∪
+               lexpr_map_fvars (list_to_map (zip proc_args.*1 lexprs))).
+            { apply reserved_disjoint_dom.
+              - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+              - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                  [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+            have HbA_M2 : assertion_exists_binders proc_pre ##
+              (dom (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr) ∪
+               lexpr_map_fvars (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))).
+            { apply reserved_disjoint_dom.
+              - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+              - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                  [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
+            have HfvA : ∀ v, v ∈ assertion_lexpr_fvars proc_pre →
+              v ∈ dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) ∨ is_reserved v.
+            { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
+              intros v Hv.
+              destruct (proj1 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0) v Hv) as [Hin | Hin].
+              - left. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hin.
+              - right. exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0) v Hin). }
             have HdomEq : dom (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr) = dom (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
             { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ HlocalsDef. have := Forall2_length _ _ _ Hlexprs_arg_vals. lia. }
               have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ HlocalsDef. lia. }
               rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
             pose proof (trnsl_assertion_w_lexpr_subst proc_pre lexprs proc_args.*1 arg_vals stk_id mp u1 proc_frame_pre
               Hwf (proj1 Hspec_StackFree)
-              (proj1 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-              (proj1 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-              HfvA HdomEq
+              HbA_M1 HbA_M2
+              HfvA HdomEq Hmr1 Hmr2
               Hlexprs_arg_vals Hproc_pre Hproc_frame_pre) as Himpl.
             iApply Himpl. iFrame.
           }
@@ -2022,19 +2264,62 @@ Section MainTranslation.
             iSplitR "Hq".
             { rewrite fresh_mp_rewrite_symb_stk_to_stk_frm_compat; try done. rewrite trnsl_lval_trnsl_val_inverse. iFrame. }
 
-            { have HfvA : assertion_lexpr_fvars proc_post ⊆ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)).
-              { have Hfv := proj2 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0).
-                have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
-                rewrite dom_insert_L. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hfv. }
+            { have Hmr1_base : subst_map_avoids_reserved (list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr).
+              { apply subst_map_avoids_reserved_of_lexprs.
+                - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                           (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+                - exact H5. }
+              have Hmr2_base : subst_map_avoids_reserved
+                (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
+              { apply subst_map_avoids_reserved_of_lexprs.
+                - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
+                           (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
+                - exact (lval_list_no_reserved arg_vals trnsl_val). }
+              have Hlvar_x_ok : ¬ is_reserved lvar_x := H4.
+              have Hargs_ok : Forall (λ a, ¬ is_reserved a) proc_args.*1 :=
+                Hwf.(pwf_proc_args_not_reserved) proc_name
+                  (Proc proc_args proc_locals proc_pre proc_post proc_body) H0.
+              have Hmr1 : subst_map_avoids_reserved (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)).
+              { apply subst_map_avoids_reserved_insert.
+                - exact ret_val_not_reserved.
+                - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact Hlvar_x_ok.
+                - exact Hmr1_base. }
+              have Hmr2 : subst_map_avoids_reserved (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)).
+              { apply subst_map_avoids_reserved_insert.
+                - exact ret_val_not_reserved.
+                - intros v Hv. simpl in Hv. set_solver.
+                - exact Hmr2_base. }
+              have HbA_M1 : assertion_exists_binders proc_post ##
+                (dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) ∪
+                 lexpr_map_fvars (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs)))).
+              { apply reserved_disjoint_dom.
+                - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+                - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                    [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+              have HbA_M2 : assertion_exists_binders proc_post ##
+                (dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)) ∪
+                 lexpr_map_fvars (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))))).
+              { apply reserved_disjoint_dom.
+                - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0)).
+                - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+                    [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
+              have HfvA : ∀ v, v ∈ assertion_lexpr_fvars proc_post →
+                v ∈ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) ∨ is_reserved v.
+              { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
+                intros v Hv.
+                destruct (proj2 (Hwf.(pwf_proc_fvars_bounded) proc_name _ H0) v Hv) as [Hin | Hin].
+                - left. rewrite dom_insert_L. rewrite dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). exact Hin.
+                - right. exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc_name _ H0) v Hin). }
               have HdomEq : dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip proc_args.*1 lexprs) : gmap lvar LExpr)) = dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)).
               { have Hlen : length proc_args.*1 ≤ length lexprs. { have := Forall2_length _ _ _ Hlexprs_arg_vals. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 have Hlen2 : length proc_args.*1 ≤ length (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals). { rewrite map_length. have := Forall2_length _ _ _ Harg_vals. have := @length_fmap _ _ fst proc_args. simpl in *. lia. }
                 rewrite !dom_insert_L. rewrite !dom_list_to_map_L. rewrite (fst_zip _ _ Hlen). rewrite (fst_zip _ _ Hlen2). reflexivity. }
               pose proof (trnsl_assertion_w_lexpr_subst_r proc_post lexprs proc_args.*1 arg_vals lvar_x ret_val stk stk_id mp u (proc_frame_post ret_val)
                 Hwf (proj2 Hspec_StackFree)
-                (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-                (proj2 (Hwf.(pwf_proc_binders_fresh) proc_name _ _ H0))
-                HfvA HdomEq (fresh_lvar_not_in_lexpr_map_fvars_zip stk args lexprs proc_args.*1 lvar_x H2 H)
+                HbA_M1 HbA_M2
+                HfvA HdomEq Hmr1 Hmr2
+                (fresh_lvar_not_in_lexpr_map_fvars_zip stk args lexprs proc_args.*1 lvar_x H2 H)
+                Hlvar_x_ok Hargs_ok
                 H Hlexprs_arg_vals Hpost Hproc_frame_post) as Himpl.
               setoid_rewrite <- trnsl_assertion_unfold. iApply Himpl. iFrame. }
           }
@@ -2118,7 +2403,7 @@ Section MainTranslation.
          local-variable names as lvar names (which would force every
          procedure sharing such a name to agree on its type under a single
          global σ). *)
-      (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+      (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
       (* The per-invariant shared worlds are established.  The calculus has no
          rule that could produce this -- an [LInv] fact is only ever *traded
          for* by [InvAllocRule], never conjured -- so it is an explicit
@@ -2173,7 +2458,7 @@ Section MainTranslation.
       have Hargs_locals_lvs_disjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs := dll_disjoint dll.
 
       destruct (Hbodies proc proc_record Hproc_map) as [Hwelldef Hbody_msk].
-      destruct (Hbody_msk msk Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & HRHT).
+      destruct (Hbody_msk msk Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & HRHT).
 
       set (args := (proc_args_of proc_record).*1).
       set (loc_names := (proc_locals_of proc_record).*1).
@@ -2278,14 +2563,55 @@ Section MainTranslation.
       have Hargs_len_lvs' : length args ≤ length (map LVar args_lvs).
       { rewrite map_length. rewrite Hargs_len_lvs. apply Nat.le_refl. }
 
+      (* mp0 only ever overrides mp at lvs = args_lvs ++ locals_lvs, all of
+         which are non-reserved (dll_args_not_reserved/dll_locals_not_reserved)
+         -- so it agrees with mp at every reserved name, the fact both
+         Hprecond_bridge/Hpostcond_bridge's own widened Hbase need to cover
+         the "is_reserved" disjunct trnsl_assertion_subst_congr's Hbase
+         premise now carries. *)
+      have Hreserved_mp0 : ∀ x, is_reserved x → mp0 x = mp x.
+      { intros x Hx.
+        have Hx_lvs : x ∉ lvs.
+        { intro Hin. unfold lvs in Hin. apply elem_of_app in Hin as [Hin|Hin].
+          - exact (proj1 (Forall_forall _ _) (dll_args_not_reserved dll) x Hin Hx).
+          - exact (proj1 (Forall_forall _ _) (dll_locals_not_reserved dll) x Hin Hx). }
+        unfold mp0.
+        have Hnone : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! x = None.
+        { apply not_elem_of_dom.
+          rewrite dom_list_to_map_L (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))).
+          rewrite elem_of_list_to_set. exact Hx_lvs. }
+        rewrite Hnone. reflexivity. }
+
       have Hprecond_bridge :
         trnsl_assertion (subst (proc_precond_of proc_record) (list_to_map (zip args (map LVar args_lvs)))) stk_id mp0
         ≡ precond.
       { set (M1 := list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr).
         set (M2 := list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals)) : gmap var LExpr).
+        have Hmr1 : subst_map_avoids_reserved M1.
+        { unfold M1. apply subst_map_avoids_reserved_of_lexprs.
+          - exact (Hwf.(pwf_proc_args_not_reserved) proc proc_record Hproc_map).
+          - exact (lvar_list_no_reserved args_lvs (dll_args_not_reserved dll)). }
+        have Hmr2 : subst_map_avoids_reserved M2.
+        { unfold M2. apply subst_map_avoids_reserved_of_lexprs.
+          - exact (Hwf.(pwf_proc_args_not_reserved) proc proc_record Hproc_map).
+          - exact (lval_list_no_reserved stk_vals trnsl_val). }
+        have HbA_M1 : assertion_exists_binders (proc_precond_of proc_record) ##
+          (dom M1 ∪ lexpr_map_fvars M1).
+        { apply reserved_disjoint_dom.
+          - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map)).
+          - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+              [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+        have HbA_M2 : assertion_exists_binders (proc_precond_of proc_record) ##
+          (dom M2 ∪ lexpr_map_fvars M2).
+        { apply reserved_disjoint_dom.
+          - exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map)).
+          - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+              [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
         have Hfv := proj1 (Hwf.(pwf_proc_fvars_bounded) proc proc_record Hproc_map).
-        have HfvA : assertion_lexpr_fvars (proc_precond_of proc_record) ⊆ dom M1.
-        { unfold M1. rewrite dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hfv. }
+        have HfvA : ∀ v, v ∈ assertion_lexpr_fvars (proc_precond_of proc_record) → v ∈ dom M1 ∨ is_reserved v.
+        { intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+          - left. unfold M1. rewrite dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hin.
+          - right. exact (proj1 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map) v Hin). }
         have HdomEq : dom M1 = dom M2.
         { unfold M1, M2. rewrite !dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') (fst_zip _ _ Hargs_len2'). reflexivity. }
         have Hstab := hstab_lexpr_subst_fwd args (map LVar args_lvs) stk_vals HdomEq.
@@ -2328,10 +2654,15 @@ Section MainTranslation.
           have Hmp0_lv : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some val.
           { apply elem_of_list_to_map_1; [rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))); exact Hnodup_lvs | exact Hzip_lvs_full]. }
           rewrite Hmp0_lv. done. }
+        have Hbase' : ∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        { intros x [Hx | Hx]; [exact (Hbase x Hx) |].
+          unfold eval_lvar.
+          have Hn1 : M1 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr1 x Hin Hx). }
+          have Hn2 : M2 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr2 x Hin Hx). }
+          rewrite Hn1 Hn2. f_equal. exact (Hreserved_mp0 x Hx). }
         have Heq := trnsl_assertion_subst_congr Hwf (proc_precond_of proc_record) M1 M2 stk_id mp0 mp
-          Hpre_free (proj1 (Hwf.(pwf_proc_binders_fresh) proc proc_record M1 Hproc_map))
-          (proj1 (Hwf.(pwf_proc_binders_fresh) proc proc_record M2 Hproc_map))
-          HfvA HdomEq Hstab Hbase.
+          Hpre_free HbA_M1 HbA_M2
+          HfvA HdomEq Hmr1 Hmr2 Hstab Hbase'.
         rewrite Heq. exact Hprecond_eq. }
 
       set (ret_val := trnsl_lval (mp0 lv_final)).
@@ -2345,12 +2676,45 @@ Section MainTranslation.
       { set (M1 := <["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))) : gmap var LExpr).
         set (M2 := <["#ret_val" := LVal (trnsl_val ret_val)]>
                      (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals))) : gmap var LExpr).
+        have Hmr1_base : subst_map_avoids_reserved (list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr).
+        { apply subst_map_avoids_reserved_of_lexprs.
+          - exact (Hwf.(pwf_proc_args_not_reserved) proc proc_record Hproc_map).
+          - exact (lvar_list_no_reserved args_lvs (dll_args_not_reserved dll)). }
+        have Hmr2_base : subst_map_avoids_reserved
+          (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals)) : gmap var LExpr).
+        { apply subst_map_avoids_reserved_of_lexprs.
+          - exact (Hwf.(pwf_proc_args_not_reserved) proc proc_record Hproc_map).
+          - exact (lval_list_no_reserved stk_vals trnsl_val). }
+        have Hmr1 : subst_map_avoids_reserved M1.
+        { unfold M1. apply subst_map_avoids_reserved_insert.
+          - exact ret_val_not_reserved.
+          - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact Hlv_final_res.
+          - exact Hmr1_base. }
+        have Hmr2 : subst_map_avoids_reserved M2.
+        { unfold M2. apply subst_map_avoids_reserved_insert.
+          - exact ret_val_not_reserved.
+          - intros v Hv. simpl in Hv. set_solver.
+          - exact Hmr2_base. }
+        have HbA_M1 : assertion_exists_binders (proc_postcond_of proc_record) ##
+          (dom M1 ∪ lexpr_map_fvars M1).
+        { apply reserved_disjoint_dom.
+          - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map)).
+          - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+              [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+        have HbA_M2 : assertion_exists_binders (proc_postcond_of proc_record) ##
+          (dom M2 ∪ lexpr_map_fvars M2).
+        { apply reserved_disjoint_dom.
+          - exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map)).
+          - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+              [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
         have Hfv := proj2 (Hwf.(pwf_proc_fvars_bounded) proc proc_record Hproc_map).
         have HdomEq0 : dom (list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr)
                      = dom (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals)) : gmap var LExpr).
         { rewrite !dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs') (fst_zip _ _ Hargs_len2'). reflexivity. }
-        have HfvA : assertion_lexpr_fvars (proc_postcond_of proc_record) ⊆ dom M1.
-        { unfold M1. rewrite dom_insert_L dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hfv. }
+        have HfvA : ∀ v, v ∈ assertion_lexpr_fvars (proc_postcond_of proc_record) → v ∈ dom M1 ∨ is_reserved v.
+        { intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+          - left. unfold M1. rewrite dom_insert_L dom_list_to_map_L (fst_zip _ _ Hargs_len_lvs'). exact Hin.
+          - right. exact (proj2 (Hwf.(pwf_proc_binders_reserved) proc proc_record Hproc_map) v Hin). }
         have HdomEq : dom M1 = dom M2.
         { unfold M1, M2. rewrite !dom_insert_L. rewrite HdomEq0. reflexivity. }
         have Hstab := hstab_lexpr_subst_r args (map LVar args_lvs) stk_vals lv_final ret_val HdomEq.
@@ -2401,10 +2765,15 @@ Section MainTranslation.
             have Hmp0_lv : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some val.
           { apply elem_of_list_to_map_1; [rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))); exact Hnodup_lvs | exact Hzip_lvs_full]. }
           rewrite Hmp0_lv. done. }
+        have Hbase' : ∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        { intros x [Hx | Hx]; [exact (Hbase x Hx) |].
+          unfold eval_lvar.
+          have Hn1 : M1 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr1 x Hin Hx). }
+          have Hn2 : M2 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr2 x Hin Hx). }
+          rewrite Hn1 Hn2. f_equal. exact (Hreserved_mp0 x Hx). }
         have Heq := trnsl_assertion_subst_congr Hwf (proc_postcond_of proc_record) M1 M2 stk_id mp0 mp
-          Hpost_free (proj2 (Hwf.(pwf_proc_binders_fresh) proc proc_record M1 Hproc_map))
-          (proj2 (Hwf.(pwf_proc_binders_fresh) proc proc_record M2 Hproc_map))
-          HfvA HdomEq Hstab Hbase.
+          Hpost_free HbA_M1 HbA_M2
+          HfvA HdomEq Hmr1 Hmr2 Hstab Hbase'.
         rewrite Heq. exact (Hpostcond_eq ret_val). }
 
       iPoseProof (rrl_validity ρ σ stk_id

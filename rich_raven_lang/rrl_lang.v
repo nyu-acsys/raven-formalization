@@ -177,6 +177,40 @@ Proof.
         { rewrite lookup_insert_ne; [exact Hk' | congruence]. }
 Qed.
 
+(* Inserting a fresh binding can only grow lexpr_map_fvars by the new
+   value's own fvars. *)
+Lemma lexpr_map_fvars_insert_subseteq (M : gmap lvar LExpr) (k : lvar) (v : LExpr) :
+  lexpr_map_fvars (<[k := v]> M) ⊆ lexpr_fvars v ∪ lexpr_map_fvars M.
+Proof.
+  intros x Hx.
+  destruct (decide (x ∈ lexpr_fvars v)) as [Hv | Hv]; [set_solver |].
+  destruct (decide (x ∈ lexpr_map_fvars M)) as [HM | HM]; [set_solver |].
+  exfalso.
+  have Hn : x ∉ lexpr_map_fvars (<[k := v]> M).
+  { apply (proj2 (lexpr_map_fvars_spec _ x)).
+    intros k' e' Hk'.
+    destruct (decide (k' = k)) as [-> | Hne].
+    - rewrite lookup_insert in Hk'. injection Hk' as <-. exact Hv.
+    - rewrite lookup_insert_ne in Hk'; [| congruence].
+      exact (proj1 (lexpr_map_fvars_spec M x) HM k' e' Hk'). }
+  exact (Hn Hx).
+Qed.
+
+(* lexpr_map_fvars of a zipped-up substitution map is bounded by the union
+   of the values' own fvars -- collapsing duplicate keys via list_to_map
+   can only shrink the union, never exceed it. *)
+Lemma lexpr_map_fvars_zip_subseteq (ks : list lvar) (vs : list LExpr) :
+  lexpr_map_fvars (list_to_map (zip ks vs) : gmap lvar LExpr) ⊆ ⋃ (lexpr_fvars <$> vs).
+Proof.
+  revert vs. induction ks as [| k ks' IH]; intros vs; simpl.
+  - unfold lexpr_map_fvars. rewrite map_fold_empty. set_solver.
+  - destruct vs as [| v vs']; simpl.
+    + unfold lexpr_map_fvars. rewrite map_fold_empty. set_solver.
+    + have := lexpr_map_fvars_insert_subseteq (list_to_map (zip ks' vs')) k v.
+      have := IH vs'.
+      set_solver.
+Qed.
+
 Definition symb_map : Type := lvar -> val.
 
 Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
@@ -647,6 +681,19 @@ Fixpoint subst (ra: assertion) (mp: gmap var LExpr) : assertion := match ra with
 | LAnd a1 a2 => LAnd (subst a1 mp) (subst a2 mp)
 end.
 
+(* LExists binder variables of an assertion (does NOT descend into LInv/LPred bodies).
+   Moved ahead of InvRecord/PredRecord/ProcRecord's own well-formedness
+   definitions (InvBodyWF etc. below) so they can state their own "## dom M"
+   premise in terms of it -- see local/binders.md. *)
+Fixpoint assertion_exists_binders (a : assertion) : gset lvar :=
+  match a with
+  | LExists v _ body => {[v]} ∪ assertion_exists_binders body
+  | LForall _ _ body => assertion_exists_binders body
+  | LIte _ then_ else_ => assertion_exists_binders then_ ∪ assertion_exists_binders else_
+  | LAnd a1 a2 => assertion_exists_binders a1 ∪ assertion_exists_binders a2
+  | _ => ∅
+  end.
+
 (* Builds an association gmap out of a key list zipped positionally against
    a value list -- the one low-level pattern every symbolic stack (var ->
    lvar), stack frame (var -> val / lvar -> val), and substitution map
@@ -671,11 +718,20 @@ Record InvRecord := Inv {
   inv_body: assertion;
 }.
 
-(* Well-formedness: the body only references its formal argument variables,
-   so substitution commutes with argument substitution. *)
+(* Well-formedness: the body only references its formal argument variables
+   (mod its own internal binders, see assertion_exists_binders r.(inv_body)
+   ## dom M below), so substitution commutes with argument substitution.
+   The "## dom M" premise is what a naively-unconditional version of this
+   fact would need to hold for *any* M, which is unsatisfiable whenever
+   inv_body has a genuine internal existential (e.g. an Auth-style ghost
+   witness) -- see local/binders.md. Discharged via the record's own
+   binders being drawn from the reserved namespace (ProgramWF's
+   pwf_inv_binders_reserved) together with M avoiding it, not by M being
+   unconstrained. *)
 Definition InvBodyWF (r : InvRecord) : Prop :=
   forall (args : list LExpr) (M : gmap var LExpr),
     length args = length r.(inv_args) →
+    assertion_exists_binders r.(inv_body) ## dom M →
     subst (r.(inv_body))
       (list_to_map (zip (r.(inv_args)) (map (fun e => lexpr_subst e M) args))) =
     subst (subst (r.(inv_body))
@@ -688,10 +744,12 @@ Record PredRecord := Pred {
   pred_body: assertion;
 }.
 
-(* Well-formedness: analogous condition for predicate bodies. *)
+(* Well-formedness: analogous condition for predicate bodies, with the
+   same "## dom M" premise as InvBodyWF and for the same reason. *)
 Definition PredBodyWF (r : PredRecord) : Prop :=
   forall (args : list LExpr) (M : gmap var LExpr),
     length args = length r.(pred_args) →
+    assertion_exists_binders r.(pred_body) ## dom M →
     subst (r.(pred_body))
       (list_to_map (zip (r.(pred_args)) (map (fun e => lexpr_subst e M) args))) =
     subst (subst (r.(pred_body))
@@ -736,17 +794,6 @@ Inductive StackFree : assertion → Prop :=
     StackFree (LPred pred_name args).
 
 Global Parameter proc_map : gmap proc_name ProcRecord.
-
-
-(* LExists binder variables of an assertion (does NOT descend into LInv/LPred bodies) *)
-Fixpoint assertion_exists_binders (a : assertion) : gset lvar :=
-  match a with
-  | LExists v _ body => {[v]} ∪ assertion_exists_binders body
-  | LForall _ _ body => assertion_exists_binders body
-  | LIte _ then_ else_ => assertion_exists_binders then_ ∪ assertion_exists_binders else_
-  | LAnd a1 a2 => assertion_exists_binders a1 ∪ assertion_exists_binders a2
-  | _ => ∅
-  end.
 
 (* Per-(typ,val) compatibility check -- factored out of env_typ_well_defined
    so it can be used standalone by LExists/LForall's own translation
@@ -811,6 +858,157 @@ Fixpoint assertion_lexpr_fvars (a : assertion) : gset lvar :=
   | _ => ∅
   end.
 
+(* Scope-correct free variables: unlike assertion_lexpr_fvars, this
+   subtracts LExists's own bound variable from its body's fvars, so it
+   never over-approximates through a genuine existential (see Finding 2 in
+   local/binders.md -- assertion_lexpr_fvars deliberately keeps the bug,
+   since the reserved-namespace design tolerates it; this function is the
+   accurate version needed where that tolerance isn't good enough, namely
+   trnsl_assertion_mp_irrelevant_reserved below).
+   LForall's bound variable is *not* subtracted, matching
+   assertion_exists_binders and trnsl_assertion_forall: LForall's binder is
+   inert in the translation (trnsl_assertion_forall never updates mp), so a
+   leaf mention of it inside body is genuinely read from the ambient mp,
+   not shadowed. *)
+Fixpoint assertion_true_fvars (a : assertion) : gset lvar :=
+  match a with
+  | LExprA e => lexpr_fvars e
+  | LOwn e _ chunk => lexpr_fvars e ∪ lexpr_fvars chunk
+  | LGhostOwn e _ _ chunk => lexpr_fvars e ∪ lexpr_fvars chunk
+  | LForall _ _ body => assertion_true_fvars body
+  | LExists v _ body => assertion_true_fvars body ∖ {[v]}
+  | LIte cond then_ else_ => lexpr_fvars cond ∪ assertion_true_fvars then_ ∪ assertion_true_fvars else_
+  | LInv _ args => ⋃ (lexpr_fvars <$> args)
+  | LPred _ args => ⋃ (lexpr_fvars <$> args)
+  | LAnd a1 a2 => assertion_true_fvars a1 ∪ assertion_true_fvars a2
+  | _ => ∅
+  end.
+
+(* assertion_true_fvars only ever removes names assertion_lexpr_fvars
+   would keep (the LExists case), never adds any -- so it's always a
+   subset. *)
+Lemma assertion_true_fvars_subseteq_lexpr_fvars (a : assertion) :
+  assertion_true_fvars a ⊆ assertion_lexpr_fvars a.
+Proof.
+  induction a; simpl; try set_solver.
+Qed.
+
+(* Every fvar surviving a substitution either traces back to an
+   unsubstituted original fvar or came in through some substituted
+   expression's own fvars -- an unconditional inclusion, independent of any
+   binder-disjointness (capture, if it happened, would only route a
+   would-be-bound occurrence through M's image, still counted on the
+   right). The workhorse for assertion_true_fvars_subst_bound below. *)
+Lemma lexpr_fvars_subst_bound (e : LExpr) (M : gmap lvar LExpr) :
+  lexpr_fvars (lexpr_subst e M) ⊆ (lexpr_fvars e ∖ dom M) ∪ lexpr_map_fvars M.
+Proof.
+  induction e; simpl.
+  - destruct (M !! x) as [ex | ] eqn:Hx; simpl; rewrite Hx /=.
+    + have Hsub : lexpr_fvars ex ⊆ lexpr_map_fvars M.
+      { intros y Hy. destruct (decide (y ∈ lexpr_map_fvars M)) as [Hin | Hn]; [exact Hin |].
+        exfalso. exact (proj1 (lexpr_map_fvars_spec M y) Hn x ex Hx Hy). }
+      intros y Hy. apply elem_of_union_r. exact (Hsub y Hy).
+    + apply not_elem_of_dom in Hx.
+      intros y Hy. apply elem_of_singleton in Hy as ->.
+      apply elem_of_union_l. apply elem_of_difference. split; [apply elem_of_singleton; reflexivity | exact Hx].
+  - set_solver.
+  - set_solver.
+  - set_solver.
+  - set_solver.
+  - set_solver.
+Qed.
+
+(* List-of-arguments version, for LInv/LPred's leaf case. *)
+Lemma lexpr_fvars_subst_bound_list (args : list LExpr) (M : gmap lvar LExpr) :
+  ⋃ (lexpr_fvars <$> map (fun e => lexpr_subst e M) args)
+  ⊆ (⋃ (lexpr_fvars <$> args) ∖ dom M) ∪ lexpr_map_fvars M.
+Proof.
+  induction args as [| e args' IH]; simpl; [set_solver |].
+  have He := lexpr_fvars_subst_bound e M. set_solver.
+Qed.
+
+(* Assertion-level analogue of lexpr_fvars_subst_bound, unconditional in
+   the same way. LExists's own case needs no side hypothesis either: the
+   set-algebra alone (distributing ∖{[v]} over the IH's union) gives the
+   bound, regardless of whether v happens to lie in dom M. *)
+Lemma assertion_true_fvars_subst_mem_bound (a : assertion) (M : gmap lvar LExpr) :
+  assertion_true_fvars (subst a M) ⊆ (assertion_true_fvars a ∖ dom M) ∪ lexpr_map_fvars M.
+Proof.
+  induction a as
+    [ pn pe
+    | sg
+    | pexp
+    | pp
+    | oe ofld ochunk
+    | ge gfld gr gchunk
+    | fv ft fbody IHf
+    | ev et ebody IHe
+    | icond ithen IHi1 ielse IHi2
+    | ivn iargs
+    | pdn pargs
+    | a1 IH1 a2 IH2 ];
+    simpl; try set_solver.
+  - (* LExprA *) have := lexpr_fvars_subst_bound pexp M. set_solver.
+  - (* LOwn *)
+    have := lexpr_fvars_subst_bound oe M. have := lexpr_fvars_subst_bound ochunk M. set_solver.
+  - (* LGhostOwn *)
+    have := lexpr_fvars_subst_bound ge M. have := lexpr_fvars_subst_bound gchunk M. set_solver.
+  - (* LIte *) have := lexpr_fvars_subst_bound icond M. set_solver.
+  - (* LInv *) have := lexpr_fvars_subst_bound_list iargs M. set_solver.
+  - (* LPred *) have := lexpr_fvars_subst_bound_list pargs M. set_solver.
+Qed.
+
+(* Tight corollary: when a's true fvars are already fully covered by dom M,
+   substituting leaves nothing behind -- no reserved (or any other) name
+   escapes. This is what makes the reserved-namespace design's "or
+   reserved" escape hatch unnecessary once assertion_true_fvars (rather
+   than assertion_lexpr_fvars) is used: see pwf_inv_fvars_closed /
+   pwf_pred_fvars_closed and trnsl_assertion_mp_irrelevant_reserved. *)
+Lemma assertion_true_fvars_subst_bound (a : assertion) (M : gmap lvar LExpr) :
+  assertion_true_fvars a ⊆ dom M →
+  assertion_true_fvars (subst a M) ⊆ lexpr_map_fvars M.
+Proof.
+  intro H. have := assertion_true_fvars_subst_mem_bound a M. set_solver.
+Qed.
+
+(* Naming convention distinguishing lvars an *authored* invariant/
+   predicate/procedure-contract body binds internally (its own
+   existential/universal witnesses, e.g. counterInv_body's own ghost
+   value) from every other lvar in the system: entry lvars, derivation-
+   fresh witnesses (VarAssignmentRule etc.), and formal-argument names.
+   Reserved names are never chosen by anything except the author of an
+   invariant/predicate/proc contract's own binder, and never appear as a
+   formal-argument name or as a key/value some substitution map could
+   mention -- see subst_map_avoids_reserved below and local/binders.md
+   for the full argument. This is what lets ProgramWF's own
+   binder-freshness obligations become purely syntactic, local checks
+   instead of an unsatisfiable "forall M" disjointness. *)
+Definition is_reserved (v : lvar) : Prop := String.prefix "$" v = true.
+
+Global Instance is_reserved_dec (v : lvar) : Decision (is_reserved v).
+Proof. unfold is_reserved. apply _. Defined.
+
+(* Bundles both projections of "M was built by the ordinary framework
+   machinery, not by hand-picking a reserved name": neither its keys
+   (formal-argument/entry-lvar names) nor the fvars of its values (lvars
+   some caller's stack happens to use) ever land in the reserved
+   namespace. Whoever supplies this for a concrete M is asserting it was
+   actually built that way -- e.g. via trnsl_expr_lExpr against an
+   ordinary symbolic stack, or via fresh_proc_entry_lvars/Hσ_rich, itself
+   expected to be strengthened to avoid the reserved prefix wherever it
+   is finally discharged for a concrete program (see local/binders.md's
+   deferred item; not yet needed to typecheck this file). *)
+Definition subst_map_avoids_reserved (M : gmap lvar LExpr) : Prop :=
+  (∀ v, v ∈ dom M → ¬ is_reserved v) ∧ (∀ v, v ∈ lexpr_map_fvars M → ¬ is_reserved v).
+
+(* The bridge from the record-local pwf_*_binders_reserved fields (an
+   assertion's own binders are all reserved) plus subst_map_avoids_reserved
+   (a substitution map touches none of them) to the disjointness fact the
+   translation machinery actually needs. *)
+Lemma reserved_disjoint_dom (R X : gset lvar) :
+  set_Forall is_reserved R → (∀ v, v ∈ X → ¬ is_reserved v) → R ## X.
+Proof. intros HR HX v HvR HvX. exact (HX v HvX (HR v HvR)). Qed.
+
 Lemma assertion_exists_binders_subst (a : assertion) (M : gmap lvar LExpr) :
   assertion_exists_binders (subst a M) = assertion_exists_binders a.
 Proof.
@@ -818,16 +1016,30 @@ Proof.
 Qed.
 
 (* Substitution composes: if all fvars of e are in dom σ, then substituting
-   via (fmap (fun e => lexpr_subst e M) σ) equals substituting σ then M. *)
-Lemma lexpr_subst_compose (e : LExpr) (σ M : gmap var LExpr) :
-  lexpr_fvars e ⊆ dom σ →
+   via (fmap (fun e => lexpr_subst e M) σ) equals substituting σ then M.
+   Generalized over an extra "safe to leave unsubstituted" set R, disjoint
+   from dom M: covers names an over-approximating fvars computation might
+   pull in that aren't genuinely free (see assertion_lexpr_fvars's own
+   generalization below, and local/binders.md). Instantiating R := ∅
+   recovers the original statement exactly. *)
+Lemma lexpr_subst_compose (e : LExpr) (σ M : gmap var LExpr) (R : gset lvar) :
+  R ## dom M →
+  lexpr_fvars e ⊆ dom σ ∪ R →
   lexpr_subst e (fmap (fun e' => lexpr_subst e' M) σ) = lexpr_subst (lexpr_subst e σ) M.
 Proof.
-  induction e; simpl; intro Hfv.
+  intro HR. induction e; simpl; intro Hfv.
   - (* LVar x *)
-    have Hx : x ∈ dom σ. { set_solver. }
-    apply elem_of_dom in Hx as [ex Hx].
-    rewrite lookup_fmap Hx /=. done.
+    destruct (decide (x ∈ dom σ)) as [Hxin | Hxout].
+    + apply elem_of_dom in Hxin as [ex Hex].
+      rewrite lookup_fmap Hex /=. done.
+    + have HxR : x ∈ R. { set_solver. }
+      have HxM : x ∉ dom M. { set_solver. }
+      apply not_elem_of_dom in Hxout.
+      apply not_elem_of_dom in HxM.
+      rewrite Hxout /=.
+      rewrite lookup_fmap Hxout /=.
+      rewrite HxM.
+      reflexivity.
   - done.
   - have := IHe Hfv. congruence.
   - have H1 := IHe1 ltac:(set_solver). have H2 := IHe2 ltac:(set_solver). congruence.
@@ -858,22 +1070,30 @@ Proof.
     simpl. rewrite dom_insert_L IH; [done | simpl in Hlen; lia].
 Qed.
 
-(* Assertion substitution composes: if all lvar fvars of a are in dom σ, then
-   subst a (fmap (fun e => lexpr_subst e M) σ) = subst (subst a σ) M. *)
-Lemma assertion_subst_compose (a : assertion) (σ M : gmap var LExpr) :
-  assertion_lexpr_fvars a ⊆ dom σ →
+(* Generalized the same way as lexpr_subst_compose, and by the same
+   argument: R is threaded through the induction *unchanged* rather than
+   recomputed at each LExists/LForall (assertion_lexpr_fvars doesn't
+   shrink through those cases -- it's literally unchanged, by
+   definition -- so the set of names needing coverage doesn't either).
+   Typical instantiation: R := assertion_exists_binders a, which is what
+   lets a's own over-approximated fvars at every LExists/LForall leak in
+   its own binder names for free, and R := ∅ recovers the original
+   unconditional statement. *)
+Lemma assertion_subst_compose (a : assertion) (σ M : gmap var LExpr) (R : gset lvar) :
+  R ## dom M →
+  assertion_lexpr_fvars a ⊆ dom σ ∪ R →
   subst a (fmap (fun e => lexpr_subst e M) σ) = subst (subst a σ) M.
 Proof.
-  induction a; simpl; intro Hfv; try done.
-  - f_equal. apply lexpr_subst_compose. exact Hfv.
-  - f_equal; apply lexpr_subst_compose; set_solver.
-  - f_equal; apply lexpr_subst_compose; set_solver.
+  intro HR. induction a; simpl; intro Hfv; try done.
+  - f_equal. apply (lexpr_subst_compose _ _ _ R HR). exact Hfv.
+  - f_equal; apply (lexpr_subst_compose _ _ _ R HR); set_solver.
+  - f_equal; apply (lexpr_subst_compose _ _ _ R HR); set_solver.
   - f_equal. apply IHa. exact Hfv.
   - f_equal. apply IHa. exact Hfv.
-  - f_equal; [apply lexpr_subst_compose | apply IHa1 | apply IHa2]; set_solver.
+  - f_equal; [apply (lexpr_subst_compose _ _ _ R HR) | apply IHa1 | apply IHa2]; set_solver.
   - (* LInv *) f_equal. rewrite map_map. apply Forall_fmap_ext_1.
     apply Forall_forall. intros e He.
-    apply lexpr_subst_compose.
+    apply (lexpr_subst_compose _ _ _ R HR).
     have Hsub : lexpr_fvars e ⊆ ⋃ (lexpr_fvars <$> args). {
       intros x Hx. apply elem_of_union_list. exists (lexpr_fvars e).
       split; [apply elem_of_list_fmap; exists e; split; [done | exact He] | exact Hx].
@@ -881,7 +1101,7 @@ Proof.
     set_solver.
   - (* LPred *) f_equal. rewrite map_map. apply Forall_fmap_ext_1.
     apply Forall_forall. intros e He.
-    apply lexpr_subst_compose.
+    apply (lexpr_subst_compose _ _ _ R HR).
     have Hsub : lexpr_fvars e ⊆ ⋃ (lexpr_fvars <$> args). {
       intros x Hx. apply elem_of_union_list. exists (lexpr_fvars e).
       split; [apply elem_of_list_fmap; exists e; split; [done | exact He] | exact Hx].
@@ -890,32 +1110,41 @@ Proof.
   - f_equal; [apply IHa1 | apply IHa2]; set_solver.
 Qed.
 
-(* InvBodyWF follows from the simple well-scopedness condition. *)
+(* InvBodyWF follows from the widened well-scopedness condition: every
+   lexpr fvar of inv_body is either a genuine formal argument or one of
+   inv_body's own binders (the latter only ever shows up because
+   assertion_lexpr_fvars doesn't subtract LExists/LForall's bound
+   variable -- see local/binders.md). *)
 Lemma inv_body_wf_from_scoped (r : InvRecord) :
-  assertion_lexpr_fvars r.(inv_body) ⊆ list_to_set r.(inv_args) →
+  (∀ v, v ∈ assertion_lexpr_fvars r.(inv_body) →
+     v ∈ (list_to_set r.(inv_args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body)) →
   InvBodyWF r.
 Proof.
-  intros Hscoped args M Hlen.
+  intros Hscoped args M Hlen HR.
   have Hdom : dom (list_to_map (zip r.(inv_args) args) : gmap var LExpr) = list_to_set r.(inv_args).
   { apply dom_list_to_map_zip. lia. }
-  have Hfv : assertion_lexpr_fvars r.(inv_body) ⊆ dom (list_to_map (zip r.(inv_args) args) : gmap var LExpr).
-  { rewrite Hdom. exact Hscoped. }
+  have Hfv : assertion_lexpr_fvars r.(inv_body) ⊆
+    dom (list_to_map (zip r.(inv_args) args) : gmap var LExpr) ∪ assertion_exists_binders r.(inv_body).
+  { intros v Hv. rewrite elem_of_union Hdom. exact (Hscoped v Hv). }
   rewrite list_to_map_zip_fmap.
-  exact (assertion_subst_compose r.(inv_body) _ M Hfv).
+  exact (assertion_subst_compose r.(inv_body) _ M (assertion_exists_binders r.(inv_body)) HR Hfv).
 Qed.
 
-(* PredBodyWF follows from the simple well-scopedness condition. *)
+(* PredBodyWF follows from the widened well-scopedness condition,
+   analogously. *)
 Lemma pred_body_wf_from_scoped (r : PredRecord) :
-  assertion_lexpr_fvars r.(pred_body) ⊆ list_to_set r.(pred_args) →
+  (∀ v, v ∈ assertion_lexpr_fvars r.(pred_body) →
+     v ∈ (list_to_set r.(pred_args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(pred_body)) →
   PredBodyWF r.
 Proof.
-  intros Hscoped args M Hlen.
+  intros Hscoped args M Hlen HR.
   have Hdom : dom (list_to_map (zip r.(pred_args) args) : gmap var LExpr) = list_to_set r.(pred_args).
   { apply dom_list_to_map_zip. lia. }
-  have Hfv : assertion_lexpr_fvars r.(pred_body) ⊆ dom (list_to_map (zip r.(pred_args) args) : gmap var LExpr).
-  { rewrite Hdom. exact Hscoped. }
+  have Hfv : assertion_lexpr_fvars r.(pred_body) ⊆
+    dom (list_to_map (zip r.(pred_args) args) : gmap var LExpr) ∪ assertion_exists_binders r.(pred_body).
+  { intros v Hv. rewrite elem_of_union Hdom. exact (Hscoped v Hv). }
   rewrite list_to_map_zip_fmap.
-  exact (assertion_subst_compose r.(pred_body) _ M Hfv).
+  exact (assertion_subst_compose r.(pred_body) _ M (assertion_exists_binders r.(pred_body)) HR Hfv).
 Qed.
 
 (* Mapping from invariant names to Iris namespaces, supplied by the user. *)
@@ -958,49 +1187,112 @@ Record ProgramWF : Prop := {
     map_Forall (λ _ r,
       StackFree (proc_precond_of r) ∧ StackFree (proc_postcond_of r)) proc_map;
 
-  (* LExpr free variables in pre/post are bounded by the formal argument names. *)
+  (* LExpr free variables in pre/post are bounded by the formal argument
+     names, up to pre/post's own binder names (leaked in by
+     assertion_lexpr_fvars's own over-approximation through LExists/
+     LForall -- it doesn't subtract the bound variable, see
+     local/binders.md). pwf_proc_binders_reserved below is what makes
+     those binder names harmless despite not being formal arguments. *)
   pwf_proc_fvars_bounded :
     map_Forall (λ _ r,
-      assertion_lexpr_fvars (proc_precond_of r) ⊆ list_to_set (proc_args_of r).*1 ∧
-      assertion_lexpr_fvars (proc_postcond_of r) ⊆ {["#ret_val"]} ∪ list_to_set (proc_args_of r).*1) proc_map;
+      (∀ v, v ∈ assertion_lexpr_fvars (proc_precond_of r) →
+         v ∈ (list_to_set (proc_args_of r).*1 : gset lvar) ∨
+         v ∈ assertion_exists_binders (proc_precond_of r)) ∧
+      (∀ v, v ∈ assertion_lexpr_fvars (proc_postcond_of r) →
+         v ∈ ({["#ret_val"]} ∪ list_to_set (proc_args_of r).*1 : gset lvar) ∨
+         v ∈ assertion_exists_binders (proc_postcond_of r))) proc_map;
 
-  (* LExists binders in pre/post are disjoint from the free vars of any lexpr map. *)
-  pwf_proc_binders_fresh :
-    ∀ proc_nm r M, proc_map !! proc_nm = Some r →
-      assertion_exists_binders (proc_precond_of r) ## lexpr_map_fvars M ∧
-      assertion_exists_binders (proc_postcond_of r) ## lexpr_map_fvars M;
+  (* Every procedure's own pre/postcond binders (its own internal
+     existential/universal witnesses, as opposed to lvars threaded through
+     the symbolic stack) are drawn from the reserved namespace (is_reserved),
+     so they can never collide with any substitution map's own fvars --
+     replaces the old pwf_proc_binders_fresh, which quantified over *every*
+     M unconditionally and so was unsatisfiable whenever pre/postcond had a
+     genuine existential. See local/binders.md. *)
+  pwf_proc_binders_reserved :
+    map_Forall (λ _ r,
+      set_Forall is_reserved (assertion_exists_binders (proc_precond_of r)) ∧
+      set_Forall is_reserved (assertion_exists_binders (proc_postcond_of r))) proc_map;
+
+  (* Analogous to pwf_inv_args_not_reserved: a procedure's own formal
+     argument names are never drawn from the reserved namespace. *)
+  pwf_proc_args_not_reserved :
+    map_Forall (λ _ r, Forall (λ a, ¬ is_reserved a) (proc_args_of r).*1) proc_map;
 
   (* ── Invariant map ───────────────────────────────────────────────────── *)
-  (* LExpr fvars of an invariant body are bounded by its formal argument names. *)
+  (* LExpr fvars of an invariant body are bounded by its formal argument
+     names, up to its own binder names (same over-approximation as
+     pwf_proc_fvars_bounded above). *)
   pwf_inv_fvars_scoped :
-    map_Forall (λ _ r, assertion_lexpr_fvars r.(inv_body) ⊆ list_to_set r.(inv_args)) inv_map;
+    map_Forall (λ _ r,
+      ∀ v, v ∈ assertion_lexpr_fvars r.(inv_body) →
+        v ∈ (list_to_set r.(inv_args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body)) inv_map;
 
-  (* LExpr fvars of a substituted invariant body are bounded by the argument fvars. *)
+  (* Stronger than pwf_inv_fvars_scoped: an invariant body's *scope-correct*
+     free variables (assertion_true_fvars, which -- unlike
+     assertion_lexpr_fvars -- actually subtracts a genuine existential's own
+     bound name) are fully covered by its formal arguments, with no reserved
+     leftover at all. This rules out a body that mentions a reserved name
+     "freely" outside the scope of its own matching binder -- something
+     pwf_inv_fvars_scoped's "∨ reserved" escape hatch can't distinguish from
+     the over-approximation's false positives. Needed by
+     trnsl_assertion_mp_irrelevant_reserved. *)
+  pwf_inv_fvars_closed :
+    map_Forall (λ _ r, assertion_true_fvars r.(inv_body) ⊆ (list_to_set r.(inv_args) : gset lvar)) inv_map;
+
+  (* LExpr fvars of a substituted invariant body are bounded by the argument
+     fvars, up to the (subst-invariant, see assertion_exists_binders_subst)
+     binder names. *)
   pwf_inv_fvars_bounded :
     ∀ inv_nm r args, inv_map !! inv_nm = Some r →
-      assertion_lexpr_fvars (subst r.(inv_body) (list_to_map (zip r.(inv_args) args))) ⊆
-        ⋃ (lexpr_fvars <$> args);
+      ∀ v, v ∈ assertion_lexpr_fvars (subst r.(inv_body) (list_to_map (zip r.(inv_args) args))) →
+        v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body);
 
-  (* LExists binders in an invariant body are disjoint from any lexpr map's fvars. *)
-  pwf_inv_binders_fresh :
-    ∀ inv_nm r M, inv_map !! inv_nm = Some r →
-      assertion_exists_binders r.(inv_body) ## lexpr_map_fvars M;
+  (* Analogous to pwf_proc_binders_reserved: an invariant body's own
+     binders are drawn from the reserved namespace. Replaces the old,
+     unconditional-over-M pwf_inv_binders_fresh. *)
+  pwf_inv_binders_reserved :
+    map_Forall (λ _ r, set_Forall is_reserved (assertion_exists_binders r.(inv_body))) inv_map;
+
+  (* Ordinary formal-argument names, unlike an invariant's own internal
+     witnesses, are never drawn from the reserved namespace -- needed so
+     that a subst_map keyed by an invariant's own inv_args (e.g. the
+     inv_arg_map built from a concrete argument-value list, used to open
+     the invariant) can be shown, syntactically, to avoid reserved names,
+     independent of subst_map_avoids_reserved (which is about lvars,
+     not the pvar-keyed formal-argument names substitution ranges over). *)
+  pwf_inv_args_not_reserved :
+    map_Forall (λ _ r, Forall (λ a, ¬ is_reserved a) r.(inv_args)) inv_map;
 
   (* ── Predicate map ───────────────────────────────────────────────────── *)
-  (* LExpr fvars of a predicate body are bounded by its formal argument names. *)
+  (* LExpr fvars of a predicate body are bounded by its formal argument
+     names, up to its own binder names (same over-approximation as above). *)
   pwf_pred_fvars_scoped :
-    map_Forall (λ _ r, assertion_lexpr_fvars r.(pred_body) ⊆ list_to_set r.(pred_args)) pred_map;
+    map_Forall (λ _ r,
+      ∀ v, v ∈ assertion_lexpr_fvars r.(pred_body) →
+        v ∈ (list_to_set r.(pred_args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(pred_body)) pred_map;
 
-  (* LExpr fvars of a substituted predicate body are bounded by the argument fvars. *)
+  (* Analogous to pwf_inv_fvars_closed. *)
+  pwf_pred_fvars_closed :
+    map_Forall (λ _ r, assertion_true_fvars r.(pred_body) ⊆ (list_to_set r.(pred_args) : gset lvar)) pred_map;
+
+  (* LExpr fvars of a substituted predicate body are bounded by the
+     argument fvars, up to the binder names. *)
   pwf_pred_fvars_bounded :
     ∀ pred_nm r args, pred_map !! pred_nm = Some r →
-      assertion_lexpr_fvars (subst r.(pred_body) (list_to_map (zip r.(pred_args) args))) ⊆
-        ⋃ (lexpr_fvars <$> args);
+      ∀ v, v ∈ assertion_lexpr_fvars (subst r.(pred_body) (list_to_map (zip r.(pred_args) args))) →
+        v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(pred_body);
 
-  (* LExists binders in a predicate body are disjoint from any lexpr map's fvars. *)
-  pwf_pred_binders_fresh :
-    ∀ pred_nm r M, pred_map !! pred_nm = Some r →
-      assertion_exists_binders r.(pred_body) ## lexpr_map_fvars M;
+  (* Analogous to pwf_proc_binders_reserved: a predicate body's own binders
+     are drawn from the reserved namespace. Replaces the old,
+     unconditional-over-M pwf_pred_binders_fresh. *)
+  pwf_pred_binders_reserved :
+    map_Forall (λ _ r, set_Forall is_reserved (assertion_exists_binders r.(pred_body))) pred_map;
+
+  (* Analogous to pwf_inv_args_not_reserved: a predicate's own formal
+     argument names are never drawn from the reserved namespace. *)
+  pwf_pred_args_not_reserved :
+    map_Forall (λ _ r, Forall (λ a, ¬ is_reserved a) r.(pred_args)) pred_map;
 
   (* An invariant body, once its formal arguments are instantiated, is
      stack-free: it never mentions the stack of whoever opens it.  This is the
@@ -1264,18 +1556,19 @@ Section Translation.
        formal arg / local variable, so that different procedures' same-named
        parameters no longer need to agree on a single global type via σ. *)
     Lemma fresh_lvars_list (σ : lvar_typs)
-        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
         (decls : list (var * typ)) (excl0 : gset lvar) :
       ∃ lvs : list lvar,
         length lvs = length decls ∧
         Forall2 (fun decl lv => σ lv = snd decl) decls lvs ∧
         NoDup lvs ∧
-        Forall (fun lv => lv ∉ excl0) lvs.
+        Forall (fun lv => lv ∉ excl0) lvs ∧
+        Forall (fun lv => ¬ is_reserved lv) lvs.
     Proof.
       revert excl0. induction decls as [| [v tp] decls IH]; intros excl0.
       - exists []. repeat split; try constructor.
-      - destruct (Hrich tp excl0) as [lv [Hlv_notin Hlv_typ]].
-        destruct (IH ({[lv]} ∪ excl0)) as [lvs [Hlen [HF2 [Hnodup Hexcl]]]].
+      - destruct (Hrich tp excl0) as [lv [Hlv_notin [Hlv_res Hlv_typ]]].
+        destruct (IH ({[lv]} ∪ excl0)) as [lvs [Hlen [HF2 [Hnodup [Hexcl Hres]]]]].
         exists (lv :: lvs). repeat split.
         + simpl. lia.
         + constructor; [exact Hlv_typ | exact HF2].
@@ -1285,6 +1578,9 @@ Section Translation.
         + constructor.
           * exact Hlv_notin.
           * eapply Forall_impl; [exact Hexcl |]. intros lv' Hlv'. set_solver.
+        + constructor.
+          * exact Hlv_res.
+          * exact Hres.
     Qed.
 
     (* A pair of lvar lists that is a legal fresh entry-stack for calling
@@ -1305,6 +1601,12 @@ Section Translation.
       dll_args_nodup : NoDup dll_args;
       dll_locals_nodup : NoDup dll_locals;
       dll_disjoint : ∀ lv, lv ∈ dll_args → lv ∉ dll_locals;
+      (* Entry lvars are never reserved -- lets raven_soundness's own
+         precond/postcond bridging build subst_map_avoids_reserved facts
+         for the symbolic (LVar-valued) substitution map it builds out of
+         dll_args. See local/binders.md. *)
+      dll_args_not_reserved : Forall (fun lv => ¬ is_reserved lv) dll_args;
+      dll_locals_not_reserved : Forall (fun lv => ¬ is_reserved lv) dll_locals;
     }.
     Global Arguments dll_args {_ _}.
     Global Arguments dll_locals {_ _}.
@@ -1315,24 +1617,26 @@ Section Translation.
     Global Arguments dll_args_nodup {_ _}.
     Global Arguments dll_locals_nodup {_ _}.
     Global Arguments dll_disjoint {_ _}.
+    Global Arguments dll_args_not_reserved {_ _}.
+    Global Arguments dll_locals_not_reserved {_ _}.
 
     (* fresh_lvars_list, applied twice (locals avoiding the args' own
        choices) and packaged into a proc_entry_lvars for proc_record. *)
     Lemma fresh_proc_entry_lvars (σ : lvar_typs)
-        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ σ lv = t)
+        (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
         (proc_record : ProcRecord) :
       ∃ dll : proc_entry_lvars σ proc_record, Logic.True.
     Proof.
       destruct (fresh_lvars_list σ Hrich (proc_args_of proc_record) ∅)
-        as (args_lvs & Hargs_len & Hargs_typed & Hargs_nodup & _).
+        as (args_lvs & Hargs_len & Hargs_typed & Hargs_nodup & _ & Hargs_res).
       destruct (fresh_lvars_list σ Hrich (proc_locals_of proc_record) (list_to_set args_lvs))
-        as (locals_lvs & Hlocals_len & Hlocals_typed & Hlocals_nodup & Hlocals_excl).
+        as (locals_lvs & Hlocals_len & Hlocals_typed & Hlocals_nodup & Hlocals_excl & Hlocals_res).
       have Hdisjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs.
       { intros lv Hin1 Hin2.
         pose proof (proj1 (Forall_forall (λ lv0, lv0 ∉ list_to_set args_lvs) locals_lvs) Hlocals_excl lv Hin2) as Hcontra.
         apply Hcontra. rewrite elem_of_list_to_set. exact Hin1. }
       exists (ProcEntryLvars σ proc_record args_lvs locals_lvs Hargs_len Hlocals_len Hargs_typed Hlocals_typed
-                Hargs_nodup Hlocals_nodup Hdisjoint).
+                Hargs_nodup Hlocals_nodup Hdisjoint Hargs_res Hlocals_res).
       exact Logic.I.
     Qed.
 
@@ -3360,6 +3664,20 @@ Section RavenLogic.
     length args = length (proc_args_of proc_record) ->
     (map (fun arg => trnsl_expr_lExpr stk arg) args) = (map (fun lexpr => Some lexpr) lexprs) ->
     stk_type_compat ρ σ stk ->
+    (* Local, per-application side conditions, appended last (rather than
+       next to fresh_lvar/the Hargs premise they logically belong with) so
+       this case's existing default-named hypotheses in trnsl.v's
+       iInduction keep their names: the fresh result lvar and the call's
+       own argument lexprs stay out of the reserved ("$") namespace
+       reserved for an authored contract's own internal existentials (see
+       ProgramWF's pwf_*_binders_reserved and local/binders.md). Checkable
+       by whoever builds a concrete derivation (just don't pick
+       "$"-prefixed names) -- unlike a blanket "no stack/lexpr anywhere
+       ever uses a reserved name" assumption, which is simply false
+       (nothing stops an adversarial stk from doing so) and was tried,
+       and abandoned, earlier. *)
+    ¬ is_reserved lvar_x ->
+    Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ->
     let subst_map := list_to_map (zip (proc_args_of proc_record).*1 lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (subst (proc_precond_of proc_record) subst_map))
@@ -3442,6 +3760,9 @@ Section RavenLogic.
     inv ∈ mask ->
     inv_map !! inv = Some inv_record ->
     length lexprs = length inv_record.(inv_args) ->
+    (* Local, per-application reserved-namespace side condition -- see
+       ProcCallRuleRet's own copy of this comment. *)
+    Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ->
     stk_type_compat ρ σ stk ->
     let subst_map := list_to_map (zip inv_record.(inv_args) lexprs) in
     (* lv is chosen fresh w.r.t. stk, matching HeapReadRule/CASSuccRule's
@@ -3452,6 +3773,7 @@ Section RavenLogic.
        statement's own conclusion -- this rule doesn't introduce lv itself,
        just re-closes the invariant around whatever produced it. *)
     fresh_lvar stk lv ->
+    ¬ is_reserved lv ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (subst inv_record.(inv_body) subst_map) p))
         stmt (mask ∖ {[inv]})
@@ -3470,6 +3792,9 @@ Section RavenLogic.
     inv ∈ mask ->
     inv_map !! inv = Some inv_record ->
     length lexprs = length inv_record.(inv_args) ->
+    (* Local, per-application reserved-namespace side condition -- see
+       ProcCallRuleRet's own copy of this comment. *)
+    Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ->
     stk_type_compat ρ σ stk ->
     let subst_map := list_to_map (zip inv_record.(inv_args) lexprs) in
     RavenHoareTriple ρ σ
@@ -3832,10 +4157,22 @@ Section AssertionsProperties.
   Qed.
 
   (* Restricted version: lexpr_fvars e ⊆ dom M1 → Hbase restricted to dom M1 suffices *)
+  (* Generalized via is_reserved directly, rather than a fixed gset R:
+     reserved names potentially escaping dom M1's coverage (through
+     assertion_lexpr_fvars's over-approximation, see local/binders.md)
+     aren't confined to a single top-level assertion's own binders --
+     subst_congr_step below recurses into predicate bodies fetched fresh
+     from pred_map (for recursive predicates), which are not syntactic
+     subterms of whatever top-level assertion this all started from, so
+     a fixed, pre-computed "safe" gset could never be threaded through
+     that unfolding. is_reserved, being a uniform predicate rather than
+     one assertion's own finite binder set, covers this uniformly.
+     Instantiating with "fun _ _ => False" (never reserved) recovers the
+     original, unconditional statement. *)
   Lemma interp_lexpr_lexpr_subst_eval_lvar_congr_dom (e : LExpr) (M1 M2 : gmap lvar LExpr)
       (mp1 mp2 : symb_map) :
-    lexpr_fvars e ⊆ dom M1 →
-    (∀ x, x ∈ dom M1 → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x) →
+    (∀ v, v ∈ lexpr_fvars e → v ∈ dom M1 ∨ is_reserved v) →
+    (∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x) →
     interp_lexpr (lexpr_subst e M1) mp1 = interp_lexpr (lexpr_subst e M2) mp2.
   Proof.
     intros Hdom Hbase. induction e; simpl.
@@ -3844,13 +4181,18 @@ Section AssertionsProperties.
     - reflexivity.
     - simpl in Hdom. rewrite (IHe Hdom). reflexivity.
     - simpl in Hdom.
-      have Hd1 : lexpr_fvars e1 ⊆ dom M1. { set_solver. }
-      have Hd2 : lexpr_fvars e2 ⊆ dom M1. { set_solver. }
+      have Hd1 : ∀ v, v ∈ lexpr_fvars e1 → v ∈ dom M1 ∨ is_reserved v.
+      { intros v Hv. apply Hdom. set_solver. }
+      have Hd2 : ∀ v, v ∈ lexpr_fvars e2 → v ∈ dom M1 ∨ is_reserved v.
+      { intros v Hv. apply Hdom. set_solver. }
       rewrite (IHe1 Hd1). rewrite (IHe2 Hd2). reflexivity.
     - simpl in Hdom.
-      have Hd1 : lexpr_fvars e1 ⊆ dom M1. { set_solver. }
-      have Hd2 : lexpr_fvars e2 ⊆ dom M1. { set_solver. }
-      have Hd3 : lexpr_fvars e3 ⊆ dom M1. { set_solver. }
+      have Hd1 : ∀ v, v ∈ lexpr_fvars e1 → v ∈ dom M1 ∨ is_reserved v.
+      { intros v Hv. apply Hdom. set_solver. }
+      have Hd2 : ∀ v, v ∈ lexpr_fvars e2 → v ∈ dom M1 ∨ is_reserved v.
+      { intros v Hv. apply Hdom. set_solver. }
+      have Hd3 : ∀ v, v ∈ lexpr_fvars e3 → v ∈ dom M1 ∨ is_reserved v.
+      { intros v Hv. apply Hdom. set_solver. }
       rewrite (IHe1 Hd1).
       destruct (interp_lexpr (lexpr_subst e1 M2) mp2) as [[b| | | |]|]; try reflexivity.
       destruct b.
@@ -3859,42 +4201,88 @@ Section AssertionsProperties.
     - reflexivity.
   Qed.
 
+  (* Restricts an "every fvar is in Z or reserved" bound from a superset Y
+     of fvars down to a subset X -- the workhorse for every subterm case
+     below, where X is some subterm's own fvars and Y is the whole node's. *)
+  Lemma fvars_bound_mono (X Y Z : gset lvar) :
+    X ⊆ Y → (∀ v, v ∈ Y → v ∈ Z ∨ is_reserved v) → (∀ v, v ∈ X → v ∈ Z ∨ is_reserved v).
+  Proof. intros HXY HY v Hv. exact (HY v (HXY v Hv)). Qed.
+
+  (* Single-map specialization of interp_lexpr_lexpr_subst_eval_lvar_congr_dom:
+     agreement only needs to cover e's own fvars directly (no dom/reserved
+     framing at all) -- the version used by trnsl_assertion_mp_irrelevant_reserved,
+     where the whole point is to avoid needing agreement at reserved names. *)
+  Lemma interp_lexpr_subst_eval_lvar_congr_true (e : LExpr) (M : gmap lvar LExpr)
+      (mp1 mp2 : symb_map) :
+    (∀ x, x ∈ lexpr_fvars e → eval_lvar M mp1 x = eval_lvar M mp2 x) →
+    interp_lexpr (lexpr_subst e M) mp1 = interp_lexpr (lexpr_subst e M) mp2.
+  Proof.
+    induction e; simpl; intro Hbase.
+    - rewrite !interp_lexpr_lookup_match. apply Hbase. set_solver.
+    - reflexivity.
+    - rewrite (IHe ltac:(intros v Hv; apply Hbase; set_solver)). reflexivity.
+    - rewrite (IHe1 ltac:(intros v Hv; apply Hbase; set_solver)).
+      rewrite (IHe2 ltac:(intros v Hv; apply Hbase; set_solver)). reflexivity.
+    - rewrite (IHe1 ltac:(intros v Hv; apply Hbase; set_solver)).
+      destruct (interp_lexpr (lexpr_subst e1 M) mp2) as [[b| | | |]|]; try reflexivity.
+      destruct b.
+      + exact (IHe2 ltac:(intros v Hv; apply Hbase; set_solver)).
+      + exact (IHe3 ltac:(intros v Hv; apply Hbase; set_solver)).
+    - reflexivity.
+  Qed.
+
   (* Side conditions under which (M1,mp1) and (M2,mp2) assign the same meaning
      to a StackFree assertion:
      - dom M1 = dom M2
-     - the assertion's LExpr fvars ⊆ dom M1
-     - its LExists binders avoid the fvars of either map
+     - the assertion's LExpr fvars are covered by dom M1, up to reserved
+       names (assertion_lexpr_fvars's own over-approximation through
+       LExists/LForall can leak an assertion's own binder names in --
+       see local/binders.md)
+     - its own binders avoid dom/fvars of either map
+     - M1/M2 were built by the ordinary framework machinery, so touch no
+       reserved name themselves (subst_map_avoids_reserved) -- needed so
+       a reserved name can be resolved directly, without depending on
+       dom M1 membership, in the leaf/LPred cases below
      - (Hstab) restricted eval_lvar agreement survives an mp update at a binder
-     - (Hbase) restricted eval_lvar agreement for mp1 and mp2 themselves. *)
+     - (Hbase) restricted eval_lvar agreement for mp1 and mp2 themselves,
+       covering reserved names too, not just dom M1 -- necessary because
+       subst_congr_step recurses into predicate bodies fetched fresh from
+       pred_map, which aren't syntactic subterms of whatever top-level
+       assertion this all started from, so no fixed, finite "safe" set
+       could be threaded through that unfolding; is_reserved, being a
+       uniform predicate, covers it regardless of which body a reserved
+       name came from. *)
   Definition subst_congr_cond (a : assertion) (M1 M2 : gmap lvar LExpr)
       (mp1 mp2 : symb_map) : Prop :=
     StackFree a ∧
-    assertion_exists_binders a ## lexpr_map_fvars M1 ∧
-    assertion_exists_binders a ## lexpr_map_fvars M2 ∧
-    assertion_lexpr_fvars a ⊆ dom M1 ∧
+    assertion_exists_binders a ## (dom M1 ∪ lexpr_map_fvars M1) ∧
+    assertion_exists_binders a ## (dom M2 ∪ lexpr_map_fvars M2) ∧
+    (∀ v, v ∈ assertion_lexpr_fvars a → v ∈ dom M1 ∨ is_reserved v) ∧
     dom M1 = dom M2 ∧
+    subst_map_avoids_reserved M1 ∧
+    subst_map_avoids_reserved M2 ∧
     (∀ (q1 q2 : symb_map),
       (∀ x, x ∈ dom M1 → eval_lvar M1 q1 x = eval_lvar M2 q2 x) →
       ∀ (v : lvar), v ∉ lexpr_map_fvars M1 → v ∉ lexpr_map_fvars M2 →
       ∀ (v' : val) (x : lvar), x ∈ dom M1 →
       eval_lvar M1 (fun y => if (y =? v)%string then v' else q1 y) x =
       eval_lvar M2 (fun y => if (y =? v)%string then v' else q2 y) x) ∧
-    (∀ x, x ∈ dom M1 → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x).
+    (∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x).
 
   (* The side conditions are symmetric, so one entailment direction suffices to
      get the equivalence. *)
   Lemma subst_congr_cond_sym a M1 M2 mp1 mp2 :
     subst_congr_cond a M1 M2 mp1 mp2 → subst_congr_cond a M2 M1 mp2 mp1.
   Proof.
-    intros (Hsf & HbA1 & HbA2 & HfvA & HdomEq & Hstab & Hbase).
+    intros (Hsf & HbA1 & HbA2 & HfvA & HdomEq & Hmr1 & Hmr2 & Hstab & Hbase).
     split_and!; try assumption.
-    - rewrite <- HdomEq. exact HfvA.
+    - intros v Hv. rewrite <- HdomEq. exact (HfvA v Hv).
     - exact (eq_sym HdomEq).
     - intros q1 q2 Hag v Hv2 Hv1 v' x Hx.
       symmetry. apply Hstab; try assumption.
       + intros y Hy. symmetry. apply Hag. rewrite <- HdomEq. exact Hy.
       + rewrite HdomEq. exact Hx.
-    - intros x Hx. symmetry. apply Hbase. rewrite HdomEq. exact Hx.
+    - intros x Hx. symmetry. apply Hbase. set_solver.
   Qed.
 
   (* Transfer of the LInv clause's argument-evaluation side condition. *)
@@ -3948,7 +4336,7 @@ Section AssertionsProperties.
       ⊢ trnsl_assertion (subst a0 M2) stk mp2.
   Proof.
     induction a0; intros M1 M2 stk mp1 mp2 Hcond;
-      destruct Hcond as (Hsf & HbA1 & HbA2 & HfvA & HdomEq & Hstab & Hbase);
+      destruct Hcond as (Hsf & HbA1 & HbA2 & HfvA & HdomEq & Hmr1 & Hmr2 & Hstab & Hbase);
       simpl in HbA1, HbA2, HfvA;
       (etrans; [| apply bi.equiv_entails_1_2,
                   (trnsl_assertion_unfold (subst _ M2) stk mp2)]).
@@ -3964,14 +4352,15 @@ Section AssertionsProperties.
       apply bi.exist_mono. intro chunk0.
       apply bi.sep_mono.
       { apply bi.pure_mono. unfold LExpr_holds.
-        have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
-        { simpl. set_solver. }
+        have Hfv_dom : ∀ v, v ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) → v ∈ dom M1 ∨ is_reserved v.
+        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld0 chunk))); [simpl; set_solver | exact HfvA]. }
         have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
           (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
         simpl in Hcongr |- *. rewrite Hcongr. tauto. }
       apply bi.sep_mono; [| done].
       apply bi.pure_mono. intro Hchunk.
-      have Hfv_dom2 : lexpr_fvars chunk ⊆ dom M1. { simpl. set_solver. }
+      have Hfv_dom2 : ∀ v, v ∈ lexpr_fvars chunk → v ∈ dom M1 ∨ is_reserved v.
+      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld0 chunk))); [simpl; set_solver | exact HfvA]. }
       have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
         chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
       rewrite <- Hcongr2. exact Hchunk.
@@ -3983,54 +4372,90 @@ Section AssertionsProperties.
       apply bi.exist_mono. intro γ.
       apply bi.sep_mono.
       { apply bi.pure_mono. unfold LExpr_holds.
-        have Hfv_dom : lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) ⊆ dom M1.
-        { simpl. set_solver. }
+        have Hfv_dom : ∀ v, v ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) → v ∈ dom M1 ∨ is_reserved v.
+        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld0 r chunk))); [simpl; set_solver | exact HfvA]. }
         have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
           (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
         simpl in Hcongr |- *. rewrite Hcongr. tauto. }
       apply bi.sep_mono; [| done].
       apply bi.pure_mono. intro Hchunk.
-      have Hfv_dom2 : lexpr_fvars chunk ⊆ dom M1. { simpl. set_solver. }
+      have Hfv_dom2 : ∀ v, v ∈ lexpr_fvars chunk → v ∈ dom M1 ∨ is_reserved v.
+      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld0 r chunk))); [simpl; set_solver | exact HfvA]. }
       have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
         chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
       rewrite <- Hcongr2. exact Hchunk.
-    - (* LForall: does not update mp *)
+    - (* LForall: does not update mp, so nothing about a0's own binders
+         changes either -- every field carries over unchanged. *)
       inversion Hsf.
       apply bi.forall_mono. intro v'.
       etrans; [| apply bi.equiv_entails_1_1,
                  (trnsl_assertion_unfold (subst a0 M2) stk mp2)].
       apply (IHa0 M1 M2 stk mp1 mp2). by split_and!.
-    - (* LExists: updates mp at the binder; freshness from HbA1/HbA2 *)
+    - (* LExists: updates mp at the binder v. Hbase' must cover
+         dom M1 ∨ is_reserved: for x ∈ dom M1, Hstab unchanged; for x = v
+         (reserved, since v ∈ assertion_exists_binders (LExists v t body)
+         is covered by HbA1/HbA2's own bundled dom-disjointness), both
+         sides reduce to v' directly, since v ∉ dom M1 ∪ dom M2; for
+         x ≠ v with x reserved, the update at v doesn't touch x, so the
+         outer Hbase carries over via eval_lvar_update_stable. *)
       inversion Hsf. subst.
       apply bi.exist_mono. intro v'.
       apply bi.sep_mono; [done|].
+      have Hv1dom : v ∉ dom M1. { set_solver. }
+      have Hv2dom : v ∉ dom M2. { set_solver. }
       have Hv1 : v ∉ lexpr_map_fvars M1. { set_solver. }
       have Hv2 : v ∉ lexpr_map_fvars M2. { set_solver. }
-      have Hbase' : ∀ x, x ∈ dom M1 →
+      have Hbase_narrow : ∀ x, x ∈ dom M1 → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x.
+      { intros x Hx. apply Hbase. left. exact Hx. }
+      have Hbase' : ∀ x, x ∈ dom M1 ∨ is_reserved x →
         eval_lvar M1 (fun y => if (y =? v)%string then v' else mp1 y) x =
         eval_lvar M2 (fun y => if (y =? v)%string then v' else mp2 y) x.
-      { intros x Hx. exact (Hstab mp1 mp2 Hbase v Hv1 Hv2 v' x Hx). }
+      { intros x Hx. destruct (decide (x ∈ dom M1)) as [HxM | HxM].
+        - exact (Hstab mp1 mp2 Hbase_narrow v Hv1 Hv2 v' x HxM).
+        - destruct (decide (x = v)) as [-> | Hne].
+          + unfold eval_lvar.
+            apply not_elem_of_dom in Hv1dom. apply not_elem_of_dom in Hv2dom.
+            rewrite Hv1dom Hv2dom /=. rewrite String.eqb_refl. reflexivity.
+          + rewrite (eval_lvar_update_stable M1 mp1 v v' x Hv1 (or_intror Hne)).
+            rewrite (eval_lvar_update_stable M2 mp2 v v' x Hv2 (or_intror Hne)).
+            apply Hbase. destruct Hx as [Hx | Hx]; [contradiction (HxM Hx) | right; exact Hx]. }
       etrans; [| apply bi.equiv_entails_1_1,
                  (trnsl_assertion_unfold (subst a0 M2) stk
                     (fun y => if (y =? v)%string then v' else mp2 y))].
       apply (IHa0 M1 M2 stk
         (fun y => if (y =? v)%string then v' else mp1 y)
         (fun y => if (y =? v)%string then v' else mp2 y)).
-      split_and!; try assumption; set_solver.
+      split_and!.
+      + assumption.
+      + set_solver.
+      + set_solver.
+      + assumption.
+      + assumption.
+      + assumption.
+      + assumption.
+      + assumption.
+      + exact Hbase'.
     - (* LIte *)
       inversion Hsf. subst.
-      have Hfv_cond : lexpr_fvars cond ⊆ dom M1. { set_solver. }
+      have Hfv_cond : ∀ v, v ∈ lexpr_fvars cond → v ∈ dom M1 ∨ is_reserved v.
+      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LIte cond a0_1 a0_2))); [simpl; set_solver | exact HfvA]. }
       apply bi.and_mono.
       + apply bi.wand_mono.
         * apply bi.pure_mono. unfold LExpr_holds.
           rewrite (interp_lexpr_lexpr_subst_eval_lvar_congr_dom cond M1 M2 mp1 mp2 Hfv_cond Hbase). tauto.
         * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_1 M2) stk mp2)].
-          apply (IHa0_1 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
+          apply (IHa0_1 M1 M2 stk mp1 mp2). split_and!; try assumption.
+          -- set_solver.
+          -- set_solver.
+          -- apply (fvars_bound_mono _ (assertion_lexpr_fvars (LIte cond a0_1 a0_2))); [simpl; set_solver | exact HfvA].
       + apply bi.wand_mono.
         * apply bi.pure_mono. unfold LExpr_holds.
           rewrite (interp_lexpr_lexpr_subst_eval_lvar_congr_dom cond M1 M2 mp1 mp2 Hfv_cond Hbase). tauto.
         * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_2 M2) stk mp2)].
-          apply (IHa0_2 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
+          apply (IHa0_2 M1 M2 stk mp1 mp2). split_and!; try assumption.
+          -- set_solver.
+          -- set_solver.
+          -- apply (fvars_bound_mono _ (assertion_lexpr_fvars (LIte cond a0_1 a0_2))); [simpl; set_solver | exact HfvA].
     - (* LInv: a leaf -- only the argument evaluations must be transferred *)
       simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       apply bi.exist_mono. intro vs. apply bi.sep_mono; [| done].
@@ -4038,34 +4463,55 @@ Section AssertionsProperties.
       intros le Hle.
       apply (interp_lexpr_lexpr_subst_eval_lvar_congr_dom le M1 M2 mp1 mp2);
         [| exact Hbase].
-      etrans; [exact (lexpr_fvars_elem_subseteq le args Hle) | exact HfvA].
-    - (* LPred: the fixpoint induction hypothesis fires here *)
+      intros v Hv. apply HfvA. exact (lexpr_fvars_elem_subseteq le args Hle v Hv).
+    - (* LPred: the fixpoint induction hypothesis fires here. Unlike every
+         other case, the recursive body (pred_body) is fetched fresh from
+         pred_map, not a syntactic subterm of a0 -- its own binders need
+         pwf_pred_binders_reserved (not HbA1/HbA2, which are about a0's
+         own, unrelated, empty binder set) combined with Hmr1/Hmr2 to
+         re-derive HbA1/HbA2- and HfvA-shaped facts for it. *)
       simpl. destruct (pred_map !! pred_name0) as [r|] eqn:Hr; [| done].
+      have Hbr1 : assertion_exists_binders r.(pred_body) ## (dom M1 ∪ lexpr_map_fvars M1).
+      { apply reserved_disjoint_dom.
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
+        - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+            [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+      have Hbr2 : assertion_exists_binders r.(pred_body) ## (dom M2 ∪ lexpr_map_fvars M2).
+      { apply reserved_disjoint_dom.
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
+        - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+            [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
       have HPredBodyWF := pred_body_wf_from_scoped r
         (Hwf.(pwf_pred_fvars_scoped) pred_name0 r Hr).
       inversion Hsf. rewrite Hr in H1. inversion H1. subst pred_record.
-      rewrite (HPredBodyWF args M1 H2); rewrite (HPredBodyWF args M2 H2).
+      rewrite (HPredBodyWF args M1 H2 ltac:(set_solver));
+        rewrite (HPredBodyWF args M2 H2 ltac:(set_solver)).
       rewrite /trnsl_assertion_curry.
       iIntros "H".
       iApply ("H" $! (subst r.(pred_body) (list_to_map (zip r.(pred_args) args)))
                  M1 M2 mp2); iPureIntro; [reflexivity |].
       split_and!; try assumption.
-      + rewrite assertion_exists_binders_subst.
-        exact (Hwf.(pwf_pred_binders_fresh) pred_name0 r M1 Hr).
-      + rewrite assertion_exists_binders_subst.
-        exact (Hwf.(pwf_pred_binders_fresh) pred_name0 r M2 Hr).
-      + etrans.
-        { exact (Hwf.(pwf_pred_fvars_bounded) pred_name0 r args Hr). }
-        { exact HfvA. }
+      + rewrite assertion_exists_binders_subst. exact Hbr1.
+      + rewrite assertion_exists_binders_subst. exact Hbr2.
+      + intros v Hv.
+        destruct (Hwf.(pwf_pred_fvars_bounded) pred_name0 r args Hr v Hv) as [Hin | Hin].
+        * exact (HfvA v Hin).
+        * right. exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr v Hin).
     - (* LAnd *)
       inversion Hsf. subst.
       apply bi.sep_mono.
       + etrans; [| apply bi.equiv_entails_1_1,
                    (trnsl_assertion_unfold (subst a0_1 M2) stk mp2)].
-        apply (IHa0_1 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
+        apply (IHa0_1 M1 M2 stk mp1 mp2). split_and!; try assumption.
+        * set_solver.
+        * set_solver.
+        * apply (fvars_bound_mono _ (assertion_lexpr_fvars (LAnd a0_1 a0_2))); [simpl; set_solver | exact HfvA].
       + etrans; [| apply bi.equiv_entails_1_1,
                    (trnsl_assertion_unfold (subst a0_2 M2) stk mp2)].
-        apply (IHa0_2 M1 M2 stk mp1 mp2). split_and!; try assumption; set_solver.
+        apply (IHa0_2 M1 M2 stk mp1 mp2). split_and!; try assumption.
+        * set_solver.
+        * set_solver.
+        * apply (fvars_bound_mono _ (assertion_lexpr_fvars (LAnd a0_1 a0_2))); [simpl; set_solver | exact HfvA].
   Qed.
 
   (* One direction of the congruence. *)
@@ -4093,25 +4539,276 @@ Section AssertionsProperties.
     (Hwf : ProgramWF)
     (a : assertion) (M1 M2 : gmap lvar LExpr) stk_id (mp1 mp2 : symb_map) :
     StackFree a →
-    assertion_exists_binders a ## lexpr_map_fvars M1 →
-    assertion_exists_binders a ## lexpr_map_fvars M2 →
-    assertion_lexpr_fvars a ⊆ dom M1 →
+    assertion_exists_binders a ## (dom M1 ∪ lexpr_map_fvars M1) →
+    assertion_exists_binders a ## (dom M2 ∪ lexpr_map_fvars M2) →
+    (∀ v, v ∈ assertion_lexpr_fvars a → v ∈ dom M1 ∨ is_reserved v) →
     dom M1 = dom M2 →
+    subst_map_avoids_reserved M1 →
+    subst_map_avoids_reserved M2 →
     (∀ (q1 q2 : symb_map),
       (∀ x, x ∈ dom M1 → eval_lvar M1 q1 x = eval_lvar M2 q2 x) →
       ∀ (v : lvar), v ∉ lexpr_map_fvars M1 → v ∉ lexpr_map_fvars M2 →
       ∀ (v' : val) (x : lvar), x ∈ dom M1 →
       eval_lvar M1 (fun y => if (y =? v)%string then v' else q1 y) x =
       eval_lvar M2 (fun y => if (y =? v)%string then v' else q2 y) x) →
-    (∀ x, x ∈ dom M1 → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x) →
+    (∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x) →
     trnsl_assertion (subst a M1) stk_id mp1 ≡ trnsl_assertion (subst a M2) stk_id mp2.
   Proof.
-    intros HSF HbA_M1 HbA_M2 HfvA HdomEq Hstab Hbase.
+    intros HSF HbA_M1 HbA_M2 HfvA HdomEq Hmr1 Hmr2 Hstab Hbase.
     have Hcond : subst_congr_cond a M1 M2 mp1 mp2 by split_and!.
     apply bi.equiv_entails; split.
     - exact (trnsl_assertion_subst_mono Hwf a M1 M2 stk_id mp1 mp2 Hcond).
     - exact (trnsl_assertion_subst_mono Hwf a M2 M1 stk_id mp2 mp1
                (subst_congr_cond_sym _ _ _ _ _ Hcond)).
+  Qed.
+
+  (* Side conditions under which two symbolic maps mp1/mp2 assign the same
+     meaning to a StackFree, once-substituted assertion, *without* needing
+     any agreement at reserved names -- unlike subst_congr_cond's Hbase,
+     which needs exactly that (impossible at inv_body_bridge's step 3,
+     see local/binders.md). The trick: assertion_true_fvars is scope-
+     correct (unlike assertion_lexpr_fvars), so every name it reports is
+     genuinely read from the ambient mp -- nothing here is a spurious
+     over-approximation through a binder, and covering it directly is both
+     necessary and sufficient. *)
+  Definition mp_irr_cond (a : assertion) (M : gmap lvar LExpr) (mp1 mp2 : symb_map) : Prop :=
+    StackFree a ∧
+    assertion_exists_binders a ## (dom M ∪ lexpr_map_fvars M) ∧
+    subst_map_avoids_reserved M ∧
+    (∀ x, x ∈ assertion_true_fvars a → eval_lvar M mp1 x = eval_lvar M mp2 x).
+
+  Lemma mp_irr_cond_sym a M mp1 mp2 :
+    mp_irr_cond a M mp1 mp2 → mp_irr_cond a M mp2 mp1.
+  Proof.
+    intros (Hsf & HbA & Hmr & Hbase). split_and!; try assumption.
+    intros x Hx. symmetry. exact (Hbase x Hx).
+  Qed.
+
+  Definition mp_irr_Phi (x : leibnizO trnsl_dom) : iProp Σ :=
+    (∀ a0 M mp2,
+       ⌜x.1.1 = subst a0 M⌝ -∗
+       ⌜mp_irr_cond a0 M x.2 mp2⌝ -∗
+       trnsl_assertion (subst a0 M) x.1.2 mp2)%I.
+
+  Global Arguments mp_irr_Phi : simpl never.
+
+  Local Instance mp_irr_Phi_ne : NonExpansive mp_irr_Phi.
+  Proof. intros n x y Heq. change (x = y) in Heq. by subst. Qed.
+
+  (* One unfolding step, structural induction on the assertion, exactly
+     paralleling subst_congr_step but with a single map M throughout
+     (mp1/mp2 only, no M1/M2), and using assertion_true_fvars (no reserved
+     escape) instead of assertion_lexpr_fvars/is_reserved. *)
+  Local Lemma mp_irr_step (Hwf : ProgramWF) (a0 : assertion) :
+    ∀ (M : gmap lvar LExpr) (stk : stack_id) (mp1 mp2 : symb_map),
+      mp_irr_cond a0 M mp1 mp2 →
+      trnsl_assertion_str (trnsl_assertion_curry mp_irr_Phi) (subst a0 M) stk mp1
+      ⊢ trnsl_assertion (subst a0 M) stk mp2.
+  Proof.
+    induction a0; intros M stk mp1 mp2 Hcond;
+      destruct Hcond as (Hsf & HbA & Hmr & Hbase);
+      simpl in HbA;
+      (etrans; [| apply bi.equiv_entails_1_2,
+                  (trnsl_assertion_unfold (subst _ M) stk mp2)]).
+    - (* LProc *) iIntros "H". iExact "H".
+    - (* LStack *) inversion Hsf.
+    - (* LExprA *)
+      apply bi.pure_mono. unfold LExpr_holds.
+      rewrite (interp_lexpr_subst_eval_lvar_congr_true p M mp1 mp2
+                 ltac:(intros x Hx; apply Hbase; simpl; exact Hx)).
+      tauto.
+    - (* LPure *) iIntros "H". iExact "H".
+    - (* LOwn *)
+      apply bi.exist_mono. intro l.
+      apply bi.exist_mono. intro chunk0.
+      apply bi.sep_mono.
+      { apply bi.pure_mono. unfold LExpr_holds.
+        have Hb1 : ∀ x, x ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) →
+          eval_lvar M mp1 x = eval_lvar M mp2 x.
+        { intros x Hx. apply Hbase. simpl in Hx |- *. set_solver. }
+        have Hcongr := interp_lexpr_subst_eval_lvar_congr_true
+          (LBinOp EqOp e (LVal (LitLoc l))) M mp1 mp2 Hb1.
+        simpl in Hcongr |- *. rewrite Hcongr. tauto. }
+      apply bi.sep_mono; [| done].
+      apply bi.pure_mono. intro Hchunk.
+      have Hb2 : ∀ x, x ∈ lexpr_fvars chunk → eval_lvar M mp1 x = eval_lvar M mp2 x.
+      { intros x Hx. apply Hbase. simpl. set_solver. }
+      have Hcongr2 := interp_lexpr_subst_eval_lvar_congr_true chunk M mp1 mp2 Hb2.
+      rewrite <- Hcongr2. exact Hchunk.
+    - (* LGhostOwn *)
+      simpl. generalize (Γ (ra_map r)).
+      intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+      apply bi.exist_mono. intro l.
+      apply bi.exist_mono. intro chunk0.
+      apply bi.exist_mono. intro γ.
+      apply bi.sep_mono.
+      { apply bi.pure_mono. unfold LExpr_holds.
+        have Hb1 : ∀ x, x ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) →
+          eval_lvar M mp1 x = eval_lvar M mp2 x.
+        { intros x Hx. apply Hbase. simpl in Hx |- *. set_solver. }
+        have Hcongr := interp_lexpr_subst_eval_lvar_congr_true
+          (LBinOp EqOp e (LVal (LitLoc l))) M mp1 mp2 Hb1.
+        simpl in Hcongr |- *. rewrite Hcongr. tauto. }
+      apply bi.sep_mono; [| done].
+      apply bi.pure_mono. intro Hchunk.
+      have Hb2 : ∀ x, x ∈ lexpr_fvars chunk → eval_lvar M mp1 x = eval_lvar M mp2 x.
+      { intros x Hx. apply Hbase. simpl. set_solver. }
+      have Hcongr2 := interp_lexpr_subst_eval_lvar_congr_true chunk M mp1 mp2 Hb2.
+      rewrite <- Hcongr2. exact Hchunk.
+    - (* LForall: inert binder, so a direct recursion at the same mp1/mp2 --
+         matches trnsl_assertion_forall never updating mp, and
+         assertion_true_fvars not subtracting v either. *)
+      inversion Hsf.
+      apply bi.forall_mono. intro v'.
+      etrans; [| apply bi.equiv_entails_1_1,
+                 (trnsl_assertion_unfold (subst a0 M) stk mp2)].
+      apply (IHa0 M stk mp1 mp2). by split_and!.
+    - (* LExists: updates mp1/mp2 at the same fresh witness v'; assertion_true_fvars
+         (LExists v t body) = assertion_true_fvars body ∖ {[v]}, so at x = v both
+         sides trivially reduce to v' (v ∉ dom M, from HbA), and at x ≠ v the
+         update is a no-op (eval_lvar_update_stable) and the outer Hbase carries
+         over directly -- no is_reserved detour needed anywhere. *)
+      inversion Hsf. subst.
+      apply bi.exist_mono. intro v'.
+      apply bi.sep_mono; [done|].
+      have HvdomM : v ∉ dom M. { set_solver. }
+      have HvlexM : v ∉ lexpr_map_fvars M. { set_solver. }
+      have Hbase' : ∀ x, x ∈ assertion_true_fvars a0 →
+        eval_lvar M (fun y => if (y =? v)%string then v' else mp1 y) x =
+        eval_lvar M (fun y => if (y =? v)%string then v' else mp2 y) x.
+      { intros x Hx. destruct (decide (x = v)) as [-> | Hne].
+        - unfold eval_lvar. apply not_elem_of_dom in HvdomM. rewrite HvdomM /=.
+          rewrite String.eqb_refl. reflexivity.
+        - rewrite (eval_lvar_update_stable M mp1 v v' x HvlexM (or_intror Hne)).
+          rewrite (eval_lvar_update_stable M mp2 v v' x HvlexM (or_intror Hne)).
+          apply Hbase. simpl. set_solver. }
+      etrans; [| apply bi.equiv_entails_1_1,
+                 (trnsl_assertion_unfold (subst a0 M) stk
+                    (fun y => if (y =? v)%string then v' else mp2 y))].
+      apply (IHa0 M stk
+        (fun y => if (y =? v)%string then v' else mp1 y)
+        (fun y => if (y =? v)%string then v' else mp2 y)).
+      split_and!.
+      + assumption.
+      + set_solver.
+      + assumption.
+      + exact Hbase'.
+    - (* LIte *)
+      inversion Hsf. subst.
+      have Hfv_cond : ∀ x, x ∈ lexpr_fvars cond → eval_lvar M mp1 x = eval_lvar M mp2 x.
+      { intros x Hx. apply Hbase. simpl. set_solver. }
+      apply bi.and_mono.
+      + apply bi.wand_mono.
+        * apply bi.pure_mono. unfold LExpr_holds.
+          rewrite (interp_lexpr_subst_eval_lvar_congr_true cond M mp1 mp2 Hfv_cond). tauto.
+        * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_1 M) stk mp2)].
+          apply (IHa0_1 M stk mp1 mp2). split_and!; try assumption.
+          -- set_solver.
+          -- intros x Hx. apply Hbase. simpl. set_solver.
+      + apply bi.wand_mono.
+        * apply bi.pure_mono. unfold LExpr_holds.
+          rewrite (interp_lexpr_subst_eval_lvar_congr_true cond M mp1 mp2 Hfv_cond). tauto.
+        * etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold (subst a0_2 M) stk mp2)].
+          apply (IHa0_2 M stk mp1 mp2). split_and!; try assumption.
+          -- set_solver.
+          -- intros x Hx. apply Hbase. simpl. set_solver.
+    - (* LInv: a leaf -- only the argument evaluations must be transferred *)
+      simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
+      apply bi.exist_mono. intro vs. apply bi.sep_mono; [| done].
+      apply bi.pure_mono. apply (Forall2_interp_subst_congr args vs M M mp1 mp2).
+      intros le Hle.
+      apply (interp_lexpr_subst_eval_lvar_congr_true le M mp1 mp2).
+      intros x Hx. apply Hbase. simpl. exact (lexpr_fvars_elem_subseteq le args Hle x Hx).
+    - (* LPred: the fixpoint induction hypothesis fires here, exactly as in
+         subst_congr_step's LPred case, but re-deriving the mp_irr_cond-shaped
+         (rather than subst_congr_cond-shaped) facts for the unfolded body:
+         its own binders are reserved (pwf_pred_binders_reserved) and disjoint
+         from M (Hmr), and its true fvars are fully closed by its formal args
+         (pwf_pred_fvars_closed), so once substituted by the call's own args
+         they land inside assertion_true_fvars (LPred pred_name0 args) --
+         exactly Hbase's domain, no reserved leftover. *)
+      simpl. destruct (pred_map !! pred_name0) as [r|] eqn:Hr; [| done].
+      have Hbr : assertion_exists_binders r.(pred_body) ## (dom M ∪ lexpr_map_fvars M).
+      { apply reserved_disjoint_dom.
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
+        - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
+            [exact (proj1 Hmr v Hv) | exact (proj2 Hmr v Hv)]. }
+      have HPredBodyWF := pred_body_wf_from_scoped r
+        (Hwf.(pwf_pred_fvars_scoped) pred_name0 r Hr).
+      inversion Hsf. rewrite Hr in H1. inversion H1. subst pred_record.
+      rewrite (HPredBodyWF args M H2 ltac:(set_solver)).
+      rewrite /trnsl_assertion_curry.
+      iIntros "H".
+      iApply ("H" $! (subst r.(pred_body) (list_to_map (zip r.(pred_args) args))) M mp2);
+        iPureIntro; [reflexivity |].
+      split_and!.
+      + assumption.
+      + rewrite assertion_exists_binders_subst. exact Hbr.
+      + exact Hmr.
+      + have Hclosed := Hwf.(pwf_pred_fvars_closed) pred_name0 r Hr.
+        have Hdom : assertion_true_fvars r.(pred_body) ⊆
+          dom (list_to_map (zip r.(pred_args) args) : gmap lvar LExpr).
+        { rewrite (dom_list_to_map_zip r.(pred_args) args (eq_sym H2)). exact Hclosed. }
+        have Hb1 := assertion_true_fvars_subst_bound r.(pred_body)
+          (list_to_map (zip r.(pred_args) args)) Hdom.
+        have Hb2 := lexpr_map_fvars_zip_subseteq r.(pred_args) args.
+        intros x Hx. apply Hbase. simpl.
+        exact (Hb2 x (Hb1 x Hx)).
+    - (* LAnd *)
+      inversion Hsf. subst.
+      apply bi.sep_mono.
+      + etrans; [| apply bi.equiv_entails_1_1,
+                   (trnsl_assertion_unfold (subst a0_1 M) stk mp2)].
+        apply (IHa0_1 M stk mp1 mp2). split_and!; try assumption.
+        * set_solver.
+        * intros x Hx. apply Hbase. simpl. set_solver.
+      + etrans; [| apply bi.equiv_entails_1_1,
+                   (trnsl_assertion_unfold (subst a0_2 M) stk mp2)].
+        apply (IHa0_2 M stk mp1 mp2). split_and!; try assumption.
+        * set_solver.
+        * intros x Hx. apply Hbase. simpl. set_solver.
+  Qed.
+
+  (* One direction of the equivalence. *)
+  Lemma trnsl_assertion_mp_irrelevant_reserved_mono (Hwf : ProgramWF)
+      (a : assertion) (M : gmap lvar LExpr) stk_id (mp1 mp2 : symb_map) :
+    mp_irr_cond a M mp1 mp2 →
+    trnsl_assertion (subst a M) stk_id mp1 ⊢ trnsl_assertion (subst a M) stk_id mp2.
+  Proof.
+    intros Hcond.
+    iIntros "H".
+    iDestruct (least_fixpoint_iter trnsl_assertion_F mp_irr_Phi with "[] H") as "H'".
+    { iIntros "!>" ([[b stk'] mp']) "HF".
+      rewrite /mp_irr_Phi /=.
+      iIntros (a0 M' mp2') "-> %Hc".
+      by iApply (mp_irr_step Hwf a0 M' stk' mp' mp2' Hc). }
+    rewrite /mp_irr_Phi /=.
+    iApply ("H'" $! a M mp2); iPureIntro; [reflexivity | exact Hcond].
+  Qed.
+
+  (* The lemma local/binders.md's "Blocked" section calls for: translating a
+     once-substituted, StackFree assertion doesn't depend on the ambient
+     mp's value anywhere -- not even at reserved names, unlike
+     trnsl_assertion_subst_congr's Hbase, which needs exactly that
+     agreement and is therefore unusable when mp1/mp2 (e.g. a caller's own
+     mp vs the canonical WINV_MP) are genuinely unrelated. Only requires
+     agreement where the assertion actually, truly (not merely
+     over-approximately) reads mp -- assertion_true_fvars a, once M is
+     applied, is empty of anything mp could still influence beyond that. *)
+  Lemma trnsl_assertion_mp_irrelevant_reserved (Hwf : ProgramWF)
+    (a : assertion) (M : gmap lvar LExpr) stk_id (mp1 mp2 : symb_map) :
+    StackFree a →
+    assertion_exists_binders a ## (dom M ∪ lexpr_map_fvars M) →
+    subst_map_avoids_reserved M →
+    (∀ x, x ∈ assertion_true_fvars a → eval_lvar M mp1 x = eval_lvar M mp2 x) →
+    trnsl_assertion (subst a M) stk_id mp1 ≡ trnsl_assertion (subst a M) stk_id mp2.
+  Proof.
+    intros HSF HbA Hmr Hbase.
+    have Hcond : mp_irr_cond a M mp1 mp2 by split_and!.
+    apply bi.equiv_entails; split.
+    - exact (trnsl_assertion_mp_irrelevant_reserved_mono Hwf a M stk_id mp1 mp2 Hcond).
+    - exact (trnsl_assertion_mp_irrelevant_reserved_mono Hwf a M stk_id mp2 mp1
+               (mp_irr_cond_sym _ _ _ _ Hcond)).
   Qed.
 
   (* Helper: eval_lvar agreement holds for list_to_map (zip args lexprs) vs
@@ -4220,59 +4917,95 @@ Section AssertionsProperties.
     exact (eq_sym (eval_lvar_update_stable _ q2 v v' x Hv2 (or_introl Hx2))).
   Qed.
 
+  (* Extra "no key here is reserved" hypotheses (Hargs_ok, Hlvar_x_ok)
+     needed for the new is_reserved x disjunct: when x is reserved, none
+     of "#ret_val" (never reserved, a different, "#"-prefixed convention),
+     args's own formal-argument names (never reserved by the framework's
+     own naming discipline, see local/binders.md), or lvar_x (ditto for
+     derivation-fresh witnesses) can equal x, so both sides fall back
+     directly to mp/the ret_val update, which trivially agree. *)
   Lemma hbase_lexpr_subst_r (args : list lvar) (lexprs : list LExpr)
       (arg_vals : list lang.val) (lvar_x : lvar) (ret_val : lang.val) (mp : symb_map) :
     lvar_x ∉ lexpr_map_fvars (list_to_map (zip args lexprs)) →
+    ¬ is_reserved lvar_x →
+    Forall (λ a, ¬ is_reserved a) args →
     Forall2 (λ expr val0, interp_lexpr expr mp = Some (trnsl_val val0)) lexprs arg_vals →
-    ∀ x, x ∈ dom (<["#ret_val" := LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) →
+    ∀ x, x ∈ dom (<["#ret_val" := LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) ∨ is_reserved x →
     eval_lvar (<["#ret_val" := LVar lvar_x]>(list_to_map (zip args lexprs)))
       (λ x0, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0) x =
     eval_lvar (<["#ret_val" := LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ w : lang.val, LVal (trnsl_val w)) arg_vals))))
       mp x.
   Proof.
-    intros Hfresh HF2 x Hdom.
-    destruct (decide (x = "#ret_val")) as [-> | Hne].
-    - unfold eval_lvar. rewrite !lookup_insert. simpl. rewrite String.eqb_refl. reflexivity.
-    - have Hne' : "#ret_val" ≠ x := fun H => Hne (eq_sym H).
-      have Hdomx : x ∈ dom (list_to_map (zip args lexprs) : gmap lvar LExpr).
-      { rewrite dom_insert in Hdom. set_solver. }
+    intros Hfresh Hlvar_x_ok Hargs_ok HF2 x [Hdom | Hres].
+    - destruct (decide (x = "#ret_val")) as [-> | Hne].
+      + unfold eval_lvar. rewrite !lookup_insert. simpl. rewrite String.eqb_refl. reflexivity.
+      + have Hne' : "#ret_val" ≠ x := fun H => Hne (eq_sym H).
+        have Hdomx : x ∈ dom (list_to_map (zip args lexprs) : gmap lvar LExpr).
+        { rewrite dom_insert in Hdom. set_solver. }
+        unfold eval_lvar.
+        rewrite (lookup_insert_ne _ _ _ _ Hne').
+        rewrite (lookup_insert_ne _ _ _ _ Hne').
+        have Hcongr : eval_lvar (list_to_map (zip args lexprs)) mp x =
+                      eval_lvar (list_to_map (zip args (map (λ w, LVal (trnsl_val w)) arg_vals))) mp x :=
+          eval_lvar_list_to_map_zip_forall2 args lexprs arg_vals mp HF2 x.
+        unfold eval_lvar in Hcongr.
+        destruct (list_to_map (zip args lexprs) !! x) as [le|] eqn:Hle.
+        * have Hle_fresh : lvar_x ∉ lexpr_fvars le :=
+            proj1 (lexpr_map_fvars_spec _ _) Hfresh x le Hle.
+          rewrite Hle. simpl. simpl in Hcongr.
+          etransitivity.
+          { exact (interp_lexpr_stable le mp lvar_x (trnsl_val ret_val) Hle_fresh). }
+          exact Hcongr.
+        * exfalso. rewrite elem_of_dom in Hdomx. destruct Hdomx as [le' Hle']. congruence.
+    - have Hne_ret : x ≠ "#ret_val".
+      { intros ->. unfold is_reserved in Hres. discriminate. }
+      have Hne_lvar_x : x ≠ lvar_x.
+      { intros ->. exact (Hlvar_x_ok Hres). }
+      have Hnotin_args : x ∉ args.
+      { intros Hin. rewrite Forall_forall in Hargs_ok. exact (Hargs_ok x Hin Hres). }
+      have Hnotin1 : (list_to_map (zip args lexprs) : gmap lvar LExpr) !! x = None.
+      { destruct ((list_to_map (zip args lexprs) : gmap lvar LExpr) !! x) as [e|] eqn:Heq; [| reflexivity].
+        exfalso. apply elem_of_list_to_map_2 in Heq. apply elem_of_zip_l in Heq.
+        exact (Hnotin_args Heq). }
+      have Hnotin2 : (list_to_map (zip args (map (λ w, LVal (trnsl_val w)) arg_vals)) : gmap lvar LExpr) !! x = None.
+      { destruct ((list_to_map (zip args (map (λ w, LVal (trnsl_val w)) arg_vals)) : gmap lvar LExpr) !! x)
+          as [e|] eqn:Heq; [| reflexivity].
+        exfalso. apply elem_of_list_to_map_2 in Heq. apply elem_of_zip_l in Heq.
+        exact (Hnotin_args Heq). }
       unfold eval_lvar.
-      rewrite (lookup_insert_ne _ _ _ _ Hne').
-      rewrite (lookup_insert_ne _ _ _ _ Hne').
-      have Hcongr : eval_lvar (list_to_map (zip args lexprs)) mp x =
-                    eval_lvar (list_to_map (zip args (map (λ w, LVal (trnsl_val w)) arg_vals))) mp x :=
-        eval_lvar_list_to_map_zip_forall2 args lexprs arg_vals mp HF2 x.
-      unfold eval_lvar in Hcongr.
-      destruct (list_to_map (zip args lexprs) !! x) as [le|] eqn:Hle.
-      + have Hle_fresh : lvar_x ∉ lexpr_fvars le :=
-          proj1 (lexpr_map_fvars_spec _ _) Hfresh x le Hle.
-        rewrite Hle. simpl. simpl in Hcongr.
-        etransitivity.
-        { exact (interp_lexpr_stable le mp lvar_x (trnsl_val ret_val) Hle_fresh). }
-        exact Hcongr.
-      + exfalso. rewrite elem_of_dom in Hdomx. destruct Hdomx as [le' Hle']. congruence.
+      rewrite (lookup_insert_ne _ _ _ _ (fun H => Hne_ret (eq_sym H))).
+      rewrite (lookup_insert_ne _ _ _ _ (fun H => Hne_ret (eq_sym H))).
+      rewrite Hnotin1 Hnotin2. simpl.
+      rewrite (proj2 (String.eqb_neq x lvar_x) Hne_lvar_x).
+      reflexivity.
   Qed.
 
   Lemma trnsl_assertion_w_lexpr_subst assertion lexprs args arg_vals stk_id mp p1 p2
       (Hwf : ProgramWF)
       (HSF : StackFree assertion)
-      (HbA_M1 : assertion_exists_binders assertion ## lexpr_map_fvars (list_to_map (zip args lexprs)))
-      (HbA_M2 : assertion_exists_binders assertion ## lexpr_map_fvars (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))))
-      (HfvA : assertion_lexpr_fvars assertion ⊆ dom (list_to_map (zip args lexprs) : gmap lvar LExpr))
-      (HdomEq : dom (list_to_map (zip args lexprs) : gmap lvar LExpr) = dom (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr)) :
+      (HbA_M1 : assertion_exists_binders assertion ##
+        (dom (list_to_map (zip args lexprs) : gmap lvar LExpr) ∪ lexpr_map_fvars (list_to_map (zip args lexprs))))
+      (HbA_M2 : assertion_exists_binders assertion ##
+        (dom (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr) ∪
+         lexpr_map_fvars (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))))
+      (HfvA : ∀ v, v ∈ assertion_lexpr_fvars assertion →
+        v ∈ (dom (list_to_map (zip args lexprs) : gmap lvar LExpr)) ∨ is_reserved v)
+      (HdomEq : dom (list_to_map (zip args lexprs) : gmap lvar LExpr) = dom (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr))
+      (Hmr1 : subst_map_avoids_reserved (list_to_map (zip args lexprs)))
+      (Hmr2 : subst_map_avoids_reserved (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))) :
     Forall2 (λ expr val0, interp_lexpr expr mp = Some (trnsl_val val0)) lexprs arg_vals →
     trnsl_assertion (subst assertion (list_to_map (zip args lexprs))) stk_id mp ≡ p1 →
     trnsl_assertion (subst assertion (list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))) stk_id mp ≡ p2 →
     p1 -∗ p2.
   Proof.
     intros HF2 Hp1 Hp2.
-    have Hbase : ∀ x, x ∈ dom (list_to_map (zip args lexprs) : gmap lvar LExpr) →
+    have Hbase : ∀ x, x ∈ dom (list_to_map (zip args lexprs) : gmap lvar LExpr) ∨ is_reserved x →
                        eval_lvar (list_to_map (zip args lexprs)) mp x =
                        eval_lvar (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) arg_vals))) mp x.
     { intros x _. exact (eval_lvar_list_to_map_zip_forall2 args lexprs arg_vals mp HF2 x). }
     have Hstab := hstab_lexpr_subst_fwd args lexprs arg_vals HdomEq.
     have Heq := trnsl_assertion_subst_congr Hwf assertion _ _ stk_id mp mp
-      HSF HbA_M1 HbA_M2 HfvA HdomEq Hstab Hbase.
+      HSF HbA_M1 HbA_M2 HfvA HdomEq Hmr1 Hmr2 Hstab Hbase.
     rewrite <- Hp1. rewrite Heq. rewrite Hp2.
     iIntros "H". iExact "H".
   Qed.
@@ -4280,11 +5013,20 @@ Section AssertionsProperties.
   Lemma trnsl_assertion_w_lexpr_subst_r assertion lexprs args arg_vals lvar_x ret_val stk stk_id mp p1 p2
       (Hwf : ProgramWF)
       (HSF : StackFree assertion)
-      (HbA_M1 : assertion_exists_binders assertion ## lexpr_map_fvars (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs))))
-      (HbA_M2 : assertion_exists_binders assertion ## lexpr_map_fvars (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))))
-      (HfvA : assertion_lexpr_fvars assertion ⊆ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr))
+      (HbA_M1 : assertion_exists_binders assertion ##
+        (dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) ∪
+         lexpr_map_fvars (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)))))
+      (HbA_M2 : assertion_exists_binders assertion ##
+        (dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))) : gmap lvar LExpr) ∪
+         lexpr_map_fvars (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))))))
+      (HfvA : ∀ v, v ∈ assertion_lexpr_fvars assertion →
+        v ∈ (dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr)) ∨ is_reserved v)
       (HdomEq : dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) = dom (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals))) : gmap lvar LExpr))
-      (Hfresh_base : lvar_x ∉ lexpr_map_fvars (list_to_map (zip args lexprs))) :
+      (Hmr1 : subst_map_avoids_reserved (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs))))
+      (Hmr2 : subst_map_avoids_reserved (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)))))
+      (Hfresh_base : lvar_x ∉ lexpr_map_fvars (list_to_map (zip args lexprs)))
+      (Hlvar_x_ok : ¬ is_reserved lvar_x)
+      (Hargs_ok : Forall (λ a, ¬ is_reserved a) args) :
     fresh_lvar stk lvar_x →
     Forall2 (λ expr val0, interp_lexpr expr mp = Some (trnsl_val val0)) lexprs arg_vals →
     trnsl_assertion (subst assertion (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)))) stk_id
@@ -4294,15 +5036,15 @@ Section AssertionsProperties.
   Proof.
     intros _Hfresh HF2 Hp1 Hp2.
     have Hstab_r := hstab_lexpr_subst_r args lexprs arg_vals lvar_x ret_val HdomEq.
-    have Hbase_r : ∀ x, x ∈ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) →
+    have Hbase_r : ∀ x, x ∈ dom (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)) : gmap lvar LExpr) ∨ is_reserved x →
       eval_lvar (<["#ret_val":=LVar lvar_x]>(list_to_map (zip args lexprs)))
         (λ x0, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0) x =
       eval_lvar (<["#ret_val":=LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ val, LVal (trnsl_val val)) arg_vals))))
         mp x.
-    { intros x Hx. exact (hbase_lexpr_subst_r args lexprs arg_vals lvar_x ret_val mp Hfresh_base HF2 x Hx). }
+    { intros x Hx. exact (hbase_lexpr_subst_r args lexprs arg_vals lvar_x ret_val mp Hfresh_base Hlvar_x_ok Hargs_ok HF2 x Hx). }
     have Heq := trnsl_assertion_subst_congr Hwf assertion _ _ stk_id
       (λ x0, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0) mp
-      HSF HbA_M1 HbA_M2 HfvA HdomEq Hstab_r Hbase_r.
+      HSF HbA_M1 HbA_M2 HfvA HdomEq Hmr1 Hmr2 Hstab_r Hbase_r.
     rewrite <- Hp2. rewrite <- Heq. rewrite Hp1.
     iIntros "H". iExact "H".
   Qed.
@@ -4389,20 +5131,36 @@ Section AssertionsProperties.
       by apply stack_free_assertion_trnsl_mono.
   Qed.
 
+  (* Hmr: subst_map touches no reserved name -- needed to re-derive the
+     "## dom subst_map" premise InvBodyWF/PredBodyWF now require (in place
+     of the old, unconditional-over-M pwf_*_binders_fresh) for whichever
+     inv/pred body SF_Inv/SF_Pred happens to unfold. Whoever discharges
+     this for a concrete subst_map is asserting it was built by the
+     ordinary framework machinery -- see subst_map_avoids_reserved and
+     local/binders.md. *)
   Lemma stack_free_assertion_subst
     (Hwf : ProgramWF)
-    assertion subst_map :
+    assertion subst_map
+    (Hmr : (∀ v, v ∈ dom subst_map → ¬ is_reserved v)) :
     StackFree assertion -> StackFree (subst assertion subst_map).
   Proof.
     intros HSF. induction HSF; simpl; try constructor; try assumption.
     - (* SF_Inv *)
       have Hbwf := inv_body_wf_from_scoped inv_record (Hwf.(pwf_inv_fvars_scoped) _ _ H).
+      have Hbr : assertion_exists_binders inv_record.(inv_body) ## dom subst_map.
+      { apply reserved_disjoint_dom.
+        - exact (Hwf.(pwf_inv_binders_reserved) _ _ H).
+        - exact Hmr. }
       eapply SF_Inv. { exact H. } { rewrite map_length. exact H0. }
-      rewrite (Hbwf args subst_map H0). exact IHHSF.
+      rewrite (Hbwf args subst_map H0 Hbr). exact IHHSF.
     - (* SF_Pred *)
       have Hbwf := pred_body_wf_from_scoped pred_record (Hwf.(pwf_pred_fvars_scoped) _ _ H).
+      have Hbr : assertion_exists_binders pred_record.(pred_body) ## dom subst_map.
+      { apply reserved_disjoint_dom.
+        - exact (Hwf.(pwf_pred_binders_reserved) _ _ H).
+        - exact Hmr. }
       eapply SF_Pred. { exact H. } { rewrite map_length. exact H0. }
-      rewrite (Hbwf args subst_map H0). exact IHHSF.
+      rewrite (Hbwf args subst_map H0 Hbr). exact IHHSF.
   Qed.
   
 
@@ -4501,7 +5259,10 @@ Section InvariantWorld.
     destruct (decide (length vs = length r.(inv_args))) as [Hlen |]; [| apply _].
     apply trnsl_assertion_timeless.
     apply (stack_free_assertion_subst Hwf).
-    exact (Hwf.(pwf_inv_body_stack_free) inv' r Hr).
+    - intros v Hv. apply elem_of_dom in Hv as [e He].
+      apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+      exact (proj1 (Forall_forall _ _) (Hwf.(pwf_inv_args_not_reserved) inv' r Hr) v He).
+    - exact (Hwf.(pwf_inv_body_stack_free) inv' r Hr).
   Qed.
 
   Lemma Winv_timeless (Hwf : ProgramWF) inv' : Timeless (Winv inv').
@@ -4517,8 +5278,15 @@ Section InvariantWorld.
      The two agree whenever the LExprs evaluate to those values: the body is
      StackFree (so the stack is immaterial) and, once instantiated at values,
      closed (so the symbolic map is immaterial). *)
+  (* Hlexprs_ok: the caller's own argument expressions -- built by
+     trnsl_expr_lExpr against some ordinary symbolic stack -- touch no
+     reserved lvar. Same status as subst_map_avoids_reserved elsewhere:
+     an explicit premise recording that lexprs was actually built by the
+     framework's own machinery, not a proof obligation dischargeable here
+     (see local/binders.md's deferred item). *)
   Lemma inv_body_bridge (Hwf : ProgramWF) (inv' : inv_name) (r : InvRecord)
-      (lexprs : list LExpr) (vs : list val) (stk : stack_id) (mp : symb_map) :
+      (lexprs : list LExpr) (vs : list val) (stk : stack_id) (mp : symb_map)
+      (Hlexprs_ok : ∀ v, v ∈ lexpr_map_fvars (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) → ¬ is_reserved v) :
     inv_map !! inv' = Some r →
     length lexprs = length r.(inv_args) →
     Forall2 (λ le v, interp_lexpr le mp = Some v) lexprs vs →
@@ -4550,9 +5318,22 @@ Section InvariantWorld.
     have HdomEq : dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr)
                 = dom (inv_arg_map r vs : gmap lvar LExpr).
     { by rewrite Hdom1 Hdom2. }
-    have Hfv : assertion_lexpr_fvars r.(inv_body)
-               ⊆ dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr).
-    { rewrite Hdom1. exact (Hwf.(pwf_inv_fvars_scoped) inv' r Hr). }
+    have Hfv : ∀ v, v ∈ assertion_lexpr_fvars r.(inv_body) →
+      v ∈ dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) ∨ is_reserved v.
+    { intros v Hv. destruct (Hwf.(pwf_inv_fvars_scoped) inv' r Hr v Hv) as [Hin | Hin].
+      - left. rewrite Hdom1. exact Hin.
+      - right. exact (Hwf.(pwf_inv_binders_reserved) inv' r Hr v Hin). }
+    have Hfv2 : ∀ v, v ∈ assertion_lexpr_fvars r.(inv_body) →
+      v ∈ dom (inv_arg_map r vs : gmap lvar LExpr) ∨ is_reserved v.
+    { intros v Hv. destruct (Hwf.(pwf_inv_fvars_scoped) inv' r Hr v Hv) as [Hin | Hin].
+      - left. rewrite Hdom2. exact Hin.
+      - right. exact (Hwf.(pwf_inv_binders_reserved) inv' r Hr v Hin). }
+    have Hmr1 : subst_map_avoids_reserved (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr).
+    { split.
+      - intros v Hv. apply elem_of_dom in Hv as [e He].
+        apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+        exact (proj1 (Forall_forall _ _) (Hwf.(pwf_inv_args_not_reserved) inv' r Hr) v He).
+      - exact Hlexprs_ok. }
     (* eval_lvar on the value-instantiated map ignores the symbolic map. *)
     have Hval_eval : ∀ (q : symb_map) x,
         x ∈ dom (inv_arg_map r vs : gmap lvar LExpr) →
@@ -4564,18 +5345,45 @@ Section InvariantWorld.
       { rewrite /inv_arg_map in He.
         exact (lookup_list_to_map_zip_in_snd _ _ _ _ He). }
       destruct (Hvals vs e He2) as [w ->]. done. }
+    have Hmr2 : subst_map_avoids_reserved (inv_arg_map r vs : gmap lvar LExpr).
+    { split.
+      - intros v Hv. apply elem_of_dom in Hv as [e He]. rewrite /inv_arg_map in He.
+        apply elem_of_list_to_map_2 in He. apply elem_of_zip_l in He.
+        exact (proj1 (Forall_forall _ _) (Hwf.(pwf_inv_args_not_reserved) inv' r Hr) v He).
+      - rewrite Hnofv. set_solver. }
+    have HbA_M1 : assertion_exists_binders r.(inv_body) ##
+      (dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) ∪ lexpr_map_fvars (list_to_map (zip r.(inv_args) lexprs))).
+    { apply reserved_disjoint_dom.
+      - exact (Hwf.(pwf_inv_binders_reserved) inv' r Hr).
+      - intros v Hv. apply elem_of_union in Hv as [Hv|Hv]; [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
+    have HbA_M2 : assertion_exists_binders r.(inv_body) ##
+      (dom (inv_arg_map r vs : gmap lvar LExpr) ∪ lexpr_map_fvars (inv_arg_map r vs)).
+    { apply reserved_disjoint_dom.
+      - exact (Hwf.(pwf_inv_binders_reserved) inv' r Hr).
+      - intros v Hv. apply elem_of_union in Hv as [Hv|Hv]; [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
     (* Step 1: replace the symbolic arguments by the values they denote. *)
     have Hbase1 : ∀ x, x ∈ dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) →
         eval_lvar (list_to_map (zip r.(inv_args) lexprs)) mp x =
         eval_lvar (inv_arg_map r vs) mp x.
     { intros x _. rewrite /inv_arg_map /eval_lvar.
-      clear Hdom1 Hdom2 HdomEq Hfv Hval_eval Hnofv Hlen Hlenvs.
+      clear Hdom1 Hdom2 HdomEq Hfv Hfv2 Hval_eval Hnofv Hlen Hlenvs
+        Hlexprs_ok Hmr1 Hmr2 HbA_M1 HbA_M2.
       revert lexprs vs HF2. generalize r.(inv_args) as ks. intros ks.
       induction ks as [| k ks IH]; intros lexprs vs HF2; [done |].
       inversion HF2 as [| le v lexprs' vs' Hle HF2' Heq1 Heq2]; subst; simpl; [done |].
       destruct (decide (x = k)) as [-> | Hne].
       - rewrite !lookup_insert. by rewrite Hle.
       - rewrite !lookup_insert_ne; [| congruence | congruence]. by apply IH. }
+    have Hbase1' : ∀ x, x ∈ dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) ∨ is_reserved x →
+        eval_lvar (list_to_map (zip r.(inv_args) lexprs)) mp x =
+        eval_lvar (inv_arg_map r vs) mp x.
+    { intros x [Hx | Hx]; [exact (Hbase1 x Hx) |].
+      unfold eval_lvar.
+      have Hn1 : (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) !! x = None.
+      { apply not_elem_of_dom. intros Hin. exact (proj1 Hmr1 x Hin Hx). }
+      have Hn2 : (inv_arg_map r vs : gmap lvar LExpr) !! x = None.
+      { apply not_elem_of_dom. intros Hin. exact (proj1 Hmr2 x Hin Hx). }
+      rewrite Hn1 Hn2. reflexivity. }
     have Hstab1 : ∀ (q1 q2 : symb_map),
         (∀ x, x ∈ dom (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) →
               eval_lvar (list_to_map (zip r.(inv_args) lexprs)) q1 x =
@@ -4594,26 +5402,26 @@ Section InvariantWorld.
       exact (eq_sym (eval_lvar_update_stable _ q2 v v' x Hv2 (or_introl Hx2))). }
     etrans.
     { apply (trnsl_assertion_subst_congr Hwf r.(inv_body)
-               (list_to_map (zip r.(inv_args) lexprs)) (inv_arg_map r vs) stk mp mp Hsf);
-        try assumption.
-      - exact (Hwf.(pwf_inv_binders_fresh) inv' r _ Hr).
-      - exact (Hwf.(pwf_inv_binders_fresh) inv' r _ Hr). }
+               (list_to_map (zip r.(inv_args) lexprs)) (inv_arg_map r vs) stk mp mp Hsf
+               HbA_M1 HbA_M2 Hfv HdomEq Hmr1 Hmr2 Hstab1 Hbase1'). }
     (* Step 2: the body is StackFree, so the stack is immaterial. *)
     etrans.
     { apply stack_free_assertion_trnsl with (stk_id' := WINV_STK).
-      exact (stack_free_assertion_subst Hwf _ _ Hsf). }
-    (* Step 3: the instantiated body is closed, so the symbolic map is too. *)
-    apply (trnsl_assertion_subst_congr Hwf r.(inv_body)
-             (inv_arg_map r vs) (inv_arg_map r vs) WINV_STK mp WINV_MP Hsf).
-    - rewrite Hnofv. apply disjoint_empty_r.
-    - rewrite Hnofv. apply disjoint_empty_r.
-    - rewrite Hdom2. exact (Hwf.(pwf_inv_fvars_scoped) inv' r Hr).
-    - reflexivity.
-    - intros q1 q2 Hag v Hv1 Hv2 v' x Hx.
-      rewrite (eval_lvar_update_stable _ q1 v v' x Hv1 (or_introl Hx)).
-      rewrite (eval_lvar_update_stable _ q2 v v' x Hv2 (or_introl Hx)).
-      exact (Hag x Hx).
-    - intros x Hx. exact (Hval_eval mp x Hx).
+      exact (stack_free_assertion_subst Hwf _ _ (proj1 Hmr2) Hsf). }
+    (* Step 3: the instantiated body is closed, so the symbolic map is too.
+       trnsl_assertion_subst_congr's Hbase (agreement at reserved names too)
+       is unsatisfiable here -- mp is an arbitrary caller-supplied map and
+       WINV_MP a fixed global constant, genuinely unrelated at any name
+       neither map's domain covers. trnsl_assertion_mp_irrelevant_reserved
+       is the right tool instead: it only needs agreement where inv_body's
+       *scope-correct* fvars (assertion_true_fvars, via pwf_inv_fvars_closed)
+       actually land, which is exactly dom (inv_arg_map r vs) -- Hval_eval's
+       own domain. See local/binders.md's "Blocked" section. *)
+    have Htrue_dom : assertion_true_fvars r.(inv_body) ⊆ dom (inv_arg_map r vs : gmap lvar LExpr).
+    { rewrite Hdom2. exact (Hwf.(pwf_inv_fvars_closed) inv' r Hr). }
+    apply (trnsl_assertion_mp_irrelevant_reserved Hwf r.(inv_body)
+             (inv_arg_map r vs) WINV_STK mp WINV_MP Hsf HbA_M2 Hmr2).
+    intros x Hx. exact (Hval_eval mp x (Htrue_dom x Hx)).
   Qed.
 
   Lemma inv_body_at_eq (inv' : inv_name) (r : InvRecord) (vs : list val) :

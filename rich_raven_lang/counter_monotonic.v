@@ -468,8 +468,11 @@ Proof.
     + set_solver.
     + exact inv_map_counterInv.
     + reflexivity.
+    + constructor; [| constructor]. intros v Hv. simpl in Hv.
+      apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
     + exact stk_type_compat_stk0.
     + apply fresh_lvar_stk0. discriminate.
+    + unfold is_reserved. discriminate.
     + simpl. exact read_fldrd_block_step.
   - exact (entails_and_mono _ _ _ _ (entails_refl (LStack stk0)) (entails_and_true_intro (LInv "counterInv" [LVar "x"]))).
   - exact (entails_exists_mono "l_v1" TpInt _ _ eq_refl
@@ -1252,8 +1255,11 @@ Proof.
   - set_solver.
   - exact inv_map_counterInv.
   - reflexivity.
+  - constructor; [| constructor]. intros v Hv. simpl in Hv.
+    apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
   - exact stk_type_compat_incr_stk1.
   - apply fresh_lvar_incr_stk1; discriminate.
+  - unfold is_reserved. discriminate.
   - rewrite (subst_id_map ["x"] counterInv_body). exact incr_invblock2_v_elim_step.
 Qed.
 
@@ -1278,6 +1284,9 @@ Proof.
     + reflexivity.
     + reflexivity.
     + exact stk_type_compat_incr_stk2.
+    + unfold is_reserved. discriminate.
+    + constructor; [| constructor]. intros v Hv. simpl in Hv.
+      apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
   - apply entails_and_mono; [exact (entails_refl _) |].
     eapply entails_trans; [exact (entails_and_elim_l _ _) |].
     unfold incr_precond. simpl. exact (entails_refl _).
@@ -1484,6 +1493,8 @@ Proof.
   - set_solver.
   - exact inv_map_counterInv.
   - reflexivity.
+  - constructor; [| constructor]. intros v Hv. simpl in Hv.
+    apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
 Qed.
 
