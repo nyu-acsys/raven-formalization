@@ -71,6 +71,16 @@ Context `{!inGs Σ Gs}.
    sharing is entirely delegated back to the RA itself, same as before. *)
 Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
+(* Layer 0 (see local/parameters-redesign.md's Step 5b): the ghost-heap's
+   own inG requirement, isolated as a subG-derivable capability. Unlike
+   heapG/invTokenG it doesn't bundle any gname alongside the inG evidence,
+   so no separate GpreS/GS split is needed here -- just this one fact,
+   combined into ravenΣ below. *)
+Definition ghostHeapInGΣ : gFunctors := #[ GFunctor (authR (gmapUR heap_addr (agreeR gnameO))) ].
+
+Global Instance subG_ghostHeapInG Σ' : subG ghostHeapInGΣ Σ' → inG Σ' (authR (gmapUR heap_addr (agreeR gnameO))).
+Proof. solve_inG. Qed.
+
 Context `{!simpLangG Σ}.
 
 Definition lvar := string.
@@ -639,6 +649,36 @@ Definition invTokenGΣ : gFunctors := #[ GFunctor (authR inv_argsUR) ].
 
 Global Instance subG_invTokenGpreS Σ' : subG invTokenGΣ Σ' → invTokenGpreS Σ'.
 Proof. solve_inG. Qed.
+
+(* Combined Layer 0 capability list (Step 5b, local/parameters-redesign.md):
+   everything a caller of the adequacy wrapper (raven_soundness, trnsl.v)
+   needs from a single subG hypothesis to build the instances its own
+   Context expects -- except inGs Σ Gs (inherently RA/program-specific,
+   picked per the one ra_name being verified, not a fixed capability) and
+   simpLangG itself (bundles concrete gnames, not just inG evidence, so it
+   needs own_alloc/wp_adequacy work a caller does separately -- heapGΣ and
+   invΣ below only cover the "pre" half of what building one requires).
+   subG's own transitivity through gFunctors append (#[...]) lets
+   subG_heapGpreS/subG_invTokenGpreS/subG_ghostHeapInG (this file) and
+   Iris's own subG_invΣ each fire straight off "subG ravenΣ Σ'" via
+   solve_inG, without restating any of them here -- checked directly below,
+   not just assumed, since invGpreS (unlike the other three) needed an
+   explicit "apply subG_invΣ" first: solve_inG alone doesn't chase through
+   invΣ's own name to find it. *)
+Definition ravenΣ : gFunctors := #[ heapGΣ; invTokenGΣ; ghostHeapInGΣ; invΣ ].
+
+Lemma ravenΣ_subG_heapGpreS Σ' `{!subG ravenΣ Σ'} : heapGpreS Σ'.
+Proof. solve_inG. Qed.
+
+Lemma ravenΣ_subG_invTokenGpreS Σ' `{!subG ravenΣ Σ'} : invTokenGpreS Σ'.
+Proof. solve_inG. Qed.
+
+Lemma ravenΣ_subG_ghostHeapInG Σ' `{!subG ravenΣ Σ'} :
+  inG Σ' (authR (gmapUR heap_addr (agreeR gnameO))).
+Proof. solve_inG. Qed.
+
+Lemma ravenΣ_subG_invGpreS Σ' `{!subG ravenΣ Σ'} : invGpreS Σ'.
+Proof. apply subG_invΣ. solve_inG. Qed.
 
 Context `{!invTokenG Σ}.
 
