@@ -2,39 +2,93 @@
    (a monotone counter backed by a simplified Auth[MaxNat]-style resource
    algebra) against rrl_lang.v/lang.v, together with a RavenHoareTriple
    derivation for incr/read/make. *)
-From stdpp Require Import gmap.
+From stdpp Require Import gmap namespaces.
 From raven_iris.simp_raven_lang Require Import lang.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
 Require Import Coq.Logic.FunctionalExtensionality.
 
-(* ----------------------------------------------------------------------- *)
-(* The resource algebra: a plain monotone nat -- comp/frame is max, every
-   element is valid, and a frame-preserving update is exactly "go up".
-   This is the fragment of Auth[MaxNat] this proof actually needs: nothing
-   here ever holds a separate authoritative/fragment split, so there is no
-   need to formalize Auth on top of it. *)
-Definition MonoNat := nat.
+(* Sigma/Gs/I (hence invTokenG's own inG obligation) are still abstract
+   Context declarations throughout rrl_lang.v -- picking a concrete Sigma
+   is Step 5's job (the adequacy wrapper), not this file's. Everything
+   else this file needs (Program, GhostConfig) is concrete, defined below
+   once read/incr/make/counterInv's own records exist (see RProg/G,
+   after make_record). *)
+Context `{!invTokenG rrl_lang.Σ}.
 
-Definition mn_comp (x y : MonoNat) : MonoNat := Nat.max x y.
-Definition mn_frame (x y : MonoNat) : MonoNat := x.
-Definition mn_valid (x : MonoNat) : Prop := True.
-Definition mn_fpuValid (x y : MonoNat) : Prop := x <= y.
+(* ----------------------------------------------------------------------- *)
+(* The resource algebra: a plain monotone nat -- comp/frame is max, and a
+   frame-preserving update is exactly "go up". This is the fragment of
+   Auth[MaxNat] this proof actually needs: nothing here ever holds a
+   separate authoritative/fragment split, so there is no need to formalize
+   Auth on top of it.
+   Carrier is [option nat], not [nat]: the restored ResourceAlgebra axioms
+   (see local/parameters-redesign.md, Step 0) require [frame] to actually
+   reject the [x < y] case via [valid], and plain [nat] has no element to
+   reject with. [None] is that invalid sentinel -- mirrors
+   lib/library/resource_algebra.rav's own [MaxNat] module, which uses
+   [Int]'s [-1] as its sentinel, filtered out by [valid(n) := n >= 0]. *)
+Definition MonoNat := option nat.
+
+Definition mn_comp (x y : MonoNat) : MonoNat :=
+  match x, y with
+  | Some a, Some b => Some (Nat.max a b)
+  | _, _ => None
+  end.
+
+(* [y = id]: pass [x] through unchanged, valid or not (mirrors [comp]'s own
+   id-absorption, and gives [frame_id] for free). Otherwise [x]/[y] must
+   both be valid and [x >= y], else the result is invalid ([None]). *)
+Definition mn_frame (x y : MonoNat) : MonoNat :=
+  match y with
+  | Some 0%nat => x
+  | Some n =>
+      match x with
+      | Some m => if le_dec n m then Some m else None
+      | None => None
+      end
+  | None => None
+  end.
+
+Definition mn_valid (x : MonoNat) : Prop := is_Some x.
+
+Definition mn_fpuValid (x y : MonoNat) : Prop :=
+  match x, y with
+  | Some a, Some b => a <= b
+  | _, _ => False
+  end.
+
 (* Total: negative ints (which MonoNat has no natural reading of) fall back
-   to ra_id (0), rather than getting stuck. *)
+   to ra_id (Some 0), rather than getting stuck. *)
 Definition mn_of_int (z : Z) : MonoNat :=
-  match z with
+  Some match z with
   | Z0 => 0%nat
   | Zpos p => Pos.to_nat p
   | Zneg _ => 0%nat
   end.
 
+Definition mn_valid_dec (x : MonoNat) : Decision (mn_valid x).
+Proof.
+  destruct x as [a|].
+  - left. by exists a.
+  - right. intros [a Ha]. discriminate.
+Defined.
+
+Definition mn_fpuValid_dec (x y : MonoNat) : Decision (mn_fpuValid x y).
+Proof.
+  destruct x as [a|].
+  - destruct y as [b|].
+    + simpl. apply le_dec.
+    + simpl. right. intros [].
+  - simpl. right. intros [].
+Defined.
+
 (* Needed to discharge incr's own Fpu step: incr always moves the counter up
    by exactly 1, so mn_of_int of the new value is always >= mn_of_int of the
    old one -- true across the fallback-to-0 case too (z and z+1 both
    negative, or z negative and z+1 = 0, both give mn_of_int z = 0). *)
-Lemma mn_of_int_mono (z : Z) : mn_of_int z <= mn_of_int (z + 1).
+Lemma mn_of_int_mono (z : Z) : mn_fpuValid (mn_of_int z) (mn_of_int (z + 1)).
 Proof.
-  unfold mn_of_int.
+  unfold mn_of_int, mn_fpuValid.
   destruct z as [ | p | p]; simpl.
   - lia.
   - rewrite Pos.add_1_r. rewrite Pos2Nat.inj_succ. lia.
@@ -43,21 +97,84 @@ Qed.
 
 Lemma mn_fpuAxiom : forall x y : MonoNat, mn_fpuValid x y ->
   mn_valid x /\ mn_valid y /\ forall c, mn_valid (mn_comp x c) -> mn_valid (mn_comp y c).
-Proof. intros x y _. repeat split; done. Qed.
+Proof.
+  intros x y Hfpu. unfold mn_fpuValid in Hfpu.
+  destruct x as [a|]; destruct y as [b|]; try done.
+  unfold mn_valid, mn_comp in *.
+  repeat split; [by exists a | by exists b |].
+  intros c [r Hr]. destruct c as [cc|]; [| discriminate].
+  by exists (Nat.max b cc).
+Qed.
 
-Lemma mn_ra_id_comp : forall x, mn_comp 0%nat x = x.
-Proof. intros x. unfold mn_comp. lia. Qed.
+Lemma mn_ra_id_comp : forall x, mn_comp (Some 0%nat) x = x.
+Proof. intros [a|]; unfold mn_comp; [f_equal; lia | reflexivity]. Qed.
+
+Lemma mn_ra_id_valid : mn_valid (Some 0%nat).
+Proof. by exists 0%nat. Qed.
+
+Lemma mn_comp_comm : forall x y, mn_comp x y = mn_comp y x.
+Proof. intros [a|] [b|]; unfold mn_comp; [f_equal; lia | ..]; reflexivity. Qed.
+
+Lemma mn_comp_assoc : forall x y z, mn_comp (mn_comp x y) z = mn_comp x (mn_comp y z).
+Proof.
+  intros [a|] [b|] [c|]; unfold mn_comp; simpl; try reflexivity.
+  f_equal. lia.
+Qed.
+
+Lemma mn_comp_valid : forall x y, mn_valid (mn_comp x y) -> mn_valid x /\ mn_valid y.
+Proof.
+  intros [a|] [b|] Hv; unfold mn_valid, mn_comp in *;
+    [split; [by exists a | by exists b] | ..];
+    destruct Hv as [? Hv]; discriminate.
+Qed.
+
+Lemma mn_frame_id : forall x, mn_valid x -> mn_frame x (Some 0%nat) = x.
+Proof. intros x _. unfold mn_frame. reflexivity. Qed.
+
+Lemma mn_comp_frame_inv : forall x y, mn_valid (mn_frame x y) -> mn_comp (mn_frame x y) y = x.
+Proof.
+  intros x y Hv.
+  destruct y as [[|n]|].
+  - destruct x as [a|]; unfold mn_frame, mn_comp in *; simpl; [f_equal; lia | reflexivity].
+  - destruct x as [a|]; unfold mn_frame, mn_valid, mn_comp in *; simpl in *.
+    + destruct (le_dec (S n) a) as [Hle|Hnle]; simpl in *.
+      * f_equal. lia.
+      * exfalso. destruct Hv as [? Hv]; discriminate.
+    + exfalso. destruct Hv as [? Hv]; discriminate.
+  - exfalso. unfold mn_frame, mn_valid in Hv. destruct Hv as [? Hv]; discriminate.
+Qed.
+
+Lemma mn_weak_frame_comp_inv : forall x y, mn_valid (mn_comp x y) -> mn_valid (mn_frame (mn_comp x y) y).
+Proof.
+  intros x y Hv.
+  destruct x as [a|]; destruct y as [[|n]|]; unfold mn_valid, mn_comp, mn_frame in *; simpl in *.
+  - by exists (Nat.max a 0).
+  - destruct (le_dec (S n) (Nat.max a (S n))) as [Hle|Hnle].
+    + by exists (Nat.max a (S n)).
+    + exfalso. apply Hnle. lia.
+  - destruct Hv as [? Hv]; discriminate.
+  - destruct Hv as [? Hv]; discriminate.
+  - destruct Hv as [? Hv]; discriminate.
+  - destruct Hv as [? Hv]; discriminate.
+Qed.
 
 Global Instance MonoNatRA : ResourceAlgebra MonoNat := {|
   comp := mn_comp;
   frame := mn_frame;
   valid := mn_valid;
-  valid_dec := fun x => left I;
+  valid_dec := mn_valid_dec;
   fpuValid := mn_fpuValid;
-  fpuValid_dec := fun x y => le_dec x y;
+  fpuValid_dec := mn_fpuValid_dec;
   fpuAxiom := mn_fpuAxiom;
-  ra_id := 0%nat;
+  ra_id := Some 0%nat;
   ra_id_comp := mn_ra_id_comp;
+  ra_id_valid := mn_ra_id_valid;
+  comp_comm := mn_comp_comm;
+  comp_assoc := mn_comp_assoc;
+  comp_valid := mn_comp_valid;
+  frame_id := mn_frame_id;
+  comp_frame_inv := mn_comp_frame_inv;
+  weak_frame_comp_inv := mn_weak_frame_comp_inv;
   ra_of_int := mn_of_int;
 |}.
 
@@ -87,13 +204,125 @@ Qed.
 (* counterInv(x): exists v: Int, own(x.h, <v as MonoNat>) && own(x.c, v). *)
 
 Definition counterInv_body : assertion :=
-  LExists "v" TpInt (LAnd
-    (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-    (LOwn (LVar "x") "c" (LVar "v"))).
+  LExists "$v" TpInt (LAnd
+    (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+    (LOwn (LVar "x") "c" (LVar "$v"))).
 
 Definition counterInv_record : InvRecord := Inv ["x"] counterInv_body.
 
-Axiom inv_map_counterInv : inv_map !! "counterInv" = Some counterInv_record.
+(* ----------------------------------------------------------------------- *)
+(* read/incr/make's own ProcRecords, and the concrete Program/GhostConfig
+   built from them -- moved ahead of read/incr/make's own proof
+   development (which used to sit right after each record) so RProg/G
+   exist before RavenHoareTriple/ProgramWF's own Local Notations
+   (needed by every RavenHoareTriple-typed lemma in this file) do. *)
+
+Definition read_body : stmt :=
+  Seq
+    (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c"))
+    (Assign "#ret_val" (Var "v1")).
+
+Definition read_precond : assertion := LInv "counterInv" [LVar "x"].
+(* No need to restate the invariant here: LInv's own translation is
+   Persistent (see trnsl_assertion_LInv_persistent), so the caller keeps
+   their copy from read_precond for free, without it being handed back. *)
+Definition read_postcond : assertion := LPure True.
+
+Definition read_record : ProcRecord :=
+  Proc [("x", TpLoc)] [("v1", TpInt); ("#ret_val", TpInt)]
+    read_precond read_postcond read_body.
+
+Definition incr_body : stmt :=
+  Seq
+    (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c"))
+    (Seq
+      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
+      (Seq
+        (InvAccessBlock "counterInv" [Var "x"]
+          (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
+               (IfS (Var "res")
+                 (Fpu (Var "x") "h" h_ra
+                   (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
+                 SkipS)))
+        (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS))).
+
+Definition incr_precond : assertion := LInv "counterInv" [LVar "x"].
+(* Same simplification as read_postcond: LInv is Persistent, so the caller
+   (including incr's own recursive self-call) keeps their copy for free. *)
+Definition incr_postcond : assertion := LPure True.
+
+(* "#ret_val" must be declared (pwf_proc_ret_val_declared) even though incr
+   never assigns it: incr's own contract (incr_postcond = LPure True) says
+   nothing about it, so its non-deterministically-chosen entry value is
+   simply never touched or observed -- same status as a void return. *)
+Definition incr_record : ProcRecord :=
+  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool); ("#ret_val", TpUnit)]
+    incr_precond incr_postcond incr_body.
+
+Definition make_body : stmt :=
+  Seq
+    (Alloc "x" [("c", lang.LitInt 0)])
+    (Seq (FoldInv "counterInv" [Var "x"])
+         (Assign "#ret_val" (Var "x"))).
+
+Definition make_precond : assertion := LPure True.
+(* No existential: "#ret_val" is a placeholder for the call's own fresh
+   result lvar, substituted in by whoever consumes make_record's contract
+   (see all_proc_specs_valid_raven's own <["#ret_val":=LVar lv_final]>
+   substitution). Unlike the old "x"-existential shape, this has no
+   top-level LExists binder -- required by ProgramWF's own
+   pwf_proc_binders_fresh field, an unconditional forall over substitution
+   maps that a top-level binder could never satisfy (pick a map sending some
+   key to LVar "x" to violate disjointness). *)
+Definition make_postcond : assertion := LInv "counterInv" [LVar "#ret_val"].
+
+Definition make_record : ProcRecord :=
+  Proc [] [("x", TpLoc); ("#ret_val", TpLoc)] make_precond make_postcond make_body.
+
+(* The concrete Program/GhostConfig this file's whole development is
+   about -- replaces the old per-fact axioms (proc_map_read, proc_map_incr,
+   proc_map_make, inv_map_counterInv, proc_map_only, inv_map_only,
+   pred_map_empty, inv_set_eq, ghost_heap_namespace_disjoint_counterInv),
+   all provable lemmas below now. gname/namespace are concrete, inhabited
+   Coq types (gname := positive) -- no allocation is needed to pick *a*
+   name/namespace, only to later prove ownership *at* one (a separate,
+   Step-5 concern, unrelated to picking the value itself). *)
+Definition RProg : Program := {|
+  prog_proc_set := {["read"; "incr"; "make"]};
+  prog_pred_set := ∅;
+  prog_inv_set := {["counterInv"]};
+  prog_fld_set := {["c"; "h"]};
+  prog_proc_map := list_to_map [("read", read_record); ("incr", incr_record); ("make", make_record)];
+  prog_inv_map := list_to_map [("counterInv", counterInv_record)];
+  prog_pred_map := ∅;
+|}.
+
+Definition G : GhostConfig := {|
+  gc_ghost_heap_name := 1%positive;
+  gc_ghost_heap_namespace := nroot .@ "ghost_heap";
+  gc_inv_namespace_map := fun iv => nroot .@ iv;
+|}.
+
+Local Notation proc_map := (RProg.(prog_proc_map)).
+Local Notation inv_map := (RProg.(prog_inv_map)).
+Local Notation pred_map := (RProg.(prog_pred_map)).
+Local Notation inv_set := (RProg.(prog_inv_set)).
+Local Notation ghost_heap_namespace := (G.(gc_ghost_heap_namespace)).
+Local Notation inv_namespace_map := (G.(gc_inv_namespace_map)).
+Local Notation ProgramWF := (@ProgramWF invTokenG0 RProg G).
+Local Notation RavenHoareTriple := (@RavenHoareTriple RProg).
+
+Lemma proc_map_read : proc_map !! "read" = Some read_record.
+Proof. reflexivity. Qed.
+
+Lemma proc_map_incr : proc_map !! "incr" = Some incr_record.
+Proof. reflexivity. Qed.
+
+Lemma proc_map_make : proc_map !! "make" = Some make_record.
+Proof. reflexivity. Qed.
+
+Lemma inv_map_counterInv : inv_map !! "counterInv" = Some counterInv_record.
+Proof. reflexivity. Qed.
 
 (* ----------------------------------------------------------------------- *)
 (* Program-level setup shared by incr/read's derivations. Moved ahead of the
@@ -114,7 +343,7 @@ Definition rho : pvar_typs := fun v =>
 Definition sigma : lvar_typs := fun lv =>
   match lv with
   | "x" => TpLoc
-  | "v" => TpInt (* counterInv_body's own existential witness *)
+  | "$v" => TpInt (* counterInv_body's own existential witness *)
   | "l_v1" => TpInt
   | "l_new_v1" => TpInt
   | "l_res" => TpBool
@@ -165,253 +394,127 @@ Qed.
 (* Small reusable helpers for bridging InvAccessBlockRule's fixed
    LAnd (LInv ...) p shape against a bare LInv ... contract.
 
-   entails is parameterized by sigma (rrl_lang.v) so WeakeningRule's own
-   entails premises can use env_typ_well_defined; this local notation keeps
-   every call site below exactly as it read before that change, always
+   WeakeningRule takes assertion_entails, not entails (see rrl_lang.v's
+   assertion_entails: a purely syntactic entailment on assertions,
+   independent of Gamma/GhostConfig/invTokenG, restated there so
+   RavenHoareTriple itself doesn't depend on them). assertion_entails is
+   parameterized by sigma so its own AE_Exists_Mono/AE_Exists_ValIntro
+   cases can use it; this local notation keeps every call site below
    instantiated at this file's own sigma. *)
-Local Notation entails P Q := (rrl_lang.entails sigma P Q).
+Local Notation assertion_entails P Q := (rrl_lang.assertion_entails sigma P Q).
 
-Lemma entails_intro P Q :
-  (forall stk mp, env_typ_well_defined sigma mp -> trnsl_assertion P stk mp ⊢ trnsl_assertion Q stk mp) -> entails P Q.
-Proof.
-  intros H stk mp Henv. exists (trnsl_assertion P stk mp), (trnsl_assertion Q stk mp).
-  split; [done | split; [done | apply H, Henv]].
-Qed.
+Lemma entails_and_true_intro P : assertion_entails P (LAnd P (LPure True)).
+Proof. exact (AE_And_True_Intro sigma P). Qed.
 
-Lemma entails_and_true_intro P : entails P (LAnd P (LPure True)).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  iIntros "H". iFrame.
-Qed.
-
-Lemma entails_and_true_elim P : entails (LAnd P (LPure True)) P.
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  iIntros "[H _]". iFrame.
-Qed.
+Lemma entails_and_true_elim P : assertion_entails (LAnd P (LPure True)) P.
+Proof. exact (AE_And_True_Elim sigma P). Qed.
 
 (* A small reusable entails algebra, so LAnd-trees can be reshuffled freely
    via WeakeningRule instead of ad hoc per-site proofs. *)
-Lemma entails_refl P : entails P P.
-Proof. apply entails_intro. intros stk mp Henv. done. Qed.
+Lemma entails_refl P : assertion_entails P P.
+Proof. exact (AE_Refl sigma P). Qed.
 
-Lemma entails_trans P Q R : entails P Q -> entails Q R -> entails P R.
-Proof.
-  intros H1 H2. apply entails_intro. intros stk mp Henv.
-  destruct (H1 stk mp Henv) as [P' [Q' [<- [<- H1']]]].
-  destruct (H2 stk mp Henv) as [Q'' [R' [Heq [<- H2']]]].
-  rewrite Heq in H1'. rewrite H1'. exact H2'.
-Qed.
+Lemma entails_trans P Q R : assertion_entails P Q -> assertion_entails Q R -> assertion_entails P R.
+Proof. exact (AE_Trans sigma P Q R). Qed.
 
 Lemma entails_and_mono P P' Q Q' :
-  entails P P' -> entails Q Q' -> entails (LAnd P Q) (LAnd P' Q').
-Proof.
-  intros H1 H2. apply entails_intro. intros stk mp Henv.
-  destruct (H1 stk mp Henv) as [Pp [Pp' [<- [<- H1']]]].
-  destruct (H2 stk mp Henv) as [Qp [Qp' [<- [<- H2']]]].
-  rewrite !trnsl_assertion_and. iIntros "[HP HQ]". iSplitL "HP".
-  - iApply (H1' with "HP").
-  - iApply (H2' with "HQ").
-Qed.
+  assertion_entails P P' -> assertion_entails Q Q' -> assertion_entails (LAnd P Q) (LAnd P' Q').
+Proof. exact (AE_And_Mono sigma P P' Q Q'). Qed.
 
-Lemma entails_and_comm P Q : entails (LAnd P Q) (LAnd Q P).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_and. iIntros "[$ $]".
-Qed.
+Lemma entails_and_comm P Q : assertion_entails (LAnd P Q) (LAnd Q P).
+Proof. exact (AE_And_Comm sigma P Q). Qed.
 
-Lemma entails_and_assoc_r P Q R : entails (LAnd (LAnd P Q) R) (LAnd P (LAnd Q R)).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_and. iIntros "[[$ $] $]".
-Qed.
+Lemma entails_and_assoc_r P Q R : assertion_entails (LAnd (LAnd P Q) R) (LAnd P (LAnd Q R)).
+Proof. exact (AE_And_Assoc_R sigma P Q R). Qed.
 
-Lemma entails_and_assoc_l P Q R : entails (LAnd P (LAnd Q R)) (LAnd (LAnd P Q) R).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_and. iIntros "[$ [$ $]]".
-Qed.
+Lemma entails_and_assoc_l P Q R : assertion_entails (LAnd P (LAnd Q R)) (LAnd (LAnd P Q) R).
+Proof. exact (AE_And_Assoc_L sigma P Q R). Qed.
 
 Lemma entails_exists_mono (lv : lvar) (t : typ) (A B : assertion) :
   sigma lv = t ->
-  entails A B -> entails (LExists lv t A) (LExists lv t B).
-Proof.
-  intros Hty H. apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_exists.
-  iIntros "[%v' [%Htyp HA]]". iExists v'. iSplitR; [done|].
-  have Henv' : env_typ_well_defined sigma (fun y => if (y =? lv)%string then v' else mp y).
-  { apply env_typ_well_defined_update; [exact Henv | rewrite Hty; exact Htyp]. }
-  destruct (H stk (fun y => if (y =? lv)%string then v' else mp y) Henv') as [P' [Q' [<- [<- Hent]]]].
-  iApply (Hent with "HA").
-Qed.
-
-(* Re-folds counterInv's own existential witness ("v") from a concretely
-   known value v': the ordinary reassembly step every read/CAS/fpu inside
-   an open counterInv block needs to restore InvAccessBlockRule's required
-   postcondition shape. *)
-Lemma trnsl_repack_counterInv (v' : val) (stk : stack_id) (mp : symb_map) :
-  trnsl_assertion (LOwn (LVar "x") "c" (LVal v')) stk mp -∗
-  trnsl_assertion (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVal v'))) stk mp -∗
-  trnsl_assertion counterInv_body stk mp.
-Proof.
-  unfold counterInv_body.
-  rewrite (trnsl_assertion_exists "v" TpInt
-    (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-          (LOwn (LVar "x") "c" (LVar "v"))) stk mp).
-  rewrite (trnsl_assertion_unfold (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVal v'))))
-          /trnsl_assertion_pre /=.
-  destruct (Γ (ra_map h_ra)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓ.
-  iIntros "Hown Hghost".
-  iDestruct "Hghost" as (l chunk γ) "[%Heql [%Heval [Hmap Hghost]]]".
-  assert (typ_val_match TpInt v') as Htyp.
-  { destruct v' as [b|z| |lc|[r x0]]; simpl in Heval; try discriminate; done. }
-  iExists v'. iSplitR; [done|].
-  rewrite trnsl_assertion_and.
-  rewrite (trnsl_assertion_unfold (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))))
-          /trnsl_assertion_pre /= HΓ.
-  rewrite (trnsl_assertion_unfold (LOwn (LVar "x") "c" (LVar "v"))) /trnsl_assertion_pre /=.
-  iEval (rewrite (trnsl_assertion_unfold (LOwn (LVar "x") "c" (LVal v'))) /trnsl_assertion_pre /=) in "Hown".
-  simpl.
-  iSplitL "Hmap Hghost".
-  - iExists l, chunk, γ. iFrame "Hmap Hghost". iPureIntro. split; [exact Heql | ].
-    unfold LExpr_holds in Heql |- *. simpl. exact Heval.
-  - iExact "Hown".
-Qed.
-
-Lemma entails_repack_counterInv (v' : val) :
-  entails
-    (LAnd (LOwn (LVar "x") "c" (LVal v'))
-          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVal v'))))
-    counterInv_body.
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  iIntros "[Hown Hghost]".
-  iApply (trnsl_repack_counterInv v' stk mp with "Hown Hghost").
-Qed.
+  assertion_entails A B -> assertion_entails (LExists lv t A) (LExists lv t B).
+Proof. exact (AE_Exists_Mono sigma lv t A B). Qed.
 
 (* ----------------------------------------------------------------------- *)
 (* read(x): requires/ensures counterInv(x). *)
 
-Definition read_body : stmt :=
-  Seq
-    (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c"))
-    (Assign "#ret_val" (Var "v1")).
-
-Definition read_precond : assertion := LInv "counterInv" [LVar "x"].
-(* No need to restate the invariant here: LInv's own translation is
-   Persistent (see trnsl_assertion_LInv_persistent), so the caller keeps
-   their copy from read_precond for free, without it being handed back. *)
-Definition read_postcond : assertion := LPure True.
-
-Definition read_record : ProcRecord :=
-  Proc [("x", TpLoc)] [("v1", TpInt); ("#ret_val", TpInt)]
-    read_precond read_postcond read_body.
-
-Axiom proc_map_read : proc_map !! "read" = Some read_record.
-
+(* Purely a 4-leaf LAnd reshuffling (LStack/GhostOwn/Own/True, grouped by
+   (LStack,Own) and (GhostOwn,True) instead of the source's grouping) --
+   the "medial" law (A∧B)∧(C∧D) ⊢ (A∧C)∧(B∧D), built from
+   assoc/comm/mono since assertion_entails has no single primitive for
+   arbitrary LAnd-tree permutations. *)
 Lemma entails_regroup_pre_sym :
-  entails
-    (LAnd (LStack stk0) (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-                                     (LOwn (LVar "x") "c" (LVar "v")))
+  assertion_entails
+    (LAnd (LStack stk0) (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                                     (LOwn (LVar "x") "c" (LVar "$v")))
                                (LPure True)))
-    (LAnd (LAnd (LStack stk0) (LOwn (LVar "x") "c" (LVar "v")))
-          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))) (LPure True))).
+    (LAnd (LAnd (LStack stk0) (LOwn (LVar "x") "c" (LVar "$v")))
+          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True))).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_and.
-  iIntros "[$ [[$ $] $]]".
+  eapply AE_Trans; [eapply AE_And_Assoc_L | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_And_Assoc_L | eapply AE_Refl] | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_Refl | eapply AE_And_Assoc_L] | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_Refl | eapply AE_And_Mono; [eapply AE_And_Comm | eapply AE_Refl]] | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_Refl | eapply AE_And_Assoc_R] | ].
+  eapply AE_And_Assoc_L.
 Qed.
 
-(* LOwn/LGhostOwn's translation only ever consults its chunk expr through
-   interp_lexpr, so any two chunks agreeing there translate identically --
-   lets a symbolic chunk (e.g. LVar "v") be swapped for the concrete literal
-   trnsl_repack_counterInv expects, once its interp is known. *)
-Lemma trnsl_assertion_lown_interp_congr (e : LExpr) (fld : fld_name) (chunk1 chunk2 : LExpr) stk mp :
-  interp_lexpr chunk1 mp = interp_lexpr chunk2 mp ->
-  trnsl_assertion (LOwn e fld chunk1) stk mp ⊢ trnsl_assertion (LOwn e fld chunk2) stk mp.
-Proof.
-  intros Heq.
-  rewrite (trnsl_assertion_unfold (LOwn e fld chunk1)) (trnsl_assertion_unfold (LOwn e fld chunk2))
-    /trnsl_assertion_pre /=.
-  unfold LExpr_holds. rewrite Heq. done.
-Qed.
-
-Lemma trnsl_assertion_lghostown_interp_congr (e : LExpr) (fld : fld_name) (r : ra_name) (chunk1 chunk2 : LExpr) stk mp :
-  interp_lexpr chunk1 mp = interp_lexpr chunk2 mp ->
-  trnsl_assertion (LGhostOwn e fld r chunk1) stk mp ⊢ trnsl_assertion (LGhostOwn e fld r chunk2) stk mp.
-Proof.
-  intros Heq.
-  rewrite (trnsl_assertion_unfold (LGhostOwn e fld r chunk1)) (trnsl_assertion_unfold (LGhostOwn e fld r chunk2))
-    /trnsl_assertion_pre /=.
-  destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-  unfold LExpr_holds. rewrite Heq. done.
-Qed.
-
-(* Symbolic counterpart of the old entails_regroup_post: the witness "l_v1"
-   equals not a known literal but mp "v" -- trnsl_assertion_mp_irrelevant
-   (rather than the old, retired trnsl_assertion_subst_var) is what lets the
-   LGhostOwn/LOwn facts, read off at the l_v1-extended map, be carried back
-   down to plain mp, matching what trnsl_repack_counterInv expects. *)
+(* Everything here is already phrased in terms of "$v" (not "l_v1") --
+   HeapReadRule's own "l_v1 = $v" equality fact never actually has to be
+   consumed: the l_v1 binder is just carried through vacuously (its scoped
+   body doesn't depend on it at all once we're done), and counterInv_body
+   is reassembled from GhostOwn($v)/Own($v) via AE_Exists_Intro "$v" using
+   "$v"'s own ambient value as witness, exactly as counterInv's contract
+   already reads. No value-substitution witness-intro needed here (unlike
+   entails_alloc_fields_to_counterInv below, which does start from a
+   concrete literal). *)
 Lemma entails_regroup_post_sym (stk1 : stack) :
-  entails
-    (LAnd (LExists "l_v1" TpInt (LAnd (LStack stk1) (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_v1") (LVar "v"))))))
-          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))) (LPure True)))
+  assertion_entails
+    (LAnd (LExists "l_v1" TpInt (LAnd (LStack stk1) (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_v1") (LVar "$v"))))))
+          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True)))
     (LExists "l_v1" TpInt (LAnd (LStack stk1) (LAnd counterInv_body (LPure True)))).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and
-    (trnsl_assertion_exists "l_v1" TpInt (LAnd (LStack stk1) (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_v1") (LVar "v"))))) stk mp)
-    (trnsl_assertion_exists "l_v1" TpInt (LAnd (LStack stk1) (LAnd counterInv_body (LPure True))) stk mp).
-  iIntros "[[%v'' [%Htyp Hleft]] Hframe]".
-  rewrite trnsl_assertion_and.
-  iDestruct "Hleft" as "[Hstk1 Hrest]".
-  rewrite trnsl_assertion_and.
-  iDestruct "Hrest" as "[Hown Heq]".
-  iEval (rewrite (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar "l_v1") (LVar "v")))) /trnsl_assertion_pre /=) in "Heq".
-  iDestruct "Heq" as "%Heq".
-  unfold LExpr_holds in Heq. simpl in Heq.
-  injection Heq as Heq. apply bool_decide_eq_true in Heq. simpl in Heq. subst v''.
-  iEval (rewrite trnsl_assertion_and) in "Hframe".
-  iDestruct "Hframe" as "[Hghost _]".
-  have HghostFresh : lvar_fresh_in_assertion "l_v1"
-    (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))).
-  { simpl. split; set_solver. }
-  iEval (rewrite <- (trnsl_assertion_mp_irrelevant "l_v1"
-    (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))) (mp "v") stk mp HghostFresh)) in "Hghost".
-  iExists (mp "v"). iSplitR; [iPureIntro; exact Htyp|].
-  rewrite trnsl_assertion_and.
-  iFrame "Hstk1".
-  rewrite trnsl_assertion_and.
-  set (mp' := (fun y => if (y =? "l_v1")%string then mp "v" else mp y)).
-  iDestruct (trnsl_assertion_lown_interp_congr (LVar "x") "c" (LVar "v") (LVal (mp' "v")) stk mp'
-    eq_refl with "Hown") as "Hown'".
-  iDestruct (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
-    (LUnOp (RAOfIntOp h_ra) (LVar "v")) (LUnOp (RAOfIntOp h_ra) (LVal (mp' "v"))) stk mp'
-    ltac:(simpl; f_equal) with "Hghost") as "Hghost'".
-  iSplitL "Hown' Hghost'".
-  - iApply (trnsl_repack_counterInv (mp' "v") stk mp' with "Hown' Hghost'").
-  - rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=. done.
+  eapply AE_Trans.
+  { eapply AE_Exists_And_Swap_R. simpl. set_solver. }
+  eapply AE_Exists_Mono; [reflexivity | ].
+  (* AE_Exists_And_Swap_R's own body is the *whole* LAnd (LStack stk1)
+     (LAnd Own Eq) bundled as one LAnd-pair with p -- re-associate first so
+     LStack stk1 is a top-level sibling again, matching the target shape. *)
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_And_Mono; [eapply AE_Refl | ].
+  (* Middle terms named explicitly throughout below: AE_Exists_Intro's own
+     conclusion (X ⊢ LExists lv t X) doesn't pin lv/t from its LHS alone,
+     so leaving them as AE_Trans metavariables (resolved only by the
+     *other* branch) is unsafe under eapply's left-to-right subgoal order. *)
+  eapply (AE_Trans sigma _
+    (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))) _).
+  - eapply AE_And_Mono; eapply AE_And_Elim_L.
+  - eapply (AE_Trans sigma _
+      (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LOwn (LVar "x") "c" (LVar "$v"))) _).
+    + eapply AE_And_Comm.
+    + eapply (AE_Trans sigma _ counterInv_body _).
+      * eapply AE_Exists_Intro. reflexivity.
+      * eapply AE_And_True_Intro.
 Qed.
 
 (* The single, symbolic derivation the new ExistsElimRule needs for read's
    FldRd, run with counterInv's own existential witness kept as the free
-   lvar "v" rather than substituted -- matching the new rule's shape. *)
+   lvar "$v" rather than substituted -- matching the new rule's shape. *)
 Lemma read_inner_step_sym :
   RavenHoareTriple rho sigma
     (LAnd (LStack stk0)
-          (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-                      (LOwn (LVar "x") "c" (LVar "v")))
+          (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                      (LOwn (LVar "x") "c" (LVar "$v")))
                 (LPure True)))
       (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]})
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
   - eapply FrameRule with
-      (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))) (LPure True)).
-    apply (HeapReadRule rho sigma stk0 (cmask ∖ {["counterInv"]}) "v1" (Var "x") (LVar "v") "c" (LVar "x") "l_v1").
+      (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True)).
+    apply (HeapReadRule rho sigma stk0 (cmask ∖ {["counterInv"]}) "v1" (Var "x") (LVar "$v") "c" (LVar "x") "l_v1").
     + reflexivity.
     + reflexivity.
     + apply fresh_lvar_stk0. discriminate.
@@ -425,7 +528,7 @@ Qed.
    the new, subst-free ExistsElimRule at the top-level LExists shape, so the
    LStack-fixed precondition is first commuted into that shape via
    WeakeningRule + entails_and_stack_exists_swap. The witness's well-typedness
-   ("v" : Int) now comes directly from sigma's own declaration (sigma "v" =
+   ("$v" : Int) now comes directly from sigma's own declaration (sigma "$v" =
    TpInt), via the rule's new sigma-consistency premise -- no separate
    witness_well_typed proof needed any more. *)
 Lemma read_fldrd_block_step :
@@ -435,10 +538,10 @@ Lemma read_fldrd_block_step :
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "v" TpInt
+  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack stk0)
-            (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-                        (LOwn (LVar "x") "c" (LVar "v")))
+            (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                        (LOwn (LVar "x") "c" (LVar "$v")))
                   (LPure True)))
       (FldRd "v1" (Var "x") "c")
       (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True))))).
@@ -447,7 +550,7 @@ Proof.
       { apply fresh_lvar_extend; [apply fresh_lvar_stk0; discriminate | discriminate]. }
       split; [left; reflexivity | exact I].
     + exact read_inner_step_sym.
-  - eapply entails_and_stack_exists_swap.
+  - eapply assertion_entails_and_stack_exists_swap.
     + apply fresh_lvar_stk0. discriminate.
     + simpl. auto.
   - exact (entails_refl _).
@@ -480,25 +583,6 @@ Proof.
                          (entails_and_true_elim (LInv "counterInv" [LVar "x"])))).
 Qed.
 
-(* Drops a fresh-witness LExists together with the LStack fact riding along
-   with it -- the target assertion X doesn't depend on lv, so its own
-   translation is unaffected by which witness/stack the existential carries.
-   Used to weaken read/incr's own per-step conclusions down to their bare
-   procedure-level postcondition, since neither cares about the specific
-   fresh lvars intermediate statements happened to introduce. *)
-Lemma entails_exists_stack_drop (lv : lvar) (t : typ) (stk : stack) (X : assertion) :
-  lvar_fresh_in_assertion lv X ->
-  entails (LExists lv t (LAnd (LStack stk) X)) X.
-Proof.
-  intros Hfresh. apply entails_intro. intros stk' mp Henv.
-  rewrite trnsl_assertion_exists.
-  iIntros "[%v' [%Htyp H]]".
-  rewrite trnsl_assertion_and.
-  iDestruct "H" as "[_ H]".
-  iEval (rewrite (trnsl_assertion_mp_irrelevant lv X v' stk' mp Hfresh)) in "H".
-  iExact "H".
-Qed.
-
 (* The single, symbolic derivation for read's Assign "#ret_val" (Var "v1")
    step: VarAssignmentRule + FrameRule (carrying the re-closed counterInv
    fact through), weakened all the way down to the bare procedure
@@ -518,15 +602,11 @@ Proof.
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk0 | reflexivity | reflexivity].
 Qed.
 
-Lemma entails_and_elim_l P Q : entails (LAnd P Q) P.
-Proof. apply entails_intro. intros stk mp Henv. rewrite trnsl_assertion_and. iIntros "[$ _]". Qed.
+Lemma entails_and_elim_l P Q : assertion_entails (LAnd P Q) P.
+Proof. exact (AE_And_Elim_L sigma P Q). Qed.
 
-Lemma entails_true_intro X : entails X (LPure True).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  iIntros "_". done.
-Qed.
+Lemma entails_true_intro X : assertion_entails X (LPure True).
+Proof. exact (AE_True_Intro sigma X). Qed.
 
 (* No need to carry counterInv's own LInv fact (or the intermediate stack
    state / "l_ret" witness) through to the end: read_postcond doesn't
@@ -579,39 +659,10 @@ Qed.
    unconditionally -- and the retry-on-failure recursive call happens
    *after* that fold, outside the invariant's scope, exactly where the
    source calls incr(x) only once already folded back. counterInv's own
-   witness ("v", tied to x.c's value while the invariant is open) is
+   witness ("$v", tied to x.c's value while the invariant is open) is
    consumed directly via CASSuccRule/CASFailRule/FPURule's own LOwn/LGhostOwn
    premises -- no separate "v2 :| ..." pick or "assert" needed, matching how
    read never introduced a named witness for its own FldRd either. *)
-
-Definition incr_body : stmt :=
-  Seq
-    (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c"))
-    (Seq
-      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
-      (Seq
-        (InvAccessBlock "counterInv" [Var "x"]
-          (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
-               (IfS (Var "res")
-                 (Fpu (Var "x") "h" h_ra
-                   (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-                 SkipS)))
-        (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS))).
-
-Definition incr_precond : assertion := LInv "counterInv" [LVar "x"].
-(* Same simplification as read_postcond: LInv is Persistent, so the caller
-   (including incr's own recursive self-call) keeps their copy for free. *)
-Definition incr_postcond : assertion := LPure True.
-
-(* "#ret_val" must be declared (pwf_proc_ret_val_declared) even though incr
-   never assigns it: incr's own contract (incr_postcond = LPure True) says
-   nothing about it, so its non-deterministically-chosen entry value is
-   simply never touched or observed -- same status as a void return. *)
-Definition incr_record : ProcRecord :=
-  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool); ("#ret_val", TpUnit)]
-    incr_precond incr_postcond incr_body.
-
-Axiom proc_map_incr : proc_map !! "incr" = Some incr_record.
 
 (* The first InvAccessBlock (FldRd "v1") is byte-for-byte read's own first
    step -- reuse read_invblock_step directly. *)
@@ -652,7 +703,7 @@ Proof.
       (LInv "counterInv" [LVar "x"])
       incr_assign_inner_step).
   - exact (entails_refl _).
-  - apply entails_exists_and_swap.
+  - apply AE_Exists_And_Swap_R.
     simpl. apply Forall_singleton. set_solver.
 Qed.
 
@@ -667,104 +718,31 @@ Qed.
 (* Also hands back cond itself (established internally when deciding which
    branch of the LIte holds), not just A -- needed by callers that must
    relate a fact tied to the LIte's own witness (e.g. a ghost chunk keyed on
-   "v") to one tied to whatever the program actually compared against. *)
+   "$v") to one tied to whatever the program actually compared against. *)
+(* Both promoted to rrl_lang.v as AE_Ite_Bool_True/AE_Ite_Bool_False --
+   general, reusable facts about LIte's relationship to an indirect
+   boolean witness lv, not specific to this file. *)
 Lemma entails_ite_bool_true (cond : LExpr) (A B : assertion) (lv : lvar) :
-  entails
+  assertion_entails
     (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
                       (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
           (LExprA (LVar lv)))
     (LAnd A (LExprA cond)).
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  rewrite (trnsl_assertion_ite cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
-    (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))) stk mp).
-  rewrite (trnsl_assertion_unfold (LExprA (LVar lv))) /trnsl_assertion_pre /=.
-  iIntros "[Hite %Hlv]".
-  unfold LExpr_holds in Hlv. simpl in Hlv.
-  destruct (interp_lexpr cond mp) as [vc|] eqn:Hcond.
-  - destruct (val_beq vc (LitBool true)) eqn:Hvc.
-    + unfold val_beq in Hvc. apply bool_decide_eq_true_1 in Hvc. subst vc.
-      iDestruct "Hite" as "[Hthen _]".
-      iDestruct ("Hthen" with "[]") as "HA".
-      { iPureIntro. unfold LExpr_holds. rewrite Hcond. done. }
-      iEval (rewrite trnsl_assertion_and) in "HA". iDestruct "HA" as "[HA _]".
-      rewrite trnsl_assertion_and (trnsl_assertion_unfold (LExprA cond)) /trnsl_assertion_pre /=.
-      iFrame "HA". iPureIntro. unfold LExpr_holds. rewrite Hcond. done.
-    + iDestruct "Hite" as "[_ Helse]".
-      iDestruct ("Helse" with "[]") as "HB".
-      { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros ->.
-        unfold val_beq in Hvc. apply bool_decide_eq_false_1 in Hvc. apply Hvc. reflexivity. }
-      iEval (rewrite trnsl_assertion_and
-        (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false)))))
-        /trnsl_assertion_pre /=) in "HB".
-      iDestruct "HB" as "[_ %Hf]".
-      unfold LExpr_holds in Hf. cbn [interp_lexpr] in Hf.
-      assert (Hcomp : val_beq (LitBool true) (LitBool false) = false).
-      { destruct (val_beq (LitBool true) (LitBool false)) eqn:Heq0; [|reflexivity].
-        exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
-      congruence.
-  - iDestruct "Hite" as "[_ Helse]".
-    iDestruct ("Helse" with "[]") as "HB".
-    { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros []. }
-    iEval (rewrite trnsl_assertion_and
-      (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false)))))
-      /trnsl_assertion_pre /=) in "HB".
-    iDestruct "HB" as "[_ %Hf]".
-    unfold LExpr_holds in Hf. cbn [interp_lexpr] in Hf.
-    assert (Hcomp : val_beq (LitBool true) (LitBool false) = false).
-    { destruct (val_beq (LitBool true) (LitBool false)) eqn:Heq0; [|reflexivity].
-      exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
-    congruence.
-Qed.
+Proof. exact (AE_Ite_Bool_True sigma cond A B lv). Qed.
 
 Lemma entails_ite_bool_false (cond : LExpr) (A B : assertion) (lv : lvar) :
-  entails
+  assertion_entails
     (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
                       (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
           (LExprA (LUnOp NotBoolOp (LVar lv))))
     B.
-Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  rewrite (trnsl_assertion_ite cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
-    (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))) stk mp).
-  rewrite (trnsl_assertion_unfold (LExprA (LUnOp NotBoolOp (LVar lv)))) /trnsl_assertion_pre /=.
-  iIntros "[Hite %Hlv]".
-  unfold LExpr_holds in Hlv. simpl in Hlv.
-  destruct (mp lv) as [b| |i|l|ra] eqn:Hmplv; simpl in Hlv; try contradiction.
-  injection Hlv as Hlv. apply negb_true_iff in Hlv. subst b.
-  destruct (interp_lexpr cond mp) as [vc|] eqn:Hcond.
-  - destruct (val_beq vc (LitBool true)) eqn:Hvc.
-    + unfold val_beq in Hvc. apply bool_decide_eq_true_1 in Hvc. subst vc.
-      iDestruct "Hite" as "[Hthen _]".
-      iDestruct ("Hthen" with "[]") as "HA".
-      { iPureIntro. unfold LExpr_holds. rewrite Hcond. done. }
-      iEval (rewrite trnsl_assertion_and
-        (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
-        /trnsl_assertion_pre /=) in "HA".
-      iDestruct "HA" as "[_ %Ht]".
-      unfold LExpr_holds in Ht. cbn [interp_lexpr] in Ht.
-      assert (Hcomp : val_beq (LitBool false) (LitBool true) = false).
-      { destruct (val_beq (LitBool false) (LitBool true)) eqn:Heq0; [|reflexivity].
-        exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
-      congruence.
-    + iDestruct "Hite" as "[_ Helse]".
-      iDestruct ("Helse" with "[]") as "HB".
-      { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros ->.
-        unfold val_beq in Hvc. apply bool_decide_eq_false_1 in Hvc. apply Hvc. reflexivity. }
-      iEval (rewrite trnsl_assertion_and) in "HB". iDestruct "HB" as "[$ _]".
-  - iDestruct "Hite" as "[_ Helse]".
-    iDestruct ("Helse" with "[]") as "HB".
-    { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros []. }
-    iEval (rewrite trnsl_assertion_and) in "HB". iDestruct "HB" as "[$ _]".
-Qed.
+Proof. exact (AE_Ite_Bool_False sigma cond A B lv). Qed.
 
 (* entails_ite_bool_true, with an extra frame fact riding alongside the
    LIte untouched -- lets a caller carry other resources/facts (e.g.
    counterInv's ghost chunk) through the same branch-extraction step. *)
 Lemma entails_ite_bool_true_framed (cond : LExpr) (A B FRAME : assertion) (lv : lvar) :
-  entails
+  assertion_entails
     (LAnd (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
                           (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
                 FRAME)
@@ -781,7 +759,7 @@ Qed.
 (* incr's second InvAccessBlock: CAS(x.c, v1, new_v1) followed by a
    conditional Fpu(x.h, ...) on success, both wrapped in one InvAccessBlock
    -- matching read_inner_step_sym's approach, counterInv's own existential
-   witness "v" is kept as a free lvar throughout rather than substituted. *)
+   witness "$v" is kept as a free lvar throughout rather than substituted. *)
 
 Definition incr_stk1 : stack := <["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> stk0).
 
@@ -807,23 +785,23 @@ Qed.
 Lemma incr_cas_step :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk1)
-          (LAnd (LOwn (LVar "x") "c" (LVar "v"))
-                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+          (LAnd (LOwn (LVar "x") "c" (LVar "$v"))
+                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
       (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1")) (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd
       (LAnd (LStack (<["res":="l_res"]> incr_stk1))
-        (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+        (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
           (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-          (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false)))))))
-      (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+          (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false)))))))
+      (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
             (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))).
 Proof.
   eapply WeakeningRule.
-  - eapply FrameRule with (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+  - eapply FrameRule with (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))).
     apply (CASRule rho sigma incr_stk1 (cmask ∖ {["counterInv"]}) "res" (Var "x") "c" (Var "v1") (Var "new_v1")
-      "l_res" (LVar "x") (LVar "l_v1") (LVar "l_new_v1") (LVar "v")).
+      "l_res" (LVar "x") (LVar "l_v1") (LVar "l_new_v1") (LVar "$v")).
     + apply fresh_lvar_incr_stk1; discriminate.
     + reflexivity.
     + exists TpInt. reflexivity.
@@ -834,7 +812,7 @@ Proof.
     + reflexivity.
     + exact stk_type_compat_incr_stk1.
   - exact (entails_and_assoc_l _ _ _).
-  - apply entails_exists_and_swap.
+  - apply AE_Exists_And_Swap_R.
     simpl. split; [split; set_solver | set_solver].
 Qed.
 
@@ -856,25 +834,19 @@ Qed.
    incr_assign_step) into the RAFpuValidOp fact Fpu's own precondition
    needs. *)
 Lemma incr_fpu_pre_entails :
-  entails
+  assertion_entails
     (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
           (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
     (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
           (LExprA (LBinOp RAFpuValidOp (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")) (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1"))))).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  rewrite (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
-    /trnsl_assertion_pre /=.
-  rewrite trnsl_assertion_and.
-  rewrite (trnsl_assertion_unfold (LExprA (LBinOp RAFpuValidOp (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")) (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")))))
-    /trnsl_assertion_pre /=.
-  iIntros "[$ %Harith]".
+  eapply AE_And_Mono; [eapply AE_Refl | ].
+  eapply AE_LExprA_Impl. intros mp Harith.
   unfold LExpr_holds in Harith. simpl in Harith.
   destruct (mp "l_v1") as [b|z1| |l|p] eqn:Hv1val; try (exfalso; exact Harith).
   injection Harith as Harith.
   unfold val_beq in Harith. apply bool_decide_eq_true_1 in Harith.
-  iPureIntro. unfold LExpr_holds.
+  unfold LExpr_holds.
   rewrite (interp_lexpr_ra_fpuvalid h_ra (ra_of_int z1) (ra_of_int (z1 + 1)%Z)
     (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")) (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")) mp).
   - simpl. f_equal. apply bool_decide_eq_true_2. apply h_ra_fpuValid_mono. reflexivity.
@@ -933,41 +905,37 @@ Qed.
    LExists/map-update machinery (no fresh witness is being introduced here,
    "l_new_v1" is already the natural map). *)
 Lemma incr_repack_post_l_new_v1 :
-  entails
+  assertion_entails
     (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")))
           (LOwn (LVar "x") "c" (LVar "l_new_v1")))
     (LAnd counterInv_body (LPure True)).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  iIntros "[Hghost Hown]".
-  rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  set (v' := mp "l_new_v1").
-  iDestruct (trnsl_assertion_lown_interp_congr (LVar "x") "c" (LVar "l_new_v1") (LVal v') stk mp eq_refl with "Hown") as "Hown'".
-  iDestruct (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
-    (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")) (LUnOp (RAOfIntOp h_ra) (LVal v')) stk mp
-    ltac:(simpl; f_equal) with "Hghost") as "Hghost'".
-  iSplitL.
-  - iApply (trnsl_repack_counterInv v' stk mp with "Hown' Hghost'").
-  - done.
+  eapply (AE_Trans sigma _ counterInv_body _).
+  - exact (AE_Exists_Rename_Intro sigma "$v" "l_new_v1" TpInt
+      (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+            (LOwn (LVar "x") "c" (LVar "$v")))
+      eq_refl eq_refl (conj I I)).
+  - eapply AE_And_True_Intro.
 Qed.
 
-(* Rewrites counterInv's ghost chunk from "v" to "l_v1" using the CAS-success
+(* Rewrites counterInv's ghost chunk from "$v" to "l_v1" using the CAS-success
    equality extracted from CASRule's own LIte (via entails_ite_bool_true). *)
 Lemma incr_ghostown_v_to_l_v1 :
-  entails
-    (LAnd (LExprA (LBinOp EqOp (LVar "v") (LVar "l_v1")))
-          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))))
+  assertion_entails
+    (LAnd (LExprA (LBinOp EqOp (LVar "$v") (LVar "l_v1")))
+          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))))
     (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1"))).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar "v") (LVar "l_v1")))) /trnsl_assertion_pre /=.
-  iIntros "[%Heq Hghost]".
-  unfold LExpr_holds in Heq. simpl in Heq.
-  injection Heq as Heq. unfold val_beq in Heq. apply bool_decide_eq_true_1 in Heq.
-  iApply (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
-    (LUnOp (RAOfIntOp h_ra) (LVar "v")) (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")) stk mp
-    ltac:(simpl; rewrite Heq; reflexivity) with "Hghost").
+  eapply (AE_Trans sigma _
+    (LAnd (LExprA (LBinOp EqOp (LVar "l_v1") (LVar "$v")))
+          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))) _).
+  - eapply AE_And_Mono; [ | eapply AE_Refl].
+    eapply AE_LExprA_Impl. intros mp Heq.
+    unfold LExpr_holds in Heq |- *. simpl in Heq |- *.
+    injection Heq as Heq. unfold val_beq in Heq |- *.
+    apply bool_decide_eq_true_1 in Heq. f_equal. apply bool_decide_eq_true_2. exact (eq_sym Heq).
+  - exact (AE_LExpr_Subst_Eq_Congr sigma "l_v1" "$v"
+      (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1"))) I).
 Qed.
 
 (* Regroups the pieces entails_ite_bool_true_framed hands back -- A (=LOwn
@@ -975,21 +943,27 @@ Qed.
    fact -- into incr_fpu_step_framed's own expected precondition shape,
    rewriting GhostOwn(v) to GhostOwn(l_v1) along the way. *)
 Lemma incr_true_branch_regroup :
-  entails
-    (LAnd (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "v") (LVar "l_v1"))))
-          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+  assertion_entails
+    (LAnd (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "$v") (LVar "l_v1"))))
+          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
     (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
           (LOwn (LVar "x") "c" (LVar "l_new_v1"))).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite !trnsl_assertion_and.
-  iIntros "[[HA Hcond] [Hghost Harith]]".
-  destruct (incr_ghostown_v_to_l_v1 stk mp Henv) as [P' [Q' [<- [<- Hent]]]].
-  rewrite trnsl_assertion_and in Hent.
-  iDestruct (Hent with "[Hcond Hghost]") as "Hghost'"; [iFrame|].
-  iFrame.
+  (* (A∧B)∧(C∧D) ⊢ (B∧C)∧(A∧D), regrouping the Eq/GhostOwn(v) pair (B∧C)
+     together so incr_ghostown_v_to_l_v1 applies, then reshuffling the
+     GhostOwn(l_v1)-for-(B∧C) result back with D/A into the target shape. *)
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_Refl | eapply AE_And_Assoc_L] | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_L | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_And_Comm | eapply AE_Refl] | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [exact incr_ghostown_v_to_l_v1 | eapply AE_Refl] | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_L | ].
+  eapply AE_Trans; [eapply AE_And_Mono; [eapply AE_And_Comm | eapply AE_Refl] | ].
+  eapply AE_Trans; [eapply AE_And_Assoc_R | ].
+  eapply AE_And_Comm.
 Qed.
 
 (* The IfS's "res = true" branch (the Fpu), fully composed: extract, rewrite,
@@ -997,10 +971,10 @@ Qed.
 Lemma incr_true_branch_step :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk2)
-      (LAnd (LAnd (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+      (LAnd (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                      (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-                     (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
-                   (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+                     (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
+                   (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                          (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
             (LExprA (LVar "l_res"))))
       (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
@@ -1017,7 +991,7 @@ Qed.
 (* entails_ite_bool_false, with an extra frame fact riding alongside --
    mirrors entails_ite_bool_true_framed. *)
 Lemma entails_ite_bool_false_framed (cond : LExpr) (A B FRAME : assertion) (lv : lvar) :
-  entails
+  assertion_entails
     (LAnd (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
                           (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
                 FRAME)
@@ -1030,26 +1004,21 @@ Proof.
   exact (entails_and_mono _ _ _ _ (entails_ite_bool_false cond A B lv) (entails_refl FRAME)).
 Qed.
 
-(* Repacks counterInv_body with "v" (unchanged -- CAS failed, nothing was
+(* Repacks counterInv_body with "$v" (unchanged -- CAS failed, nothing was
    written) as the witness. *)
 Lemma incr_repack_post_v :
-  entails
-    (LAnd (LOwn (LVar "x") "c" (LVar "v"))
-          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))))
+  assertion_entails
+    (LAnd (LOwn (LVar "x") "c" (LVar "$v"))
+          (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))))
     (LAnd counterInv_body (LPure True)).
 Proof.
-  apply entails_intro. intros stk mp Henv.
-  rewrite trnsl_assertion_and.
-  iIntros "[Hown Hghost]".
-  rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  set (v' := mp "v").
-  iDestruct (trnsl_assertion_lown_interp_congr (LVar "x") "c" (LVar "v") (LVal v') stk mp eq_refl with "Hown") as "Hown'".
-  iDestruct (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
-    (LUnOp (RAOfIntOp h_ra) (LVar "v")) (LUnOp (RAOfIntOp h_ra) (LVal v')) stk mp
-    ltac:(simpl; f_equal) with "Hghost") as "Hghost'".
-  iSplitL.
-  - iApply (trnsl_repack_counterInv v' stk mp with "Hown' Hghost'").
-  - done.
+  eapply (AE_Trans sigma _ counterInv_body _).
+  - eapply AE_Trans; [eapply AE_And_Comm | ].
+    exact (AE_Exists_Intro sigma "$v" TpInt
+      (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+            (LOwn (LVar "x") "c" (LVar "$v")))
+      eq_refl).
+  - eapply AE_And_True_Intro.
 Qed.
 
 (* The IfS's "res = false" branch (SkipS): extract, drop the now-unused
@@ -1057,10 +1026,10 @@ Qed.
 Lemma incr_false_branch_step :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk2)
-      (LAnd (LAnd (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+      (LAnd (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                      (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-                     (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
-                   (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+                     (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
+                   (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                          (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
             (LExprA (LUnOp NotBoolOp (LVar "l_res")))))
       SkipS
@@ -1069,7 +1038,7 @@ Lemma incr_false_branch_step :
 Proof.
   eapply WeakeningRule.
   - apply (SkipRule rho sigma incr_stk2 (cmask ∖ {["counterInv"]})
-      (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v"))))).
+      (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))))).
     exact stk_type_compat_incr_stk2.
   - apply entails_and_mono; [exact (entails_refl _) |].
     eapply entails_trans; [exact (entails_ite_bool_false_framed _ _ _ _ _) |].
@@ -1081,10 +1050,10 @@ Qed.
 Lemma incr_ifs_res_step :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk2)
-          (LAnd (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+          (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                    (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-                   (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
-                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+                   (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
+                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
@@ -1096,10 +1065,10 @@ Proof.
     (Var "res")
     (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
     SkipS
-    (LAnd (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+    (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
              (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-             (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
-          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+             (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
+          (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))
     (LVar "l_res")).
@@ -1123,10 +1092,10 @@ Qed.
 Lemma incr_ifs_res_step_wrapped :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk2)
-          (LAnd (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+          (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                    (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-                   (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
-                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+                   (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
+                (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
@@ -1137,7 +1106,7 @@ Proof.
   eapply WeakeningRule.
   - exact incr_ifs_res_step.
   - exact (entails_refl _).
-  - exact (entails_exists_intro sigma "l_res" TpBool _ eq_refl).
+  - exact (AE_Exists_Intro sigma "l_res" TpBool _ eq_refl).
 Qed.
 
 (* Combines incr_cas_step with incr_ifs_res_step_wrapped via SequenceRule:
@@ -1150,8 +1119,8 @@ Qed.
 Lemma incr_invblock2_inner_sym :
   RavenHoareTriple rho sigma
     (LAnd (LStack incr_stk1)
-          (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-                      (LOwn (LVar "x") "c" (LVar "v")))
+          (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                      (LOwn (LVar "x") "c" (LVar "$v")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
            (IfS (Var "res")
@@ -1170,10 +1139,10 @@ Proof.
     + exact (entails_refl _).
   - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "l_res" TpBool
       (LAnd (LAnd (LStack incr_stk2)
-               (LIte (LBinOp EqOp (LVar "v") (LVar "l_v1"))
+               (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                   (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
-                  (LAnd (LOwn (LVar "x") "c" (LVar "v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false)))))))
-            (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
+                  (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false)))))))
+            (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                   (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
@@ -1194,7 +1163,7 @@ Qed.
    outward, matching how the frame was already dropped inside
    incr_true_branch_step/incr_false_branch_step's own repack steps). *)
 
-(* Eliminates counterInv's own "v" existential to reach
+(* Eliminates counterInv's own "$v" existential to reach
    incr_invblock2_inner_sym -- mirrors read_fldrd_block_step exactly. *)
 Lemma incr_invblock2_v_elim_step :
   RavenHoareTriple rho sigma
@@ -1209,10 +1178,10 @@ Lemma incr_invblock2_v_elim_step :
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "v" TpInt
+  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack incr_stk1)
-            (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "v")))
-                        (LOwn (LVar "x") "c" (LVar "v")))
+            (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                        (LOwn (LVar "x") "c" (LVar "$v")))
                   (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
            (IfS (Var "res")
@@ -1224,7 +1193,7 @@ Proof.
       { apply fresh_lvar_incr_stk2; discriminate. }
       split; [left; reflexivity | exact I].
     + exact incr_invblock2_inner_sym.
-  - eapply entails_and_stack_exists_swap.
+  - eapply assertion_entails_and_stack_exists_swap.
     + apply fresh_lvar_incr_stk1; discriminate.
     + simpl. set_solver.
   - exact (entails_refl _).
@@ -1406,52 +1375,30 @@ Proof. intros v0 Heq. unfold stk_make0 in Heq. rewrite lookup_empty in Heq. disc
 Definition h0 : RA_carrier (ra_map h_ra) := ra_of_int 0.
 
 Lemma h0_valid : (RA_inst (ra_map h_ra)).(valid) h0.
-Proof. unfold h0. rewrite ra_map_h_ra. simpl. exact I. Qed.
-
-Definition make_body : stmt :=
-  Seq
-    (Alloc "x" [("c", lang.LitInt 0)])
-    (Seq (FoldInv "counterInv" [Var "x"])
-         (Assign "#ret_val" (Var "x"))).
-
-Definition make_precond : assertion := LPure True.
-(* No existential: "#ret_val" is a placeholder for the call's own fresh
-   result lvar, substituted in by whoever consumes make_record's contract
-   (see all_proc_specs_valid_raven's own <["#ret_val":=LVar lv_final]>
-   substitution). Unlike the old "x"-existential shape, this has no
-   top-level LExists binder -- required by ProgramWF's own
-   pwf_proc_binders_fresh field, an unconditional forall over substitution
-   maps that a top-level binder could never satisfy (pick a map sending some
-   key to LVar "x" to violate disjointness). *)
-Definition make_postcond : assertion := LInv "counterInv" [LVar "#ret_val"].
-
-Definition make_record : ProcRecord :=
-  Proc [] [("x", TpLoc); ("#ret_val", TpLoc)] make_precond make_postcond make_body.
-
-Axiom proc_map_make : proc_map !! "make" = Some make_record.
+Proof. unfold h0. rewrite ra_map_h_ra. simpl. by exists 0%nat. Qed.
 
 (* Folds the two field-initialization lists HeapAllocRule's own conclusion
-   produces (one real, one ghost) down into counterInv_body -- the
-   allocation-time counterpart of entails_repack_counterInv, which folds
-   the very same two facts back once they've been read out of an
-   already-open invariant instead. *)
+   produces (one real, one ghost) down into counterInv_body. *)
 Lemma entails_alloc_fields_to_counterInv :
-  entails
+  assertion_entails
     (LAnd (field_list_to_assertion (LVar "x") [("c", lang.LitInt 0)])
           (field_list_to_ghost_assertion (LVar "x") [("h", existT h_ra h0)]))
     (LAnd counterInv_body (LPure True)).
 Proof.
-  apply entails_intro. intros stk mp Henv.
   simpl.
-  rewrite !trnsl_assertion_and.
-  iIntros "[[Hown _] [Hghost _]]".
-  iDestruct (trnsl_assertion_lghostown_interp_congr (LVar "x") "h" h_ra
-    (LVal (LitRAElem (existT h_ra h0))) (LUnOp (RAOfIntOp h_ra) (LVal (LitInt 0))) stk mp
-    eq_refl with "Hghost") as "Hghost'".
-  rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
-  iSplitL "Hown Hghost'".
-  - iApply (trnsl_repack_counterInv (LitInt 0) stk mp with "Hown Hghost'").
-  - done.
+  eapply AE_Trans.
+  { eapply AE_And_Mono; eapply AE_And_Elim_L. }
+  eapply (AE_Trans sigma _
+    (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVal (LitInt 0)))) (LOwn (LVar "x") "c" (LVal (LitInt 0)))) _).
+  - eapply AE_Trans; [eapply AE_And_Comm | ].
+    eapply AE_And_Mono; [ | eapply AE_Refl].
+    eapply AE_GhostOwn_Chunk_Eq. intros mp. simpl. reflexivity.
+  - eapply (AE_Trans sigma _ counterInv_body _).
+    + exact (AE_Exists_ValIntro sigma "$v" TpInt (LitInt 0)
+        (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+              (LOwn (LVar "x") "c" (LVar "$v")))
+        eq_refl I (conj I I)).
+    + eapply AE_And_True_Intro.
 Qed.
 
 Lemma make_alloc_step :
@@ -1496,29 +1443,6 @@ Proof.
   - constructor; [| constructor]. intros v Hv. simpl in Hv.
     apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
-Qed.
-
-(* Congruence for LInv's own translation: like LOwn/LGhostOwn's own interp
-   congruence lemmas (trnsl_assertion_lown_interp_congr,
-   trnsl_assertion_lghostown_interp_congr), an LInv's translation depends on
-   its args only through their interp_lexpr value (see
-   trnsl_assertion_LInv_some), so an argument list agreeing pointwise on
-   interp translates identically. *)
-Lemma trnsl_assertion_linv_interp_congr (inv' : inv_name) (args1 args2 : list LExpr) stk mp :
-  Forall2 (fun e1 e2 => interp_lexpr e1 mp = interp_lexpr e2 mp) args1 args2 ->
-  trnsl_assertion (LInv inv' args1) stk mp ⊢ trnsl_assertion (LInv inv' args2) stk mp.
-Proof.
-  intros Heq.
-  rewrite (trnsl_assertion_unfold (LInv inv' args1)) (trnsl_assertion_unfold (LInv inv' args2))
-    /trnsl_assertion_pre /=.
-  destruct (inv_map !! inv'); [ | done].
-  iIntros "[%vs [%Hev Hown]]".
-  iExists vs. iSplitR; [ | iFrame].
-  iPureIntro.
-  revert vs Hev. induction Heq as [| e1 e2 args1' args2' Hh Ht IH]; intros vs Hev.
-  - inversion Hev; subst. constructor.
-  - inversion Hev as [| ? v0 ? vs' Hh' Ht']; subst.
-    constructor; [rewrite <- Hh; exact Hh' | exact (IH vs' Ht')].
 Qed.
 
 (* make's own Assign "#ret_val" (Var "x") step: bare VarAssignmentRule,
@@ -1571,18 +1495,13 @@ Proof.
       (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))
       make_assign_inner_step).
   - exact (entails_refl _).
-  - eapply entails_trans.
-    + apply entails_exists_and_swap.
-      simpl. split; [apply Forall_singleton; set_solver | exact I].
-    + apply (entails_exists_mono "l_x_ret" TpLoc _ _ eq_refl).
-      apply entails_intro. intros stk mp Henv.
-      rewrite !trnsl_assertion_and
-        (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x")))) /trnsl_assertion_pre /=.
-      iIntros "[[_ %Heq] [Hinv _]]".
-      unfold LExpr_holds in Heq. simpl in Heq.
-      injection Heq as Heq. unfold val_beq in Heq. apply bool_decide_eq_true_1 in Heq.
-      iApply (trnsl_assertion_linv_interp_congr "counterInv" [LVar "x"] [LVar "l_x_ret"] stk mp
-        ltac:(constructor; [simpl; congruence | constructor]) with "Hinv").
+  - eapply AE_Trans.
+    { eapply AE_Exists_And_Swap_R. simpl. split; [apply Forall_singleton; set_solver | exact I]. }
+    eapply AE_Exists_Mono; [reflexivity | ].
+    eapply (AE_Trans sigma _
+      (LAnd (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))) (LInv "counterInv" [LVar "x"])) _).
+    + eapply AE_And_Mono; [eapply AE_And_Elim_R | eapply AE_And_Elim_L].
+    + exact (AE_LExpr_Subst_Eq_Congr sigma "l_x_ret" "x" (LInv "counterInv" [LVar "l_x_ret"]) I).
 Qed.
 
 (* make's full body: HeapAllocRule, then InvAllocRule, then the Assign that
@@ -1613,4 +1532,167 @@ Proof.
     + eapply SequenceRule.
       * exact make_foldinv_step.
       * exact make_assign_step.
+Qed.
+
+(* ----------------------------------------------------------------------- *)
+(* ProgramWF: pin proc_map/inv_map/pred_map/inv_set to this program's own
+   concrete records and discharge every field.
+
+   proc_map/inv_map are concrete now (RProg above), so "pinning" them is
+   just computation. The individual "contains at least this entry" facts
+   above (proc_map_read, proc_map_incr, proc_map_make, inv_map_counterInv)
+   already do half of that; *_only below adds the other half ("nothing
+   else is in the map"), stated as a standalone complement rather than
+   restating the map's contents, so there is no risk of the two
+   accidentally disagreeing -- any actual mismatch would simply fail to
+   typecheck in proc_map_forall/inv_map_forall below. *)
+
+Lemma proc_map_only : forall k : proc_name,
+  k ≠ "make" -> k ≠ "read" -> k ≠ "incr" -> proc_map !! k = None.
+Proof.
+  intros k Hm Hr Hi. simpl.
+  rewrite lookup_insert_ne; [| congruence].
+  rewrite lookup_insert_ne; [| congruence].
+  rewrite lookup_insert_ne; [| congruence].
+  apply lookup_empty.
+Qed.
+
+Lemma inv_map_only : forall k : inv_name,
+  k ≠ "counterInv" -> inv_map !! k = None.
+Proof. intros k Hne. simpl. rewrite lookup_insert_ne; [| congruence]. apply lookup_empty. Qed.
+
+Lemma pred_map_empty : pred_map = (∅ : gmap pred_name PredRecord).
+Proof. reflexivity. Qed.
+
+Lemma inv_set_eq : inv_set = {["counterInv"]}.
+Proof. reflexivity. Qed.
+
+(* With only one invariant in scope, pwf_inv_namespace_disjoint/
+   pwf_inv_gname_injective turn out vacuous (no two *distinct* elements
+   of a singleton set), but this one -- ghost_heap_namespace vs.
+   counterInv's own namespace -- is a genuine fact about how the two
+   namespaces were picked (both under nroot, distinct suffixes). *)
+Lemma ghost_heap_namespace_disjoint_counterInv :
+  ghost_heap_namespace ## inv_namespace_map "counterInv".
+Proof. apply ndot_ne_disjoint. congruence. Qed.
+
+Lemma proc_map_forall (P : proc_name -> ProcRecord -> Prop) :
+  P "make" make_record -> P "read" read_record -> P "incr" incr_record ->
+  map_Forall P proc_map.
+Proof.
+  intros Hm Hr Hi k v Hkv.
+  destruct (decide (k = "make")) as [-> | Hne1].
+  { rewrite proc_map_make in Hkv. injection Hkv as <-. exact Hm. }
+  destruct (decide (k = "read")) as [-> | Hne2].
+  { rewrite proc_map_read in Hkv. injection Hkv as <-. exact Hr. }
+  destruct (decide (k = "incr")) as [-> | Hne3].
+  { rewrite proc_map_incr in Hkv. injection Hkv as <-. exact Hi. }
+  rewrite (proc_map_only k Hne1 Hne2 Hne3) in Hkv. discriminate.
+Qed.
+
+Lemma inv_map_forall (P : inv_name -> InvRecord -> Prop) :
+  P "counterInv" counterInv_record -> map_Forall P inv_map.
+Proof.
+  intros Hc k v Hkv.
+  destruct (decide (k = "counterInv")) as [-> | Hne].
+  { rewrite inv_map_counterInv in Hkv. injection Hkv as <-. exact Hc. }
+  rewrite (inv_map_only k Hne) in Hkv. discriminate.
+Qed.
+
+(* "x" is the only lvar every record/body here ever uses that could
+   collide with the reserved namespace; "$v" is the only reserved one.
+   Both are settled by unfolding is_reserved and letting discriminate
+   compute String.prefix. *)
+Ltac not_reserved := unfold is_reserved; simpl; discriminate.
+
+Lemma counter_monotonic_ProgramWF : ProgramWF.
+Proof.
+  constructor.
+  - (* pwf_proc_args_unique *)
+    apply proc_map_forall; simpl.
+    + constructor.
+    + repeat constructor; set_solver.
+    + repeat constructor; set_solver.
+  - (* pwf_proc_ret_val_fresh *)
+    apply proc_map_forall; simpl; set_solver.
+  - (* pwf_proc_locals_unique *)
+    apply proc_map_forall; simpl.
+    + repeat constructor; set_solver.
+    + repeat constructor; set_solver.
+    + repeat constructor; set_solver.
+  - (* pwf_proc_args_locals_disjoint *)
+    apply proc_map_forall; simpl; set_solver.
+  - (* pwf_proc_ret_val_declared *)
+    apply proc_map_forall; simpl; set_solver.
+  - (* pwf_proc_stack_free *)
+    apply proc_map_forall; simpl.
+    + split; [constructor |].
+      unfold make_postcond. eapply SF_Inv; [exact inv_map_counterInv | reflexivity |].
+      simpl. repeat constructor.
+    + split.
+      * unfold read_precond. eapply SF_Inv; [exact inv_map_counterInv | reflexivity |].
+        simpl. repeat constructor.
+      * constructor.
+    + split.
+      * unfold incr_precond. eapply SF_Inv; [exact inv_map_counterInv | reflexivity |].
+        simpl. repeat constructor.
+      * constructor.
+  - (* pwf_proc_fvars_bounded *)
+    apply proc_map_forall; simpl.
+    + split; set_solver.
+    + split; set_solver.
+    + split; set_solver.
+  - (* pwf_proc_binders_reserved *)
+    apply proc_map_forall; simpl; split; set_solver.
+  - (* pwf_proc_args_not_reserved *)
+    apply proc_map_forall; simpl.
+    + constructor.
+    + repeat constructor. not_reserved.
+    + repeat constructor. not_reserved.
+  - (* pwf_inv_fvars_scoped *)
+    apply inv_map_forall; simpl. set_solver.
+  - (* pwf_inv_fvars_closed *)
+    apply inv_map_forall; simpl. set_solver.
+  - (* pwf_inv_fvars_bounded *)
+    intros inv_nm r args Hr Hlen v Hv.
+    destruct (decide (inv_nm = "counterInv")) as [-> | Hne].
+    2: { rewrite (inv_map_only inv_nm Hne) in Hr. discriminate. }
+    rewrite inv_map_counterInv in Hr. injection Hr as <-.
+    unfold counterInv_record in *. simpl in Hlen.
+    destruct args as [| a args']; [discriminate Hlen |].
+    destruct args' as [| b args'']; [| discriminate Hlen].
+    have Hsubst : subst counterInv_body (list_to_map (zip ["x"] [a]))
+                = LExists "$v" TpInt (LAnd
+                    (LGhostOwn a "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+                    (LOwn a "c" (LVar "$v"))).
+    { unfold counterInv_body. simpl. rewrite lookup_insert. reflexivity. }
+    rewrite Hsubst in Hv. simpl in Hv. set_solver.
+  - (* pwf_inv_binders_reserved *)
+    apply inv_map_forall; simpl. intros v Hv.
+    assert (Hv' : v ∈ ({["$v"]} : gset lvar)) by set_solver.
+    apply elem_of_singleton in Hv'. subst v. unfold is_reserved. reflexivity.
+  - (* pwf_inv_args_not_reserved *)
+    apply inv_map_forall; simpl. repeat constructor. not_reserved.
+  - (* pwf_pred_fvars_scoped *)
+    rewrite pred_map_empty. intros k v Hkv. rewrite lookup_empty in Hkv. discriminate.
+  - (* pwf_pred_fvars_closed *)
+    rewrite pred_map_empty. intros k v Hkv. rewrite lookup_empty in Hkv. discriminate.
+  - (* pwf_pred_fvars_bounded *)
+    rewrite pred_map_empty. intros pred_nm r args Hr. rewrite lookup_empty in Hr. discriminate.
+  - (* pwf_pred_binders_reserved *)
+    rewrite pred_map_empty. intros k v Hkv. rewrite lookup_empty in Hkv. discriminate.
+  - (* pwf_pred_args_not_reserved *)
+    rewrite pred_map_empty. intros k v Hkv. rewrite lookup_empty in Hkv. discriminate.
+  - (* pwf_inv_body_stack_free *)
+    apply inv_map_forall; simpl. repeat constructor.
+  - (* pwf_inv_gname_injective *)
+    rewrite inv_set_eq. intros inv1 inv2 Hin1 Hin2 Heq.
+    apply elem_of_singleton in Hin1 as ->. apply elem_of_singleton in Hin2 as ->. reflexivity.
+  - (* pwf_inv_namespace_disjoint *)
+    rewrite inv_set_eq. intros inv1 inv2 Hin1 Hin2 Hne.
+    apply elem_of_singleton in Hin1 as ->. apply elem_of_singleton in Hin2 as ->.
+    exfalso. exact (Hne eq_refl).
+  - (* pwf_ghost_heap_namespace_disjoint_inv *)
+    rewrite inv_set_eq. intros inv' Hin. apply elem_of_singleton in Hin as ->.
+    exact ghost_heap_namespace_disjoint_counterInv.
 Qed.

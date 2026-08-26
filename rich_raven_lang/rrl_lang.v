@@ -505,6 +505,27 @@ Proof.
   - (* LStuck *) reflexivity.
 Qed.
 
+(* Same statement as interp_lexpr_subst_var, but substituting another lvar
+   (its own current mp-value) rather than a fixed literal -- the LExpr-level
+   fact backing "swap one already-bound lvar for another, given they're
+   co-asserted equal" (see AE_LExpr_Subst_Eq_Congr). *)
+Lemma interp_lexpr_subst_lvar (e : LExpr) (v v2 : lvar) (mp : symb_map) :
+  interp_lexpr (lexpr_subst e (<[v := LVar v2]> ∅)) mp =
+  interp_lexpr e (fun y => if (y =? v)%string then mp v2 else mp y).
+Proof.
+  induction e; simpl.
+  - (* LVar x *)
+    destruct (String.eqb x v) eqn:Hxv.
+    + apply String.eqb_eq in Hxv as ->. rewrite lookup_insert. reflexivity.
+    + apply String.eqb_neq in Hxv.
+      rewrite lookup_insert_ne; [ | congruence]. rewrite lookup_empty. reflexivity.
+  - (* LVal *) reflexivity.
+  - (* LUnOp *) rewrite IHe. reflexivity.
+  - (* LBinOp *) rewrite IHe1 IHe2. reflexivity.
+  - (* LIfE *) rewrite IHe1 IHe2 IHe3. reflexivity.
+  - (* LStuck *) reflexivity.
+Qed.
+
 Global Instance val_countable : Countable val.
 Proof.
   refine (inj_countable'
@@ -3621,6 +3642,181 @@ Proof.
   - rewrite Hself. iExact "H".
 Qed.
 
+(* Fragment closed under LAnd, restricted to the leaf shapes whose own
+   translation reads its LExpr arguments only through interp_lexpr at the
+   ambient mp (LOwn/LGhostOwn/LExprA/LPure/LInv -- LInv's own args list is
+   read the same way, via a pointwise Forall2 over interp_lexpr, no
+   recursion into inv_map's body) -- deliberately excludes LForall/LExists
+   (binder shadowing) and LPred (recursion through a global table, the
+   *body* of which does need it, unlike LInv's own nominal fact). *)
+Fixpoint qf_assertion (a : assertion) : Prop :=
+  match a with
+  | LOwn _ _ _ => True
+  | LGhostOwn _ _ _ _ => True
+  | LExprA _ => True
+  | LPure _ => True
+  | LInv _ _ => True
+  | LAnd a1 a2 => qf_assertion a1 /\ qf_assertion a2
+  | _ => False
+  end.
+
+(* Substituting a concrete value w for lv throughout a qf_assertion, then
+   translating at mp, is the same as translating unsubstituted at mp
+   updated at lv -- the assertion-level generalization of
+   interp_lexpr_subst_var, restricted to the fragment where it holds by
+   plain structural induction (no least_fixpoint machinery needed, since
+   LPred/LInv -- the only cases that would require it -- are excluded).
+   Mirrors trnsl_assertion_mp_irrelevant's proof shape exactly, swapping
+   "override mp at a fresh lvar" for "substitute a value for lv". *)
+Lemma trnsl_assertion_subst_lv (a : assertion) (lv : lvar) (w : val) (stk : stack_id) (mp : symb_map) :
+  qf_assertion a ->
+  trnsl_assertion (subst a (<[lv := LVal w]> ∅)) stk mp ≡
+  trnsl_assertion a stk (fun y => if (y =? lv)%string then w else mp y).
+Proof.
+  induction a as
+    [ pn pe
+    | sg
+    | pexp
+    | pp
+    | oe ofld ochunk
+    | ge gfld gr gchunk
+    | fv ft fbody IHf
+    | ev et ebody IHe
+    | icond ithen IHi1 ielse IHi2
+    | ivn iargs
+    | pdn pargs
+    | a1 IH1 a2 IH2 ]; intros Hqf; simpl in Hqf.
+  - (* LProc *) exfalso. exact Hqf.
+  - (* LStack *) exfalso. exact Hqf.
+  - (* LExprA *) simpl.
+    rewrite (trnsl_assertion_unfold (LExprA (lexpr_subst pexp (<[lv := LVal w]> ∅))))
+            (trnsl_assertion_unfold (LExprA pexp)) /trnsl_assertion_pre /=.
+    unfold LExpr_holds. rewrite (interp_lexpr_subst_var pexp lv w mp). done.
+  - (* LPure *) simpl.
+    rewrite (trnsl_assertion_unfold (LPure pp)) (trnsl_assertion_unfold (LPure pp))
+            /trnsl_assertion_pre /=. done.
+  - (* LOwn *) simpl.
+    rewrite (trnsl_assertion_unfold
+              (LOwn (lexpr_subst oe (<[lv := LVal w]> ∅)) ofld (lexpr_subst ochunk (<[lv := LVal w]> ∅))))
+            (trnsl_assertion_unfold (LOwn oe ofld ochunk)) /trnsl_assertion_pre /=.
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_subst_var oe lv w mp) (interp_lexpr_subst_var ochunk lv w mp).
+    done.
+  - (* LGhostOwn *) simpl.
+    rewrite (trnsl_assertion_unfold
+              (LGhostOwn (lexpr_subst ge (<[lv := LVal w]> ∅)) gfld gr (lexpr_subst gchunk (<[lv := LVal w]> ∅))))
+            (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
+    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_subst_var ge lv w mp) (interp_lexpr_subst_var gchunk lv w mp).
+    done.
+  - (* LForall *) exfalso. exact Hqf.
+  - (* LExists *) exfalso. exact Hqf.
+  - (* LIte *) exfalso. exact Hqf.
+  - (* LInv *) simpl.
+    rewrite (trnsl_assertion_unfold (LInv ivn (map (fun e => lexpr_subst e (<[lv := LVal w]> ∅)) iargs)))
+            (trnsl_assertion_unfold (LInv ivn iargs)) /trnsl_assertion_pre /=.
+    destruct (inv_map !! ivn); [ | done].
+    apply bi.exist_proper; intros vs.
+    apply bi.sep_proper; [ | done].
+    apply bi.pure_proper.
+    revert vs. induction iargs as [ | le0 iargs' IHl]; intros vs; simpl.
+    + split; intros H; inversion H; subst; constructor.
+    + destruct vs as [ | v0 vs']; simpl.
+      * split; intros H; inversion H.
+      * split; intros H; inversion H as [|? ? ? ? Hh Ht]; subst.
+        -- constructor.
+           ++ rewrite (interp_lexpr_subst_var le0 lv w mp) in Hh. exact Hh.
+           ++ apply IHl; exact Ht.
+        -- constructor.
+           ++ rewrite (interp_lexpr_subst_var le0 lv w mp). exact Hh.
+           ++ apply IHl; exact Ht.
+  - (* LPred *) exfalso. exact Hqf.
+  - (* LAnd *) destruct Hqf as [Hq1 Hq2]. simpl.
+    rewrite (trnsl_assertion_and (subst a1 (<[lv := LVal w]> ∅)) (subst a2 (<[lv := LVal w]> ∅)) stk mp)
+            (trnsl_assertion_and a1 a2 stk (fun y => if (y =? lv)%string then w else mp y)).
+    apply bi.sep_proper; [exact (IH1 Hq1) | exact (IH2 Hq2)].
+Qed.
+
+(* LVar-substitution counterpart of trnsl_assertion_subst_lv (mirrors it
+   case-for-case, swapping interp_lexpr_subst_var for
+   interp_lexpr_subst_lvar) -- the assertion-level fact backing "swap one
+   already-bound lvar for another, given they're co-asserted equal"
+   (AE_LExpr_Subst_Eq_Congr). *)
+Lemma trnsl_assertion_subst_lvar (a : assertion) (lv lv2 : lvar) (stk : stack_id) (mp : symb_map) :
+  qf_assertion a ->
+  trnsl_assertion (subst a (<[lv := LVar lv2]> ∅)) stk mp ≡
+  trnsl_assertion a stk (fun y => if (y =? lv)%string then mp lv2 else mp y).
+Proof.
+  induction a as
+    [ pn pe
+    | sg
+    | pexp
+    | pp
+    | oe ofld ochunk
+    | ge gfld gr gchunk
+    | fv ft fbody IHf
+    | ev et ebody IHe
+    | icond ithen IHi1 ielse IHi2
+    | ivn iargs
+    | pdn pargs
+    | a1 IH1 a2 IH2 ]; intros Hqf; simpl in Hqf.
+  - (* LProc *) exfalso. exact Hqf.
+  - (* LStack *) exfalso. exact Hqf.
+  - (* LExprA *) simpl.
+    rewrite (trnsl_assertion_unfold (LExprA (lexpr_subst pexp (<[lv := LVar lv2]> ∅))))
+            (trnsl_assertion_unfold (LExprA pexp)) /trnsl_assertion_pre /=.
+    unfold LExpr_holds. rewrite (interp_lexpr_subst_lvar pexp lv lv2 mp). done.
+  - (* LPure *) simpl.
+    rewrite (trnsl_assertion_unfold (LPure pp)) (trnsl_assertion_unfold (LPure pp))
+            /trnsl_assertion_pre /=. done.
+  - (* LOwn *) simpl.
+    rewrite (trnsl_assertion_unfold
+              (LOwn (lexpr_subst oe (<[lv := LVar lv2]> ∅)) ofld (lexpr_subst ochunk (<[lv := LVar lv2]> ∅))))
+            (trnsl_assertion_unfold (LOwn oe ofld ochunk)) /trnsl_assertion_pre /=.
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_subst_lvar oe lv lv2 mp) (interp_lexpr_subst_lvar ochunk lv lv2 mp).
+    done.
+  - (* LGhostOwn *) simpl.
+    rewrite (trnsl_assertion_unfold
+              (LGhostOwn (lexpr_subst ge (<[lv := LVar lv2]> ∅)) gfld gr (lexpr_subst gchunk (<[lv := LVar lv2]> ∅))))
+            (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
+    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+    unfold LExpr_holds. simpl.
+    rewrite (interp_lexpr_subst_lvar ge lv lv2 mp) (interp_lexpr_subst_lvar gchunk lv lv2 mp).
+    done.
+  - (* LForall *) exfalso. exact Hqf.
+  - (* LExists *) exfalso. exact Hqf.
+  - (* LIte *) exfalso. exact Hqf.
+  - (* LInv *) simpl.
+    rewrite (trnsl_assertion_unfold (LInv ivn (map (fun e => lexpr_subst e (<[lv := LVar lv2]> ∅)) iargs)))
+            (trnsl_assertion_unfold (LInv ivn iargs)) /trnsl_assertion_pre /=.
+    destruct (inv_map !! ivn); [ | done].
+    apply bi.exist_proper; intros vs.
+    apply bi.sep_proper; [ | done].
+    apply bi.pure_proper.
+    revert vs. induction iargs as [ | le0 iargs' IHl]; intros vs; simpl.
+    + split; intros H; inversion H; subst; constructor.
+    + destruct vs as [ | v0 vs']; simpl.
+      * split; intros H; inversion H.
+      * split; intros H; inversion H as [|? ? ? ? Hh Ht]; subst.
+        -- constructor.
+           ++ rewrite (interp_lexpr_subst_lvar le0 lv lv2 mp) in Hh. exact Hh.
+           ++ apply IHl; exact Ht.
+        -- constructor.
+           ++ rewrite (interp_lexpr_subst_lvar le0 lv lv2 mp). exact Hh.
+           ++ apply IHl; exact Ht.
+  - (* LPred *) exfalso. exact Hqf.
+  - (* LAnd *) destruct Hqf as [Hq1 Hq2]. simpl.
+    rewrite (trnsl_assertion_and (subst a1 (<[lv := LVar lv2]> ∅)) (subst a2 (<[lv := LVar lv2]> ∅)) stk mp)
+            (trnsl_assertion_and a1 a2 stk (fun y => if (y =? lv)%string then mp lv2 else mp y)).
+    apply bi.sep_proper; [exact (IH1 Hq1) | exact (IH2 Hq2)].
+Qed.
+
 End TypeInf.
 
 
@@ -3660,6 +3856,13 @@ Section RavenLogic.
       assertion_entails σ (LExists lv t A) (LExists lv t B)
   | AE_Exists_Intro lv t X :
       σ lv = t -> assertion_entails σ X (LExists lv t X)
+  | AE_Exists_ValIntro lv t w A :
+      (* Witness-intro for a value w that is not necessarily lv's own
+         ambient mp-value (AE_Exists_Intro's case) but a fresh constant:
+         plugs w in for lv throughout A first (via subst), restricted to
+         the qf_assertion fragment where trnsl_assertion_subst_lv holds. *)
+      σ lv = t -> typ_val_match t w -> qf_assertion A ->
+      assertion_entails σ (subst A (<[lv := LVal w]> ∅)) (LExists lv t A)
   | AE_Exists_Elim lv t P Q :
       σ lv = t -> lvar_fresh_in_assertion lv Q ->
       assertion_entails σ P Q -> assertion_entails σ (LExists lv t P) Q
@@ -3676,7 +3879,62 @@ Section RavenLogic.
          all already forces cond to evaluate to Some (LitBool false) --
          NotBoolOp's own interp_lexpr case gives None (so LExpr_holds is
          False, vacuously) for every other outcome. *)
-      assertion_entails σ (LAnd (LIte cond A B) (LExprA (LUnOp NotBoolOp cond))) B.
+      assertion_entails σ (LAnd (LIte cond A B) (LExprA (LUnOp NotBoolOp cond))) B
+  | AE_Ite_Bool_True cond A B lv :
+      (* Recovers cond itself (not just A) from an indirect boolean
+         witness lv, tagged onto each LIte branch's own tail -- unlike
+         AE_Ite_True, the fact in hand isn't cond directly but lv = true,
+         so which branch actually holds has to be inferred: the else_
+         branch's own tag (lv = false) would contradict it. *)
+      assertion_entails σ
+        (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
+                          (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
+              (LExprA (LVar lv)))
+        (LAnd A (LExprA cond))
+  | AE_Ite_Bool_False cond A B lv :
+      assertion_entails σ
+        (LAnd (LIte cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
+                          (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))))
+              (LExprA (LUnOp NotBoolOp (LVar lv))))
+        B
+  | AE_LExpr_Subst_Eq_Congr lv lv2 A :
+      (* "Swap one already-bound lvar for another, given they're
+         co-asserted equal": substituting lv2 for lv throughout a
+         qf_assertion A, plus the LExprA fact that lv and lv2 currently
+         agree, is enough to recover A itself (unlike
+         AE_Exists_ValIntro, lv/lv2 are both already ambient here -- no
+         fresh binder is introduced or eliminated). *)
+      qf_assertion A ->
+      assertion_entails σ
+        (LAnd (LExprA (LBinOp EqOp (LVar lv) (LVar lv2))) (subst A (<[lv := LVar lv2]> ∅)))
+        A
+  | AE_Exists_Rename_Intro lv lv2 t A :
+      (* Like AE_Exists_Intro (wraps in a fresh existential using an
+         ambient value as witness), but the witness comes from a
+         *different* already-ambient lvar lv2 -- A is stated in terms of
+         lv2 throughout (via subst), and gets rebound under a fresh lv
+         using lv2's own current value. Subsumes AE_Exists_Intro
+         (lv2 = lv, subst is then a no-op) as a special case, not stated
+         as one to keep AE_Exists_Intro's own simpler soundness proof. *)
+      σ lv = t -> σ lv2 = t -> qf_assertion A ->
+      assertion_entails σ (subst A (<[lv := LVar lv2]> ∅)) (LExists lv t A)
+  | AE_LExprA_Impl e1 e2 :
+      (* interp_lexpr/LExpr_holds are plain, total functions of LExpr and
+         symb_map -- no Sigma/Gamma/GhostConfig/invTokenG involved at all
+         -- so any Coq-level implication between two LExpr_holds facts
+         (e.g. RA-specific arithmetic, as in counter_monotonic.v's own
+         fpuValid bridging) lifts directly, uniformly in mp. *)
+      (forall mp, LExpr_holds e1 mp -> LExpr_holds e2 mp) ->
+      assertion_entails σ (LExprA e1) (LExprA e2)
+  | AE_GhostOwn_Chunk_Eq e fld r chunk1 chunk2 :
+      (* Unconditional (no co-asserted equality needed, unlike
+         AE_LExpr_Subst_Eq_Congr): chunk1/chunk2 interp-agree at *every*
+         mp, e.g. two different closed LExprs computing the same ground
+         RA element -- LGhostOwn's own translation only ever consults its
+         chunk argument through interp_lexpr, so this is a direct
+         congruence. *)
+      (forall mp, interp_lexpr chunk1 mp = interp_lexpr chunk2 mp) ->
+      assertion_entails σ (LGhostOwn e fld r chunk1) (LGhostOwn e fld r chunk2).
 
   Lemma assertion_entails_sound σ A B : assertion_entails σ A B -> entails σ A B.
   Proof.
@@ -3728,6 +3986,12 @@ Section RavenLogic.
         as [Ap [Bp [<- [<- Hent]]]].
       iApply (Hent with "HA").
     - (* AE_Exists_Intro *) exact (entails_exists_intro σ lv t X H).
+    - (* AE_Exists_ValIntro *)
+      rename H into Hty, H0 into Htv, H1 into Hqf.
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_exists.
+      rewrite (trnsl_assertion_subst_lv A lv w stk mp Hqf).
+      iIntros "H". iExists w. iSplitR; [done|]. iExact "H".
     - (* AE_Exists_Elim *)
       rename H into Hty, H0 into Hfresh.
       apply entails_intro. intros stk mp Henv.
@@ -3768,6 +4032,133 @@ Section RavenLogic.
         destruct bv; [discriminate Hnc | reflexivity]. }
       iDestruct "Hite" as "[_ Helse]". iApply "Helse". iPureIntro.
       unfold LExpr_holds. rewrite Hcond_false. intros [=].
+    - (* AE_Ite_Bool_True *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and.
+      rewrite (trnsl_assertion_ite cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
+        (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))) stk mp).
+      rewrite (trnsl_assertion_unfold (LExprA (LVar lv))) /trnsl_assertion_pre /=.
+      iIntros "[Hite %Hlv]".
+      unfold LExpr_holds in Hlv. simpl in Hlv.
+      destruct (interp_lexpr cond mp) as [vc|] eqn:Hcond.
+      + destruct (val_beq vc (LitBool true)) eqn:Hvc.
+        * unfold val_beq in Hvc. apply bool_decide_eq_true_1 in Hvc. subst vc.
+          iDestruct "Hite" as "[Hthen _]".
+          iDestruct ("Hthen" with "[]") as "HA".
+          { iPureIntro. unfold LExpr_holds. rewrite Hcond. done. }
+          iEval (rewrite trnsl_assertion_and) in "HA". iDestruct "HA" as "[HA _]".
+          rewrite trnsl_assertion_and (trnsl_assertion_unfold (LExprA cond)) /trnsl_assertion_pre /=.
+          iFrame "HA". iPureIntro. unfold LExpr_holds. rewrite Hcond. done.
+        * iDestruct "Hite" as "[_ Helse]".
+          iDestruct ("Helse" with "[]") as "HB".
+          { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros ->.
+            unfold val_beq in Hvc. apply bool_decide_eq_false_1 in Hvc. apply Hvc. reflexivity. }
+          iEval (rewrite trnsl_assertion_and
+            (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false)))))
+            /trnsl_assertion_pre /=) in "HB".
+          iDestruct "HB" as "[_ %Hf]".
+          unfold LExpr_holds in Hf. cbn [interp_lexpr] in Hf.
+          assert (Hcomp : val_beq (LitBool true) (LitBool false) = false).
+          { destruct (val_beq (LitBool true) (LitBool false)) eqn:Heq0; [|reflexivity].
+            exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
+          congruence.
+      + iDestruct "Hite" as "[_ Helse]".
+        iDestruct ("Helse" with "[]") as "HB".
+        { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros []. }
+        iEval (rewrite trnsl_assertion_and
+          (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false)))))
+          /trnsl_assertion_pre /=) in "HB".
+        iDestruct "HB" as "[_ %Hf]".
+        unfold LExpr_holds in Hf. cbn [interp_lexpr] in Hf.
+        assert (Hcomp : val_beq (LitBool true) (LitBool false) = false).
+        { destruct (val_beq (LitBool true) (LitBool false)) eqn:Heq0; [|reflexivity].
+          exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
+        congruence.
+    - (* AE_Ite_Bool_False *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and.
+      rewrite (trnsl_assertion_ite cond (LAnd A (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
+        (LAnd B (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool false))))) stk mp).
+      rewrite (trnsl_assertion_unfold (LExprA (LUnOp NotBoolOp (LVar lv)))) /trnsl_assertion_pre /=.
+      iIntros "[Hite %Hlv]".
+      unfold LExpr_holds in Hlv. simpl in Hlv.
+      destruct (mp lv) as [b| |i|l|ra] eqn:Hmplv; simpl in Hlv; try contradiction.
+      injection Hlv as Hlv. apply negb_true_iff in Hlv. subst b.
+      destruct (interp_lexpr cond mp) as [vc|] eqn:Hcond.
+      + destruct (val_beq vc (LitBool true)) eqn:Hvc.
+        * unfold val_beq in Hvc. apply bool_decide_eq_true_1 in Hvc. subst vc.
+          iDestruct "Hite" as "[Hthen _]".
+          iDestruct ("Hthen" with "[]") as "HA".
+          { iPureIntro. unfold LExpr_holds. rewrite Hcond. done. }
+          iEval (rewrite trnsl_assertion_and
+            (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVal (LitBool true)))))
+            /trnsl_assertion_pre /=) in "HA".
+          iDestruct "HA" as "[_ %Ht]".
+          unfold LExpr_holds in Ht. cbn [interp_lexpr] in Ht.
+          assert (Hcomp : val_beq (LitBool false) (LitBool true) = false).
+          { destruct (val_beq (LitBool false) (LitBool true)) eqn:Heq0; [|reflexivity].
+            exfalso. apply internal_val_dec_bl in Heq0. discriminate. }
+          congruence.
+        * iDestruct "Hite" as "[_ Helse]".
+          iDestruct ("Helse" with "[]") as "HB".
+          { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros ->.
+            unfold val_beq in Hvc. apply bool_decide_eq_false_1 in Hvc. apply Hvc. reflexivity. }
+          iEval (rewrite trnsl_assertion_and) in "HB". iDestruct "HB" as "[$ _]".
+      + iDestruct "Hite" as "[_ Helse]".
+        iDestruct ("Helse" with "[]") as "HB".
+        { iPureIntro. unfold LExpr_holds. rewrite Hcond. intros []. }
+        iEval (rewrite trnsl_assertion_and) in "HB". iDestruct "HB" as "[$ _]".
+    - (* AE_LExpr_Subst_Eq_Congr *)
+      rename H into Hqf.
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and (trnsl_assertion_unfold (LExprA (LBinOp EqOp (LVar lv) (LVar lv2))))
+        /trnsl_assertion_pre /=.
+      iIntros "[%Heq H]".
+      unfold LExpr_holds in Heq. simpl in Heq. injection Heq as Heq.
+      apply bool_decide_eq_true in Heq.
+      rewrite (trnsl_assertion_subst_lvar A lv lv2 stk mp Hqf).
+      have Hself : (fun y => if (y =? lv)%string then mp lv2 else mp y) = mp.
+      { apply functional_extensionality. intros y.
+        destruct (String.eqb_spec y lv) as [-> | _]; [exact (eq_sym Heq) | reflexivity]. }
+      rewrite Hself. iExact "H".
+    - (* AE_Exists_Rename_Intro *)
+      rename H into Hty, H0 into Hty2, H1 into Hqf.
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_exists.
+      rewrite (trnsl_assertion_subst_lvar A lv lv2 stk mp Hqf).
+      iIntros "H". iExists (mp lv2). iSplitR.
+      + iPureIntro. specialize (Henv lv2). rewrite Hty2 in Henv.
+        destruct (σ lv2), (mp lv2); simpl in *; try done.
+      + iExact "H".
+    - (* AE_LExprA_Impl *)
+      rename H into Himpl.
+      apply entails_intro. intros stk mp Henv.
+      rewrite (trnsl_assertion_unfold (LExprA e1)) (trnsl_assertion_unfold (LExprA e2)) /trnsl_assertion_pre /=.
+      iIntros "%He1". iPureIntro. exact (Himpl mp He1).
+    - (* AE_GhostOwn_Chunk_Eq *)
+      rename H into Heq.
+      apply entails_intro. intros stk mp Henv.
+      rewrite (trnsl_assertion_unfold (LGhostOwn e fld0 r chunk1)) (trnsl_assertion_unfold (LGhostOwn e fld0 r chunk2))
+        /trnsl_assertion_pre /=.
+      destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+      unfold LExpr_holds. rewrite (Heq mp). done.
+  Qed.
+
+  (* assertion_entails-typed counterpart of TypeInf's entails_and_stack_exists_swap
+     (now otherwise unused -- WeakeningRule no longer takes entails), derived
+     purely compositionally from the two swap primitives above: pull the
+     LExists past p (AE_Exists_And_Swap_R) under the fixed LStack via
+     AE_And_Mono, then past the LStack itself (AE_And_Exists_Swap_L). *)
+  Lemma assertion_entails_and_stack_exists_swap (σ : lvar_typs) (stk : stack) (v : lvar) (t : typ) (body p : assertion) :
+    fresh_lvar stk v ->
+    lvar_fresh_in_assertion v p ->
+    assertion_entails σ (LAnd (LStack stk) (LAnd (LExists v t body) p))
+                       (LExists v t (LAnd (LStack stk) (LAnd body p))).
+  Proof.
+    intros Hfresh_stk Hfresh_p.
+    eapply AE_Trans.
+    - eapply AE_And_Mono; [exact (AE_Refl σ (LStack stk)) | exact (AE_Exists_And_Swap_R σ v t body p Hfresh_p)].
+    - exact (AE_And_Exists_Swap_L σ v t (LStack stk) (LAnd body p) Hfresh_stk).
   Qed.
 
   Fixpoint field_list_to_assertion lexpr fld_vals  := match fld_vals with
