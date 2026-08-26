@@ -18,8 +18,83 @@ From iris.program_logic Require Import ectx_lifting.
 From raven_iris.simp_raven_lang Require Import lang lifting ghost_state.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
 
+(* "All", not "Type": with this many Let-bound cross-file names in one
+   Section, "Type" mode's minimization guesses wrong far more often here
+   than in rrl_lang.v, and the guess-then-fix cycle for the same handful
+   of trivial early lemmas got repetitive. "All" trades that for a
+   different, rarer failure mode (a lemma whose statement doesn't
+   determine P/G/Gamma at its call site, needing a `@name P G Γ`-style
+   explicit instantiation) -- fixed per-site as encountered, same as any
+   other implicit-argument inference gap. *)
+Set Default Proof Using "All".
+
 
 Section MainTranslation.
+    (* rrl_lang.v's own Program/GhostConfig/Gamma Section variables don't
+       carry across files (unlike its top-level Context Sigma/Gs/I,
+       genuinely ambient everywhere) -- redeclared here under the same
+       names/projections so every existing bare use below keeps working
+       unchanged; cross-file calls into rrl_lang.v's own definitions
+       (ProgramWF, RavenHoareTriple, trnsl_assertion, entails, ...) need
+       these supplied explicitly, since Coq has no way to know trnsl.v's
+       RProg/G/Gamma are "the same" as rrl_lang.v's without being told. *)
+    Context {RProg : Program}.
+    Context {G : GhostConfig}.
+    Context {Γ : Γ_type}.
+    Context `{!invTokenG rrl_lang.Σ}.
+
+    (* Notation, not Let: a Let-bound alias is a genuinely new constant,
+       definitionally but not syntactically equal to the projection/
+       application it abbreviates -- confirmed to break `rewrite`'s
+       head-symbol matching against goals produced by directly calling
+       the aliased rrl_lang.v lemma/definition with explicit RProg/G/Γ
+       (same root cause as the ra_map/val Section-wrapping attempt's
+       "convertible but not identical" tactic friction, recurring here
+       for a much smaller, local reason). Notation is pure text
+       substitution, so every occurrence -- including ones reached only
+       by unfolding a called lemma's own conclusion -- elaborates to the
+       identical term. *)
+    Local Notation proc_set := (RProg.(prog_proc_set)).
+    Local Notation pred_set := (RProg.(prog_pred_set)).
+    Local Notation inv_set := (RProg.(prog_inv_set)).
+    Local Notation fld_set := (RProg.(prog_fld_set)).
+    Local Notation proc_map := (RProg.(prog_proc_map)).
+    Local Notation inv_map := (RProg.(prog_inv_map)).
+    Local Notation pred_map := (RProg.(prog_pred_map)).
+    Local Notation ghost_heap_name := (G.(gc_ghost_heap_name)).
+    Local Notation ghost_heap_namespace := (G.(gc_ghost_heap_namespace)).
+    Local Notation inv_namespace_map := (G.(gc_inv_namespace_map)).
+    Local Notation ProgramWF := (@ProgramWF invTokenG0 RProg G).
+    Local Notation RavenHoareTriple := (@RavenHoareTriple RProg).
+    Local Notation trnsl_assertion := (@trnsl_assertion invTokenG0 RProg G Γ).
+    Local Notation entails := (@entails invTokenG0 RProg G Γ).
+    Local Notation inv_body_bridge := (@inv_body_bridge invTokenG0 RProg G Γ).
+    Local Notation Wghost := (@Wghost G).
+    Local Notation Wghost_alloc := (@Wghost_alloc G Γ).
+    Local Notation Winv := (@Winv invTokenG0 RProg G Γ).
+    Local Notation Winv_alloc := (@Winv_alloc invTokenG0 RProg G Γ).
+    Local Notation Winv_open := (@Winv_open invTokenG0 RProg G Γ).
+    Local Notation stmt_well_defined := (@stmt_well_defined RProg).
+    Local Notation alloc_stmt_well_defined := (@alloc_stmt_well_defined RProg).
+    Local Notation fresh_proc_entry_lvars := (@fresh_proc_entry_lvars G).
+    Local Notation proc_bodies_translate := (@proc_bodies_translate RProg).
+    Local Notation StackFree := (@StackFree RProg).
+    Local Notation stack_free_assertion_subst := (@stack_free_assertion_subst invTokenG0 RProg G).
+    Local Notation stack_free_assertion_trnsl := (@stack_free_assertion_trnsl invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_and := (@trnsl_assertion_and invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_exists := (@trnsl_assertion_exists invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_LInv_some := (@trnsl_assertion_LInv_some invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_mp_irrelevant := (@trnsl_assertion_mp_irrelevant invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_mp_irrelevant_reserved :=
+      (@trnsl_assertion_mp_irrelevant_reserved invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_subst_congr := (@trnsl_assertion_subst_congr invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_unfold := (@trnsl_assertion_unfold invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_w_lexpr_subst := (@trnsl_assertion_w_lexpr_subst invTokenG0 RProg G Γ).
+    Local Notation trnsl_inv_validity' := (@trnsl_inv_validity' invTokenG0 RProg G Γ).
+    Local Notation trnsl_pred_validity' := (@trnsl_pred_validity' invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_w_lexpr_subst_r := (@trnsl_assertion_w_lexpr_subst_r invTokenG0 RProg G Γ).
+    Local Notation typeOf_val_has_typ := (@typeOf_val_has_typ G).
+
     Definition inv_set_to_namespace (s : gset inv_name) : coPset :=
       set_fold (λ inv acc, acc ∪ ↑(inv_namespace_map inv)) ∅ s.
 
@@ -1599,6 +1674,7 @@ Section MainTranslation.
 
       4 : {
         (* WEAKENING *)
+        apply (assertion_entails_sound (invTokenG0:=invTokenG0) (P:=RProg) (G:=G) (Γ:=Γ)) in H0, H1.
         unfold entails in *.
         unfold trnsl_hoare_triple. simpl.
         specialize H0 with stk_id mp. specialize (H0 Henv).

@@ -24,6 +24,17 @@ Require Import Coq.Logic.FunctionalExtensionality.
 Require Import Coq.Program.Equality.
 Require Import Coq.Init.Datatypes.
 
+(* "All", not "Type": Coq's "Type" default still tries to minimize which
+   section variables each proof closes over, and that minimization gets
+   confused by broad-search tactics (naive_solver etc.), spuriously
+   rejecting proofs as depending on unrelated section variables. "All"
+   unconditionally closes every proof over every variable in scope at
+   that point -- harmless here, since we only care that the few
+   externally-visible definitions (RavenHoareTriple, raven_soundness,
+   ...) end up with the right dependencies, not that internal lemmas have
+   minimal signatures. *)
+Set Default Proof Using "Type".
+
 Class inGs {I : Type} (Σ : gFunctors) (Gs : I → cmra) := {
   inGs_inG : ∀ i, inG Σ (Gs i)
 }.
@@ -53,24 +64,21 @@ Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
 Context `{!simpLangG Σ}.
 
+Section WithProgram.
+
 Definition lvar := string.
 
 Definition proc_name := string.
-Global Parameter proc_set : gset proc_name.
 
 Definition pred_name := string.
-Global Parameter pred_set : gset pred_name.
 
 Definition inv_name := string.
-Global Parameter inv_set : gset inv_name.
 
 (* ResourceAlgebra/RA_Pack/ra_name/ra_set/ra_map/ra_elem live in
    simp_raven_lang/lang.v (re-exported here via `Require Export lang`
    above): RA elements are ordinary program values (typ's TpRA, val's
    LitRAElem below), not a ghost-only concept, so they belong at the base
    of the language rather than in this spec layer. *)
-
-Parameter fld_set : gset lang.fld_name.
 
 Record fld := Fld { fld_name_val : fld_name; fld_typ : typ }.
 
@@ -84,8 +92,6 @@ Record fld := Fld { fld_name_val : fld_name; fld_typ : typ }.
    still lives at that freshly-minted gname via a bare own, exactly as in
    the original design, so FPURule's update never touches this map at
    all. *)
-Parameter ghost_heap_name : gname.
-Parameter ghost_heap_namespace : namespace.
 
 (* val mirrors lang.val exactly (see trnsl_lval/trnsl_val below), including
    its LitRAElem case, so that isomorphism extends to RA elements too. *)
@@ -737,8 +743,6 @@ Definition InvBodyWF (r : InvRecord) : Prop :=
     subst (subst (r.(inv_body))
       (list_to_map (zip (r.(inv_args)) args))) M.
 
-Global Parameter inv_map : gmap inv_name InvRecord.
-
 Record PredRecord := Pred {
   pred_args: list var;
   pred_body: assertion;
@@ -755,7 +759,31 @@ Definition PredBodyWF (r : PredRecord) : Prop :=
     subst (subst (r.(pred_body))
       (list_to_map (zip (r.(pred_args)) args))) M.
 
-Global Parameter pred_map : gmap pred_name PredRecord.
+(* The elaborated module, bundled -- see local/parameters-redesign.md's
+   "Architecture" section. Positioned here (not right after proc_set/etc.
+   above): ProcRecord/InvRecord/PredRecord all need to already exist, and
+   StackFree below needs inv_map/pred_map ambient, so this is the earliest
+   point everything lines up. Not ra_map/ra_set (see that decision in the
+   same doc) -- those stay Global Parameter in lang.v. *)
+Record Program := {
+  prog_proc_set : gset proc_name;
+  prog_pred_set : gset pred_name;
+  prog_inv_set : gset inv_name;
+  prog_fld_set : gset lang.fld_name;
+  prog_proc_map : gmap proc_name ProcRecord;
+  prog_inv_map : gmap inv_name InvRecord;
+  prog_pred_map : gmap pred_name PredRecord;
+}.
+
+Context {P : Program}.
+
+Let proc_set := P.(prog_proc_set).
+Let pred_set := P.(prog_pred_set).
+Let inv_set := P.(prog_inv_set).
+Let fld_set := P.(prog_fld_set).
+Let proc_map := P.(prog_proc_map).
+Let inv_map := P.(prog_inv_map).
+Let pred_map := P.(prog_pred_map).
 
 Inductive StackFree : assertion → Prop :=
 | SF_Proc proc_name proc_entry :
@@ -792,8 +820,6 @@ Inductive StackFree : assertion → Prop :=
     length args = length pred_record.(pred_args) →
     StackFree (subst (pred_record.(pred_body)) (list_to_map (zip pred_record.(pred_args) args))) →
     StackFree (LPred pred_name args).
-
-Global Parameter proc_map : gmap proc_name ProcRecord.
 
 (* Per-(typ,val) compatibility check -- factored out of env_typ_well_defined
    so it can be used standalone by LExists/LForall's own translation
@@ -1147,8 +1173,23 @@ Proof.
   exact (assertion_subst_compose r.(pred_body) _ M (assertion_exists_binders r.(pred_body)) HR Hfv).
 Qed.
 
-(* Mapping from invariant names to Iris namespaces, supplied by the user. *)
-Parameter inv_namespace_map : inv_name -> namespace.
+(* Ghost-embedding config: namespace/gname bookkeeping needed to embed a
+   program into Iris, distinct from Program (what a .rav author writes) --
+   see local/parameters-redesign.md's "Architecture" section. Not Gamma:
+   Gamma_type sits inside the (already-closed, by this point) nested
+   Section Translation below, so it can't be bundled here without redoing
+   that relocation; stays its own Variable for now. *)
+Record GhostConfig := {
+  gc_ghost_heap_name : gname;
+  gc_ghost_heap_namespace : namespace;
+  gc_inv_namespace_map : inv_name -> namespace;
+}.
+
+Context {G : GhostConfig}.
+
+Let ghost_heap_name := G.(gc_ghost_heap_name).
+Let ghost_heap_namespace := G.(gc_ghost_heap_namespace).
+Let inv_namespace_map := G.(gc_inv_namespace_map).
 
 (* Well-formedness predicate for a program (proc_map, inv_map, pred_map).
    Bundles all structural side-conditions required by the translation theorem.
@@ -1242,9 +1283,19 @@ Record ProgramWF : Prop := {
 
   (* LExpr fvars of a substituted invariant body are bounded by the argument
      fvars, up to the (subst-invariant, see assertion_exists_binders_subst)
-     binder names. *)
+     binder names. Needs length args = length r.(inv_args): without it,
+     zip truncates and some of inv_body's own formal-argument-only free
+     vars (e.g. a genuine "x" reference, not one of inv_body's own
+     binders) can survive the substitution unaccounted for by either
+     disjunct -- concretely false for any invariant whose body actually
+     mentions a formal argument, caught while constructing a concrete
+     ProgramWF witness (see local/binders.md). This field is currently
+     unused elsewhere in the codebase; pwf_pred_fvars_bounded (its
+     predicate analogue, used by subst_congr_step's LPred case) already
+     always has this length fact on hand from StackFree's own SF_Pred/
+     SF_Inv premise, so this is purely a matter of exposing it here too. *)
   pwf_inv_fvars_bounded :
-    ∀ inv_nm r args, inv_map !! inv_nm = Some r →
+    ∀ inv_nm r args, inv_map !! inv_nm = Some r → length args = length r.(inv_args) →
       ∀ v, v ∈ assertion_lexpr_fvars (subst r.(inv_body) (list_to_map (zip r.(inv_args) args))) →
         v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body);
 
@@ -1277,9 +1328,12 @@ Record ProgramWF : Prop := {
     map_Forall (λ _ r, assertion_true_fvars r.(pred_body) ⊆ (list_to_set r.(pred_args) : gset lvar)) pred_map;
 
   (* LExpr fvars of a substituted predicate body are bounded by the
-     argument fvars, up to the binder names. *)
+     argument fvars, up to the binder names. Needs length args =
+     length r.(pred_args) -- see pwf_inv_fvars_bounded's own comment,
+     same reason; subst_congr_step's LPred case (this field's one
+     consumer) already always has the length fact on hand. *)
   pwf_pred_fvars_bounded :
-    ∀ pred_nm r args, pred_map !! pred_nm = Some r →
+    ∀ pred_nm r args, pred_map !! pred_nm = Some r → length args = length r.(pred_args) →
       ∀ v, v ∈ assertion_lexpr_fvars (subst r.(pred_body) (list_to_map (zip r.(pred_args) args))) →
         v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(pred_body);
 
@@ -1340,7 +1394,7 @@ match v with
 end.
 
 Lemma typeOf_val_has_typ v t : typeOf v = t <-> lang.val_has_typ v t.
-Proof. destruct v as [ | | | | [r x] ], t; simpl; naive_solver. Qed.
+Proof using G inv_namespace_map. destruct v as [ | | | | [r x] ], t; simpl; naive_solver. Qed.
 
 Fixpoint inf_expr (ρ: pvar_typs) (e: lang.expr) : option typ :=
 match e with
@@ -1498,6 +1552,121 @@ Section AtomicAnnotations.
 
 End AtomicAnnotations.
 
+  Definition transport {A B : Type} (H : A = B) (x : A) : B :=
+    eq_rect A id x _ H.
+
+  Lemma transport_sym : forall (A B : Type) (H : A = B) (x : B),
+     (transport H (transport (eq_sym H) x)) = x.
+  Proof.
+    intros. unfold transport. destruct H. simpl. reflexivity.
+  Qed.
+
+  Lemma transport_cancel : forall (A B : Type) (H : A = B) (x : A),
+    transport (eq_sym H) (transport H x) = x.
+  Proof.
+    intros. unfold transport. destruct H. simpl. reflexivity.
+  Qed.
+
+  Lemma eq_rect_transport_comp : forall (R: RA_Pack) (U : Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)) (c : U),
+  eq_rect (RA_carrier R) (λ T : Type, T → T → T) (RA_inst R).(comp) U Heq_car (transport Heq_car x) c = 
+  transport Heq_car ((RA_inst R).(comp) x (transport (eq_sym Heq_car) c)).
+Proof.
+  intros. unfold transport. destruct Heq_car. simpl. reflexivity.
+Qed.
+
+
+  Lemma eq_rect_transport_valid : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)),
+    eq_rect (RA_carrier R) (λ T : Type, T -> Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car x) ->
+    (RA_inst R).(valid) x.
+  Proof.
+    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
+  Qed.
+
+  Lemma eq_rect_transport_valid_inv : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)),
+    (RA_inst R).(valid) x ->
+    eq_rect (RA_carrier R) (λ T : Type, T -> Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car x).
+    
+  Proof.
+    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
+  Qed.
+
+  Lemma eq_rect_transport_inv_comp_valid : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (y : (RA_carrier R)) (c: U),
+    (RA_inst R).(valid) ((RA_inst R).(comp) y (transport (eq_sym Heq_car) c)) ->
+    eq_rect (RA_carrier R) (λ T : Type, T → Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car ((RA_inst R).(comp) y (transport (eq_sym Heq_car) c))).
+  Proof.
+    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
+  Qed.
+
+  Definition Γ_type := forall R : RA_Pack,
+  { i : I & { U : ucmra |
+      CmraDiscrete U /\
+      { Heq_car : RA_carrier R = ucmra_car U | 
+          ucmra_cmraR U = Gs i /\ 
+          ucmra_op U = eq_rect (RA_carrier R) (fun T => T -> T -> T) ((RA_inst R).(comp)) (ucmra_car U) Heq_car /\
+          ucmra_valid U = eq_rect (RA_carrier R) (fun T => T -> Prop) ((RA_inst R).(valid)) (ucmra_car U) Heq_car
+      }
+  } } .
+
+  Lemma RAPack_fpuValid (Γ: Γ_type) :
+    forall R : RA_Pack,
+      forall x y : RA_carrier R,
+        (* let '(existT i (existT U (exist _ Hdis Heq_car (conj Hind (conj Hcomp Hvalid))))) := Γ R in *)
+        let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Hcmra (conj Hop Hvalid)))))) := Γ R in
+        (RA_inst R).(fpuValid) x y -> (transport Heq_car x) ~~> (transport Heq_car y).
+  Proof.
+    intros R x y.
+    destruct (Γ R) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]].
+    intros Hfpu.
+    
+    intros n c Hvalid.
+    destruct c as [c|].
+
+    - simpl in *. 
+
+    (* make the dot-notation explicit so we can rewrite the op *)
+    change (transport Heq_car x ⋅ c) with (ucmra_op U (transport Heq_car x) c) in Hvalid.
+    rewrite Hcomp in Hvalid.
+    (* bring the context back to the R-side by destructing the equality *)
+    apply cmra_discrete_valid_iff.
+    apply cmra_discrete_valid_iff in Hvalid.
+    change (✓ (transport Heq_car y ⋅ c)) with (ucmra_valid U (transport Heq_car y ⋅ c)).
+    rewrite Hval.
+    unfold transport.
+
+    set (cR := transport (eq_sym Heq_car) c).
+    assert ((RA_inst R).(valid) ((RA_inst R).(comp) y cR)). {
+      apply (fpuAxiom x y); [done | ].
+
+      rewrite eq_rect_transport_comp in Hvalid.
+      unfold cR.
+      change (✓ transport Heq_car (comp x (transport (eq_sym Heq_car) c))) with ((ucmra_valid U) (transport Heq_car ((RA_inst R).(comp) x (transport (eq_sym Heq_car) c)))) in Hvalid.
+      
+      rewrite Hval in Hvalid.
+      apply (eq_rect_transport_valid R (ucmra_car U) Heq_car). done.
+    }
+
+    subst cR.
+
+    change (eq_rect (RA_carrier R) (λ T : Type, T → Prop) (RA_inst R).(valid) U Heq_car ((ucmra_op U) (eq_rect (RA_carrier R) id y U Heq_car) c)).
+
+    rewrite Hcomp.
+    rewrite eq_rect_transport_comp.
+
+    apply eq_rect_transport_inv_comp_valid.
+    done.
+
+    - simpl in *. apply cmra_discrete_valid_iff. apply cmra_discrete_valid_iff in Hvalid.
+
+    apply (fpuAxiom x y) in Hfpu.
+    destruct Hfpu as [_ [HvVal _]].
+    change (@cmra.valid (cmra_car (ucmra_cmraR U)) (cmra_valid (ucmra_cmraR U))) with (ucmra_valid U).
+    rewrite Hval.
+    apply eq_rect_transport_valid_inv. done.
+  Qed.
+
+
+  Context {Γ : Γ_type}.
+
 Section Translation.
 
     Definition trnsl_lval (v: val) : lang.val :=
@@ -1564,7 +1733,7 @@ Section Translation.
         NoDup lvs ∧
         Forall (fun lv => lv ∉ excl0) lvs ∧
         Forall (fun lv => ¬ is_reserved lv) lvs.
-    Proof.
+    Proof using G.
       revert excl0. induction decls as [| [v tp] decls IH]; intros excl0.
       - exists []. repeat split; try constructor.
       - destruct (Hrich tp excl0) as [lv [Hlv_notin [Hlv_res Hlv_typ]]].
@@ -1626,7 +1795,7 @@ Section Translation.
         (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
         (proc_record : ProcRecord) :
       ∃ dll : proc_entry_lvars σ proc_record, Logic.True.
-    Proof.
+    Proof using G.
       destruct (fresh_lvars_list σ Hrich (proc_args_of proc_record) ∅)
         as (args_lvs & Hargs_len & Hargs_typed & Hargs_nodup & _ & Hargs_res).
       destruct (fresh_lvars_list σ Hrich (proc_locals_of proc_record) (list_to_set args_lvs))
@@ -2472,120 +2641,6 @@ Definition proc_bodies_translate : Prop :=
     }
   Qed.
 
-  Definition transport {A B : Type} (H : A = B) (x : A) : B :=
-    eq_rect A id x _ H.
-
-  Lemma transport_sym : forall (A B : Type) (H : A = B) (x : B),
-     (transport H (transport (eq_sym H) x)) = x.
-  Proof.
-    intros. unfold transport. destruct H. simpl. reflexivity.
-  Qed.
-
-  Lemma transport_cancel : forall (A B : Type) (H : A = B) (x : A),
-    transport (eq_sym H) (transport H x) = x.
-  Proof.
-    intros. unfold transport. destruct H. simpl. reflexivity.
-  Qed.
-
-  Lemma eq_rect_transport_comp : forall (R: RA_Pack) (U : Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)) (c : U),
-  eq_rect (RA_carrier R) (λ T : Type, T → T → T) (RA_inst R).(comp) U Heq_car (transport Heq_car x) c = 
-  transport Heq_car ((RA_inst R).(comp) x (transport (eq_sym Heq_car) c)).
-Proof.
-  intros. unfold transport. destruct Heq_car. simpl. reflexivity.
-Qed.
-
-
-  Lemma eq_rect_transport_valid : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)),
-    eq_rect (RA_carrier R) (λ T : Type, T -> Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car x) ->
-    (RA_inst R).(valid) x.
-  Proof.
-    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
-  Qed.
-
-  Lemma eq_rect_transport_valid_inv : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (x : (RA_carrier R)),
-    (RA_inst R).(valid) x ->
-    eq_rect (RA_carrier R) (λ T : Type, T -> Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car x).
-    
-  Proof.
-    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
-  Qed.
-
-  Lemma eq_rect_transport_inv_comp_valid : forall (R: RA_Pack) (U: Type) (Heq_car : (RA_carrier R) = U) (y : (RA_carrier R)) (c: U),
-    (RA_inst R).(valid) ((RA_inst R).(comp) y (transport (eq_sym Heq_car) c)) ->
-    eq_rect (RA_carrier R) (λ T : Type, T → Prop) (RA_inst R).(valid) U Heq_car (transport Heq_car ((RA_inst R).(comp) y (transport (eq_sym Heq_car) c))).
-  Proof.
-    intros. unfold transport in *. destruct Heq_car. simpl in *. done.
-  Qed.
-
-  Definition Γ_type := forall R : RA_Pack,
-  { i : I & { U : ucmra |
-      CmraDiscrete U /\
-      { Heq_car : RA_carrier R = ucmra_car U | 
-          ucmra_cmraR U = Gs i /\ 
-          ucmra_op U = eq_rect (RA_carrier R) (fun T => T -> T -> T) ((RA_inst R).(comp)) (ucmra_car U) Heq_car /\
-          ucmra_valid U = eq_rect (RA_carrier R) (fun T => T -> Prop) ((RA_inst R).(valid)) (ucmra_car U) Heq_car
-      }
-  } } .
-
-  Lemma RAPack_fpuValid (Γ: Γ_type) :
-    forall R : RA_Pack,
-      forall x y : RA_carrier R,
-        (* let '(existT i (existT U (exist _ Hdis Heq_car (conj Hind (conj Hcomp Hvalid))))) := Γ R in *)
-        let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Hcmra (conj Hop Hvalid)))))) := Γ R in
-        (RA_inst R).(fpuValid) x y -> (transport Heq_car x) ~~> (transport Heq_car y).
-  Proof.
-    intros R x y.
-    destruct (Γ R) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]].
-    intros Hfpu.
-    
-    intros n c Hvalid.
-    destruct c as [c|].
-
-    - simpl in *. 
-
-    (* make the dot-notation explicit so we can rewrite the op *)
-    change (transport Heq_car x ⋅ c) with (ucmra_op U (transport Heq_car x) c) in Hvalid.
-    rewrite Hcomp in Hvalid.
-    (* bring the context back to the R-side by destructing the equality *)
-    apply cmra_discrete_valid_iff.
-    apply cmra_discrete_valid_iff in Hvalid.
-    change (✓ (transport Heq_car y ⋅ c)) with (ucmra_valid U (transport Heq_car y ⋅ c)).
-    rewrite Hval.
-    unfold transport.
-
-    set (cR := transport (eq_sym Heq_car) c).
-    assert ((RA_inst R).(valid) ((RA_inst R).(comp) y cR)). {
-      apply (fpuAxiom x y); [done | ].
-
-      rewrite eq_rect_transport_comp in Hvalid.
-      unfold cR.
-      change (✓ transport Heq_car (comp x (transport (eq_sym Heq_car) c))) with ((ucmra_valid U) (transport Heq_car ((RA_inst R).(comp) x (transport (eq_sym Heq_car) c)))) in Hvalid.
-      
-      rewrite Hval in Hvalid.
-      apply (eq_rect_transport_valid R (ucmra_car U) Heq_car). done.
-    }
-
-    subst cR.
-
-    change (eq_rect (RA_carrier R) (λ T : Type, T → Prop) (RA_inst R).(valid) U Heq_car ((ucmra_op U) (eq_rect (RA_carrier R) id y U Heq_car) c)).
-
-    rewrite Hcomp.
-    rewrite eq_rect_transport_comp.
-
-    apply eq_rect_transport_inv_comp_valid.
-    done.
-
-    - simpl in *. apply cmra_discrete_valid_iff. apply cmra_discrete_valid_iff in Hvalid.
-
-    apply (fpuAxiom x y) in Hfpu.
-    destruct Hfpu as [_ [HvVal _]].
-    change (@cmra.valid (cmra_car (ucmra_cmraR U)) (cmra_valid (ucmra_cmraR U))) with (ucmra_valid U).
-    rewrite Hval.
-    apply eq_rect_transport_valid_inv. done.
-  Qed.
-
-
-  Global Parameter Γ : Γ_type.
 
   Fixpoint trnsl_assertion_str (F : assertion -d> stack_id -d> symb_map -d> (iPropO Σ)) 
     (a: assertion) (stk_id: stack_id) (mp: symb_map) : 
@@ -3364,7 +3419,7 @@ Section TypeInf.
     length args = length arg_vals →
     (∀ v val, (v, val) ∈ zip args arg_vals → mp' v = trnsl_val val) →
     Forall2 (λ expr val0, interp_lexpr expr mp' = Some (trnsl_val val0)) (map LVar args) arg_vals.
-  Proof.
+  Proof using G.
     revert arg_vals. induction args as [| a args IH]; intros [| v vals] Hlen Hagree;
       simpl in Hlen; try discriminate Hlen; simpl; [constructor |].
     constructor.
@@ -3479,9 +3534,28 @@ Section TypeInf.
    -- something an unconditional-over-all-mp entails could never prove,
    since nothing stops an ill-typed mp from violating the witness's own
    typ_val_match side condition. *)
-Definition entails (σ : lvar_typs) P Q :=
+Definition entails (σ : lvar_typs) (P Q : assertion) :=
   forall stk_id mp, env_typ_well_defined σ mp ->
   ∃ P' Q', trnsl_assertion P stk_id mp = P' /\ trnsl_assertion Q stk_id mp = Q' /\ (P' ⊢  Q')%I.
+
+Lemma entails_intro σ A B :
+  (forall stk mp, env_typ_well_defined σ mp -> trnsl_assertion A stk mp ⊢ trnsl_assertion B stk mp) ->
+  entails σ A B.
+Proof.
+  intros H stk mp Henv. exists (trnsl_assertion A stk mp), (trnsl_assertion B stk mp).
+  split; [done | split; [done | apply H, Henv]].
+Qed.
+
+Lemma entails_refl σ A : entails σ A A.
+Proof. apply entails_intro. intros stk mp Henv. done. Qed.
+
+Lemma entails_trans σ A B C : entails σ A B -> entails σ B C -> entails σ A C.
+Proof.
+  intros H1 H2. apply entails_intro. intros stk mp Henv.
+  destruct (H1 stk mp Henv) as [A' [B' [<- [<- H1']]]].
+  destruct (H2 stk mp Henv) as [B'' [C' [Heq [<- H2']]]].
+  rewrite Heq in H1'. rewrite H1'. exact H2'.
+Qed.
 
 (* Commutes a fixed-stack LAnd past a nested LExists into a single top-level
    LExists -- lets the new, subst-free ExistsElimRule (which only eliminates
@@ -3551,6 +3625,150 @@ End TypeInf.
 
 
 Section RavenLogic.
+
+  (* Purely syntactic entailment on assertions -- deliberately independent
+     of trnsl_assertion/Iris (no Sigma/Gamma/GhostConfig/invTokenG needed
+     anywhere in this relation's own definition), so that WeakeningRule
+     (the sole reason RavenHoareTriple used to need those) can be stated
+     without them. Soundness w.r.t. the real (Iris-level) [entails] is
+     proved once, by induction on this relation's derivation -- see
+     assertion_entails_sound, alongside trnsl_assertion (this relation is
+     "the calculus's own opinion of entailment"; that lemma is "the
+     calculus's opinion agrees with the semantics"). Reasoning about pure
+     facts bottoms out in plain Coq implication (AE_Pure); everything else
+     is structural manipulation of the assertion AST. *)
+  Inductive assertion_entails (σ : lvar_typs) : assertion -> assertion -> Prop :=
+  | AE_Refl P : assertion_entails σ P P
+  | AE_Trans P Q R :
+      assertion_entails σ P Q -> assertion_entails σ Q R -> assertion_entails σ P R
+  | AE_And_Mono P P' Q Q' :
+      assertion_entails σ P P' -> assertion_entails σ Q Q' ->
+      assertion_entails σ (LAnd P Q) (LAnd P' Q')
+  | AE_And_Comm P Q : assertion_entails σ (LAnd P Q) (LAnd Q P)
+  | AE_And_Assoc_R P Q R :
+      assertion_entails σ (LAnd (LAnd P Q) R) (LAnd P (LAnd Q R))
+  | AE_And_Assoc_L P Q R :
+      assertion_entails σ (LAnd P (LAnd Q R)) (LAnd (LAnd P Q) R)
+  | AE_And_Elim_L P Q : assertion_entails σ (LAnd P Q) P
+  | AE_And_Elim_R P Q : assertion_entails σ (LAnd P Q) Q
+  | AE_And_True_Intro P : assertion_entails σ P (LAnd P (LPure True))
+  | AE_And_True_Elim P : assertion_entails σ (LAnd P (LPure True)) P
+  | AE_True_Intro P : assertion_entails σ P (LPure True)
+  | AE_Pure (p q : Prop) : (p -> q) -> assertion_entails σ (LPure p) (LPure q)
+  | AE_Exists_Mono lv t A B :
+      σ lv = t -> assertion_entails σ A B ->
+      assertion_entails σ (LExists lv t A) (LExists lv t B)
+  | AE_Exists_Intro lv t X :
+      σ lv = t -> assertion_entails σ X (LExists lv t X)
+  | AE_Exists_Elim lv t P Q :
+      σ lv = t -> lvar_fresh_in_assertion lv Q ->
+      assertion_entails σ P Q -> assertion_entails σ (LExists lv t P) Q
+  | AE_Exists_And_Swap_R lv t body p :
+      lvar_fresh_in_assertion lv p ->
+      assertion_entails σ (LAnd (LExists lv t body) p) (LExists lv t (LAnd body p))
+  | AE_And_Exists_Swap_L lv t c body :
+      lvar_fresh_in_assertion lv c ->
+      assertion_entails σ (LAnd c (LExists lv t body)) (LExists lv t (LAnd c body))
+  | AE_Ite_True cond A B :
+      assertion_entails σ (LAnd (LIte cond A B) (LExprA cond)) A
+  | AE_Ite_False cond A B :
+      (* No typing premise needed: LExprA (LUnOp NotBoolOp cond) holding at
+         all already forces cond to evaluate to Some (LitBool false) --
+         NotBoolOp's own interp_lexpr case gives None (so LExpr_holds is
+         False, vacuously) for every other outcome. *)
+      assertion_entails σ (LAnd (LIte cond A B) (LExprA (LUnOp NotBoolOp cond))) B.
+
+  Lemma assertion_entails_sound σ A B : assertion_entails σ A B -> entails σ A B.
+  Proof.
+    induction 1.
+    - (* AE_Refl *) apply entails_refl.
+    - (* AE_Trans *) eapply entails_trans; eassumption.
+    - (* AE_And_Mono *)
+      apply entails_intro. intros stk mp Henv.
+      destruct (IHassertion_entails1 stk mp Henv) as [Pp [Pp' [<- [<- H1']]]].
+      destruct (IHassertion_entails2 stk mp Henv) as [Qp [Qp' [<- [<- H2']]]].
+      rewrite !trnsl_assertion_and. iIntros "[HP HQ]". iSplitL "HP".
+      + iApply (H1' with "HP").
+      + iApply (H2' with "HQ").
+    - (* AE_And_Comm *)
+      apply entails_intro. intros stk mp Henv. rewrite !trnsl_assertion_and. iIntros "[$ $]".
+    - (* AE_And_Assoc_R *)
+      apply entails_intro. intros stk mp Henv. rewrite !trnsl_assertion_and. iIntros "[[$ $] $]".
+    - (* AE_And_Assoc_L *)
+      apply entails_intro. intros stk mp Henv. rewrite !trnsl_assertion_and. iIntros "[$ [$ $]]".
+    - (* AE_And_Elim_L *)
+      apply entails_intro. intros stk mp Henv. rewrite trnsl_assertion_and. iIntros "[$ _]".
+    - (* AE_And_Elim_R *)
+      apply entails_intro. intros stk mp Henv. rewrite trnsl_assertion_and. iIntros "[_ $]".
+    - (* AE_And_True_Intro *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
+      iIntros "H". iFrame.
+    - (* AE_And_True_Elim *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
+      iIntros "[$ _]".
+    - (* AE_True_Intro *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite (trnsl_assertion_unfold (LPure True)) /trnsl_assertion_pre /=.
+      iIntros "_". done.
+    - (* AE_Pure *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite (trnsl_assertion_unfold (LPure p)) (trnsl_assertion_unfold (LPure q))
+        /trnsl_assertion_pre /=.
+      iIntros "%Hp". iPureIntro. auto.
+    - (* AE_Exists_Mono *)
+      rename H into Hty.
+      apply entails_intro. intros stk mp Henv.
+      rewrite !trnsl_assertion_exists.
+      iIntros "[%v' [%Htyp HA]]". iExists v'. iSplitR; [done|].
+      have Henv' : env_typ_well_defined σ (fun y => if (y =? lv)%string then v' else mp y).
+      { apply env_typ_well_defined_update; [exact Henv | rewrite Hty; exact Htyp]. }
+      destruct (IHassertion_entails stk (fun y => if (y =? lv)%string then v' else mp y) Henv')
+        as [Ap [Bp [<- [<- Hent]]]].
+      iApply (Hent with "HA").
+    - (* AE_Exists_Intro *) exact (entails_exists_intro σ lv t X H).
+    - (* AE_Exists_Elim *)
+      rename H into Hty, H0 into Hfresh.
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_exists.
+      iIntros "[%v' [%Htyp HP]]".
+      have Henv' : env_typ_well_defined σ (fun y => if (y =? lv)%string then v' else mp y).
+      { apply env_typ_well_defined_update; [exact Henv | rewrite Hty; exact Htyp]. }
+      destruct (IHassertion_entails stk (fun y => if (y =? lv)%string then v' else mp y) Henv')
+        as [Pp [Qp [<- [<- Hent]]]].
+      iDestruct (Hent with "HP") as "HQ".
+      iEval (rewrite (trnsl_assertion_mp_irrelevant lv Q v' stk mp Hfresh)) in "HQ".
+      iExact "HQ".
+    - (* AE_Exists_And_Swap_R *) exact (entails_exists_and_swap σ lv t body p H).
+    - (* AE_And_Exists_Swap_L *)
+      rename H into Hfresh.
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and trnsl_assertion_exists trnsl_assertion_exists.
+      iIntros "[Hc [%v' [%Htyp Hbody]]]".
+      iExists v'. iSplitR; [done|].
+      rewrite trnsl_assertion_and.
+      rewrite (trnsl_assertion_mp_irrelevant lv c v' stk mp Hfresh).
+      iFrame.
+    - (* AE_Ite_True *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and (trnsl_assertion_ite cond A B stk mp)
+        (trnsl_assertion_unfold (LExprA cond)) /trnsl_assertion_pre /=.
+      iIntros "[Hite %Hc]".
+      iDestruct "Hite" as "[Hthen _]". iApply "Hthen". iPureIntro. exact Hc.
+    - (* AE_Ite_False *)
+      apply entails_intro. intros stk mp Henv.
+      rewrite trnsl_assertion_and (trnsl_assertion_ite cond A B stk mp)
+        (trnsl_assertion_unfold (LExprA (LUnOp NotBoolOp cond))) /trnsl_assertion_pre /=.
+      iIntros "[Hite %Hnc]".
+      have Hcond_false : interp_lexpr cond mp = Some (LitBool false).
+      { unfold LExpr_holds in Hnc. simpl in Hnc.
+        destruct (interp_lexpr cond mp) as [[bv|zv| |lv0|[rv xv]]|] eqn:Hcond;
+          simpl in Hnc; try (exfalso; exact Hnc).
+        destruct bv; [discriminate Hnc | reflexivity]. }
+      iDestruct "Hite" as "[_ Helse]". iApply "Helse". iPureIntro.
+      unfold LExpr_holds. rewrite Hcond_false. intros [=].
+  Qed.
 
   Fixpoint field_list_to_assertion lexpr fld_vals  := match fld_vals with
   | [] => LPure true
@@ -3862,8 +4080,8 @@ Section RavenLogic.
         c mask
       q
     ->
-    entails σ p' p ->
-    entails σ q q' ->
+    assertion_entails σ p' p ->
+    assertion_entails σ q q' ->
 
     RavenHoareTriple ρ σ
       p'
@@ -4174,7 +4392,7 @@ Section AssertionsProperties.
     (∀ v, v ∈ lexpr_fvars e → v ∈ dom M1 ∨ is_reserved v) →
     (∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp1 x = eval_lvar M2 mp2 x) →
     interp_lexpr (lexpr_subst e M1) mp1 = interp_lexpr (lexpr_subst e M2) mp2.
-  Proof.
+  Proof using G.
     intros Hdom Hbase. induction e; simpl.
     - rewrite !interp_lexpr_lookup_match.
       apply Hbase. apply Hdom. set_solver.
@@ -4216,7 +4434,7 @@ Section AssertionsProperties.
       (mp1 mp2 : symb_map) :
     (∀ x, x ∈ lexpr_fvars e → eval_lvar M mp1 x = eval_lvar M mp2 x) →
     interp_lexpr (lexpr_subst e M) mp1 = interp_lexpr (lexpr_subst e M) mp2.
-  Proof.
+  Proof using G.
     induction e; simpl; intro Hbase.
     - rewrite !interp_lexpr_lookup_match. apply Hbase. set_solver.
     - reflexivity.
@@ -4273,7 +4491,7 @@ Section AssertionsProperties.
      get the equivalence. *)
   Lemma subst_congr_cond_sym a M1 M2 mp1 mp2 :
     subst_congr_cond a M1 M2 mp1 mp2 → subst_congr_cond a M2 M1 mp2 mp1.
-  Proof.
+  Proof using G P.
     intros (Hsf & HbA1 & HbA2 & HfvA & HdomEq & Hmr1 & Hmr2 & Hstab & Hbase).
     split_and!; try assumption.
     - intros v Hv. rewrite <- HdomEq. exact (HfvA v Hv).
@@ -4494,7 +4712,7 @@ Section AssertionsProperties.
       + rewrite assertion_exists_binders_subst. exact Hbr1.
       + rewrite assertion_exists_binders_subst. exact Hbr2.
       + intros v Hv.
-        destruct (Hwf.(pwf_pred_fvars_bounded) pred_name0 r args Hr v Hv) as [Hin | Hin].
+        destruct (Hwf.(pwf_pred_fvars_bounded) pred_name0 r args Hr H2 v Hv) as [Hin | Hin].
         * exact (HfvA v Hin).
         * right. exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr v Hin).
     - (* LAnd *)
@@ -4935,7 +5153,7 @@ Section AssertionsProperties.
       (λ x0, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0) x =
     eval_lvar (<["#ret_val" := LVal (trnsl_val ret_val)]>(list_to_map (zip args (map (λ w : lang.val, LVal (trnsl_val w)) arg_vals))))
       mp x.
-  Proof.
+  Proof using G.
     intros Hfresh Hlvar_x_ok Hargs_ok HF2 x [Hdom | Hres].
     - destruct (decide (x = "#ret_val")) as [-> | Hne].
       + unfold eval_lvar. rewrite !lookup_insert. simpl. rewrite String.eqb_refl. reflexivity.
@@ -5436,7 +5654,7 @@ Section InvariantWorld.
     own (invtoken_names inv') (● (I : inv_argsUR)) -∗
     own (invtoken_names inv') (◯ ({[vs]} : inv_argsUR)) -∗
     ⌜vs ∈ I⌝.
-  Proof.
+  Proof using G invTokenG0.
     iIntros "Hauth Hfrag".
     iDestruct (own_valid_2 with "Hauth Hfrag") as %Hval.
     apply auth_both_valid_discrete in Hval as [Hincl _].
@@ -5608,3 +5826,4 @@ Proof.
   intros Hxy. subst. done.
 Qed.
 
+End WithProgram.
