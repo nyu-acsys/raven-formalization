@@ -30,18 +30,32 @@ Set Default Proof Using "All".
 
 
 Section MainTranslation.
-    (* rrl_lang.v's own Program/GhostConfig/Gamma Section variables don't
-       carry across files (unlike its top-level Context Sigma/Gs/I,
-       genuinely ambient everywhere) -- redeclared here under the same
-       names/projections so every existing bare use below keeps working
-       unchanged; cross-file calls into rrl_lang.v's own definitions
-       (ProgramWF, RavenHoareTriple, trnsl_assertion, entails, ...) need
-       these supplied explicitly, since Coq has no way to know trnsl.v's
-       RProg/G/Gamma are "the same" as rrl_lang.v's without being told. *)
+    (* None of rrl_lang.v's own Section variables carry across files --
+       Sigma/Gs/I/simpLangG now live inside its own Section WithProgram
+       too (see rrl_lang.v's own header comment), same status as
+       Program/GhostConfig/Gamma/invTokenG below -- redeclared here under
+       the same names/projections so every existing bare use below keeps
+       working unchanged; cross-file calls into rrl_lang.v's own
+       definitions (ProgramWF, RavenHoareTriple, trnsl_assertion, entails,
+       ...) need these supplied explicitly, since Coq has no way to know
+       trnsl.v's own Sigma/RProg/G/Gamma are "the same" as rrl_lang.v's
+       without being told. *)
+    Context {I : Type}.
+    Context (Gs : I → cmra).
+    Context {Σ : gFunctors}.
+    Context `{!inGs Σ Gs}.
+    (* gmap.gmapUR, not the bare gmapUR notation: trnsl.v's own `From stdpp
+       Require Import gmap` shadows iris.algebra.gmap's own gmapUR with
+       stdpp's unrelated one of the same name; qualifying avoids the
+       ambiguity and matches rrl_lang.v's own inG instance exactly (needed
+       so Coq recognizes this as literally the same instance, not just a
+       convertible one). *)
+    Context `{!inG Σ (authR (gmap.gmapUR heap_addr (agreeR gnameO)))}.
+    Context `{!simpLangG Σ}.
     Context {RProg : Program}.
     Context {G : GhostConfig}.
-    Context {Γ : Γ_type}.
-    Context `{!invTokenG rrl_lang.Σ}.
+    Context {Γ : Γ_type Gs}.
+    Context `{!invTokenG Σ}.
 
     (* Notation, not Let: a Let-bound alias is a genuinely new constant,
        definitionally but not syntactically equal to the projection/
@@ -64,35 +78,35 @@ Section MainTranslation.
     Local Notation ghost_heap_name := (G.(gc_ghost_heap_name)).
     Local Notation ghost_heap_namespace := (G.(gc_ghost_heap_namespace)).
     Local Notation inv_namespace_map := (G.(gc_inv_namespace_map)).
-    Local Notation ProgramWF := (@ProgramWF invTokenG0 RProg G).
+    Local Notation ProgramWF := (@ProgramWF Σ invTokenG0 RProg G).
     Local Notation RavenHoareTriple := (@RavenHoareTriple RProg).
-    Local Notation trnsl_assertion := (@trnsl_assertion invTokenG0 RProg G Γ).
-    Local Notation entails := (@entails invTokenG0 RProg G Γ).
-    Local Notation inv_body_bridge := (@inv_body_bridge invTokenG0 RProg G Γ).
-    Local Notation Wghost := (@Wghost G).
-    Local Notation Wghost_alloc := (@Wghost_alloc G Γ).
-    Local Notation Winv := (@Winv invTokenG0 RProg G Γ).
-    Local Notation Winv_alloc := (@Winv_alloc invTokenG0 RProg G Γ).
-    Local Notation Winv_open := (@Winv_open invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion := (@trnsl_assertion I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation entails := (@entails I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation inv_body_bridge := (@inv_body_bridge I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation Wghost := (@Wghost Σ inG0 simpLangG0 G).
+    Local Notation Wghost_alloc := (@Wghost_alloc I Gs Σ inGs0 inG0 simpLangG0 G Γ).
+    Local Notation Winv := (@Winv I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation Winv_alloc := (@Winv_alloc I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation Winv_open := (@Winv_open I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
     Local Notation stmt_well_defined := (@stmt_well_defined RProg).
     Local Notation alloc_stmt_well_defined := (@alloc_stmt_well_defined RProg).
     Local Notation fresh_proc_entry_lvars := (@fresh_proc_entry_lvars G).
     Local Notation proc_bodies_translate := (@proc_bodies_translate RProg).
     Local Notation StackFree := (@StackFree RProg).
-    Local Notation stack_free_assertion_subst := (@stack_free_assertion_subst invTokenG0 RProg G).
-    Local Notation stack_free_assertion_trnsl := (@stack_free_assertion_trnsl invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_and := (@trnsl_assertion_and invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_exists := (@trnsl_assertion_exists invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_LInv_some := (@trnsl_assertion_LInv_some invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_mp_irrelevant := (@trnsl_assertion_mp_irrelevant invTokenG0 RProg G Γ).
+    Local Notation stack_free_assertion_subst := (@stack_free_assertion_subst Σ invTokenG0 RProg G).
+    Local Notation stack_free_assertion_trnsl := (@stack_free_assertion_trnsl I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_and := (@trnsl_assertion_and I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_exists := (@trnsl_assertion_exists I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_LInv_some := (@trnsl_assertion_LInv_some I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_mp_irrelevant := (@trnsl_assertion_mp_irrelevant I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
     Local Notation trnsl_assertion_mp_irrelevant_reserved :=
-      (@trnsl_assertion_mp_irrelevant_reserved invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_subst_congr := (@trnsl_assertion_subst_congr invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_unfold := (@trnsl_assertion_unfold invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_w_lexpr_subst := (@trnsl_assertion_w_lexpr_subst invTokenG0 RProg G Γ).
-    Local Notation trnsl_inv_validity' := (@trnsl_inv_validity' invTokenG0 RProg G Γ).
-    Local Notation trnsl_pred_validity' := (@trnsl_pred_validity' invTokenG0 RProg G Γ).
-    Local Notation trnsl_assertion_w_lexpr_subst_r := (@trnsl_assertion_w_lexpr_subst_r invTokenG0 RProg G Γ).
+      (@trnsl_assertion_mp_irrelevant_reserved I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_subst_congr := (@trnsl_assertion_subst_congr I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_unfold := (@trnsl_assertion_unfold I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_w_lexpr_subst := (@trnsl_assertion_w_lexpr_subst I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_inv_validity' := (@trnsl_inv_validity' I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_pred_validity' := (@trnsl_pred_validity' I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
+    Local Notation trnsl_assertion_w_lexpr_subst_r := (@trnsl_assertion_w_lexpr_subst_r I Gs Σ inGs0 inG0 simpLangG0 invTokenG0 RProg G Γ).
     Local Notation typeOf_val_has_typ := (@typeOf_val_has_typ G).
 
     Definition inv_set_to_namespace (s : gset inv_name) : coPset :=
@@ -474,7 +488,7 @@ Section MainTranslation.
         injection Htrnsl as <-. simpl. inversion Hstep.
     Qed.
 
-    Definition trnsl_hoare_triple (stk_id: stack_id) (p : assertion) (msk : maskAnnot) (cmd : stmt) (q : assertion) (mp : symb_map) : iProp rrl_lang.Σ :=
+    Definition trnsl_hoare_triple (stk_id: stack_id) (p : assertion) (msk : maskAnnot) (cmd : stmt) (q : assertion) (mp : symb_map) : iProp Σ :=
         match (trnsl_stmt cmd) with
         | Error => True
         | None' =>
@@ -498,7 +512,7 @@ Section MainTranslation.
     (* The per-invariant shared worlds.  Persistent, and an explicit premise of
        [raven_soundness]: the calculus has no rule that could establish it, so
        it records how the ghost state must have been set up. *)
-    Definition all_inv_worlds : iProp rrl_lang.Σ :=
+    Definition all_inv_worlds : iProp Σ :=
       ([∗ set] inv' ∈ inv_set, inv (inv_namespace_map inv') (Winv inv'))%I.
 
     Lemma all_inv_worlds_elem (inv' : inv_name) :
@@ -514,7 +528,7 @@ Section MainTranslation.
        Wghost_alloc, the only consumer, inside HeapAllocRule's soundness
        case), so it's an explicit premise of raven_soundness, same status
        as all_inv_worlds. *)
-    Definition Wghost_world : iProp rrl_lang.Σ := inv ghost_heap_namespace Wghost.
+    Definition Wghost_world : iProp Σ := inv ghost_heap_namespace Wghost.
 
     (* The proc-table registration for every procedure, mirroring
        all_inv_worlds's own role: the calculus has no rule that could
@@ -522,7 +536,7 @@ Section MainTranslation.
        state was set up, never allocated by any rule -- see
        ProcCallRuleRet's soundness case, the only consumer), so it's an
        explicit premise of raven_soundness instead. *)
-    Definition all_proc_tbl_chunks : iProp rrl_lang.Σ :=
+    Definition all_proc_tbl_chunks : iProp Σ :=
       ([∗ map] proc_name ↦ proc_record ∈ proc_map,
         proc_tbl_chunk proc_name
           (lang.Proc proc_name (proc_args_of proc_record) (proc_locals_of proc_record)
@@ -721,12 +735,12 @@ Section MainTranslation.
        whole program's verification (matching rrl_validity's own σ parameter) — not
        re-quantified internally, so every use of [all_proc_specs_valid_iris σ] and every
        rrl_validity invocation are talking about the same σ. *)
-    Definition all_proc_specs_valid_iris (σ : lvar_typs) : iProp rrl_lang.Σ :=
+    Definition all_proc_specs_valid_iris (σ : lvar_typs) : iProp Σ :=
       □ ∀ proc proc_record stk_vals,
       ⌜proc ∈ proc_set⌝ -∗
       ⌜proc_map !! proc = Some proc_record⌝ -∗
 
-      ∀ precond (postcond : lang.val -> iProp rrl_lang.Σ) stk_id stk_frm mp stmt (msk : maskAnnot),
+      ∀ precond (postcond : lang.val -> iProp Σ) stk_id stk_frm mp stmt (msk : maskAnnot),
 
       (* mp must be well-typed against σ, mirroring the requirement rrl_validity itself needs. *)
       ⌜env_typ_well_defined σ mp⌝ -∗
@@ -1430,21 +1444,27 @@ Section MainTranslation.
                 (list_to_set (map (heap_addr_constr l) gfvs'.*1))); [ | set_solver].
               iDestruct "Hgfrag" as "[Hgfrag1 Hgfragr]".
               iMod ("IHg2" with "Hgfragr") as "Hrest".
-              destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓeq.
-              pose proof (Wghost_alloc (trnsl_mask mask) r l gfld gx (Forall_inv HgfvValid)) as HWalloc.
-              rewrite HΓeq in HWalloc.
-              specialize (HWalloc (ghost_heap_namespace_subseteq_trnsl_mask mask)).
-              iMod (HWalloc with "Hgworld Hgfrag1") as (γ) "[Hmap Hown]".
-              iModIntro.
-              setoid_rewrite trnsl_assertion_unfold.
-              simpl.
-              rewrite HΓeq.
-              iSplitL "Hmap Hown".
-              + iExists l, gx, γ.
-                iSplitR; [| iSplitR; [done | iFrame]].
-                iPureIntro. unfold LExpr_holds. simpl.
-                subst mp'. simpl. rewrite String.eqb_refl val_beq_refl. done.
-              + iExact "Hrest".
+              destruct (Γ r) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ] eqn:HΓeq.
+              + pose proof (Wghost_alloc (trnsl_mask mask) r l gfld gx (Forall_inv HgfvValid)
+                  (existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid))))))
+                  HΓeq) as HWalloc.
+                specialize (HWalloc (ghost_heap_namespace_subseteq_trnsl_mask mask)).
+                iMod (HWalloc with "Hgworld Hgfrag1") as (γ) "[Hmap Hown]".
+                iModIntro.
+                setoid_rewrite trnsl_assertion_unfold.
+                simpl.
+                rewrite HΓeq.
+                iSplitL "Hmap Hown".
+                * iExists l, gx, γ.
+                  iSplitR; [| iSplitR; [done | iFrame]].
+                  iPureIntro. unfold LExpr_holds. simpl.
+                  subst mp'. simpl. rewrite String.eqb_refl val_beq_refl. done.
+                * iExact "Hrest".
+              + iModIntro.
+                setoid_rewrite trnsl_assertion_unfold.
+                simpl.
+                rewrite HΓeq.
+                iSplitR; [done | iExact "Hrest"].
           }
           iMod "Hghost" as "Hghost".
 
@@ -1674,7 +1694,7 @@ Section MainTranslation.
 
       4 : {
         (* WEAKENING *)
-        apply (assertion_entails_sound (invTokenG0:=invTokenG0) (P:=RProg) (G:=G) (Γ:=Γ)) in H0, H1.
+        apply (assertion_entails_sound Gs (invTokenG0:=invTokenG0) (P:=RProg) (G:=G) (Γ:=Γ)) in H0, H1.
         unfold entails in *.
         unfold trnsl_hoare_triple. simpl.
         specialize H0 with stk_id mp. specialize (H0 Henv).
@@ -2409,25 +2429,33 @@ Section MainTranslation.
         unfold trnsl_hoare_triple; simpl.
         setoid_rewrite trnsl_assertion_unfold.
         iIntros "[Hstack [Hown %Hfpv]]".
-        pose proof (RAPack_fpuValid Γ (ra_map r)) as HRA_fpu.
-        destruct (Γ (ra_map r)) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]] eqn:H_RA_Pack.
-        iDestruct "Hown" as (l chunk_old γ) "[%Heq [%Hown_eval [Hmap Hown]]]".
-        destruct (interp_lexpr_ra_fpuvalid_inv r chunk_old lexpr_old lexpr_new mp Hown_eval Hfpv)
-          as [chunk_new [Hnew_eval Hfpu]].
+        destruct (Γ r) as [[i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]] | ] eqn:H_RA_Pack.
+        - pose proof (RAPack_fpuValid Gs Γ r
+            (existT i (exist _ U (conj Hdisc (exist _ Heq_car (conj Hindx (conj Hcomp Hval))))))
+            H_RA_Pack) as HRA_fpu.
+          iDestruct "Hown" as (l chunk_old γ) "[%Heq [%Hown_eval [Hmap Hown]]]".
+          destruct (interp_lexpr_ra_fpuvalid_inv r chunk_old lexpr_old lexpr_new mp Hown_eval Hfpv)
+            as [chunk_new [Hnew_eval Hfpu]].
 
-        iFrame.
+          iFrame.
 
-        apply (HRA_fpu chunk_old chunk_new) in Hfpu.
+          apply (HRA_fpu chunk_old chunk_new) in Hfpu.
 
-        iMod (own_update _
-          (transport (f_equal cmra_car Hindx) ((transport Heq_car chunk_old)))
-          (transport (f_equal cmra_car Hindx) ((transport Heq_car chunk_new)))
-       with "Hown") as "Hown".
+          iMod (own_update _
+            (transport (f_equal cmra_car Hindx) ((transport Heq_car chunk_old)))
+            (transport (f_equal cmra_car Hindx) ((transport Heq_car chunk_new)))
+         with "Hown") as "Hown".
 
-       { apply transport_cmra_update. exact Hfpu.  }
+         { apply transport_cmra_update. exact Hfpu.  }
 
-       iModIntro. rewrite H_RA_Pack. iExists l, chunk_new, γ. iFrame.
-       iPureIntro. split; [exact Heq | exact Hnew_eval].
+         iModIntro. rewrite H_RA_Pack. iExists l, chunk_new, γ. iFrame.
+         iPureIntro. split; [exact Heq | exact Hnew_eval].
+
+        - (* r ∉ ra_set: LGhostOwn is vacuously True on both sides *)
+          iModIntro.
+          simpl.
+          rewrite H_RA_Pack.
+          iFrame.
 
       }
 
@@ -2470,8 +2498,17 @@ Section MainTranslation.
        locals), then all_proc_specs_valid_iris holds unconditionally -- with no
        ▷ all_proc_specs_valid_iris hypothesis of its own. The recursive/mutually-
        recursive call sites inside procedure bodies are discharged via Löb
-       induction, mirroring rrl_validity's own use of "Calls". *)
-    Theorem raven_soundness ρ σ
+       induction, mirroring rrl_validity's own use of "Calls".
+
+       Renamed from raven_soundness (now a Lemma, an internal building
+       block): the new Theorem raven_soundness, below (after Section
+       MainTranslation closes), is the adequacy wrapper that picks a
+       concrete Sigma/Gamma/invTokenG, allocates ghost_heap_name/
+       invtoken_names, discharges Hworlds/Hgworlds/Hwtbl, and calls this
+       lemma -- kept word-for-word unchanged rather than rewritten to
+       allocate internally, per the Step 5 design decision (see
+       local/parameters-redesign.md's "Status"). *)
+    Lemma raven_soundness_core ρ σ
       (Hwf : ProgramWF)
       (* σ has enough distinct lvars of any given type, avoiding any finite
          exclusion set -- lets every procedure synthesize its own entry stack
@@ -2480,23 +2517,6 @@ Section MainTranslation.
          procedure sharing such a name to agree on its type under a single
          global σ). *)
       (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
-      (* The per-invariant shared worlds are established.  The calculus has no
-         rule that could produce this -- an [LInv] fact is only ever *traded
-         for* by [InvAllocRule], never conjured -- so it is an explicit
-         premise recording how the ghost state was set up, exactly as
-         [Hbodies] records that every procedure body was verified. *)
-      (Hworlds : ⊢ all_inv_worlds)
-      (* Same status as Hworlds, for the ghost heap (see Wghost_world's own
-         comment): no rule ever produces it, only HeapAllocRule's soundness
-         case (via Wghost_alloc) ever consumes it. *)
-      (Hgworlds : ⊢ Wghost_world)
-      (* Every procedure's own registration is established, and its body
-         actually compiles -- same status as Hworlds: no rule ever produces
-         proc_tbl_chunk (ProcCallRuleRet needs it purely to satisfy wp_call's
-         operational precondition, not as part of the Hoare-logic contract
-         itself), so both are explicit premises recording how the ghost
-         state/program were set up. *)
-      (Hwtbl : ⊢ all_proc_tbl_chunks)
       (Hpbt : proc_bodies_translate)
       (* "#ret_val" is itself a stack variable, so by the time the body
          returns it may have been reassigned (fresh lvar per
@@ -2506,8 +2526,23 @@ Section MainTranslation.
          mirroring exactly how ProcCallRuleRet's own conclusion substitutes
          "#ret_val" with the call's fresh result lvar. *)
       (Hbodies : all_proc_specs_valid_raven ρ σ) :
-      ⊢ all_proc_specs_valid_iris σ.
+      (* The per-invariant shared worlds, the ghost heap's own world, and
+         every procedure's table registration are object-level (-∗)
+         antecedents, not Coq-level "⊢ P" premises: own_alloc/inv_alloc
+         (the only way to ever produce them) only ever yield a
+         |==>/={E}=∗-wrapped fact, never a bare unconditional "⊢ P" -- so a
+         caller building them via allocation (see raven_soundness, the
+         adequacy wrapper below) needs to be able to *frame them in*,
+         not hand over a closed proof term. The calculus itself has no rule
+         that could produce any of the three (an [LInv] fact is only ever
+         *traded for* by [InvAllocRule], never conjured; proc_tbl_chunk is
+         consumed by ProcCallRuleRet's soundness case but never produced by
+         any rule either), so they still record how the ghost state/program
+         were set up -- just as resources now, not as external axioms. *)
+      all_inv_worlds -∗ Wghost_world -∗ all_proc_tbl_chunks -∗
+      all_proc_specs_valid_iris σ.
     Proof.
+      iIntros "#Hworlds #Hgworlds #Hwtbl".
       iLöb as "IH".
       rewrite /all_proc_specs_valid_iris.
       iModIntro.
@@ -2861,11 +2896,11 @@ Section MainTranslation.
               (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))))))
         Hwf Hpbt Hwelldef Hmsk_sub with "[]") as "Htriple".
       { iSplitR.
-        { iModIntro. iApply Hworlds. }
+        { iModIntro. iApply "Hworlds". }
         iSplitR.
-        { iModIntro. iApply Hgworlds. }
+        { iModIntro. iApply "Hgworlds". }
         iSplitR.
-        { iModIntro. iApply Hwtbl. }
+        { iModIntro. iApply "Hwtbl". }
         iSplitR.
         { iApply "IH". }
         iPureIntro. exact HRHT. }
@@ -2917,3 +2952,93 @@ Section MainTranslation.
     Qed.
 
   End MainTranslation.
+
+(* Adequacy wrapper (Step 5, local/parameters-redesign.md): builds a
+   concrete Gamma (single-RA), GhostConfig and invTokenG instance, and
+   discharges all_inv_worlds/Wghost_world internally via own_alloc +
+   inv_alloc at the empty index -- the whole point of moving
+   raven_soundness_core's Hworlds/Hgworlds/Hwtbl from Coq-level "⊢ P"
+   premises to object-level (-∗) antecedents above: own_alloc/inv_alloc
+   only ever produce a |==>/={E}=∗-wrapped fact, so this wrapper genuinely
+   needs to *apply* raven_soundness_core to freshly-allocated resources
+   inside its own fancy update, which a bare "⊢ P" argument could never
+   accept.
+
+   Scoped to a single RA and a single invariant, parametric over which ones
+   -- not generic over an arbitrary finite ra_set/inv_set, which would need
+   a fold/induction over finite sets no caller in this project needs
+   (counter_monotonic.v uses exactly one RA, h_ra, and one invariant,
+   "counterInv"). Establishing Winv/Wghost "from nothing" (at the empty
+   index) doesn't depend on the RA/invariant's own content, so this
+   restriction only affects how all_inv_worlds is *stated* (a singleton
+   big_sepS), not how it is proved.
+
+   all_proc_tbl_chunks stays an external (-∗) antecedent: it depends on
+   simpLangG's own heap_proctbl_name, which this wrapper doesn't control
+   (simpLangG is taken as a given instance, not allocated here -- only a
+   full wp_adequacy-style derivation for a specific execution can produce
+   one, which is separate, later, unscoped work). Hwf is phrased uniformly
+   over the eventual gname choice: ProgramWF's own fields never inspect
+   *which* gname own_alloc hands back, only namespace disjointness and
+   invtoken_names's injectivity on inv_set (trivial for a singleton
+   inv_set), so proving it for one arbitrary (γg, γi) pair proves it for
+   the pair this wrapper actually picks. *)
+Section AdequacyWrapper.
+  Context {Σ : gFunctors}.
+  Context {I : Type} (Gs : I → cmra) `{!inGs Σ Gs}.
+  Context `{!inG Σ (authR (gmap.gmapUR heap_addr (agreeR gnameO)))}.
+  Context `{!simpLangG Σ}.
+  Context `{!invTokenGpreS Σ}.
+  Context (RProg : Program).
+  Context (r0 : ra_name) (w0 : Γ_witness Gs r0).
+  Context (iname0 : inv_name) (Hinv_set : prog_inv_set RProg = {[iname0]}).
+  Context (ghost_heap_ns inv_ns : namespace) (Hns_disj : ghost_heap_ns ## inv_ns).
+
+  Definition Γ0 : Γ_type Gs := λ r,
+    match decide (r = r0) with
+    | left Heq => Γ_found Gs r (eq_rect_r (Γ_witness Gs) w0 Heq)
+    | right _ => Γ_absent Gs r
+    end.
+
+  Definition mkGhostConfig (γg : gname) : GhostConfig := {|
+    gc_ghost_heap_name := γg;
+    gc_ghost_heap_namespace := ghost_heap_ns;
+    gc_inv_namespace_map := λ _, inv_ns;
+  |}.
+
+  Definition mkInvTokenG (γi : gname) : invTokenG Σ :=
+    InvTokenG Σ _ (λ _, γi).
+
+  Theorem raven_soundness (ρ : pvar_typs) (σ : lvar_typs)
+    (Hwf : ∀ γg γi, ProgramWF (P:=RProg) (G:=mkGhostConfig γg) (invTokenG0:=mkInvTokenG γi))
+    (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
+    (Hpbt : proc_bodies_translate (P:=RProg))
+    (Hbodies : all_proc_specs_valid_raven (RProg:=RProg) ρ σ) :
+    all_proc_tbl_chunks (RProg:=RProg) -∗
+    |={⊤}=> ∃ γg γi,
+      all_proc_specs_valid_iris Gs σ (RProg:=RProg) (G:=mkGhostConfig γg)
+        (Γ:=Γ0) (invTokenG0:=mkInvTokenG γi).
+  Proof.
+    iIntros "Hwtbl".
+    iMod (own_alloc (● (∅ : gmap.gmapUR heap_addr (agreeR gnameO))))
+      as (γg) "Hgh"; first by apply auth_auth_valid.
+    iMod (own_alloc (● (∅ : inv_argsUR))) as (γi) "Hin"; first by apply auth_auth_valid.
+    iExists γg, γi.
+    pose proof (Hwf γg γi) as Hwf0.
+    iAssert (▷ Wghost (G:=mkGhostConfig γg))%I with "[Hgh]" as "Hwg".
+    { iNext. iExists ∅. rewrite fmap_empty big_sepS_empty. iFrame. }
+    iMod (inv_alloc ghost_heap_ns ⊤ (Wghost (G:=mkGhostConfig γg)) with "Hwg") as "#Hgworlds".
+    iAssert (▷ Winv Gs iname0 (P:=RProg) (G:=mkGhostConfig γg) (invTokenG0:=mkInvTokenG γi) (Γ:=Γ0))%I
+      with "[Hin]" as "Hwi".
+    { iNext. iExists ∅. rewrite big_sepS_empty. unfold mkInvTokenG. simpl. iFrame. }
+    iMod (inv_alloc inv_ns ⊤
+      (Winv Gs iname0 (P:=RProg) (G:=mkGhostConfig γg) (invTokenG0:=mkInvTokenG γi) (Γ:=Γ0))
+      with "Hwi") as "#Hworlds_inv".
+    iAssert (all_inv_worlds Gs (RProg:=RProg) (G:=mkGhostConfig γg) (invTokenG0:=mkInvTokenG γi) (Γ:=Γ0))
+      as "Hworlds".
+    { rewrite /all_inv_worlds Hinv_set big_sepS_singleton. iExact "Hworlds_inv". }
+    iModIntro.
+    iApply (raven_soundness_core Gs ρ σ Hwf0 Hσ_rich Hpbt Hbodies with "Hworlds Hgworlds Hwtbl").
+  Qed.
+
+End AdequacyWrapper.

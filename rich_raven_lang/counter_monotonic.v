@@ -7,13 +7,16 @@ From raven_iris.simp_raven_lang Require Import lang.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
 Require Import Coq.Logic.FunctionalExtensionality.
 
-(* Sigma/Gs/I (hence invTokenG's own inG obligation) are still abstract
-   Context declarations throughout rrl_lang.v -- picking a concrete Sigma
-   is Step 5's job (the adequacy wrapper), not this file's. Everything
-   else this file needs (Program, GhostConfig) is concrete, defined below
-   once read/incr/make/counterInv's own records exist (see RProg/G,
-   after make_record). *)
-Context `{!invTokenG rrl_lang.Σ}.
+(* Sigma is a Section WithProgram variable in rrl_lang.v now (see its own
+   header comment) -- redeclared here, same as trnsl.v does, so
+   invTokenG's own instance can reference it. This file needs neither
+   Gs/I/inGs/the ghost-heap inG instance nor simpLangG: it never calls
+   Winv/Wghost/trnsl_assertion/entails directly (those became dead code
+   and were removed in Step 4), only ProgramWF (Sigma + invTokenG0 only)
+   and RavenHoareTriple (Program only). Picking a concrete Sigma is Step
+   5's adequacy-wrapper job, not this file's -- stays abstract here. *)
+Context {Σ : gFunctors}.
+Context `{!invTokenG Σ}.
 
 (* ----------------------------------------------------------------------- *)
 (* The resource algebra: a plain monotone nat -- comp/frame is max, and a
@@ -309,7 +312,7 @@ Local Notation pred_map := (RProg.(prog_pred_map)).
 Local Notation inv_set := (RProg.(prog_inv_set)).
 Local Notation ghost_heap_namespace := (G.(gc_ghost_heap_namespace)).
 Local Notation inv_namespace_map := (G.(gc_inv_namespace_map)).
-Local Notation ProgramWF := (@ProgramWF invTokenG0 RProg G).
+Local Notation ProgramWF := (@ProgramWF Σ invTokenG0 RProg G).
 Local Notation RavenHoareTriple := (@RavenHoareTriple RProg).
 
 Lemma proc_map_read : proc_map !! "read" = Some read_record.

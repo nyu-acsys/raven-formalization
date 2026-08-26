@@ -39,6 +39,15 @@ Class inGs {I : Type} (Σ : gFunctors) (Gs : I → cmra) := {
   inGs_inG : ∀ i, inG Σ (Gs i)
 }.
 
+Section WithProgram.
+
+(* Sigma/Gs/I/simpLangG live *inside* this section (not, as before, ambient
+   for the whole file) precisely so End WithProgram discharges them into
+   explicit arguments too, same as Program/GhostConfig/Gamma/invTokenG
+   already are -- otherwise nothing downstream (trnsl.v's own adequacy
+   wrapper, eventually) could ever supply a concrete Sigma at all: a
+   Context declared outside any Section that closes within this file is
+   permanently fixed, no different from a bare Axiom. *)
 Context {I : Type}.
 Context (Gs : I → cmra).
 Context `{!inGs Σ Gs}.
@@ -63,8 +72,6 @@ Context `{!inGs Σ Gs}.
 Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
 Context `{!simpLangG Σ}.
-
-Section WithProgram.
 
 Definition lvar := string.
 
@@ -615,6 +622,23 @@ Class invTokenG (Σ : gFunctors) := InvTokenG {
   invtoken_inG :: inG Σ (authR inv_argsUR);
   invtoken_names : inv_name -> gname;
 }.
+
+(* Layer 0 (see local/parameters-redesign.md): the camera capability
+   invTokenG needs, without the concrete invtoken_names assignment --
+   mirrors ghost_state.v's own heapGpreS/heapG split (invTokenG bundles a
+   concrete gname-valued function together with the inG evidence, so a
+   full invTokenG instance can't be derived from subG alone; only this
+   "pre" half can. Producing invtoken_names itself is own_alloc work,
+   done once per invariant name a program actually declares -- belongs to
+   the adequacy wrapper, not here). *)
+Class invTokenGpreS (Σ : gFunctors) := InvTokenGpreS {
+  invtoken_pre_inG :: inG Σ (authR inv_argsUR);
+}.
+
+Definition invTokenGΣ : gFunctors := #[ GFunctor (authR inv_argsUR) ].
+
+Global Instance subG_invTokenGpreS Σ' : subG invTokenGΣ Σ' → invTokenGpreS Σ'.
+Proof. solve_inG. Qed.
 
 Context `{!invTokenG Σ}.
 
@@ -1618,36 +1642,58 @@ Qed.
     intros. unfold transport in *. destruct Heq_car. simpl in *. done.
   Qed.
 
-  Definition Γ_type := forall R : RA_Pack,
-  { i : I & { U : ucmra |
+  (* Narrowed to ra_set (Open item 1, local/parameters-redesign.md): Γ
+     used to be universally quantified over *every* RA_Pack, but every
+     actual call site only ever applies it as Γ (ra_map r) for some
+     r : ra_name -- and a concrete Γ witness genuinely cannot be total
+     over arbitrary RA_Pack (infinitely many possible carrier types, so
+     no finite Sigma could provide a matching camera slot for every one).
+     option-valued (not a r ∈ ra_set proof obligation threaded through
+     every call site): a concrete Γ only needs to answer for the
+     program's own, finite ra_set; every other r maps to None, mirroring
+     inv_map/pred_map's own partial-lookup shape (trnsl_assertion_str's
+     LGhostOwn case below matches on this the same way LInv/LPred already
+     match on inv_map/pred_map !! _). *)
+  Definition Γ_witness (r : ra_name) := { i : I & { U : ucmra |
       CmraDiscrete U /\
-      { Heq_car : RA_carrier R = ucmra_car U | 
-          ucmra_cmraR U = Gs i /\ 
-          ucmra_op U = eq_rect (RA_carrier R) (fun T => T -> T -> T) ((RA_inst R).(comp)) (ucmra_car U) Heq_car /\
-          ucmra_valid U = eq_rect (RA_carrier R) (fun T => T -> Prop) ((RA_inst R).(valid)) (ucmra_car U) Heq_car
+      { Heq_car : RA_carrier (ra_map r) = ucmra_car U |
+          ucmra_cmraR U = Gs i /\
+          ucmra_op U = eq_rect (RA_carrier (ra_map r)) (fun T => T -> T -> T) ((RA_inst (ra_map r)).(comp)) (ucmra_car U) Heq_car /\
+          ucmra_valid U = eq_rect (RA_carrier (ra_map r)) (fun T => T -> Prop) ((RA_inst (ra_map r)).(valid)) (ucmra_car U) Heq_car
       }
   } } .
 
-  Lemma RAPack_fpuValid (Γ: Γ_type) :
-    forall R : RA_Pack,
-      forall x y : RA_carrier R,
-        (* let '(existT i (existT U (exist _ Hdis Heq_car (conj Hind (conj Hcomp Hvalid))))) := Γ R in *)
-        let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Hcmra (conj Hop Hvalid)))))) := Γ R in
-        (RA_inst R).(fpuValid) x y -> (transport Heq_car x) ~~> (transport Heq_car y).
+  (* A bespoke option, not stdlib's: Γ_witness r's own large (ucmra-valued)
+     type doesn't fit stdlib option's fixed universe, triggering a
+     universe inconsistency -- irrelevant to what this needs (just "found
+     or not"), so a fresh, unconstrained Inductive sidesteps it. *)
+  Inductive Γ_answer (r : ra_name) :=
+  | Γ_found (w : Γ_witness r)
+  | Γ_absent.
+  Arguments Γ_found {r} w.
+  Arguments Γ_absent {r}.
+
+  Definition Γ_type := forall r : ra_name, Γ_answer r.
+
+  Lemma RAPack_fpuValid (Γ: Γ_type) (r : ra_name) (w : Γ_witness r) :
+    Γ r = Γ_found w ->
+    forall x y : RA_carrier (ra_map r),
+      let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Hcmra (conj Hop Hvalid)))))) := w in
+      (RA_inst (ra_map r)).(fpuValid) x y -> (transport Heq_car x) ~~> (transport Heq_car y).
   Proof.
-    intros R x y.
-    destruct (Γ R) as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]].
+    intros Heq x y.
+    destruct w as [i [U [Hdisc [Heq_car [Hindx [Hcomp Hval]]]]]].
     intros Hfpu.
-    
+
     intros n c Hvalid.
     destruct c as [c|].
 
-    - simpl in *. 
+    - simpl in *.
 
     (* make the dot-notation explicit so we can rewrite the op *)
     change (transport Heq_car x ⋅ c) with (ucmra_op U (transport Heq_car x) c) in Hvalid.
     rewrite Hcomp in Hvalid.
-    (* bring the context back to the R-side by destructing the equality *)
+    (* bring the context back to the (ra_map r)-side by destructing the equality *)
     apply cmra_discrete_valid_iff.
     apply cmra_discrete_valid_iff in Hvalid.
     change (✓ (transport Heq_car y ⋅ c)) with (ucmra_valid U (transport Heq_car y ⋅ c)).
@@ -1655,20 +1701,20 @@ Qed.
     unfold transport.
 
     set (cR := transport (eq_sym Heq_car) c).
-    assert ((RA_inst R).(valid) ((RA_inst R).(comp) y cR)). {
+    assert ((RA_inst (ra_map r)).(valid) ((RA_inst (ra_map r)).(comp) y cR)). {
       apply (fpuAxiom x y); [done | ].
 
       rewrite eq_rect_transport_comp in Hvalid.
       unfold cR.
-      change (✓ transport Heq_car (comp x (transport (eq_sym Heq_car) c))) with ((ucmra_valid U) (transport Heq_car ((RA_inst R).(comp) x (transport (eq_sym Heq_car) c)))) in Hvalid.
-      
+      change (✓ transport Heq_car (comp x (transport (eq_sym Heq_car) c))) with ((ucmra_valid U) (transport Heq_car ((RA_inst (ra_map r)).(comp) x (transport (eq_sym Heq_car) c)))) in Hvalid.
+
       rewrite Hval in Hvalid.
-      apply (eq_rect_transport_valid R (ucmra_car U) Heq_car). done.
+      apply (eq_rect_transport_valid (ra_map r) (ucmra_car U) Heq_car). done.
     }
 
     subst cR.
 
-    change (eq_rect (RA_carrier R) (λ T : Type, T → Prop) (RA_inst R).(valid) U Heq_car ((ucmra_op U) (eq_rect (RA_carrier R) id y U Heq_car) c)).
+    change (eq_rect (RA_carrier (ra_map r)) (λ T : Type, T → Prop) (RA_inst (ra_map r)).(valid) U Heq_car ((ucmra_op U) (eq_rect (RA_carrier (ra_map r)) id y U Heq_car) c)).
 
     rewrite Hcomp.
     rewrite eq_rect_transport_comp.
@@ -2712,15 +2758,21 @@ Definition proc_bodies_translate : Prop :=
        in the original ghost_map design, so FPURule's frame-preserving
        update never has to touch the map at all. *)
     | LGhostOwn l_expr fld RAPack chunk_expr =>
-      let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map RAPack) in
-      let HinG := inGs_inG i in
-
-      (∃ l : lang.loc, ∃ chunk : RA_carrier (ra_map RAPack), ∃ γ : gname, (
-        ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗
-        ⌜interp_lexpr chunk_expr mp = Some (LitRAElem (existT RAPack chunk))⌝ ∗
-        own ghost_heap_name
-           (◯ {[ heap_addr_constr l fld := to_agree γ ]} : authR (gmapUR heap_addr (agreeR gnameO))) ∗
-        (own γ (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := HinG))))%I
+      (* RAPack not in ra_set (Γ RAPack = Γ_absent) is vacuously True,
+         mirroring LInv/LPred's own "name not declared" case below --
+         never actually reached for a well-formed program's own LGhostOwn
+         nodes, only needed for trnsl_assertion_str's own totality. *)
+      match Γ RAPack with
+      | Γ_absent => True%I
+      | Γ_found (existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) =>
+        let HinG := inGs_inG i in
+        (∃ l : lang.loc, ∃ chunk : RA_carrier (ra_map RAPack), ∃ γ : gname, (
+          ⌜LExpr_holds (LBinOp EqOp l_expr (LVal (LitLoc l))) mp⌝ ∗
+          ⌜interp_lexpr chunk_expr mp = Some (LitRAElem (existT RAPack chunk))⌝ ∗
+          own ghost_heap_name
+             (◯ {[ heap_addr_constr l fld := to_agree γ ]} : authR (gmapUR heap_addr (agreeR gnameO))) ∗
+          (own γ (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := HinG))))%I
+      end
     | LForall v _t body =>
        (∀ v':lang.val, (trnsl_assertion_str F body stk_id mp))%I
 
@@ -2809,8 +2861,8 @@ Proof.
   - (* LPure *) iIntros "_ H". iExact "H".
   - (* LOwn *) iIntros "_ H". iExact "H".
   - (* LGhostOwn *)
-    destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-    iIntros "_ H". iExact "H".
+    destruct (Γ r) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ];
+      iIntros "_ H"; iExact "H".
   - (* LForall *)
     iIntros "#Hmon H" (v').
     iDestruct (IHa stk mp with "Hmon") as "IH".
@@ -3021,11 +3073,12 @@ Proof.
   - (* LGhostOwn *) simpl. destruct Hfresh as [Hfe Hfc].
     rewrite (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk))
             (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
-    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
-    unfold LExpr_holds. simpl.
-    rewrite (interp_lexpr_stable ge mp v v' Hfe) (interp_lexpr_stable gchunk mp v v' Hfc).
-    done.
+    destruct (Γ gr) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ].
+    + apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+      unfold LExpr_holds. simpl.
+      rewrite (interp_lexpr_stable ge mp v v' Hfe) (interp_lexpr_stable gchunk mp v v' Hfc).
+      done.
+    + done.
   - (* LForall: its own binder is already a no-op in trnsl_assertion_str
        (trnsl_assertion_forall), so this is a direct recursion regardless of
        whether fv = v. *)
@@ -3707,11 +3760,12 @@ Proof.
     rewrite (trnsl_assertion_unfold
               (LGhostOwn (lexpr_subst ge (<[lv := LVal w]> ∅)) gfld gr (lexpr_subst gchunk (<[lv := LVal w]> ∅))))
             (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
-    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
-    unfold LExpr_holds. simpl.
-    rewrite (interp_lexpr_subst_var ge lv w mp) (interp_lexpr_subst_var gchunk lv w mp).
-    done.
+    destruct (Γ gr) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ].
+    + apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+      unfold LExpr_holds. simpl.
+      rewrite (interp_lexpr_subst_var ge lv w mp) (interp_lexpr_subst_var gchunk lv w mp).
+      done.
+    + done.
   - (* LForall *) exfalso. exact Hqf.
   - (* LExists *) exfalso. exact Hqf.
   - (* LIte *) exfalso. exact Hqf.
@@ -3784,11 +3838,12 @@ Proof.
     rewrite (trnsl_assertion_unfold
               (LGhostOwn (lexpr_subst ge (<[lv := LVar lv2]> ∅)) gfld gr (lexpr_subst gchunk (<[lv := LVar lv2]> ∅))))
             (trnsl_assertion_unfold (LGhostOwn ge gfld gr gchunk)) /trnsl_assertion_pre /=.
-    destruct (Γ (ra_map gr)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-    apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
-    unfold LExpr_holds. simpl.
-    rewrite (interp_lexpr_subst_lvar ge lv lv2 mp) (interp_lexpr_subst_lvar gchunk lv lv2 mp).
-    done.
+    destruct (Γ gr) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ].
+    + apply bi.exist_proper; intros l. apply bi.exist_proper; intros chunk0.
+      unfold LExpr_holds. simpl.
+      rewrite (interp_lexpr_subst_lvar ge lv lv2 mp) (interp_lexpr_subst_lvar gchunk lv lv2 mp).
+      done.
+    + done.
   - (* LForall *) exfalso. exact Hqf.
   - (* LExists *) exfalso. exact Hqf.
   - (* LIte *) exfalso. exact Hqf.
@@ -4140,8 +4195,9 @@ Section RavenLogic.
       apply entails_intro. intros stk mp Henv.
       rewrite (trnsl_assertion_unfold (LGhostOwn e fld0 r chunk1)) (trnsl_assertion_unfold (LGhostOwn e fld0 r chunk2))
         /trnsl_assertion_pre /=.
-      destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-      unfold LExpr_holds. rewrite (Heq mp). done.
+      destruct (Γ r) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ].
+      + unfold LExpr_holds. rewrite (Heq mp). done.
+      + done.
   Qed.
 
   (* assertion_entails-typed counterpart of TypeInf's entails_and_stack_exists_swap
@@ -4974,8 +5030,8 @@ Section AssertionsProperties.
         chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
       rewrite <- Hcongr2. exact Hchunk.
     - (* LGhostOwn *)
-      simpl. generalize (Γ (ra_map r)).
-      intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+      simpl. generalize (Γ r).
+      intros [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ]; [ | done].
       apply bi.exist_mono. intro l.
       apply bi.exist_mono. intro chunk0.
       apply bi.exist_mono. intro γ.
@@ -5245,8 +5301,8 @@ Section AssertionsProperties.
       have Hcongr2 := interp_lexpr_subst_eval_lvar_congr_true chunk M mp1 mp2 Hb2.
       rewrite <- Hcongr2. exact Hchunk.
     - (* LGhostOwn *)
-      simpl. generalize (Γ (ra_map r)).
-      intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+      simpl. generalize (Γ r).
+      intros [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ]; [ | done].
       apply bi.exist_mono. intro l.
       apply bi.exist_mono. intro chunk0.
       apply bi.exist_mono. intro γ.
@@ -5682,9 +5738,9 @@ Section AssertionsProperties.
     - (* LExprA *) iIntros "H". iExact "H".
     - (* LPure *) iIntros "H". iExact "H".
     - (* LOwn *) iIntros "H". iExact "H".
-    - (* LGhostOwn *) simpl. generalize (Γ (ra_map r)).
-      intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
-      iIntros "H". iExact "H".
+    - (* LGhostOwn *) simpl. generalize (Γ r).
+      intros [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ];
+        iIntros "H"; iExact "H".
     - (* LForall *)
       inversion Hsf. apply bi.forall_mono. intro v'.
       etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold a stk' mp)].
@@ -5799,8 +5855,8 @@ Section AssertionsProperties.
       rewrite trnsl_assertion_unfold. apply _.
     - (* LGhostOwn *)
       rewrite trnsl_assertion_unfold /trnsl_assertion_pre /=.
-      generalize (Γ (ra_map RAPAck)).
-      intros [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
+      generalize (Γ RAPAck).
+      intros [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ]; [ | apply _].
       apply bi.exist_timeless. intro l.
       apply bi.exist_timeless. intro chunk0.
       apply bi.exist_timeless. intro γ.
@@ -5876,7 +5932,7 @@ Section InvariantWorld.
 
   Lemma Winv_timeless (Hwf : ProgramWF) inv' : Timeless (Winv inv').
   Proof.
-    rewrite /Winv. apply bi.exist_timeless. intro I.
+    rewrite /Winv. apply bi.exist_timeless. intro Iopen.
     apply bi.sep_timeless; [apply _ |].
     apply big_sepS_timeless. intros vs _. by apply inv_body_at_timeless.
   Qed.
@@ -6041,10 +6097,10 @@ Section InvariantWorld.
   Proof. intros Hr Hlen. rewrite /inv_body_at Hr decide_True //. Qed.
 
   (* Owning a fragment means the argument vector really was established. *)
-  Lemma Winv_frag_mem (inv' : inv_name) (I : gset (list val)) (vs : list val) :
-    own (invtoken_names inv') (● (I : inv_argsUR)) -∗
+  Lemma Winv_frag_mem (inv' : inv_name) (Iset : gset (list val)) (vs : list val) :
+    own (invtoken_names inv') (● (Iset : inv_argsUR)) -∗
     own (invtoken_names inv') (◯ ({[vs]} : inv_argsUR)) -∗
-    ⌜vs ∈ I⌝.
+    ⌜vs ∈ Iset⌝.
   Proof using G invTokenG0.
     iIntros "Hauth Hfrag".
     iDestruct (own_valid_2 with "Hauth Hfrag") as %Hval.
@@ -6069,15 +6125,15 @@ Section InvariantWorld.
     have Htl : Timeless (Winv inv') := Winv_timeless Hwf inv'.
     iIntros "#Hinv Hfrag".
     iMod (inv_acc_timeless with "Hinv") as "[HW Hclose]"; [exact HE |].
-    iDestruct "HW" as (I) "[Hauth Hbig]".
+    iDestruct "HW" as (Iset) "[Hauth Hbig]".
     iDestruct (Winv_frag_mem with "Hauth Hfrag") as %Hmem.
-    rewrite (big_sepS_delete _ I vs Hmem).
+    rewrite (big_sepS_delete _ Iset vs Hmem).
     iDestruct "Hbig" as "[Hbody Hrest]".
     rewrite (inv_body_at_eq inv' r vs Hr Hlen).
     iModIntro. iFrame "Hbody".
     iIntros "Hbody". iApply "Hclose".
-    iExists I. iFrame "Hauth".
-    rewrite (big_sepS_delete _ I vs Hmem) (inv_body_at_eq inv' r vs Hr Hlen).
+    iExists Iset. iFrame "Hauth".
+    rewrite (big_sepS_delete _ Iset vs Hmem) (inv_body_at_eq inv' r vs Hr Hlen).
     iFrame.
   Qed.
 
@@ -6096,18 +6152,18 @@ Section InvariantWorld.
     have Htl : Timeless (Winv inv') := Winv_timeless Hwf inv'.
     iIntros "#Hinv Hbody".
     iMod (inv_acc_timeless with "Hinv") as "[HW Hclose]"; [exact HE |].
-    iDestruct "HW" as (I) "[Hauth Hbig]".
-    iMod (own_update _ _ (● ((I ∪ {[vs]}) : inv_argsUR) ⋅ ◯ ({[vs]} : inv_argsUR))
+    iDestruct "HW" as (Iset) "[Hauth Hbig]".
+    iMod (own_update _ _ (● ((Iset ∪ {[vs]}) : inv_argsUR) ⋅ ◯ ({[vs]} : inv_argsUR))
       with "Hauth") as "[Hauth Hfrag]".
     { etrans.
-      - apply (auth_update_auth (I : inv_argsUR) (I ∪ {[vs]}) (I ∪ {[vs]})).
+      - apply (auth_update_auth (Iset : inv_argsUR) (Iset ∪ {[vs]}) (Iset ∪ {[vs]})).
         apply gset_local_update. set_solver.
       - apply auth_update_dfrac_alloc; [apply _ |].
         apply gset_included. set_solver. }
     iAssert (Winv inv') with "[Hauth Hbig Hbody]" as "HW".
-    { iExists (I ∪ {[vs]}). iFrame "Hauth".
-      destruct (decide (vs ∈ I)) as [Hin | Hnin].
-      - have Heq : I ∪ {[vs]} = I by set_solver.
+    { iExists (Iset ∪ {[vs]}). iFrame "Hauth".
+      destruct (decide (vs ∈ Iset)) as [Hin | Hnin].
+      - have Heq : Iset ∪ {[vs]} = Iset by set_solver.
         rewrite Heq. iFrame "Hbig".
       - rewrite big_sepS_union; [| set_solver].
         iFrame "Hbig". rewrite big_sepS_singleton (inv_body_at_eq inv' r vs Hr Hlen).
@@ -6166,8 +6222,9 @@ Section GhostHeapWorld.
      (l,fld) -> γ binding, handing the caller back both pieces in exactly
      the shape LGhostOwn's own translation expects. *)
   Lemma Wghost_alloc (E : coPset) (r : ra_name) (l : loc) (fld : fld_name)
-      (chunk : RA_carrier (ra_map r)) (Hchunk_valid : (RA_inst (ra_map r)).(valid) chunk) :
-    let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := Γ (ra_map r) in
+      (chunk : RA_carrier (ra_map r)) (Hchunk_valid : (RA_inst (ra_map r)).(valid) chunk)
+      (w : Γ_witness r) (HΓeq : Γ r = Γ_found w) :
+    let '(existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid)))))) := w in
     ↑ghost_heap_namespace ⊆ E →
     inv ghost_heap_namespace Wghost -∗
     ghost_dom_frag {[heap_addr_constr l fld]}
@@ -6176,7 +6233,7 @@ Section GhostHeapWorld.
       own ghost_heap_name (◯ {[ heap_addr_constr l fld := to_agree γ ]} : authR (gmapUR heap_addr (agreeR gnameO))) ∗
       own γ (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk)) (inG0 := inGs_inG i).
   Proof.
-    destruct (Γ (ra_map r)) as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] eqn:HΓeq.
+    destruct w as [i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]].
     intros HE.
     iIntros "#Hinv Hwit".
     iMod (own_alloc (transport (f_equal cmra_car Heq_cmra) (transport Heq_car chunk))) as (γ) "Hγ".
