@@ -1,5 +1,6 @@
 From stdpp Require Import coPset gmap.
 From Coq Require Import QArith Qcanon.
+From iris.algebra Require Import ofe cmra.
 From iris.algebra Require Import big_op gmap frac agree.
 From iris.algebra Require Import csum excl auth cmra_big_op numbers.
 From iris.bi Require Import fractional.
@@ -47,6 +48,27 @@ Definition stackUR :=
    stay entirely at the rich_raven_lang layer). *)
 Definition ghost_domUR : ucmra :=
   gmapUR heap_addr (exclR unitO).
+
+(* Layer 0 (see local/parameters-redesign.md): the camera capabilities
+   [heapG] needs, without the concrete gnames -- mirrors iris_heap_lang's
+   own heapGpreS/heapGS split. [heapG] itself bundles gnames together with
+   the inG evidence (unlike the standard pre/GS split), so a [heapG]
+   instance can't be derived from [subG] alone; only this "pre" half can.
+   Producing concrete gnames from [heapGpreS] is [own_alloc] work that
+   belongs to the adequacy wrapper (Step 5), not here. *)
+Class heapGpreS Σ := HeapGpreS {
+  heapGpreS_heap_inG :: inG Σ (authR heapUR);
+  heapGpreS_stack_inG :: inG Σ (authR stackUR);
+  heapGpreS_proctbl_inG :: ghost_mapG Σ proc_name proc;
+  heapGpreS_ghostdom_inG :: inG Σ (authR ghost_domUR);
+}.
+
+Definition heapGΣ : gFunctors :=
+  #[ GFunctor (authR heapUR); GFunctor (authR stackUR);
+     ghost_mapΣ proc_name proc; GFunctor (authR ghost_domUR) ].
+
+Global Instance subG_heapGpreS Σ : subG heapGΣ Σ → heapGpreS Σ.
+Proof. solve_inG. Qed.
 
 Class heapG Σ := HeapG {
   heap_heap_inG :: inG Σ (authR heapUR);
@@ -731,4 +753,41 @@ Section updates.
   Qed.
 
 End updates.
+
+(* ----------------------------------------------------------------------- *)
+(* Layer 0 (see local/parameters-redesign.md): every [ResourceAlgebra]
+   embeds into a discrete CMRA, generically -- reusable by any program's
+   [Γ] witness so it doesn't need to hand-align its own RAs with some
+   pre-existing Iris camera. [pcore := fun _ => None]: Raven's RA has no
+   notion of a duplicable/persistent part, so "no core" is the honest
+   reading, not a hack -- every [pcore]-related CMRA law below is then
+   vacuous, since its hypothesis never fires. *)
+Section ra_cmra.
+  Context (A : Type) `{ResourceAlgebra A} `{EqDecision A}.
+
+  Canonical Structure ra_ofe : ofe := leibnizO A.
+
+  Local Instance ra_pcore : PCore A := fun _ => None.
+  Local Instance ra_op : Op A := comp.
+  (* [valid] as a bare identifier is ambiguous with iris.algebra.cmra's own
+     [Valid] class field of the same name; the [lang.valid] qualified path
+     disambiguates to ResourceAlgebra's own field. *)
+  Local Instance ra_valid_inst : Valid A := lang.valid.
+
+  Lemma ra_cmra_mixin : RAMixin A.
+  Proof.
+    split.
+    - intros x y1 y2 ->. done.
+    - intros x y cx _ Hcx. discriminate.
+    - intros x y ->. done.
+    - intros x y z. symmetry. apply comp_assoc.
+    - intros x y. apply comp_comm.
+    - intros x cx Hcx. discriminate.
+    - intros x cx Hcx. discriminate.
+    - intros x y cx _ Hcx. discriminate.
+    - intros x y Hv. destruct (comp_valid x y Hv) as [Hx _]. exact Hx.
+  Qed.
+
+  Definition ra_cmra : cmra := discreteR A ra_cmra_mixin.
+End ra_cmra.
 

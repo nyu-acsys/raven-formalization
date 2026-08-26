@@ -45,6 +45,20 @@ Class ResourceAlgebra (A: Type) := {
      comp), and gives canonical_val below a natural witness value. *)
   ra_id : A;
   ra_id_comp : forall x, comp ra_id x = x;
+  (* The remaining RA axioms, matching lib/library/resource_algebra.rav's
+     `interface ResourceAlgebra` one-for-one (idValid/compCommute/compAssoc/
+     compValid/frameId/compFrameInv/weak_frameCompInv). Not exercised by the
+     Iris camera embedding (Γ) itself, but relied on elsewhere in the ghost
+     layer's proof machinery -- any RA instance registered in ra_map must
+     satisfy them, same as in the tool. compId (right identity) isn't listed
+     separately: it's derivable from ra_id_comp plus comp_comm. *)
+  ra_id_valid : valid ra_id;
+  comp_comm : forall x y, comp x y = comp y x;
+  comp_assoc : forall x y z, comp (comp x y) z = comp x (comp y z);
+  comp_valid : forall x y, valid (comp x y) -> valid x /\ valid y;
+  frame_id : forall x, valid x -> frame x ra_id = x;
+  comp_frame_inv : forall x y, valid (frame x y) -> comp (frame x y) y = x;
+  weak_frame_comp_inv : forall x y, valid (comp x y) -> valid (frame (comp x y) y);
   (* How this RA embeds an integer as one of its elements -- backs
      RAOfIntOp. Total: an RA with no natural reading of some (or any)
      integer as one of its elements (e.g. a token or exclusive-lock-state
@@ -76,6 +90,16 @@ Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) 
    layer. Naming RAs (rather than embedding RA_Pack values inline in
    typ/val) is what makes equality of RA-typed values decidable: ra_name is
    just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
+(* ra_map/ra_set stay Global Parameter for now: making them Section-
+   parametric turned out to entangle val/expr (RA elements are embedded in
+   val via ra_elem), and beyond that, tactics like `apply` and `lia` on the
+   resulting parameterized heap/val/etc. hit recurring, per-site instance-
+   resolution mismatches (Miller-pattern misfires on `apply`, non-identical
+   but convertible typeclass-instance atoms confusing `lia`) throughout
+   ghost_state.v/lifting.v/rrl_lang.v. Deliberately deferred as orthogonal,
+   follow-up work -- see local/parameters-redesign.md -- while the rest of
+   the axiom-elimination refactor (proc_map/inv_map/pred_map/namespaces/
+   Sigma/Gs/I/Gamma) proceeds without touching this. *)
 Global Parameter ra_set : gset ra_name.
 Global Parameter ra_map : ra_name -> RA_Pack.
 
