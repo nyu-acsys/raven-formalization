@@ -1438,6 +1438,17 @@ match v with
 | lang.LitRAElem (existT r _) => TpRA r
 end.
 
+(* Bridges typeOf (on lang.val, the real runtime value) to typ_val_match (on
+   val, the symbolic one trnsl_val embeds into) -- needed wherever a runtime
+   type fact (typeOf v = t) must justify a symbolic witness's own type
+   obligation (e.g. ProcCallRuleRet's soundness case, matching a call's
+   returned value against its LExists translation). *)
+Lemma typeOf_trnsl_val_match (v : lang.val) (t : typ) :
+  typeOf v = t -> typ_val_match t (trnsl_val v).
+Proof.
+  destruct v as [ | | | | [r x]]; intros <-; simpl; done.
+Qed.
+
 Lemma typeOf_val_has_typ v t : typeOf v = t <-> lang.val_has_typ v t.
 Proof using G inv_namespace_map. destruct v as [ | | | | [r x] ], t; simpl; naive_solver. Qed.
 
@@ -1499,6 +1510,26 @@ Definition expr_well_defined (ρ : pvar_typs) (e : lang.expr) : Prop :=
 Definition proc_call_args_well_typed (ρ : pvar_typs) (args : list lang.expr) (proc_entry : ProcRecord) : Prop :=
   Forall2 (fun arg arg_decl => inf_expr ρ arg = Some (snd arg_decl)) args (proc_args_of proc_entry).
 
+(* The callee's own declared type for its "#ret_val" local
+   (pwf_proc_ret_val_declared guarantees it's present as a key) -- shared by
+   proc_call_ret_well_typed below (the static half: the caller's LHS
+   variable must match it) and by all_proc_specs_valid_raven/
+   all_proc_specs_valid_iris in trnsl.v (the dynamic half: the value
+   actually placed in "#ret_val" at return must match it too). *)
+Definition proc_ret_typ_opt (proc_entry : ProcRecord) : option typ :=
+  (list_to_map (proc_locals_of proc_entry) : gmap var typ) !! "#ret_val".
+
+(* Symmetric to proc_call_args_well_typed, for the call's own LHS variable:
+   treated like an out-argument, typed via the callee's own declared
+   "#ret_val" local -- not via a global pvar-typing slot (rho "#ret_val"
+   would force every procedure in the whole program to share one return
+   type). *)
+Definition proc_call_ret_well_typed (ρ : pvar_typs) (v : var) (proc_entry : ProcRecord) : Prop :=
+  match proc_ret_typ_opt proc_entry with
+  | Some ret_typ => ρ v = ret_typ
+  | None => False
+  end.
+
 Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
 | SeqTp ρ s1 s2 :
   stmt_well_defined ρ s1 ->
@@ -1529,6 +1560,7 @@ Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
     length args = length (proc_args_of proc_entry) ->
     (Forall (fun arg => expr_well_defined ρ arg) args) ->
     proc_call_args_well_typed ρ args proc_entry ->
+    proc_call_ret_well_typed ρ v proc_entry ->
     stmt_well_defined ρ (Call v proc args)
 | FldWrTp ρ v fld e2:
     (fld ∈ fld_set) ->
@@ -1575,13 +1607,32 @@ Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
     stmt_well_defined ρ (Fpu e fld RAPack  old_val new_val)
 .
 
-Lemma alloc_stmt_well_defined ρ x fld val fld_vals : 
+Lemma alloc_stmt_well_defined ρ x fld val fld_vals :
   stmt_well_defined ρ (Alloc x ((fld, val) :: fld_vals)) -> stmt_well_defined ρ (Alloc x fld_vals).
 Proof.
   intros H.
   inversion H.
   apply (AllocTp ρ x fld_vals).
   inversion H2. exact H7.
+Qed.
+
+(* Isolated, single-use extraction of CallTp's new proc_call_ret_well_typed
+   premise, keyed to an already-known proc_entry (via Some-injectivity on
+   proc_map's lookup) rather than CallTp's own existentially-bound one --
+   lets call sites avoid threading this through the large, already-fragile
+   auto-numbered "inversion Hwelldef; subst ..." used elsewhere for Call's
+   soundness case (see local/parameters-redesign.md). *)
+Lemma stmt_well_defined_call_ret_typed ρ v proc args proc_entry :
+  stmt_well_defined ρ (Call v proc args) ->
+  proc_map !! proc = Some proc_entry ->
+  proc_call_ret_well_typed ρ v proc_entry.
+Proof.
+  intros Hwd Hpm.
+  inversion Hwd; subst.
+  match goal with
+  | Hpm' : proc_map !! proc = Some ?proc_entry', Hret : proc_call_ret_well_typed ρ v ?proc_entry' |- _ =>
+    rewrite Hpm in Hpm'; injection Hpm' as <-; exact Hret
+  end.
 Qed.
 
 Section AtomicAnnotations.

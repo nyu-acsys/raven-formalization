@@ -769,11 +769,22 @@ Section MainTranslation.
       let subst_map' := val_subst_map (proc_args_of proc_record).*1 stk_vals in
 
       ⌜trnsl_assertion (subst (proc_precond_of proc_record) subst_map') stk_id mp ≡ precond⌝ -∗
-      ⌜∀ ret_val, trnsl_assertion (subst (proc_postcond_of proc_record) (<["#ret_val" := LVal (trnsl_val (ret_val))]> subst_map')) stk_id mp ≡ postcond ret_val⌝ -∗
+      (* The value actually placed in "#ret_val" at return matches the
+         callee's own declared type for it -- the dynamic half
+         ProcCallRuleRet's soundness case needs (see
+         proc_call_ret_well_typed's own comment for the static half),
+         bundled into this bridge (rather than as a separate conjunct of
+         the WP conclusion below) so it's available to any caller-chosen
+         postcond uniformly. Proven below by raven_soundness_core via
+         env_typ_well_defined at the callee's own exit mp. *)
+      ⌜∀ ret_val, (trnsl_assertion (subst (proc_postcond_of proc_record) (<["#ret_val" := LVal (trnsl_val (ret_val))]> subst_map')) stk_id mp ∗
+                   ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I ≡ postcond ret_val⌝ -∗
 
       ⌜(trnsl_stmt (proc_body_of proc_record) = Some' stmt) \/ (trnsl_stmt (proc_body_of proc_record) = None' /\ stmt = lang.SkipS)⌝ -∗
       {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ (trnsl_mask msk)
-        {{{ RET lang.LitUnit; ∃ ret_val stk_frm'', stack_own[stk_id, stk_frm''] ∗ ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗ postcond ret_val }}}.
+        {{{ RET lang.LitUnit; ∃ ret_val stk_frm'', stack_own[stk_id, stk_frm''] ∗
+              ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗
+              postcond ret_val }}}.
 
     (* Raven counterpart of all_proc_specs_valid_iris: every procedure's own
        body is provably correct against its own contract via RavenHoareTriple,
@@ -789,6 +800,7 @@ Section MainTranslation.
           ∃ stk0' lv_final,
             stk0' !! "#ret_val" = Some lv_final ∧
             ¬ is_reserved lv_final ∧
+            proc_ret_typ_opt proc_record = Some (σ lv_final) ∧
             RavenHoareTriple ρ σ
               (LAnd (LStack (assoc_map (proc_args_of proc_record ++ proc_locals_of proc_record).*1
                                         (dll_args dll ++ dll_locals dll)))
@@ -1005,19 +1017,6 @@ Section MainTranslation.
        own per-case IH each carry an independent ∀mp', instantiable at
        whatever extension of the ambient mp a given case's witness needs. *)
 
-    (* ProcCallRuleRet's own fresh lvar (holding the call's return value) is
-       now typed by the caller's own ρ x (x being the call's LHS pvar) --
-       Raven's own type-checker already guarantees a call's LHS and the
-       callee's return value agree in type, but that discipline isn't
-       tracked anywhere in this untyped-assertion calculus (no field/return
-       -type environment threads through LOwn/proc contracts the way
-       inf_lexpr does for HeapReadRule's chunk). Assumed here, in the same
-       spirit as Γ/proc_map/inv_map being Global Parameters representing
-       externally-guaranteed setup, rather than built out -- ProcCallRuleRet
-       isn't exercised by the counter_monotonic.v example this file's
-       soundness proof is checked against. *)
-    Axiom call_ret_val_well_typed : forall (ρ : pvar_typs) (x : var) (ret_val : lang.val),
-      typ_val_match (ρ x) (trnsl_val ret_val).
 
     Theorem rrl_validity ρ σ stk_id p msk cmd q
       (Hwf : ProgramWF) (Hpbt : proc_bodies_translate) :
@@ -1887,6 +1886,7 @@ Section MainTranslation.
         apply Hwf.(pwf_proc_ret_val_declared) in H0_rv_declared.
         pose proof H0 as Hspec_StackFree.
         apply Hwf.(pwf_proc_stack_free) in Hspec_StackFree.
+        pose proof (stmt_well_defined_call_ret_typed ρ x proc_name args proc_record Hwelldef H0) as Hret_wt.
 
         inversion Hwelldef; subst ρ0 v proc args0.
 
@@ -1896,9 +1896,10 @@ Section MainTranslation.
           (* Save stk_type_compat before clearing *)
           assert (Hstk_compat: stk_type_compat ρ σ stk) by assumption.
           (* Prove existence of arg_vals *)
-          clear Hwelldef H1 H6 H13 H15.
+          clear Hwelldef H1 H6 H15 H16.
           clear subst_map.
           clear H5.
+          clear H12.
           revert lexprs H2 H14.
           induction args as [| a args IH]; intros lexprs H2 H12.
           - simpl in H2. destruct lexprs; [ | discriminate ]. exists nil. constructor.
@@ -1923,7 +1924,7 @@ Section MainTranslation.
 
         assert (Forall2 (λ expr val, interp_lexpr expr mp = Some (trnsl_val val)) lexprs arg_vals) as Hlexprs_arg_vals.
           {
-            clear Hwelldef H1 H5 H6 H13 H14 H15 subst_map.
+            clear Hwelldef H1 H5 H6 H12 H14 H15 H16 subst_map.
             revert args arg_vals H2 Harg_vals.
             induction lexprs as [| le lexprs IH]; intros args arg_vals H2 Harg_vals.
             - destruct args; [| discriminate]. inversion Harg_vals. constructor.
@@ -1969,8 +1970,16 @@ Section MainTranslation.
 
           set ((trnsl_assertion (subst proc_pre subst_map') stk_id mp)) as proc_frame_pre.
           set (fun ret_val => trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
+          (* Threads the type fact all_proc_specs_valid_iris's WP conclusion
+             promises for "#ret_val" (see proc_ret_typ_opt's own comment)
+             through wp_call's own operational return boundary -- keeping it
+             separate from proc_frame_post itself (rather than baking it in)
+             so trnsl_assertion_w_lexpr_subst_r's bridge below stays exactly
+             as it always was. *)
+          set (fun ret_val => proc_frame_post ret_val ∗
+            ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I as proc_frame_post_typed.
 
-        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hu1]"); try iFrame; try done.
+        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post_typed with "[] [Hstk Hu1]"); try iFrame; try done.
 
           {
             (* Showing procedure contract holds, via the ambient (Löb-guarded) Calls fact *)
@@ -1982,7 +1991,7 @@ Section MainTranslation.
             iPoseProof ("Calls'" with "[%]") as "Hproc".
             { exact H0. }
 
-            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post stk_id' stk_frm' mp lang.SkipS mask).
+            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post_typed stk_id' stk_frm' mp lang.SkipS mask).
 
             iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
@@ -2031,8 +2040,9 @@ Section MainTranslation.
           iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_pre'. }
 
           have Hproc_frame_post_all : ∀ ret_val,
-              trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
-          { intros ret_val. etransitivity.
+              (trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ∗
+               ⌜proc_ret_typ_opt (Proc proc_args proc_locals proc_pre proc_post proc_body) = Some (typeOf ret_val)⌝)%I ≡ proc_frame_post_typed ret_val.
+          { intros ret_val. rewrite -Hproc_record. rewrite /proc_frame_post_typed /proc_frame_post. f_equiv. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
               apply (stack_free_assertion_subst Hwf _ _
                        (dom_insert_not_reserved subst_map' "#ret_val" (LVal (trnsl_val ret_val))
@@ -2108,13 +2118,20 @@ Section MainTranslation.
             iFrame "Hproc_tbl". setoid_rewrite <- trnsl_assertion_unfold. iFrame. }
 
           {
-            iNext. iIntros "[%ret_val [Hstk [Hq _]]]".
+            iNext. iIntros "[%ret_val [Hstk [[Hq %Htyp2] _]]]".
 
             have Hproc_frame_post : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp ≡ proc_frame_post ret_val.
             { reflexivity. }
 
+            have Hret_typ_match : typ_val_match (ρ x) (trnsl_val ret_val).
+            { apply typeOf_trnsl_val_match.
+              unfold proc_call_ret_well_typed in Hret_wt.
+              rewrite Hproc_record in Htyp2.
+              rewrite Htyp2 in Hret_wt.
+              exact (eq_sym Hret_wt). }
+
             iApply "HΦ". iFrame. iExists (trnsl_val ret_val).
-            iSplitR; [iPureIntro; exact (call_ret_val_well_typed ρ x ret_val)|].
+            iSplitR; [iPureIntro; exact Hret_typ_match|].
 
             set (trnsl_assertion (subst proc_post (<["#ret_val":=LVar lvar_x]> subst_map)) stk_id
             (λ x0 : lvar, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0)) as u.
@@ -2208,8 +2225,10 @@ Section MainTranslation.
           assert ((trnsl_assertion (subst proc_pre subst_map') stk_id mp) ≡ proc_frame_pre) as Hproc_frame_pre. { subst proc_frame_pre; reflexivity. }
 
           set (fun ret_val => trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp) as proc_frame_post.
+          set (fun ret_val => proc_frame_post ret_val ∗
+            ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I as proc_frame_post_typed.
 
-        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post with "[] [Hstk Hu1]"); try iFrame; try done.
+        iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post_typed with "[] [Hstk Hu1]"); try iFrame; try done.
 
           {
             (* Showing procedure contract holds, via the ambient (Löb-guarded) Calls fact *)
@@ -2221,7 +2240,7 @@ Section MainTranslation.
             iPoseProof ("Calls'" with "[%]") as "Hproc".
             { exact H0. }
 
-            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post stk_id' stk_frm' mp s0 mask).
+            iSpecialize ("Hproc" $! proc_frame_pre proc_frame_post_typed stk_id' stk_frm' mp s0 mask).
 
             iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
@@ -2267,8 +2286,9 @@ Section MainTranslation.
           iSpecialize ("Hproc" with "[%]"). { exact Hproc_frame_pre'. }
 
           have Hproc_frame_post_all : ∀ ret_val,
-              trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ≡ proc_frame_post ret_val.
-          { intros ret_val. etransitivity.
+              (trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id' mp ∗
+               ⌜proc_ret_typ_opt (Proc proc_args proc_locals proc_pre proc_post proc_body) = Some (typeOf ret_val)⌝)%I ≡ proc_frame_post_typed ret_val.
+          { intros ret_val. rewrite -Hproc_record. rewrite /proc_frame_post_typed /proc_frame_post. f_equiv. etransitivity.
             - symmetry. apply (stack_free_assertion_trnsl _ stk_id stk_id' mp).
               apply (stack_free_assertion_subst Hwf _ _
                        (dom_insert_not_reserved subst_map' "#ret_val" (LVal (trnsl_val ret_val))
@@ -2344,13 +2364,20 @@ Section MainTranslation.
             iFrame "Hproc_tbl". setoid_rewrite <- trnsl_assertion_unfold. iFrame. }
 
           {
-            iNext. iIntros "[%ret_val [Hstk [Hq _]]]".
+            iNext. iIntros "[%ret_val [Hstk [[Hq %Htyp2] _]]]".
 
             have Hproc_frame_post : trnsl_assertion (subst proc_post (<["#ret_val":=LVal (trnsl_val ret_val)]> subst_map')) stk_id mp ≡ proc_frame_post ret_val.
             { reflexivity. }
 
+            have Hret_typ_match : typ_val_match (ρ x) (trnsl_val ret_val).
+            { apply typeOf_trnsl_val_match.
+              unfold proc_call_ret_well_typed in Hret_wt.
+              rewrite Hproc_record in Htyp2.
+              rewrite Htyp2 in Hret_wt.
+              exact (eq_sym Hret_wt). }
+
             iApply "HΦ". iFrame. iExists (trnsl_val ret_val).
-            iSplitR; [iPureIntro; exact (call_ret_val_well_typed ρ x ret_val)|].
+            iSplitR; [iPureIntro; exact Hret_typ_match|].
 
             set (trnsl_assertion (subst proc_post (<["#ret_val":=LVar lvar_x]> subst_map)) stk_id
             (λ x0 : lvar, if (x0 =? lvar_x)%string then trnsl_val ret_val else mp x0)) as u.
@@ -2569,7 +2596,7 @@ Section MainTranslation.
       have Hargs_locals_lvs_disjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs := dll_disjoint dll.
 
       destruct (Hbodies proc proc_record Hproc_map) as [Hwelldef Hbody_msk].
-      destruct (Hbody_msk msk Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & HRHT).
+      destruct (Hbody_msk msk Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & Hlv_final_typ & HRHT).
 
       set (args := (proc_args_of proc_record).*1).
       set (loc_names := (proc_locals_of proc_record).*1).
@@ -2779,10 +2806,11 @@ Section MainTranslation.
       set (ret_val := trnsl_lval (mp0 lv_final)).
 
       have Hpostcond_bridge :
-        trnsl_assertion
+        (trnsl_assertion
           (subst (proc_postcond_of proc_record)
              (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
-          stk_id mp0
+          stk_id mp0 ∗
+         ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
         ≡ postcond ret_val.
       { set (M1 := <["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))) : gmap var LExpr).
         set (M2 := <["#ret_val" := LVal (trnsl_val ret_val)]>
@@ -2926,7 +2954,18 @@ Section MainTranslation.
         iFrame "Hpost_stk".
         iSplitR.
         + iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
-        + iEval (rewrite Hpostcond_bridge') in "Hpost_pred". iFrame.
+        + iAssert (trnsl_assertion
+              (subst (proc_postcond_of proc_record)
+                 (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
+              stk_id mp0 ∗
+            ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
+            with "[Hpost_pred]" as "Hpost_pred2".
+          { iSplitL "Hpost_pred".
+            - iEval (rewrite trnsl_assertion_unfold). iExact "Hpost_pred".
+            - iPureIntro. unfold ret_val.
+              rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final) (mp0 lv_final) mp0 Henv0 eq_refl eq_refl).
+              exact Hlv_final_typ. }
+          iEval (rewrite Hpostcond_bridge) in "Hpost_pred2". iFrame.
 
       - (* trnsl_stmt (proc_body_of proc_record) = None': body is ghost-only, runs as Skip *)
         have Hprecond_bridge' := Hprecond_bridge.
@@ -2946,7 +2985,18 @@ Section MainTranslation.
         { iExists ret_val, (symb_stk_to_stk_frm stk0' mp0). iFrame "Hpost_stk".
           iSplitR.
           - iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
-          - iEval (rewrite Hpostcond_bridge') in "Hpost_pred". iFrame. }
+          - iAssert (trnsl_assertion
+                (subst (proc_postcond_of proc_record)
+                   (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
+                stk_id mp0 ∗
+              ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
+              with "[Hpost_pred]" as "Hpost_pred2".
+            { iSplitL "Hpost_pred".
+              - iEval (rewrite trnsl_assertion_unfold). iExact "Hpost_pred".
+              - iPureIntro. unfold ret_val.
+                rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final) (mp0 lv_final) mp0 Henv0 eq_refl eq_refl).
+                exact Hlv_final_typ. }
+            iEval (rewrite Hpostcond_bridge) in "Hpost_pred2". iFrame. }
         iNext. iIntros "[Hpost _]".
         iApply "HΦ'". iFrame "Hpost".
     Qed.
