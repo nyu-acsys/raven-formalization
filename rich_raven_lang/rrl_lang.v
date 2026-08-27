@@ -789,6 +789,17 @@ Inductive stmt :=
    invariant stays shared (as with Iris's own inv_alloc), so there is no
    matching unfold/deallocate form. *)
 | FoldInv (inv: inv_name) (args : list lang.expr)
+(* A proof-only check: asserts e holds against the current assertion state
+   and otherwise has no effect (no physical step, no ghost update) --
+   ghost-only, like FoldPred/FoldInv/Fpu. GhostSkip -- a "do nothing" branch
+   filler, needed e.g. when only one arm of an IfS inside an atomic block is
+   a real step -- is Assert (Val (LitBool true)): the assert condition is
+   trivially provable, so it behaves exactly like SkipS but, unlike SkipS,
+   costs no physical step (see counter_monotonic.v's incr_body). Also the
+   Coq-level counterpart of the real tool's own generated assert statements
+   (atomicityAnalysis.ml's open_inv/call_reentrancy_asserts), should a
+   later pass want to formalize those. *)
+| Assert (e : lang.expr)
 (* old_val/new_val are lang.expr (not concrete RA_carrier values), mirroring
    CAS's e2/e3 -- a real program expression, e.g. Var g or
    BinOp RACompOp (Var g1) (Var g2), evaluated against the real stack frame
@@ -2374,6 +2385,9 @@ Inductive stmt_well_defined : pvar_typs -> stmt -> Prop :=
     inv ∈ inv_set ->
     Forall (fun arg => expr_well_defined ρ arg) args ->
     stmt_well_defined ρ (FoldInv inv args)
+| AssertTp ρ e :
+    expr_well_defined ρ e ->
+    stmt_well_defined ρ (Assert e)
 | FpuTp ρ e fld RAPack old_val new_val :
     fld ∈ fld_set ->
     expr_well_defined ρ e ->
@@ -2975,6 +2989,7 @@ Section Translation.
   | InvAccessBlock inv args body => (trnsl_atomic_block body false).1
 
   | FoldInv inv args => None'
+  | Assert e => None'
   | Fpu e fld RAPack old_val new_val => None'
   end.
 
@@ -3412,6 +3427,9 @@ Definition proc_bodies_translate : Prop :=
 
     - simpl in *.
       destruct b; inversion H; left; done.
+
+    - simpl in *.
+      destruct b; inversion H; left; done.
   Qed.
 
   Lemma trnsl_atomic_block_atomicity stmt s stk_id:
@@ -3566,6 +3584,10 @@ Definition proc_bodies_translate : Prop :=
 
     1: {
       intros. simpl in *. apply IHstmt. apply H.
+    }
+
+    1: {
+      intros. simpl in *. inversion H; subst.
     }
 
     1: {
@@ -4899,6 +4921,13 @@ Section RavenLogic.
          fpuValid bridging) lifts directly, uniformly in mp. *)
       (forall mp, LExpr_holds e1 mp -> LExpr_holds e2 mp) ->
       assertion_entails σ (LExprA e1) (LExprA e2)
+  | AE_LExprA_True e :
+      (* Special case of AE_LExprA_Impl with no source LExprA to hang the
+         implication off of: an LExpr that's unconditionally true (e.g.
+         LVal (LitBool true)) can be introduced from nothing, needed for
+         AssertRule's own use as GhostSkip (Assert (Val (LitBool true))). *)
+      (forall mp, LExpr_holds e mp) ->
+      assertion_entails σ (LPure True) (LExprA e)
   | AE_GhostOwn_Chunk_Eq e fld r chunk1 chunk2 :
       (* Unconditional (no co-asserted equality needed, unlike
          AE_LExpr_Subst_Eq_Congr): chunk1/chunk2 interp-agree at *every*
@@ -4981,6 +5010,10 @@ Section RavenLogic.
       apply (LExpr_holds_rename ren e2 mp).
       apply (LExpr_holds_rename ren e1 mp) in Hh.
       exact (Himpl _ Hh).
+    - (* AE_LExprA_True *)
+      rename H into Htrue.
+      apply AE_LExprA_True. intros mp.
+      apply (LExpr_holds_rename ren e mp). exact (Htrue _).
     - (* AE_GhostOwn_Chunk_Eq *)
       rename H into Heq.
       apply AE_GhostOwn_Chunk_Eq. intros mp.
@@ -5186,6 +5219,11 @@ Section RavenLogic.
       apply entails_intro. intros stk mp Henv.
       rewrite (trnsl_assertion_unfold (LExprA e1)) (trnsl_assertion_unfold (LExprA e2)) /trnsl_assertion_pre /=.
       iIntros "%He1". iPureIntro. exact (Himpl mp He1).
+    - (* AE_LExprA_True *)
+      rename H into Htrue.
+      apply entails_intro. intros stk mp Henv.
+      rewrite (trnsl_assertion_unfold (LPure True)) (trnsl_assertion_unfold (LExprA e)) /trnsl_assertion_pre /=.
+      iIntros "_". iPureIntro. exact (Htrue mp).
     - (* AE_GhostOwn_Chunk_Eq *)
       rename H into Heq.
       apply entails_intro. intros stk mp Henv.
@@ -5645,6 +5683,27 @@ Section RavenLogic.
       (LExists v t body)
         c mask
       q
+
+  (* A ghost-only, proof-only check: e must already be provable from the
+     ambient assertion state (p, folded in as a co-asserted LExprA lexpr,
+     mirroring CondRule's own precondition shape rather than a separate
+     assertion_entails premise), and leaves the state unchanged -- like
+     SkipRule, but translates to None' (no physical step), unlike SkipS.
+     GhostSkip := Assert (Val (LitBool true)) is the "do nothing, costs no
+     step" filler this enables (see the Assert constructor's own comment in
+     stmt, and counter_monotonic.v's incr_body). Placed last (rather than
+     next to SkipRule, its closest sibling) so it lands as the newest,
+     final case in every existing induction over RavenHoareTriple --
+     appending doesn't renumber any of rrl_validity's own numbered-bullet
+     case references in trnsl.v, whereas inserting in the middle would. *)
+  | AssertRule ρ σ stk mask e p lexpr :
+    trnsl_expr_lExpr stk e = Some lexpr ->
+    inf_expr ρ e = Some TpBool ->
+    stk_type_compat ρ σ stk ->
+    RavenHoareTriple ρ σ
+      (LAnd (LStack stk) (LAnd p (LExprA lexpr)))
+        (Assert e) mask
+      (LAnd (LStack stk) (LAnd p (LExprA lexpr)))
   .
 
   (* The main renaming theorem: transports a RavenHoareTriple derivation
@@ -5701,7 +5760,8 @@ Section RavenLogic.
       | ρ σ stk mask p Hcompat
       | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk
           Hfresh Hinf Hwd2 Hwd3 Hnotfv Htr1 Htr2 Htr3 Hcompat
-      | ρ σ mask v t body c q Hty Hfresh H IH ]; simpl.
+      | ρ σ mask v t body c q Hty Hfresh H IH
+      | ρ σ stk mask e p lexpr Htr Hinf Hcompat ]; simpl.
     - (* VarAssignmentRule *)
       rewrite fmap_insert.
       apply VarAssignmentRule.
@@ -5834,6 +5894,11 @@ Section RavenLogic.
       + rewrite Hren_typ. exact Hty.
       + exact (lvar_fresh_in_assertion_rename ren Hinj v q Hfresh).
       + exact (IH Hren_typ).
+    - (* AssertRule *)
+      apply (AssertRule ρ σ (ren <$> stk) mask e (rename_assertion ren p) (rename_lexpr ren lexpr)).
+      + exact (trnsl_expr_lExpr_rename ren stk e lexpr Htr).
+      + exact Hinf.
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
   Qed.
 
 End RavenLogic.

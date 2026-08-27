@@ -1056,7 +1056,8 @@ Section MainTranslation.
       | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_mask Hinv_record Hinv_len Hlexprs_res Hstk_tp subst
       | | | | | |
       | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk Hfresh Hinf Hwd2 Hwd3 Hnotin Htrnsl1 Htrnsl2 Htrnsl3 Hstkcompat
-      | ρ σ mask v t body c q Hsigma Hqfresh ] "IH";
+      | ρ σ mask v t body c q Hsigma Hqfresh
+      | ρ σ stk mask e p lexpr Htrnsl Hinf Hstkcompat ] "IH";
       iIntros (mp) "%Henv".
       3: { 
         (* FIELD WRITE *)
@@ -1110,7 +1111,7 @@ Section MainTranslation.
         (* INV ACCESS BLOCK *)
         unfold trnsl_hoare_triple.
 
-        inversion Hwelldef as [ | | | | | | | | | | | | | rho' inv' args' stmt' HInvSet HargsWellDef HBodywelldef | | ];
+        inversion Hwelldef as [ | | | | | | | | | | | | | rho' inv' args' stmt' HInvSet HargsWellDef HBodywelldef | | | ];
           subst stmt' args'.
         have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
         { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
@@ -1259,7 +1260,7 @@ Section MainTranslation.
       7: {
         (* INV ALLOC (FoldInv) *)
         unfold trnsl_hoare_triple. simpl.
-        inversion Hwelldef as [ | | | | | | | | | | | | | | rho' inv' args' HInvSet HargsWellDef | ];
+        inversion Hwelldef as [ | | | | | | | | | | | | | | rho' inv' args' HInvSet HargsWellDef | | ];
           subst args'.
         have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
         { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
@@ -2540,6 +2541,17 @@ Section MainTranslation.
         }
       }
 
+      1: {
+        (* ASSERT: ghost-only, no physical step, and no change to the
+           assertion state -- trnsl_hoare_triple for a None'-producing stmt
+           unfolds to a bare update between identical pre/post, so this is
+           just returning the hypothesis unchanged (mirrors FPU's own case
+           shape, but without any own_update at all, since there's no
+           ghost-state change here). *)
+        unfold trnsl_hoare_triple; simpl.
+        setoid_rewrite trnsl_assertion_unfold.
+        iIntros "H". iModIntro. iFrame.
+      }
     Qed.
 
     (* The central bootstrap theorem: if every procedure's own body is

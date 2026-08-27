@@ -220,6 +220,17 @@ Definition counterInv_record : InvRecord := Inv ["x"] counterInv_body.
    exist before RavenHoareTriple/ProgramWF's own Local Notations
    (needed by every RavenHoareTriple-typed lemma in this file) do. *)
 
+(* A "do nothing" filler for a branch that must cost no physical step --
+   e.g. incr_body's CAS-failure branch below, which sits inside an
+   InvAccessBlock that already spent its one atomic step on the CAS, so
+   SkipS (a real step) there makes the block need two steps depending on
+   which branch runs, and trnsl_atomic_block rejects it. Assert (Val
+   (LitBool true)) costs no step at all (see the Assert constructor's own
+   comment in rrl_lang.v) and, since "true" is trivially provable, behaves
+   exactly like SkipS at the Hoare-logic level (see ghostskip_step below,
+   defined once entails_* wrappers are available). *)
+Definition GhostSkip : stmt := Assert (Val (lang.LitBool true)).
+
 Definition read_body : stmt :=
   Seq
     (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c"))
@@ -246,7 +257,7 @@ Definition incr_body : stmt :=
                (IfS (Var "res")
                  (Fpu (Var "x") "h" h_ra
                    (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-                 SkipS)))
+                 GhostSkip)))
         (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS))).
 
 Definition incr_precond : assertion := LInv "counterInv" [LVar "x"].
@@ -506,6 +517,10 @@ Proof. exact (AE_And_True_Intro sigma P). Qed.
 Lemma entails_and_true_elim P : assertion_entails (LAnd P (LPure True)) P.
 Proof. exact (AE_And_True_Elim sigma P). Qed.
 
+Lemma entails_lexpra_true (le : LExpr) :
+  (forall mp, LExpr_holds le mp) -> assertion_entails (LPure True) (LExprA le).
+Proof. exact (AE_LExprA_True sigma le). Qed.
+
 (* A small reusable entails algebra, so LAnd-trees can be reshuffled freely
    via WeakeningRule instead of ad hoc per-site proofs. *)
 Lemma entails_refl P : assertion_entails P P.
@@ -763,6 +778,28 @@ Proof. exact (AE_And_Elim_L sigma P Q). Qed.
 
 Lemma entails_true_intro X : assertion_entails X (LPure True).
 Proof. exact (AE_True_Intro sigma X). Qed.
+
+(* GhostSkip's own Hoare rule: derived from AssertRule (assert (Val (LitBool
+   true)), trivially provable) via WeakeningRule, rather than a bespoke
+   RavenHoareTriple constructor -- mirrors SkipRule's own shape exactly
+   (arbitrary p, unchanged), but GhostSkip costs no physical step, unlike
+   SkipS (see GhostSkip's own comment above incr_body). *)
+Lemma ghostskip_step (ρ : pvar_typs) (mask : maskAnnot) (stk : stack) (p : assertion) :
+  stk_type_compat ρ sigma stk ->
+  RavenHoareTriple ρ sigma (LAnd (LStack stk) p) GhostSkip mask (LAnd (LStack stk) p).
+Proof.
+  intros Hcompat.
+  eapply WeakeningRule.
+  - apply (AssertRule ρ sigma stk mask (Val (lang.LitBool true)) p (LVal (LitBool true))).
+    + reflexivity.
+    + reflexivity.
+    + exact Hcompat.
+  - apply entails_and_mono; [exact (entails_refl _) |].
+    eapply entails_trans; [exact (entails_and_true_intro p) |].
+    apply entails_and_mono; [exact (entails_refl _) |].
+    apply entails_lexpra_true. intros mp. reflexivity.
+  - apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_elim_l _ _)].
+Qed.
 
 (* No need to carry counterInv's own LInv fact (or the intermediate stack
    state / "l_ret" witness) through to the end: read_postcond doesn't
@@ -1220,7 +1257,7 @@ Proof.
   - eapply AE_And_True_Intro.
 Qed.
 
-(* The IfS's "res = false" branch (SkipS): extract, drop the now-unused
+(* The IfS's "res = false" branch (GhostSkip): extract, drop the now-unused
    arithmetic fact, repack counterInv unchanged. *)
 Lemma incr_false_branch_step :
   RavenHoareTriple rho_incr sigma
@@ -1231,12 +1268,12 @@ Lemma incr_false_branch_step :
                    (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                          (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
             (LExprA (LUnOp NotBoolOp (LVar "l_res")))))
-      SkipS
+      GhostSkip
       (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   eapply WeakeningRule.
-  - apply (SkipRule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
+  - apply (ghostskip_step rho_incr (cmask ∖ {["counterInv"]}) incr_stk2
       (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))))).
     exact stk_type_compat_incr_stk2.
   - apply entails_and_mono; [exact (entails_refl _) |].
@@ -1256,14 +1293,14 @@ Lemma incr_ifs_res_step :
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-        SkipS)
+        GhostSkip)
       (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   apply (CondRule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
     (Var "res")
     (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-    SkipS
+    GhostSkip
     (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
              (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
              (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool false))))))
@@ -1298,7 +1335,7 @@ Lemma incr_ifs_res_step_wrapped :
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-        SkipS)
+        GhostSkip)
       (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
@@ -1324,7 +1361,7 @@ Lemma incr_invblock2_inner_sym :
       (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
            (IfS (Var "res")
              (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-             SkipS))
+             GhostSkip))
       (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
@@ -1345,7 +1382,7 @@ Proof.
                   (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-        SkipS)
+        GhostSkip)
       (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))))).
     + reflexivity.
     + simpl. left. reflexivity.
@@ -1372,7 +1409,7 @@ Lemma incr_invblock2_v_elim_step :
       (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
            (IfS (Var "res")
              (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-             SkipS))
+             GhostSkip))
       (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
@@ -1385,7 +1422,7 @@ Proof.
       (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
            (IfS (Var "res")
              (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-             SkipS))
+             GhostSkip))
       (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))))).
     + reflexivity.
     + simpl. right. split.
@@ -1407,7 +1444,7 @@ Lemma incr_invblock2_step :
         (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
              (IfS (Var "res")
                (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-               SkipS)))
+               GhostSkip)))
       cmask
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))).
 Proof.
@@ -1415,7 +1452,7 @@ Proof.
     (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
          (IfS (Var "res")
            (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-           SkipS))
+           GhostSkip))
     counterInv_record
     (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))
     (LPure True) "l_res" TpBool [LVar "x"]).
@@ -1508,7 +1545,7 @@ Proof.
                   (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
                        (IfS (Var "res")
                          (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-                         SkipS)))
+                         GhostSkip)))
                 (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)))
       incr_postcond).
     + reflexivity.
@@ -1522,7 +1559,7 @@ Proof.
                  (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
                       (IfS (Var "res")
                         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-                        SkipS)))
+                        GhostSkip)))
                (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS))
           incr_postcond).
         -- reflexivity.
@@ -1913,4 +1950,21 @@ Proof.
   - (* pwf_ghost_heap_namespace_disjoint_inv *)
     rewrite inv_set_eq. intros inv' Hin. apply elem_of_singleton in Hin as ->.
     exact ghost_heap_namespace_disjoint_counterInv.
+Qed.
+
+(* proc_bodies_translate: every registered procedure's own body actually
+   compiles (trnsl_stmt _ <> Error). Purely syntactic, independent of the
+   masks-redesign work blocking Hbodies (local/masks-redesign.md) -- decided
+   entirely by trnsl_stmt's own structural recursion over each concrete
+   body, computed once per procedure via vm_compute/discriminate. incr_body
+   is exactly why this isn't vacuous: its original SkipS-on-CAS-failure
+   shape made trnsl_stmt incr_body compute to Error (trnsl_atomic_block
+   rejected the second InvAccessBlock as needing two physical steps), a
+   real bug this lemma caught -- fixed by GhostSkip above, not just here. *)
+Lemma Hpbt : proc_bodies_translate (P:=RProg).
+Proof.
+  apply proc_map_forall.
+  - (* make *) vm_compute. discriminate.
+  - (* read *) vm_compute. discriminate.
+  - (* incr *) vm_compute. discriminate.
 Qed.
