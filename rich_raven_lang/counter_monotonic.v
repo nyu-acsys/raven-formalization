@@ -343,18 +343,28 @@ Definition rho : pvar_typs := fun v =>
   | _ => TpUnit
   end.
 
-Definition sigma : lvar_typs := fun lv =>
-  match lv with
-  | "x" => TpLoc
-  | "$v" => TpInt (* counterInv_body's own existential witness *)
-  | "l_v1" => TpInt
-  | "l_new_v1" => TpInt
-  | "l_res" => TpBool
-  | "l_ret" => TpInt
-  | "l_call" => TpUnit
-  | "l_x_ret" => TpLoc
-  | _ => TpUnit
-  end.
+(* Genuinely rich sigma (Hσ_rich, Step 6, local/binders.md's "Open item,
+   explicitly deferred"): the fixed names above give sigma only finitely
+   many lvars per type -- e.g. only "l_res" ever had TpBool, so excluding
+   it leaves nothing. rrl_lang.v's rich_lvar_typs fixes this generically
+   (infinitely many lvars of every type, by construction); layering these
+   few fixed names on top via lvar_typs_update inherits richness for free
+   from rich_lvar_typs_rich, with no proof to redo here. *)
+Definition sigma : lvar_typs := lvar_typs_update
+  (list_to_map [
+     ("x", TpLoc);
+     ("$v", TpInt); (* counterInv_body's own existential witness *)
+     ("l_v1", TpInt);
+     ("l_new_v1", TpInt);
+     ("l_res", TpBool);
+     ("l_ret", TpInt);
+     ("l_call", TpUnit);
+     ("l_x_ret", TpLoc)
+  ] : gmap lvar typ)
+  rich_lvar_typs.
+
+Lemma Hsigma_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ sigma lv = t.
+Proof. exact (lvar_typs_update_rich _ rich_lvar_typs rich_lvar_typs_rich). Qed.
 
 Definition stk0 : stack := {[ "x" := "x" ]}.
 Definition cmask : maskAnnot := {[ "counterInv" ]}.

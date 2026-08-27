@@ -3,6 +3,8 @@ From stdpp Require Import countable.
 Require Import Eqdep_dec.
 From stdpp Require Import gmap list sets coPset.
 From stdpp Require Import namespaces.
+From stdpp Require Import pretty.
+From Coq Require Import Ascii.
 
 From iris Require Import options.
 From iris.algebra Require Import ofe cmra agree auth gset gmap.
@@ -1098,6 +1100,244 @@ Definition is_reserved (v : lvar) : Prop := String.prefix "$" v = true.
 
 Global Instance is_reserved_dec (v : lvar) : Decision (is_reserved v).
 Proof. unfold is_reserved. apply _. Defined.
+
+(* A genuinely rich lvar_typs (Hσ_rich's shape, Step 6,
+   local/parameters-redesign.md/local/binders.md's "Open item, explicitly
+   deferred"): a naive, finite lvar_typs (e.g. one built by hand out of a
+   handful of named lvars) only ever has finitely many lvars per type --
+   sometimes zero -- failing "forall t excl, exists lv not in excl of
+   type t" outright. rich_lvar_typs below has infinitely many lvars of
+   *every* type by construction, and rich_lvar_typs_rich proves it;
+   lvar_typs_update then lets a caller layer their own finitely many
+   fixed names on top (e.g. counter_monotonic.v's "x"/"$v"/...) while
+   inheriting richness for free (lvar_typs_update_rich), rather than
+   reproving this whole construction per program. *)
+Section RichLvarTyps.
+
+  (* One infinite, by-construction-disjoint family of names per type: a
+     fixed prefix per type-tag ("fresh_i_"/"fresh_l_"/"fresh_b_"/
+     "fresh_u_"/"fresh_r_", none a prefix of another since they agree
+     everywhere but position 7), numbered so no two members of one family
+     ever coincide. None of the prefixes start with "$" (is_reserved).
+
+     TpInt/TpLoc/TpBool/TpUnit only need rich_lvar_typs to recognize the
+     prefix (not recover the number), so pretty (injective on nat,
+     stdpp's pretty_nat_inj) is enough. TpRA r needs rich_lvar_typs to
+     recover r itself from the middle of the string, which pretty can't
+     support directly (nothing pins down where its digits end and r
+     begins) -- solved by numbering those in unary (a run of "z"
+     characters) so the run's end is exactly the first non-"z" character,
+     unambiguously, regardless of what r itself contains. *)
+
+  Fixpoint unary (n : nat) : string :=
+    match n with O => EmptyString | S n' => String "z"%char (unary n') end.
+
+  Lemma unary_inj : Inj (=) (=) unary.
+  Proof.
+    intros n1. induction n1 as [| n1 IH]; intros [| n2]; simpl; try done.
+    intros [= H]. f_equal. exact (IH _ H).
+  Qed.
+
+  Lemma append_cancel_l (s1 s2 s3 : string) : s1 +:+ s2 = s1 +:+ s3 -> s2 = s3.
+  Proof.
+    induction s1 as [| a s1 IH]; simpl; [done |].
+    intros [= H]. exact (IH H).
+  Qed.
+
+  Fixpoint split_at_underscore (s : string) : string * string :=
+    match s with
+    | EmptyString => (EmptyString, EmptyString)
+    | String a s' =>
+      if ascii_dec a "_"%char then (EmptyString, s')
+      else let '(pre, post) := split_at_underscore s' in (String a pre, post)
+    end.
+
+  Lemma split_at_underscore_unary_app (n : nat) (r : string) :
+    split_at_underscore (unary n +:+ "_" +:+ r) = (unary n, r).
+  Proof.
+    induction n as [| n IH]; simpl; [done |].
+    destruct (ascii_dec "z"%char "_"%char) as [Hz | _]; [discriminate Hz |].
+    rewrite IH. reflexivity.
+  Qed.
+
+  (* String.prefix/String.append are Fixpoints structurally recursive on
+     their *second* argument, so simpl/reflexivity get stuck on goals
+     like "String.prefix s1 (s1 +:+ s2) = true" whenever s2 is open, even
+     though the fact holds regardless of what s2 is -- Coq's
+     fixpoint-unfolding guard is tied to the structural argument being a
+     literal constructor, independent of whether the body's own first
+     pattern match even inspects it. Hence this lemma, proved by
+     induction rather than left to computation. *)
+  Lemma prefix_app_l (s1 s2 : string) : String.prefix s1 (s1 +:+ s2) = true.
+  Proof.
+    induction s1 as [| a s1 IH].
+    - simpl. destruct s2; reflexivity.
+    - simpl. destruct (ascii_dec a a) as [_ | Hne]; [exact IH | exfalso; exact (Hne eq_refl)].
+  Qed.
+
+  Lemma substring_0_length_id (s : string) : String.substring 0 (String.length s) s = s.
+  Proof. induction s as [| a s IH]; simpl; [done |]. f_equal. exact IH. Qed.
+
+  Lemma substring_length_app (s1 s2 : string) :
+    String.substring (String.length s1) (String.length s2) (s1 +:+ s2) = s2.
+  Proof.
+    induction s1 as [| a s1 IH]; simpl; [apply substring_0_length_id | exact IH].
+  Qed.
+
+  Lemma string_length_app (s1 s2 : string) :
+    String.length (s1 +:+ s2) = String.length s1 + String.length s2.
+  Proof. induction s1 as [| a s1 IH]; simpl; [done | f_equal; exact IH]. Qed.
+
+  Definition fresh_int_name (n : nat) : lvar := "fresh_i_" +:+ pretty n.
+  Definition fresh_loc_name (n : nat) : lvar := "fresh_l_" +:+ pretty n.
+  Definition fresh_bool_name (n : nat) : lvar := "fresh_b_" +:+ pretty n.
+  Definition fresh_unit_name (n : nat) : lvar := "fresh_u_" +:+ pretty n.
+  Definition fresh_ra_name (r : ra_name) (n : nat) : lvar := "fresh_r_" +:+ unary n +:+ "_" +:+ r.
+
+  Lemma fresh_int_name_inj : Inj (=) (=) fresh_int_name.
+  Proof. intros n1 n2 H. apply pretty_nat_inj, (append_cancel_l "fresh_i_"), H. Qed.
+  Lemma fresh_loc_name_inj : Inj (=) (=) fresh_loc_name.
+  Proof. intros n1 n2 H. apply pretty_nat_inj, (append_cancel_l "fresh_l_"), H. Qed.
+  Lemma fresh_bool_name_inj : Inj (=) (=) fresh_bool_name.
+  Proof. intros n1 n2 H. apply pretty_nat_inj, (append_cancel_l "fresh_b_"), H. Qed.
+  Lemma fresh_unit_name_inj : Inj (=) (=) fresh_unit_name.
+  Proof. intros n1 n2 H. apply pretty_nat_inj, (append_cancel_l "fresh_u_"), H. Qed.
+  Lemma fresh_ra_name_inj (r : ra_name) : Inj (=) (=) (fresh_ra_name r).
+  Proof.
+    intros n1 n2 H. apply (append_cancel_l "fresh_r_") in H.
+    have Hsplit : split_at_underscore (unary n1 +:+ "_" +:+ r) = split_at_underscore (unary n2 +:+ "_" +:+ r).
+    { rewrite H. reflexivity. }
+    rewrite !split_at_underscore_unary_app in Hsplit.
+    injection Hsplit as Hsplit.
+    exact (unary_inj _ _ Hsplit).
+  Qed.
+
+  (* Recovers r from a name produced by fresh_ra_name: strip the
+     "fresh_r_" prefix (8 characters), then split at the first
+     underscore -- unary n never contains one, so this always lands
+     exactly at the delimiter fresh_ra_name itself inserted, regardless
+     of r's own content. *)
+  Definition ra_name_of_fresh (lv : lvar) : ra_name :=
+    snd (split_at_underscore (String.substring 8 (String.length lv - 8) lv)).
+
+  Lemma ra_name_of_fresh_correct (r : ra_name) (n : nat) :
+    ra_name_of_fresh (fresh_ra_name r n) = r.
+  Proof.
+    unfold ra_name_of_fresh, fresh_ra_name.
+    rewrite string_length_app.
+    replace (String.length "fresh_r_" + String.length (unary n +:+ "_" +:+ r) - 8)
+      with (String.length (unary n +:+ "_" +:+ r)) by (simpl; lia).
+    rewrite (substring_length_app "fresh_r_").
+    rewrite split_at_underscore_unary_app. reflexivity.
+  Qed.
+
+  Definition rich_lvar_typs : lvar_typs := fun lv =>
+    if String.prefix "fresh_i_" lv then TpInt
+    else if String.prefix "fresh_l_" lv then TpLoc
+    else if String.prefix "fresh_b_" lv then TpBool
+    else if String.prefix "fresh_u_" lv then TpUnit
+    else if String.prefix "fresh_r_" lv then TpRA (ra_name_of_fresh lv)
+    else TpUnit.
+
+  Lemma rich_lvar_typs_fresh_int (n : nat) : rich_lvar_typs (fresh_int_name n) = TpInt.
+  Proof. unfold rich_lvar_typs, fresh_int_name. rewrite (prefix_app_l "fresh_i_"). reflexivity. Qed.
+  Lemma rich_lvar_typs_fresh_loc (n : nat) : rich_lvar_typs (fresh_loc_name n) = TpLoc.
+  Proof. unfold rich_lvar_typs, fresh_loc_name. rewrite (prefix_app_l "fresh_l_"). reflexivity. Qed.
+  Lemma rich_lvar_typs_fresh_bool (n : nat) : rich_lvar_typs (fresh_bool_name n) = TpBool.
+  Proof. unfold rich_lvar_typs, fresh_bool_name. rewrite (prefix_app_l "fresh_b_"). reflexivity. Qed.
+  Lemma rich_lvar_typs_fresh_unit (n : nat) : rich_lvar_typs (fresh_unit_name n) = TpUnit.
+  Proof. unfold rich_lvar_typs, fresh_unit_name. rewrite (prefix_app_l "fresh_u_"). reflexivity. Qed.
+  Lemma rich_lvar_typs_fresh_ra (r : ra_name) (n : nat) : rich_lvar_typs (fresh_ra_name r n) = TpRA r.
+  Proof.
+    unfold rich_lvar_typs, fresh_ra_name. rewrite (prefix_app_l "fresh_r_").
+    fold (fresh_ra_name r n). rewrite ra_name_of_fresh_correct. reflexivity.
+  Qed.
+
+  Lemma fresh_int_name_not_reserved (n : nat) : ¬ is_reserved (fresh_int_name n).
+  Proof. unfold is_reserved. discriminate. Qed.
+  Lemma fresh_loc_name_not_reserved (n : nat) : ¬ is_reserved (fresh_loc_name n).
+  Proof. unfold is_reserved. discriminate. Qed.
+  Lemma fresh_bool_name_not_reserved (n : nat) : ¬ is_reserved (fresh_bool_name n).
+  Proof. unfold is_reserved. discriminate. Qed.
+  Lemma fresh_unit_name_not_reserved (n : nat) : ¬ is_reserved (fresh_unit_name n).
+  Proof. unfold is_reserved. discriminate. Qed.
+  Lemma fresh_ra_name_not_reserved (r : ra_name) (n : nat) : ¬ is_reserved (fresh_ra_name r n).
+  Proof. unfold is_reserved. discriminate. Qed.
+
+  Lemma NoDup_map_of_inj {A B} (f : A -> B) (Hinj : ∀ x y, f x = f y -> x = y) (l : list A) :
+    NoDup l -> NoDup (map f l).
+  Proof.
+    induction 1 as [| x l Hnotin Hnodup IH]; simpl; constructor; auto.
+    intros Hin. apply Hnotin. apply elem_of_list_In, in_map_iff in Hin as [y [Heq Hy]].
+    apply Hinj in Heq. subst. apply elem_of_list_In. exact Hy.
+  Qed.
+
+  (* Pigeonhole: an injective f : nat -> lvar can't map k+1 distinct
+     naturals (k := length (elements excl)) all into excl (which only
+     has k elements), so at least one index must escape. Self-contained
+     (not stdpp's Infinite class): avoids having to separately show that
+     class's own opaque "fresh" witness lands in f's image, which stdpp
+     doesn't expose. *)
+  Lemma exists_fresh_index (f : nat -> lvar) (Hinj : Inj (=) (=) f) (excl : gset lvar) :
+    ∃ n, f n ∉ excl.
+  Proof.
+    set (k := length (elements excl)).
+    destruct (Forall_Exists_dec (fun n => f n ∈ excl) (fun n => f n ∉ excl)
+                (fun n => decide (f n ∈ excl)) (seq 0 (S k)))
+      as [Hall | Hex].
+    - exfalso.
+      have Hnodup : NoDup (map f (seq 0 (S k))).
+      { apply NoDup_map_of_inj; [intros x y; apply Hinj | apply NoDup_seq]. }
+      have Hincl : incl (map f (seq 0 (S k))) (elements excl).
+      { intros y Hy. apply in_map_iff in Hy as [n [<- Hn]].
+        apply (elem_of_list_In (elements excl) (f n)), elem_of_elements.
+        apply (proj1 (Forall_forall _ (seq 0 (S k))) Hall n).
+        apply elem_of_list_In. exact Hn. }
+      pose proof (NoDup_incl_length (proj1 (NoDup_ListNoDup _) Hnodup) Hincl) as Hle.
+      rewrite map_length seq_length in Hle.
+      unfold k in Hle. lia.
+    - apply Exists_exists in Hex as [n [_ Hn]]. exists n. exact Hn.
+  Qed.
+
+  Lemma rich_lvar_typs_rich :
+    ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ rich_lvar_typs lv = t.
+  Proof.
+    intros t excl.
+    destruct t as [ | | | | r].
+    - destruct (exists_fresh_index fresh_int_name fresh_int_name_inj excl) as [n Hn].
+      exists (fresh_int_name n). eauto using fresh_int_name_not_reserved, rich_lvar_typs_fresh_int.
+    - destruct (exists_fresh_index fresh_loc_name fresh_loc_name_inj excl) as [n Hn].
+      exists (fresh_loc_name n). eauto using fresh_loc_name_not_reserved, rich_lvar_typs_fresh_loc.
+    - destruct (exists_fresh_index fresh_bool_name fresh_bool_name_inj excl) as [n Hn].
+      exists (fresh_bool_name n). eauto using fresh_bool_name_not_reserved, rich_lvar_typs_fresh_bool.
+    - destruct (exists_fresh_index fresh_unit_name fresh_unit_name_inj excl) as [n Hn].
+      exists (fresh_unit_name n). eauto using fresh_unit_name_not_reserved, rich_lvar_typs_fresh_unit.
+    - destruct (exists_fresh_index (fresh_ra_name r) (fresh_ra_name_inj r) excl) as [n Hn].
+      exists (fresh_ra_name r n). eauto using fresh_ra_name_not_reserved, rich_lvar_typs_fresh_ra.
+  Qed.
+
+  (* Layers finitely many fixed names on top of any already-rich
+     lvar_typs (not just rich_lvar_typs above -- this holds for any base
+     satisfying the same richness shape), inheriting richness for free:
+     given (t, excl), search the base's own richness fact with the
+     overrides' keys folded into the exclusion set too, so the witness it
+     returns can never be one of the finitely many overridden names. *)
+  Definition lvar_typs_update (overrides : gmap lvar typ) (base : lvar_typs) : lvar_typs :=
+    fun lv => match overrides !! lv with Some t => t | None => base lv end.
+
+  Lemma lvar_typs_update_rich (overrides : gmap lvar typ) (base : lvar_typs)
+      (Hbase_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ base lv = t) :
+    ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ lvar_typs_update overrides base lv = t.
+  Proof.
+    intros t excl.
+    destruct (Hbase_rich t (excl ∪ (dom overrides : gset lvar))) as [lv [Hnotin [Hnotres Heq]]].
+    exists lv. split; [set_solver |]. split; [exact Hnotres |].
+    unfold lvar_typs_update.
+    destruct (overrides !! lv) eqn:Hov; [| exact Heq].
+    exfalso. apply Hnotin. apply elem_of_union_r, elem_of_dom. eexists. exact Hov.
+  Qed.
+
+End RichLvarTyps.
 
 (* Bundles both projections of "M was built by the ordinary framework
    machinery, not by hand-picking a reserved name": neither its keys
