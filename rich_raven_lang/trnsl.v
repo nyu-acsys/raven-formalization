@@ -791,9 +791,21 @@ Section MainTranslation.
        run from a symbolic entry stack synthesized (via a fresh
        proc_entry_lvars) out of its formal args and locals. A plain Prop,
        not an iProp -- raven_soundness below is exactly the bridge from this
-       Raven-level statement to the Iris-level all_proc_specs_valid_iris. *)
-    Definition all_proc_specs_valid_raven (ρ : pvar_typs) (σ : lvar_typs) : Prop :=
+       Raven-level statement to the Iris-level all_proc_specs_valid_iris.
+
+       No externally-supplied pvar_typs parameter (unlike an earlier version
+       of this definition): each procedure's own body is checked against
+       proc_pvar_typs proc_record, its own args/locals, exactly as
+       all_proc_specs_valid_iris already types "#ret_val" and every other
+       local via proc_args_of/proc_locals_of/typeOf rather than a shared
+       table. A single global pvar_typs would force every procedure sharing
+       a variable name -- most unavoidably "#ret_val" itself, which every
+       procedure must declare -- to agree on its type; see
+       proc_call_ret_well_typed's own comment for the caller-side half of
+       this same fix. *)
+    Definition all_proc_specs_valid_raven (σ : lvar_typs) : Prop :=
       ∀ proc_name proc_record, proc_map !! proc_name = Some proc_record →
+        let ρ := proc_pvar_typs proc_record in
         stmt_well_defined ρ (proc_body_of proc_record) ∧
         ∀ msk, msk ⊆ inv_set →
         ∀ (dll : proc_entry_lvars σ proc_record),
@@ -2535,7 +2547,7 @@ Section MainTranslation.
        lemma -- kept word-for-word unchanged rather than rewritten to
        allocate internally, per the Step 5 design decision (see
        local/parameters-redesign.md's "Status"). *)
-    Lemma raven_soundness_core ρ σ
+    Lemma raven_soundness_core σ
       (Hwf : ProgramWF)
       (* σ has enough distinct lvars of any given type, avoiding any finite
          exclusion set -- lets every procedure synthesize its own entry stack
@@ -2552,7 +2564,7 @@ Section MainTranslation.
          "#ret_val" occurrences must be read through that renaming --
          mirroring exactly how ProcCallRuleRet's own conclusion substitutes
          "#ret_val" with the call's fresh result lvar. *)
-      (Hbodies : all_proc_specs_valid_raven ρ σ) :
+      (Hbodies : all_proc_specs_valid_raven σ) :
       (* The per-invariant shared worlds, the ghost heap's own world, and
          every procedure's table registration are object-level (-∗)
          antecedents, not Coq-level "⊢ P" premises: own_alloc/inv_alloc
@@ -2576,6 +2588,12 @@ Section MainTranslation.
       iIntros (proc proc_record stk_vals) "%Hproc_in_set %Hproc_map".
       iIntros (precond postcond stk_id stk_frm mp stmt msk)
         "%Henv %Hmsk_sub %Hargs_present %Harg_vals %Hlocals_typed %Hdom_val %Harg_vals_typed %Hprecond_eq %Hpostcond_eq %Hstmt_shape".
+
+      (* Matches all_proc_specs_valid_raven's own internal "let ρ := ..." --
+         Hbodies proc proc_record Hproc_map below is already stated in
+         terms of exactly this, so nothing past this point needs to change
+         beyond no longer taking ρ as an external parameter. *)
+      set (ρ := proc_pvar_typs proc_record).
 
       pose proof (Hwf.(pwf_proc_args_unique) proc proc_record Hproc_map) as Hargs_nodup.
       pose proof (Hwf.(pwf_proc_locals_unique) proc proc_record Hproc_map) as Hlocals_nodup.
@@ -3059,11 +3077,11 @@ Section AdequacyWrapper.
   Definition mkInvTokenG (γi : gname) : invTokenG Σ :=
     InvTokenG Σ _ (λ _, γi).
 
-  Theorem raven_soundness (ρ : pvar_typs) (σ : lvar_typs)
+  Theorem raven_soundness (σ : lvar_typs)
     (Hwf : ∀ γg γi, ProgramWF (P:=RProg) (G:=mkGhostConfig γg) (invTokenG0:=mkInvTokenG γi))
     (Hσ_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
     (Hpbt : proc_bodies_translate (P:=RProg))
-    (Hbodies : all_proc_specs_valid_raven (RProg:=RProg) ρ σ) :
+    (Hbodies : all_proc_specs_valid_raven (RProg:=RProg) σ) :
     all_proc_tbl_chunks (RProg:=RProg) -∗
     |={⊤}=> ∃ γg γi,
       all_proc_specs_valid_iris Gs σ (RProg:=RProg) (G:=mkGhostConfig γg)
@@ -3088,7 +3106,7 @@ Section AdequacyWrapper.
       as "Hworlds".
     { rewrite /all_inv_worlds Hinv_set big_sepS_singleton. iExact "Hworlds_inv". }
     iModIntro.
-    iApply (raven_soundness_core Gs ρ σ Hwf0 Hσ_rich Hpbt Hbodies with "Hworlds Hgworlds Hwtbl").
+    iApply (raven_soundness_core Gs σ Hwf0 Hσ_rich Hpbt Hbodies with "Hworlds Hgworlds Hwtbl").
   Qed.
 
 End AdequacyWrapper.

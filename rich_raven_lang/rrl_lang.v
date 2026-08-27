@@ -2237,6 +2237,25 @@ Definition proc_call_args_well_typed (ρ : pvar_typs) (args : list lang.expr) (p
 Definition proc_ret_typ_opt (proc_entry : ProcRecord) : option typ :=
   (list_to_map (proc_locals_of proc_entry) : gmap var typ) !! "#ret_val".
 
+(* A procedure's own pvar-typing context, built from its own declared args
+   and locals -- the callee-side analogue of proc_ret_typ_opt/
+   proc_call_ret_well_typed's own "type via the record, not a global slot"
+   design (see that pair's comment), generalized from just "#ret_val" to
+   every one of a procedure's own variable names. Used by
+   all_proc_specs_valid_raven (in place of a single, externally-supplied
+   pvar_typs shared by the whole program) so that two procedures reusing
+   the same argument/local name -- most unavoidably "#ret_val" itself,
+   which every procedure must declare -- never need to agree on its type.
+   The fallback (TpUnit) is never actually consulted: a procedure's own
+   RavenHoareTriple derivation only ever references its own declared
+   names, per stmt_well_defined/RavenHoareTriple's own well-formedness
+   discipline. *)
+Definition proc_pvar_typs (proc_record : ProcRecord) : pvar_typs :=
+  fun v => match (list_to_map (proc_args_of proc_record ++ proc_locals_of proc_record) : gmap var typ) !! v with
+           | Some t => t
+           | None => TpUnit
+           end.
+
 (* Symmetric to proc_call_args_well_typed, for the call's own LHS variable:
    treated like an out-argument, typed via the callee's own declared
    "#ret_val" local -- not via a global pvar-typing slot (rho "#ret_val"

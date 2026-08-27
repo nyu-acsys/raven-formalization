@@ -333,15 +333,21 @@ Proof. reflexivity. Qed.
    rrl_lang.v), so sigma has to exist before the "entails" local notation
    that partially applies it does. *)
 
-Definition rho : pvar_typs := fun v =>
-  match v with
-  | "x" => TpLoc
-  | "v1" => TpInt
-  | "new_v1" => TpInt
-  | "res" => TpBool
-  | "#ret_val" => TpInt
-  | _ => TpUnit
-  end.
+(* Per-procedure pvar-typing contexts (Step 6, local/parameters-redesign.md):
+   read/incr/make each declare "#ret_val" with a genuinely different type
+   (Int/Unit/Loc respectively -- make's return really is a location, not an
+   arbitrary choice), which a single global rho could never satisfy for all
+   three at once (all_proc_specs_valid_raven's own entry stack needs
+   rho "#ret_val" = sigma lv for whichever lv the proc's own dll picks,
+   and dll_locals_typed ties that lv's type to the *callee's* own
+   declaration). rrl_lang.v's proc_pvar_typs (all_proc_specs_valid_raven's
+   own replacement for a shared pvar_typs parameter) builds exactly the
+   right context from each proc_record's own args/locals -- see its
+   comment, and proc_call_ret_well_typed's, for the caller-side half of
+   this same fix. *)
+Definition rho_read : pvar_typs := proc_pvar_typs read_record.
+Definition rho_incr : pvar_typs := proc_pvar_typs incr_record.
+Definition rho_make : pvar_typs := proc_pvar_typs make_record.
 
 (* Genuinely rich sigma (Hσ_rich, Step 6, local/binders.md's "Open item,
    explicitly deferred"): the fixed names above give sigma only finitely
@@ -359,7 +365,18 @@ Definition sigma : lvar_typs := lvar_typs_update
      ("l_res", TpBool);
      ("l_ret", TpInt);
      ("l_call", TpUnit);
-     ("l_x_ret", TpLoc)
+     ("l_x_ret", TpLoc);
+     (* Placeholder entry values for a procedure's own not-yet-touched
+        locals (e.g. read's "v1"/"#ret_val" before FldRd/Assign overwrite
+        them) -- needed so read/incr/make's own entry stack can bind every
+        declared local from the start, matching all_proc_specs_valid_raven's
+        own entry-stack shape (every RTCallStep-allocated local is bound at
+        once, not just the ones a given derivation happens to touch first).
+        Never read, only overwritten, so one name per type suffices. *)
+     ("l_ph_int", TpInt);
+     ("l_ph_bool", TpBool);
+     ("l_ph_unit", TpUnit);
+     ("l_ph_loc", TpLoc)
   ] : gmap lvar typ)
   rich_lvar_typs.
 
@@ -369,10 +386,16 @@ Proof. exact (lvar_typs_update_rich _ rich_lvar_typs rich_lvar_typs_rich). Qed.
 Definition stk0 : stack := {[ "x" := "x" ]}.
 Definition cmask : maskAnnot := {[ "counterInv" ]}.
 
-Lemma stk_type_compat_stk0 : stk_type_compat rho sigma stk0.
+(* Generic over rho: stk0 only ever binds "x", and read/incr agree that
+   "x" is TpLoc (both declare it as their own first argument), so this one
+   fact is reusable by both via an explicit rho "x" = TpLoc side
+   hypothesis, rather than being pinned to rho_read specifically -- needed
+   since read_invblock_step_ext's whole chain (reused byte-for-byte by
+   incr) is built on top of it. *)
+Lemma stk_type_compat_stk0 (rho : pvar_typs) (Hx : rho "x" = TpLoc) : stk_type_compat rho sigma stk0.
 Proof.
   intros v lv Hv. unfold stk0 in Hv.
-  apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
+  apply lookup_singleton_Some in Hv as [<- <-]. exact Hx.
 Qed.
 
 Lemma fresh_lvar_stk0 (lv : lvar) : lv ≠ "x" -> fresh_lvar stk0 lv.
@@ -384,7 +407,7 @@ Qed.
 (* Extending a well-typed/fresh stack at a new (var, lvar) pair stays
    well-typed/fresh -- reused at every FldRd/Assign/CAS/Call step of
    incr/read's own derivations. *)
-Lemma stk_type_compat_extend (stk : stack) (v lv : var) (tp : typ) :
+Lemma stk_type_compat_extend (rho : pvar_typs) (stk : stack) (v lv : var) (tp : typ) :
   stk_type_compat rho sigma stk -> rho v = tp -> sigma lv = tp ->
   stk_type_compat rho sigma (<[v:=lv]> stk).
 Proof.
@@ -401,6 +424,55 @@ Proof.
   destruct (decide (v0 = v)) as [->|Hne'].
   - rewrite lookup_insert in Heq. injection Heq as Heq. exact (Hne Heq).
   - rewrite lookup_insert_ne in Heq; [|congruence]. exact (Hfresh v0 Heq).
+Qed.
+
+(* Union counterparts of stk_type_compat_extend/fresh_lvar_extend, needed to
+   merge stk0 with an extra, disjoint stack fragment recording placeholder
+   entries for a procedure's own not-yet-touched locals -- see
+   read_invblock_step_ext's own comment for why this is needed instead of
+   widening stk0 itself. *)
+Lemma stk_type_compat_union (rho : pvar_typs) (stk1 stk2 : stack) :
+  stk_type_compat rho sigma stk1 -> stk_type_compat rho sigma stk2 ->
+  stk_type_compat rho sigma (stk1 ∪ stk2).
+Proof.
+  intros H1 H2 v lv Hv.
+  apply lookup_union_Some_raw in Hv as [Hv | [Hnone Hv]].
+  - exact (H1 v lv Hv).
+  - exact (H2 v lv Hv).
+Qed.
+
+Lemma fresh_lvar_union (stk1 stk2 : stack) (lv : lvar) :
+  fresh_lvar stk1 lv -> fresh_lvar stk2 lv -> fresh_lvar (stk1 ∪ stk2) lv.
+Proof.
+  intros H1 H2 v0 Hv0.
+  apply lookup_union_Some_raw in Hv0 as [Hv0 | [Hnone Hv0]].
+  - exact (H1 v0 Hv0).
+  - exact (H2 v0 Hv0).
+Qed.
+
+(* stk0's own binding survives being unioned with any extra fragment on its
+   left -- needed since reflexivity alone doesn't compute through ∪, unlike
+   the singleton-literal lookups that worked against stk0 directly. *)
+Lemma stk0_union_lookup_x (extra : stack) : (stk0 ∪ extra) !! "x" = Some "x".
+Proof. apply lookup_union_Some_l. reflexivity. Qed.
+
+(* An "extra" stack fragment merged into stk0 to widen a procedure's entry
+   stack (see read_invblock_step_ext's own comment) never holds anything
+   but one of the four placeholder lvars -- the one invariant every
+   concrete extra fragment below satisfies by construction, letting a
+   single hypothesis stand in for "extra can't possibly clash with any of
+   this file's own internal fresh names", rather than restating that
+   freshness fact once per internal name (l_v1/l_new_v1/l_res/l_ret/$v). *)
+Definition extra_placeholder (extra : stack) : Prop :=
+  ∀ v0 lv0, extra !! v0 = Some lv0 →
+    lv0 = "l_ph_int" ∨ lv0 = "l_ph_bool" ∨ lv0 = "l_ph_unit" ∨ lv0 = "l_ph_loc".
+
+Lemma fresh_lvar_extra_ph (extra : stack) (Hextra_ph : extra_placeholder extra) (lv : lvar) :
+  lv ≠ "l_ph_int" → lv ≠ "l_ph_bool" → lv ≠ "l_ph_unit" → lv ≠ "l_ph_loc" →
+  fresh_lvar extra lv.
+Proof.
+  intros H1 H2 H3 H4 v0 Heq.
+  destruct (Hextra_ph v0 lv Heq) as [-> | [-> | [-> | ->]]]; [exact (H1 eq_refl) | exact (H2 eq_refl) | exact (H3 eq_refl) | exact (H4 eq_refl)].
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -456,12 +528,12 @@ Proof. exact (AE_Exists_Mono sigma lv t A B). Qed.
    the "medial" law (A∧B)∧(C∧D) ⊢ (A∧C)∧(B∧D), built from
    assoc/comm/mono since assertion_entails has no single primitive for
    arbitrary LAnd-tree permutations. *)
-Lemma entails_regroup_pre_sym :
+Lemma entails_regroup_pre_sym (stk : stack) :
   assertion_entails
-    (LAnd (LStack stk0) (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
+    (LAnd (LStack stk) (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                                      (LOwn (LVar "x") "c" (LVar "$v")))
                                (LPure True)))
-    (LAnd (LAnd (LStack stk0) (LOwn (LVar "x") "c" (LVar "$v")))
+    (LAnd (LAnd (LStack stk) (LOwn (LVar "x") "c" (LVar "$v")))
           (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True))).
 Proof.
   eapply AE_Trans; [eapply AE_And_Assoc_L | ].
@@ -514,86 +586,140 @@ Qed.
 
 (* The single, symbolic derivation the new ExistsElimRule needs for read's
    FldRd, run with counterInv's own existential witness kept as the free
-   lvar "$v" rather than substituted -- matching the new rule's shape. *)
-Lemma read_inner_step_sym :
+   lvar "$v" rather than substituted -- matching the new rule's shape.
+
+   Generalized (Step 6, local/parameters-redesign.md) over an extra,
+   disjointly-merged stack fragment recording placeholder entries for a
+   procedure's own not-yet-touched locals: all_proc_specs_valid_raven's own
+   entry stack must bind every declared local from the start (matching
+   RTCallStep's allocate-everything-at-once semantics), not just "x", but
+   read's and incr's own extra locals need *different* types at "#ret_val"
+   (Int vs Unit) -- incompatible with a single shared stk0. Since every rule
+   here only ever inserts into or reads specific keys of the stack (never
+   iterates its whole domain), an arbitrary extra fragment merged in via
+   stk0 ∪ extra survives untouched through every step, as long as its own
+   values avoid "l_v1" (the one fresh name this chain itself introduces). *)
+(* Generic over rho (see stk_type_compat_stk0's own comment): reused
+   byte-for-byte by incr's own first InvAccessBlock, which needs
+   rho_incr, not rho_read, here. *)
+Lemma read_inner_step_sym_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : stack)
+    (Hextra_compat : stk_type_compat rho sigma extra)
+    (Hextra_ph : extra_placeholder extra) :
   RavenHoareTriple rho sigma
-    (LAnd (LStack stk0)
+    (LAnd (LStack (stk0 ∪ extra))
           (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LOwn (LVar "x") "c" (LVar "$v")))
                 (LPure True)))
       (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]})
-    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True)))).
+    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
+  have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - eapply FrameRule with
       (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True)).
-    apply (HeapReadRule rho sigma stk0 (cmask ∖ {["counterInv"]}) "v1" (Var "x") (LVar "$v") "c" (LVar "x") "l_v1").
+    apply (HeapReadRule rho sigma (stk0 ∪ extra) (cmask ∖ {["counterInv"]}) "v1" (Var "x") (LVar "$v") "c" (LVar "x") "l_v1").
+    + simpl. rewrite stk0_union_lookup_x. reflexivity.
     + reflexivity.
-    + reflexivity.
-    + apply fresh_lvar_stk0. discriminate.
+    + apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate | exact Hfresh_l_v1].
     + set_solver.
-    + exact stk_type_compat_stk0.
-  - exact entails_regroup_pre_sym.
-  - exact (entails_regroup_post_sym (<["v1":="l_v1"]> stk0)).
+    + exact (stk_type_compat_union _ _ _ (stk_type_compat_stk0 rho Hx) Hextra_compat).
+  - exact (entails_regroup_pre_sym (stk0 ∪ extra)).
+  - exact (entails_regroup_post_sym (<["v1":="l_v1"]> (stk0 ∪ extra))).
 Qed.
 
-(* Eliminates counterInv's own existential to reach read_inner_step_sym. Uses
-   the new, subst-free ExistsElimRule at the top-level LExists shape, so the
-   LStack-fixed precondition is first commuted into that shape via
+(* Eliminates counterInv's own existential to reach read_inner_step_sym_ext.
+   Uses the new, subst-free ExistsElimRule at the top-level LExists shape,
+   so the LStack-fixed precondition is first commuted into that shape via
    WeakeningRule + entails_and_stack_exists_swap. The witness's well-typedness
    ("$v" : Int) now comes directly from sigma's own declaration (sigma "$v" =
    TpInt), via the rule's new sigma-consistency premise -- no separate
    witness_well_typed proof needed any more. *)
-Lemma read_fldrd_block_step :
+Lemma read_fldrd_block_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : stack)
+    (Hextra_compat : stk_type_compat rho sigma extra)
+    (Hextra_ph : extra_placeholder extra) :
   RavenHoareTriple rho sigma
-    (LAnd (LStack stk0) (LAnd counterInv_body (LPure True)))
+    (LAnd (LStack (stk0 ∪ extra)) (LAnd counterInv_body (LPure True)))
       (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]})
-    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True)))).
+    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
+  have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+  have Hfresh_dollarv : fresh_lvar extra "$v" := fresh_lvar_extra_ph extra Hextra_ph "$v"
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
-      (LAnd (LStack stk0)
+      (LAnd (LStack (stk0 ∪ extra))
             (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                         (LOwn (LVar "x") "c" (LVar "$v")))
                   (LPure True)))
       (FldRd "v1" (Var "x") "c")
-      (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LAnd counterInv_body (LPure True))))).
+      (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True))))).
     + reflexivity.
     + simpl. right. split.
-      { apply fresh_lvar_extend; [apply fresh_lvar_stk0; discriminate | discriminate]. }
+      { apply fresh_lvar_extend;
+          [apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate | exact Hfresh_dollarv] | discriminate]. }
       split; [left; reflexivity | exact I].
-    + exact read_inner_step_sym.
+    + exact (read_inner_step_sym_ext rho Hx extra Hextra_compat Hextra_ph).
   - eapply assertion_entails_and_stack_exists_swap.
-    + apply fresh_lvar_stk0. discriminate.
+    + apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate | exact Hfresh_dollarv].
     + simpl. auto.
   - exact (entails_refl _).
 Qed.
 
 (* Wraps the FldRd in the InvAccessBlock; recovers counterInv(x) as a bare
    LInv fact on both sides. *)
-Lemma read_invblock_step :
+Lemma read_invblock_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : stack)
+    (Hextra_compat : stk_type_compat rho sigma extra)
+    (Hextra_ph : extra_placeholder extra) :
   RavenHoareTriple rho sigma
-    (LAnd (LStack stk0) (LInv "counterInv" [LVar "x"]))
+    (LAnd (LStack (stk0 ∪ extra)) (LInv "counterInv" [LVar "x"]))
       (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c")) cmask
-    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LInv "counterInv" [LVar "x"]))).
+    (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LInv "counterInv" [LVar "x"]))).
 Proof.
+  have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
-  - eapply (InvAccessBlockRule rho sigma stk0 (<["v1":="l_v1"]> stk0) cmask "counterInv" [Var "x"]
+  - eapply (InvAccessBlockRule rho sigma (stk0 ∪ extra) (<["v1":="l_v1"]> (stk0 ∪ extra)) cmask "counterInv" [Var "x"]
       (FldRd "v1" (Var "x") "c") counterInv_record (LPure True) (LPure True) "l_v1" TpInt [LVar "x"]).
-    + reflexivity.
+    + simpl. rewrite stk0_union_lookup_x. reflexivity.
     + set_solver.
     + exact inv_map_counterInv.
     + reflexivity.
     + constructor; [| constructor]. intros v Hv. simpl in Hv.
       apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
-    + exact stk_type_compat_stk0.
-    + apply fresh_lvar_stk0. discriminate.
+    + exact (stk_type_compat_union _ _ _ (stk_type_compat_stk0 rho Hx) Hextra_compat).
+    + apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate | exact Hfresh_l_v1].
     + unfold is_reserved. discriminate.
-    + simpl. exact read_fldrd_block_step.
-  - exact (entails_and_mono _ _ _ _ (entails_refl (LStack stk0)) (entails_and_true_intro (LInv "counterInv" [LVar "x"]))).
+    + simpl. exact (read_fldrd_block_step_ext rho Hx extra Hextra_compat Hextra_ph).
+  - exact (entails_and_mono _ _ _ _ (entails_refl (LStack (stk0 ∪ extra))) (entails_and_true_intro (LInv "counterInv" [LVar "x"]))).
   - exact (entails_exists_mono "l_v1" TpInt _ _ eq_refl
-      (entails_and_mono _ _ _ _ (entails_refl (LStack (<["v1":="l_v1"]> stk0)))
+      (entails_and_mono _ _ _ _ (entails_refl (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))))
                          (entails_and_true_elim (LInv "counterInv" [LVar "x"])))).
+Qed.
+
+(* read's own extra fragment: placeholder entries for its two declared
+   locals ("v1"/"#ret_val", both TpInt), needed so read_body_step's own
+   entry stack binds every declared local from the start (see
+   read_invblock_step_ext's comment). Both keys get overwritten before
+   ever being read (FldRd rebinds "v1", the final Assign rebinds
+   "#ret_val"), so any placeholder value of the right type is safe. *)
+Definition extra_read : stack := <["v1" := "l_ph_int"]> ({[ "#ret_val" := "l_ph_int" ]}).
+
+Lemma stk_type_compat_extra_read : stk_type_compat rho_read sigma extra_read.
+Proof.
+  intros v lv Hv. unfold extra_read in Hv.
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne Hv]].
+  - reflexivity.
+  - apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
+Qed.
+
+Lemma extra_placeholder_read : extra_placeholder extra_read.
+Proof.
+  intros v0 lv0 Hv0. unfold extra_read in Hv0.
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne Hv0]].
+  - left. reflexivity.
+  - apply lookup_singleton_Some in Hv0 as [<- <-]. left. reflexivity.
 Qed.
 
 (* The single, symbolic derivation for read's Assign "#ret_val" (Var "v1")
@@ -602,17 +728,22 @@ Qed.
    postcondition -- neither "l_ret" (the assigned value's own fresh lvar)
    nor the intermediate stack state matter beyond this point. *)
 Lemma read_assign_inner_step :
-  RavenHoareTriple rho sigma
-    (LStack (<["v1":="l_v1"]> stk0))
+  RavenHoareTriple rho_read sigma
+    (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read)))
       (Assign "#ret_val" (Var "v1")) cmask
-    (LExists "l_ret" TpInt (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> stk0)))
+    (LExists "l_ret" TpInt (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))))
                             (LExprA (LBinOp EqOp (LVar "l_ret") (LVar "l_v1"))))).
 Proof.
-  apply (VarAssignmentRule rho sigma (<["v1":="l_v1"]> stk0) cmask "#ret_val" "l_ret" (Var "v1") (LVar "l_v1") TpInt).
+  apply (VarAssignmentRule rho_read sigma (<["v1":="l_v1"]> (stk0 ∪ extra_read)) cmask "#ret_val" "l_ret" (Var "v1") (LVar "l_v1") TpInt).
   - reflexivity.
   - reflexivity.
-  - apply fresh_lvar_extend; [apply fresh_lvar_stk0; discriminate | discriminate].
-  - eapply stk_type_compat_extend; [exact stk_type_compat_stk0 | reflexivity | reflexivity].
+  - apply fresh_lvar_extend;
+      [apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate
+        | apply (fresh_lvar_extra_ph extra_read extra_placeholder_read); discriminate]
+      | discriminate].
+  - eapply stk_type_compat_extend;
+      [eapply stk_type_compat_union; [exact (stk_type_compat_stk0 rho_read eq_refl) | exact stk_type_compat_extra_read]
+      | reflexivity | reflexivity].
 Qed.
 
 Lemma entails_and_elim_l P Q : assertion_entails (LAnd P Q) P.
@@ -627,8 +758,8 @@ Proof. exact (AE_True_Intro sigma X). Qed.
    copy from read_precond), so the whole thing weakens straight down to
    LPure True. *)
 Lemma read_assign_step :
-  RavenHoareTriple rho sigma
-    (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LInv "counterInv" [LVar "x"]))
+  RavenHoareTriple rho_read sigma
+    (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read))) (LInv "counterInv" [LVar "x"]))
       (Assign "#ret_val" (Var "v1")) cmask
     read_postcond.
 Proof.
@@ -638,23 +769,23 @@ Proof.
   - unfold read_postcond. apply entails_true_intro.
 Qed.
 
-(* Combines the InvAccessBlock (read_invblock_step) with the Assign
+(* Combines the InvAccessBlock (read_invblock_step_ext) with the Assign
    (read_assign_step) via SequenceRule: read_assign_step's own precondition
-   is exactly what read_invblock_step's postcondition existentially
+   is exactly what read_invblock_step_ext's postcondition existentially
    provides, once "l_v1" is unwrapped via the new, subst-free
    ExistsElimRule -- straightforward now that read_assign_step's own
    conclusion (read_postcond) doesn't mention "l_v1" at all. *)
 Lemma read_body_step :
-  RavenHoareTriple rho sigma
-    (LAnd (LStack stk0) read_precond)
+  RavenHoareTriple rho_read sigma
+    (LAnd (LStack (stk0 ∪ extra_read)) read_precond)
       read_body cmask
     read_postcond.
 Proof.
   unfold read_body, read_precond.
   eapply SequenceRule.
-  - exact read_invblock_step.
-  - apply (ExistsElimRule rho sigma cmask "l_v1" TpInt
-      (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LInv "counterInv" [LVar "x"]))
+  - exact (read_invblock_step_ext rho_read eq_refl extra_read stk_type_compat_extra_read extra_placeholder_read).
+  - apply (ExistsElimRule rho_read sigma cmask "l_v1" TpInt
+      (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read))) (LInv "counterInv" [LVar "x"]))
       (Assign "#ret_val" (Var "v1"))
       read_postcond).
     + reflexivity.
@@ -678,22 +809,54 @@ Qed.
    read never introduced a named witness for its own FldRd either. *)
 
 (* The first InvAccessBlock (FldRd "v1") is byte-for-byte read's own first
-   step -- reuse read_invblock_step directly. *)
+   step -- reuse read_invblock_step_ext directly, instantiated at incr's own
+   extra fragment. *)
+
+(* incr's own extra fragment: placeholder entries for all four of its
+   declared locals ("v1"/"new_v1"/"res"/"#ret_val"), needed for the same
+   reason as extra_read -- see read_invblock_step_ext's comment. Can't
+   reuse extra_read: incr's own "#ret_val" is TpUnit, read's is TpInt, and
+   sigma is one global function, so the same lvar can't have both types. *)
+Definition extra_incr : stack :=
+  <["v1" := "l_ph_int"]> (<["new_v1" := "l_ph_int"]> (<["res" := "l_ph_bool"]> ({[ "#ret_val" := "l_ph_unit" ]}))).
+
+Lemma stk_type_compat_extra_incr : stk_type_compat rho_incr sigma extra_incr.
+Proof.
+  intros v lv Hv. unfold extra_incr in Hv.
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne1 Hv]]; [reflexivity |].
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne2 Hv]]; [reflexivity |].
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne3 Hv]]; [reflexivity |].
+  apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
+Qed.
+
+Lemma extra_placeholder_incr : extra_placeholder extra_incr.
+Proof.
+  intros v0 lv0 Hv0. unfold extra_incr in Hv0.
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne1 Hv0]]; [left; reflexivity |].
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne2 Hv0]]; [left; reflexivity |].
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne3 Hv0]]; [right; left; reflexivity |].
+  apply lookup_singleton_Some in Hv0 as [<- <-]. right; right; left; reflexivity.
+Qed.
 
 Lemma incr_assign_inner_step :
-  RavenHoareTriple rho sigma
-    (LStack (<["v1":="l_v1"]> stk0))
+  RavenHoareTriple rho_incr sigma
+    (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr)))
       (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask
-    (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> stk0)))
+    (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))).
 Proof.
-  apply (VarAssignmentRule rho sigma (<["v1":="l_v1"]> stk0) cmask "new_v1" "l_new_v1"
+  apply (VarAssignmentRule rho_incr sigma (<["v1":="l_v1"]> (stk0 ∪ extra_incr)) cmask "new_v1" "l_new_v1"
     (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))
     (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))) TpInt).
   - reflexivity.
   - reflexivity.
-  - apply fresh_lvar_extend; [apply fresh_lvar_stk0; discriminate | discriminate].
-  - eapply stk_type_compat_extend; [exact stk_type_compat_stk0 | reflexivity | reflexivity].
+  - apply fresh_lvar_extend;
+      [apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate
+        | apply (fresh_lvar_extra_ph extra_incr extra_placeholder_incr); discriminate]
+      | discriminate].
+  - eapply stk_type_compat_extend;
+      [eapply stk_type_compat_union; [exact (stk_type_compat_stk0 rho_incr eq_refl) | exact stk_type_compat_extra_incr]
+      | reflexivity | reflexivity].
 Qed.
 
 (* Carries counterInv's LInv fact through the Assign via FrameRule (unlike
@@ -702,16 +865,16 @@ Qed.
    LAnd (LExists ...) (LInv ...) back into the LExists-outermost shape via
    entails_exists_and_swap. *)
 Lemma incr_assign_step :
-  RavenHoareTriple rho sigma
-    (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LInv "counterInv" [LVar "x"]))
+  RavenHoareTriple rho_incr sigma
+    (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr))) (LInv "counterInv" [LVar "x"]))
       (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask
-    (LExists "l_new_v1" TpInt (LAnd (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> stk0)))
+    (LExists "l_new_v1" TpInt (LAnd (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))) (LInv "counterInv" [LVar "x"]))).
 Proof.
   eapply WeakeningRule.
-  - apply (FrameRule rho sigma cmask (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
-      (LStack (<["v1":="l_v1"]> stk0))
-      (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> stk0)))
+  - apply (FrameRule rho_incr sigma cmask (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
+      (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr)))
+      (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
         (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (LInv "counterInv" [LVar "x"])
       incr_assign_inner_step).
@@ -774,20 +937,29 @@ Qed.
    -- matching read_inner_step_sym's approach, counterInv's own existential
    witness "$v" is kept as a free lvar throughout rather than substituted. *)
 
-Definition incr_stk1 : stack := <["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> stk0).
+Definition incr_stk1 : stack := <["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr)).
 
-Lemma stk_type_compat_incr_stk1 : stk_type_compat rho sigma incr_stk1.
+Lemma stk_type_compat_incr_stk1 : stk_type_compat rho_incr sigma incr_stk1.
 Proof.
   unfold incr_stk1.
   eapply stk_type_compat_extend;
-    [eapply stk_type_compat_extend; [exact stk_type_compat_stk0 | reflexivity | reflexivity]
+    [eapply stk_type_compat_extend;
+      [eapply stk_type_compat_union; [exact (stk_type_compat_stk0 rho_incr eq_refl) | exact stk_type_compat_extra_incr]
+      | reflexivity | reflexivity]
     | reflexivity | reflexivity].
 Qed.
 
-Lemma fresh_lvar_incr_stk1 (lv : lvar) : lv ≠ "x" -> "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> fresh_lvar incr_stk1 lv.
+Lemma fresh_lvar_incr_stk1 (lv : lvar) :
+  lv ≠ "x" -> lv ≠ "l_ph_int" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" -> lv ≠ "l_ph_loc" ->
+  "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> fresh_lvar incr_stk1 lv.
 Proof.
-  intros Hx Hv1 Hnv1. unfold incr_stk1.
-  apply fresh_lvar_extend; [apply fresh_lvar_extend; [apply fresh_lvar_stk0; exact Hx | exact Hv1] | exact Hnv1].
+  intros Hx Hphi Hphb Hphu Hphl Hv1 Hnv1. unfold incr_stk1.
+  apply fresh_lvar_extend;
+    [apply fresh_lvar_extend;
+      [apply fresh_lvar_union; [apply fresh_lvar_stk0; exact Hx
+        | apply (fresh_lvar_extra_ph extra_incr extra_placeholder_incr); assumption]
+      | exact Hv1]
+    | exact Hnv1].
 Qed.
 
 (* The CAS itself, framing counterInv's GhostOwn fact -- together with the
@@ -796,7 +968,7 @@ Qed.
    (the Fpu that actually updates the ghost chunk comes later, only on
    success). *)
 Lemma incr_cas_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk1)
           (LAnd (LOwn (LVar "x") "c" (LVar "$v"))
                 (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
@@ -813,7 +985,7 @@ Proof.
   eapply WeakeningRule.
   - eapply FrameRule with (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))).
-    apply (CASRule rho sigma incr_stk1 (cmask ∖ {["counterInv"]}) "res" (Var "x") "c" (Var "v1") (Var "new_v1")
+    apply (CASRule rho_incr sigma incr_stk1 (cmask ∖ {["counterInv"]}) "res" (Var "x") "c" (Var "v1") (Var "new_v1")
       "l_res" (LVar "x") (LVar "l_v1") (LVar "l_new_v1") (LVar "$v")).
     + apply fresh_lvar_incr_stk1; discriminate.
     + reflexivity.
@@ -831,15 +1003,16 @@ Qed.
 
 Definition incr_stk2 : stack := <["res":="l_res"]> incr_stk1.
 
-Lemma stk_type_compat_incr_stk2 : stk_type_compat rho sigma incr_stk2.
+Lemma stk_type_compat_incr_stk2 : stk_type_compat rho_incr sigma incr_stk2.
 Proof.
   unfold incr_stk2. eapply stk_type_compat_extend; [exact stk_type_compat_incr_stk1 | reflexivity | reflexivity].
 Qed.
 
 Lemma fresh_lvar_incr_stk2 (lv : lvar) :
-  lv ≠ "x" -> "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> "l_res" ≠ lv -> fresh_lvar incr_stk2 lv.
+  lv ≠ "x" -> lv ≠ "l_ph_int" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" -> lv ≠ "l_ph_loc" ->
+  "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> "l_res" ≠ lv -> fresh_lvar incr_stk2 lv.
 Proof.
-  intros Hx Hv1 Hnv1 Hres. unfold incr_stk2.
+  intros Hx Hphi Hphb Hphu Hphl Hv1 Hnv1 Hres. unfold incr_stk2.
   apply fresh_lvar_extend; [apply fresh_lvar_incr_stk1; done | exact Hres].
 Qed.
 
@@ -869,7 +1042,7 @@ Qed.
 
 (* incr's Fpu step: bumps the ghost chunk from "l_v1" to "l_new_v1". *)
 Lemma incr_fpu_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
           (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
@@ -878,7 +1051,7 @@ Lemma incr_fpu_step :
     (LAnd (LStack incr_stk2) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")))).
 Proof.
   eapply WeakeningRule.
-  - apply (FPURule rho sigma incr_stk2 (cmask ∖ {["counterInv"]})
+  - apply (FPURule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
       (Var "x") (LVar "x") "h" h_ra
       (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1"))
       (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")) (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1"))).
@@ -895,7 +1068,7 @@ Qed.
    needed afterward to repack counterInv with witness "l_new_v1" once the
    ghost chunk has also been bumped. *)
 Lemma incr_fpu_step_framed :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
           (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
@@ -982,7 +1155,7 @@ Qed.
 (* The IfS's "res = true" branch (the Fpu), fully composed: extract, rewrite,
    apply Fpu, repack counterInv. *)
 Lemma incr_true_branch_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
       (LAnd (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                      (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1037,7 +1210,7 @@ Qed.
 (* The IfS's "res = false" branch (SkipS): extract, drop the now-unused
    arithmetic fact, repack counterInv unchanged. *)
 Lemma incr_false_branch_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
       (LAnd (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                      (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1050,7 +1223,7 @@ Lemma incr_false_branch_step :
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   eapply WeakeningRule.
-  - apply (SkipRule rho sigma incr_stk2 (cmask ∖ {["counterInv"]})
+  - apply (SkipRule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
       (LAnd (LOwn (LVar "x") "c" (LVar "$v")) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))))).
     exact stk_type_compat_incr_stk2.
   - apply entails_and_mono; [exact (entails_refl _) |].
@@ -1061,7 +1234,7 @@ Qed.
 
 (* The IfS(res, Fpu, Skip) as a whole. *)
 Lemma incr_ifs_res_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
           (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                    (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1074,7 +1247,7 @@ Lemma incr_ifs_res_step :
       (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
-  apply (CondRule rho sigma incr_stk2 (cmask ∖ {["counterInv"]})
+  apply (CondRule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
     (Var "res")
     (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
     SkipS
@@ -1103,7 +1276,7 @@ Qed.
    when the queried lvar equals the binder (shadowing), regardless of
    whether the body underneath genuinely mentions it (incr_stk2 does). *)
 Lemma incr_ifs_res_step_wrapped :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2)
           (LAnd (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                    (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1130,7 +1303,7 @@ Qed.
    needed: the wrapping already happened inside incr_ifs_res_step_wrapped
    itself, via entails_exists_intro). *)
 Lemma incr_invblock2_inner_sym :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk1)
           (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LOwn (LVar "x") "c" (LVar "$v")))
@@ -1150,7 +1323,7 @@ Proof.
       * apply entails_and_mono; [exact (entails_and_comm _ _) | exact (entails_refl _)].
       * exact (entails_and_assoc_r _ _ _).
     + exact (entails_refl _).
-  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "l_res" TpBool
+  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) "l_res" TpBool
       (LAnd (LAnd (LStack incr_stk2)
                (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                   (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1179,7 +1352,7 @@ Qed.
 (* Eliminates counterInv's own "$v" existential to reach
    incr_invblock2_inner_sym -- mirrors read_fldrd_block_step exactly. *)
 Lemma incr_invblock2_v_elim_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk1)
           (LAnd counterInv_body
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
@@ -1191,7 +1364,7 @@ Lemma incr_invblock2_v_elim_step :
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
+  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack incr_stk1)
             (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                         (LOwn (LVar "x") "c" (LVar "$v")))
@@ -1213,7 +1386,7 @@ Proof.
 Qed.
 
 Lemma incr_invblock2_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk1)
           (LAnd (LInv "counterInv" [LVar "x"])
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
@@ -1225,7 +1398,7 @@ Lemma incr_invblock2_step :
       cmask
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))).
 Proof.
-  eapply (InvAccessBlockRule rho sigma incr_stk1 incr_stk2 cmask "counterInv" [Var "x"]
+  eapply (InvAccessBlockRule rho_incr sigma incr_stk1 incr_stk2 cmask "counterInv" [Var "x"]
     (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
          (IfS (Var "res")
            (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
@@ -1254,13 +1427,13 @@ Qed.
    via entails_true_intro, since incr_postcond doesn't care what "call_res"
    came back as. *)
 Lemma incr_retry_true_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LExprA (LUnOp NotBoolOp (LVar "l_res")))))
       (Call "call_res" "incr" [Var "x"]) cmask
     (LPure True).
 Proof.
   eapply WeakeningRule.
-  - apply (ProcCallRuleRet rho sigma incr_stk2 cmask "call_res" "incr" [Var "x"] [LVar "x"] "l_call" incr_record).
+  - apply (ProcCallRuleRet rho_incr sigma incr_stk2 cmask "call_res" "incr" [Var "x"] [LVar "x"] "l_call" incr_record).
     + apply fresh_lvar_incr_stk2; discriminate.
     + exact proc_map_incr.
     + reflexivity.
@@ -1276,14 +1449,14 @@ Proof.
 Qed.
 
 Lemma incr_retry_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2) (LInv "counterInv" [LVar "x"]))
       (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)
       cmask
     incr_postcond.
 Proof.
   unfold incr_postcond.
-  apply (CondRule rho sigma incr_stk2 cmask
+  apply (CondRule rho_incr sigma incr_stk2 cmask
     (UnOp NotBoolOp (Var "res"))
     (Call "call_res" "incr" [Var "x"])
     SkipS
@@ -1295,7 +1468,7 @@ Proof.
   - exact stk_type_compat_incr_stk2.
   - exact incr_retry_true_step.
   - eapply WeakeningRule.
-    + apply (SkipRule rho sigma incr_stk2 cmask (LInv "counterInv" [LVar "x"])).
+    + apply (SkipRule rho_incr sigma incr_stk2 cmask (LInv "counterInv" [LVar "x"])).
       exact stk_type_compat_incr_stk2.
     + apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_elim_l _ _)].
     + exact (entails_true_intro _).
@@ -1305,16 +1478,16 @@ Qed.
 (* incr's full body: nested SequenceRule/ExistsElimRule chaining the four
    pieces, mirroring read_body_step exactly, just three stages deeper. *)
 Lemma incr_body_step :
-  RavenHoareTriple rho sigma
-    (LAnd (LStack stk0) incr_precond)
+  RavenHoareTriple rho_incr sigma
+    (LAnd (LStack (stk0 ∪ extra_incr)) incr_precond)
       incr_body cmask
     incr_postcond.
 Proof.
   unfold incr_body, incr_precond.
   eapply SequenceRule.
-  - exact read_invblock_step.
-  - apply (ExistsElimRule rho sigma cmask "l_v1" TpInt
-      (LAnd (LStack (<["v1":="l_v1"]> stk0)) (LInv "counterInv" [LVar "x"]))
+  - exact (read_invblock_step_ext rho_incr eq_refl extra_incr stk_type_compat_extra_incr extra_placeholder_incr).
+  - apply (ExistsElimRule rho_incr sigma cmask "l_v1" TpInt
+      (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr))) (LInv "counterInv" [LVar "x"]))
       (Seq (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
            (Seq (InvAccessBlock "counterInv" [Var "x"]
                   (Seq (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1"))
@@ -1327,7 +1500,7 @@ Proof.
     + unfold incr_postcond. exact I.
     + eapply SequenceRule.
       * exact incr_assign_step.
-      * apply (ExistsElimRule rho sigma cmask "l_new_v1" TpInt
+      * apply (ExistsElimRule rho_incr sigma cmask "l_new_v1" TpInt
           (LAnd (LAnd (LStack incr_stk1) (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
                 (LInv "counterInv" [LVar "x"]))
           (Seq (InvAccessBlock "counterInv" [Var "x"]
@@ -1346,7 +1519,7 @@ Proof.
                  --- exact (entails_and_assoc_r _ _ _).
                  --- apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_comm _ _)].
               ** exact (entails_refl _).
-           ++ apply (ExistsElimRule rho sigma cmask "l_res" TpBool
+           ++ apply (ExistsElimRule rho_incr sigma cmask "l_res" TpBool
                  (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
                  (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)
                  incr_postcond).
@@ -1368,17 +1541,34 @@ Qed.
    counterInv_body's own repack lemmas (trnsl_repack_counterInv, hardcoded
    to "x") apply directly with no generalization needed. The proc's own
    postcondition existentially quantifies over that same location, so
-   nothing beyond this file's existing rho/sigma/entails machinery (both
+   nothing beyond this file's existing rho_make/sigma/entails machinery (both
    already keyed at "x" : TpLoc) is needed either -- only a fresh, empty
    entry stack (make has no args, unlike read/incr). *)
 
-Definition stk_make0 : stack := ∅.
+(* Widened (Step 6, local/parameters-redesign.md) to bind both of make's
+   own declared locals ("x"/"#ret_val", both TpLoc -- make has no args at
+   all) from the start, matching all_proc_specs_valid_raven's own entry
+   stack shape -- see read_invblock_step_ext's comment for why this is
+   needed in general. Unlike read/incr, make's own chain isn't shared with
+   any other procedure, so no rho/extra-fragment generalization is needed
+   here: stk_make0 itself can just be widened directly. *)
+Definition stk_make0 : stack := <["x" := "l_ph_loc"]> ({[ "#ret_val" := "l_ph_loc" ]}).
 
-Lemma stk_type_compat_stk_make0 : stk_type_compat rho sigma stk_make0.
-Proof. intros v lv Hv. unfold stk_make0 in Hv. rewrite lookup_empty in Hv. discriminate. Qed.
+Lemma stk_type_compat_stk_make0 : stk_type_compat rho_make sigma stk_make0.
+Proof.
+  intros v lv Hv. unfold stk_make0 in Hv.
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne Hv]].
+  - reflexivity.
+  - apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
+Qed.
 
-Lemma fresh_lvar_stk_make0 (lv : lvar) : fresh_lvar stk_make0 lv.
-Proof. intros v0 Heq. unfold stk_make0 in Heq. rewrite lookup_empty in Heq. discriminate. Qed.
+Lemma fresh_lvar_stk_make0 (lv : lvar) : lv ≠ "l_ph_loc" -> fresh_lvar stk_make0 lv.
+Proof.
+  intros Hne v0 Heq. unfold stk_make0 in Heq.
+  apply lookup_insert_Some in Heq as [[<- <-] | [Hne' Heq]].
+  - exact (Hne eq_refl).
+  - apply lookup_singleton_Some in Heq as [<- <-]. exact (Hne eq_refl).
+Qed.
 
 (* The ghost cell's initial value, at the generic ra_of_int operation for
    h_ra's own RA instance -- matches RAOfIntOp's own interp_lexpr semantics
@@ -1415,15 +1605,15 @@ Proof.
 Qed.
 
 Lemma make_alloc_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_make sigma
     (LStack stk_make0)
       (Alloc "x" [("c", lang.LitInt 0)]) cmask
     (LExists "x" TpLoc (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (HeapAllocRule rho sigma stk_make0 cmask "x"
+  - apply (HeapAllocRule rho_make sigma stk_make0 cmask "x"
       [("c", lang.LitInt 0)] [("h", existT h_ra h0)] "x").
-    + apply fresh_lvar_stk_make0.
+    + apply fresh_lvar_stk_make0; discriminate.
     + constructor; [set_solver | constructor].
     + constructor; [set_solver | constructor].
     + discriminate.
@@ -1442,12 +1632,12 @@ Qed.
    stk0's pvar-"x"-to-lvar-"x" naming), so subst counterInv_body {"x" :=
    LVar "x"} reduces to counterInv_body itself via simpl. *)
 Lemma make_foldinv_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_make sigma
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
       (FoldInv "counterInv" [Var "x"]) cmask
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))).
 Proof.
-  apply (InvAllocRule rho sigma (<["x":="x"]> stk_make0) cmask "counterInv" [Var "x"]
+  apply (InvAllocRule rho_make sigma (<["x":="x"]> stk_make0) cmask "counterInv" [Var "x"]
     counterInv_record (LPure True) [LVar "x"]).
   - reflexivity.
   - set_solver.
@@ -1462,17 +1652,17 @@ Qed.
    picking "l_x_ret" (typed TpLoc in sigma) as the assignment's own fresh
    witness. Mirrors read_assign_inner_step/incr_assign_inner_step exactly. *)
 Lemma make_assign_inner_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_make sigma
     (LStack (<["x":="x"]> stk_make0))
       (Assign "#ret_val" (Var "x")) cmask
     (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
                              (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))))).
 Proof.
-  apply (VarAssignmentRule rho sigma (<["x":="x"]> stk_make0) cmask "#ret_val" "l_x_ret"
+  apply (VarAssignmentRule rho_make sigma (<["x":="x"]> stk_make0) cmask "#ret_val" "l_x_ret"
     (Var "x") (LVar "x") TpLoc).
   - reflexivity.
   - reflexivity.
-  - apply fresh_lvar_extend; [apply fresh_lvar_stk_make0 | discriminate].
+  - apply fresh_lvar_extend; [apply fresh_lvar_stk_make0; discriminate | discriminate].
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
 Qed.
 
@@ -1495,13 +1685,13 @@ Qed.
    connects make_body_step to all_proc_specs_valid_raven's own
    ∃ stk0' lv_final, via its <["#ret_val":=LVar lv_final]> substitution). *)
 Lemma make_assign_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_make sigma
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
       (Assign "#ret_val" (Var "x")) cmask
     (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
 Proof.
   eapply WeakeningRule.
-  - apply (FrameRule rho sigma cmask (Assign "#ret_val" (Var "x"))
+  - apply (FrameRule rho_make sigma cmask (Assign "#ret_val" (Var "x"))
       (LStack (<["x":="x"]> stk_make0))
       (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
                                (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x")))))
@@ -1525,7 +1715,7 @@ Qed.
    itself -- see make_assign_step's own comment for why the latter is
    unreachable directly from a derivation. *)
 Lemma make_body_step :
-  RavenHoareTriple rho sigma
+  RavenHoareTriple rho_make sigma
     (LAnd (LStack stk_make0) make_precond)
       make_body cmask
     (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
@@ -1536,7 +1726,7 @@ Proof.
     + exact make_alloc_step.
     + exact (entails_and_true_elim (LStack stk_make0)).
     + exact (entails_refl _).
-  - apply (ExistsElimRule rho sigma cmask "x" TpLoc
+  - apply (ExistsElimRule rho_make sigma cmask "x" TpLoc
       (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
       (Seq (FoldInv "counterInv" [Var "x"]) (Assign "#ret_val" (Var "x")))
       (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"]))).
