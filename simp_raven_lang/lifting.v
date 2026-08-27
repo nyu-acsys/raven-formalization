@@ -855,9 +855,8 @@ Section lifting.
     inversion H; subst proc0 args0 stk_id0 σ1 κ σ2 e2 efs.
     iMod "Hfupd".
     (* Freshness: the new stack id (Z.of_nat (Z.to_nat σ.(max_stack_id) + 1))
-       must not yet be in the stack map.  This follows from the invariant that
-       all allocated stack ids are ≤ max_stack_id, but that invariant is not
-       yet threaded through state_interp; now proved from state_wf. *)
+       must not yet be in the stack map. Follows from state_wf's own
+       invariant that every allocated stack id is ≤ max_stack_id. *)
     assert (Hfresh_new : stack σ !! Z.of_nat (Z.to_nat σ.(max_stack_id) + 1) = None) by (apply (max_stk_id_fresh _ Hwf)).
     iPoseProof ((stack_new_stk_frm_upd σ new_stk_frame Hfresh_new) with "Hstack") as ">[Hstack' Hstk']".
 

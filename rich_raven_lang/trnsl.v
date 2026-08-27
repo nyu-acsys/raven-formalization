@@ -31,15 +31,15 @@ Set Default Proof Using "All".
 
 Section MainTranslation.
     (* None of rrl_lang.v's own Section variables carry across files --
-       Sigma/Gs/I/simpLangG now live inside its own Section WithProgram
-       too (see rrl_lang.v's own header comment), same status as
+       Sigma/Gs/I/simpLangG live inside its own Section WithProgram (see
+       rrl_lang.v's own header comment), same status as
        Program/GhostConfig/Gamma/invTokenG below -- redeclared here under
-       the same names/projections so every existing bare use below keeps
-       working unchanged; cross-file calls into rrl_lang.v's own
-       definitions (ProgramWF, RavenHoareTriple, trnsl_assertion, entails,
-       ...) need these supplied explicitly, since Coq has no way to know
-       trnsl.v's own Sigma/RProg/G/Gamma are "the same" as rrl_lang.v's
-       without being told. *)
+       the same names/projections so every bare use below works without
+       qualification; cross-file calls into rrl_lang.v's own definitions
+       (ProgramWF, RavenHoareTriple, trnsl_assertion, entails, ...) need
+       these supplied explicitly, since Coq has no way to know trnsl.v's
+       own Sigma/RProg/G/Gamma are "the same" as rrl_lang.v's without
+       being told. *)
     Context {I : Type}.
     Context (Gs : I → cmra).
     Context {Σ : gFunctors}.
@@ -800,16 +800,15 @@ Section MainTranslation.
        not an iProp -- raven_soundness below is exactly the bridge from this
        Raven-level statement to the Iris-level all_proc_specs_valid_iris.
 
-       No externally-supplied pvar_typs parameter (unlike an earlier version
-       of this definition): each procedure's own body is checked against
-       proc_pvar_typs proc_record, its own args/locals, exactly as
-       all_proc_specs_valid_iris already types "#ret_val" and every other
-       local via proc_args_of/proc_locals_of/typeOf rather than a shared
-       table. A single global pvar_typs would force every procedure sharing
-       a variable name -- most unavoidably "#ret_val" itself, which every
-       procedure must declare -- to agree on its type; see
-       proc_call_ret_well_typed's own comment for the caller-side half of
-       this same fix. *)
+       No externally-supplied pvar_typs parameter: each procedure's own
+       body is checked against proc_pvar_typs proc_record, its own
+       args/locals, exactly as all_proc_specs_valid_iris already types
+       "#ret_val" and every other local via proc_args_of/proc_locals_of/
+       typeOf rather than a shared table. A single global pvar_typs would
+       force every procedure sharing a variable name -- most unavoidably
+       "#ret_val" itself, which every procedure must declare -- to agree
+       on its type; see proc_call_ret_well_typed's own comment for the
+       caller-side half of this same design. *)
     Definition all_proc_specs_valid_raven (σ : lvar_typs) : Prop :=
       ∀ proc_name proc_record, proc_map !! proc_name = Some proc_record →
         let ρ := proc_pvar_typs proc_record in
@@ -884,10 +883,10 @@ Section MainTranslation.
 
     (* lexpr_map_fvars of a zip-built substitution map avoids the reserved
        namespace outright, given a Forall fact over the lexprs themselves
-       (now always a local premise of whichever RavenHoareTriple rule
-       supplies them, e.g. InvAccessBlockRule/InvAllocRule/ProcCallRuleRet --
-       see local/binders.md) -- the exact shape inv_body_bridge's own
-       Hlexprs_ok parameter needs, for any key list (inv_args, pred_args,
+       (a local premise of whichever RavenHoareTriple rule supplies them,
+       e.g. InvAccessBlockRule/InvAllocRule/ProcCallRuleRet) -- the exact
+       shape inv_body_bridge's own Hlexprs_ok parameter needs, for any key
+       list (inv_args, pred_args,
        ...), so every direct inv_body_bridge/PredBodyWF-style call site can
        build its own argument with this one lemma. *)
     Lemma lexpr_map_fvars_zip_no_reserved (ks : list lvar) (lexprs : list LExpr)
@@ -906,9 +905,9 @@ Section MainTranslation.
        args, predicate args, proc-call args, ...) already establishes
        separately: formal-argument names never reserved (dom side, via
        pwf_*_args_not_reserved), and no actual argument lexpr mentions a
-       reserved lvar (values side -- now a local premise of whichever
+       reserved lvar (values side -- a local premise of whichever
        RavenHoareTriple rule supplies lexprs, e.g. InvAccessBlockRule/
-       InvAllocRule/ProcCallRuleRet, see local/binders.md). *)
+       InvAllocRule/ProcCallRuleRet). *)
     Lemma subst_map_avoids_reserved_of_lexprs (ks : list lvar) (lexprs : list LExpr)
         (Hks : Forall (fun a => ¬ is_reserved a) ks)
         (Hvs : Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs) :
@@ -1003,9 +1002,7 @@ Section MainTranslation.
        an mp-update at a var lv not mentioned by subst_map's own values (see
        InvAccessBlockRule's lv-freshness premise). M1 = M2 = M throughout, so
        this is exactly trnsl_assertion_mp_irrelevant_reserved's use case --
-       simpler than the old trnsl_assertion_subst_congr-based proof, which
-       needed an Hbase covering reserved names too (now gone, see
-       local/binders.md's "Session 3"). *)
+       no Hbase over reserved names is needed. *)
     Lemma trnsl_assertion_subst_lv_stable (Hwf : ProgramWF) (a : assertion) (M : gmap lvar LExpr)
         (lv : lvar) (v' : val) stk_id mp :
       StackFree a ->
@@ -1523,7 +1520,7 @@ Section MainTranslation.
       }
 
       4 : {
-        (* UNFOLD PRED: no later left to strip -- LPred now denotes its body
+        (* UNFOLD PRED: no later left to strip -- LPred denotes its body
            directly, so unfolding is a definitional step. *)
         unfold trnsl_hoare_triple.
         simpl.
@@ -1586,7 +1583,7 @@ Section MainTranslation.
       }
 
       5: {
-        (* CAS: consolidated CASSuccRule/CASFailRule (see git history). The
+        (* CAS: a single rule covering both outcomes. The
            outcome (chunk = lexpr2, at the pre-CAS map mp) is decided once,
            right after establishing lexpr1/lexpr2's evaluatedness, shared by
            both branches; the branch itself then picks which side of the
@@ -2562,14 +2559,12 @@ Section MainTranslation.
        recursive call sites inside procedure bodies are discharged via Löb
        induction, mirroring rrl_validity's own use of "Calls".
 
-       Renamed from raven_soundness (now a Lemma, an internal building
-       block): the new Theorem raven_soundness, below (after Section
-       MainTranslation closes), is the adequacy wrapper that picks a
-       concrete Sigma/Gamma/invTokenG, allocates ghost_heap_name/
-       invtoken_names, discharges Hworlds/Hgworlds/Hwtbl, and calls this
-       lemma -- kept word-for-word unchanged rather than rewritten to
-       allocate internally, per the Step 5 design decision (see
-       local/parameters-redesign.md's "Status"). *)
+       raven_soundness_core is an internal building block: Theorem
+       raven_soundness, below (after Section MainTranslation closes), is
+       the adequacy wrapper that picks a concrete Sigma/Gamma/invTokenG,
+       allocates ghost_heap_name/invtoken_names, discharges
+       Hworlds/Hgworlds/Hwtbl, and calls this lemma directly rather than
+       allocating internally itself. *)
     Lemma raven_soundness_core σ
       (Hwf : ProgramWF)
       (* σ has enough distinct lvars of any given type, avoiding any finite
@@ -2599,8 +2594,8 @@ Section MainTranslation.
          that could produce any of the three (an [LInv] fact is only ever
          *traded for* by [InvAllocRule], never conjured; proc_tbl_chunk is
          consumed by ProcCallRuleRet's soundness case but never produced by
-         any rule either), so they still record how the ghost state/program
-         were set up -- just as resources now, not as external axioms. *)
+         any rule either), so they record how the ghost state/program were
+         set up -- as resources, not as external axioms. *)
       all_inv_worlds -∗ Wghost_world -∗ all_proc_tbl_chunks -∗
       all_proc_specs_valid_iris σ.
     Proof.
@@ -2614,8 +2609,7 @@ Section MainTranslation.
 
       (* Matches all_proc_specs_valid_raven's own internal "let ρ := ..." --
          Hbodies proc proc_record Hproc_map below is already stated in
-         terms of exactly this, so nothing past this point needs to change
-         beyond no longer taking ρ as an external parameter. *)
+         terms of exactly this, so ρ needs no external parameter here. *)
       set (ρ := proc_pvar_typs proc_record).
 
       pose proof (Hwf.(pwf_proc_args_unique) proc proc_record Hproc_map) as Hargs_nodup.
@@ -2747,7 +2741,7 @@ Section MainTranslation.
          -- so it agrees with mp at every reserved name, the fact both
          Hprecond_bridge/Hpostcond_bridge's own widened Hbase need to cover
          the "is_reserved" disjunct trnsl_assertion_subst_congr's Hbase
-         premise now carries. *)
+         premise carries. *)
       have Hreserved_mp0 : ∀ x, is_reserved x → mp0 x = mp x.
       { intros x Hx.
         have Hx_lvs : x ∉ lvs.
@@ -3044,8 +3038,8 @@ Section MainTranslation.
 
   End MainTranslation.
 
-(* Adequacy wrapper (Step 5, local/parameters-redesign.md): builds a
-   concrete Gamma (single-RA), GhostConfig and invTokenG instance, and
+(* Adequacy wrapper: builds a concrete Gamma (single-RA), GhostConfig and
+   invTokenG instance, and
    discharges all_inv_worlds/Wghost_world internally via own_alloc +
    inv_alloc at the empty index -- the whole point of moving
    raven_soundness_core's Hworlds/Hgworlds/Hwtbl from Coq-level "⊢ P"

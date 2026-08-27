@@ -73,8 +73,8 @@ Context `{!inGs Σ Gs}.
    sharing is entirely delegated back to the RA itself, same as before. *)
 Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
-(* Layer 0 (see local/parameters-redesign.md's Step 5b): the ghost-heap's
-   own inG requirement, isolated as a subG-derivable capability. Unlike
+(* Layer 0: the ghost-heap's own inG requirement, isolated as a
+   subG-derivable capability. Unlike
    heapG/invTokenG it doesn't bundle any gname alongside the inG evidence,
    so no separate GpreS/GS split is needed here -- just this one fact,
    combined into ravenΣ below. *)
@@ -120,8 +120,8 @@ Inductive val :=
 
 (* EqDecision val is needed already by val_beq right below (interp_lexpr's
    EqOp/NeOp cases use val_beq, and interp_lexpr comes before LExpr's other
-   infrastructure), so it's placed here rather than where the original file
-   had it (further down, after interp_lexpr/lexpr_subst). *)
+   infrastructure), so it's placed here rather than alongside LExpr's own
+   infrastructure further down (after interp_lexpr/lexpr_subst). *)
 Global Instance val_eq : EqDecision val.
 Proof.
   refine (fun x y =>
@@ -715,8 +715,8 @@ Class invTokenG (Σ : gFunctors) := InvTokenG {
   invtoken_names : inv_name -> gname;
 }.
 
-(* Layer 0 (see local/parameters-redesign.md): the camera capability
-   invTokenG needs, without the concrete invtoken_names assignment --
+(* Layer 0: the camera capability invTokenG needs, without the concrete
+   invtoken_names assignment --
    mirrors ghost_state.v's own heapGpreS/heapG split (invTokenG bundles a
    concrete gname-valued function together with the inG evidence, so a
    full invTokenG instance can't be derived from subG alone; only this
@@ -732,8 +732,8 @@ Definition invTokenGΣ : gFunctors := #[ GFunctor (authR inv_argsUR) ].
 Global Instance subG_invTokenGpreS Σ' : subG invTokenGΣ Σ' → invTokenGpreS Σ'.
 Proof. solve_inG. Qed.
 
-(* Combined Layer 0 capability list (Step 5b, local/parameters-redesign.md):
-   everything a caller of the adequacy wrapper (raven_soundness, trnsl.v)
+(* Combined Layer 0 capability list: everything a caller of the adequacy
+   wrapper (raven_soundness, trnsl.v)
    needs from a single subG hypothesis to build the instances its own
    Context expects -- except inGs Σ Gs (inherently RA/program-specific,
    picked per the one ra_name being verified, not a fixed capability) and
@@ -926,9 +926,9 @@ Proof.
 Qed.
 
 (* LExists binder variables of an assertion (does NOT descend into LInv/LPred bodies).
-   Moved ahead of InvRecord/PredRecord/ProcRecord's own well-formedness
+   Sits ahead of InvRecord/PredRecord/ProcRecord's own well-formedness
    definitions (InvBodyWF etc. below) so they can state their own "## dom M"
-   premise in terms of it -- see local/binders.md. *)
+   premise in terms of it. *)
 Fixpoint assertion_exists_binders (a : assertion) : gset lvar :=
   match a with
   | LExists v _ body => {[v]} ∪ assertion_exists_binders body
@@ -994,7 +994,7 @@ Record InvRecord := Inv {
    The "## dom M" premise is what a naively-unconditional version of this
    fact would need to hold for *any* M, which is unsatisfiable whenever
    inv_body has a genuine internal existential (e.g. an Auth-style ghost
-   witness) -- see local/binders.md. Discharged via the record's own
+   witness). Discharged via the record's own
    binders being drawn from the reserved namespace (ProgramWF's
    pwf_inv_binders_reserved) together with M avoiding it, not by M being
    unconstrained. *)
@@ -1023,12 +1023,11 @@ Definition PredBodyWF (r : PredRecord) : Prop :=
     subst (subst (r.(pred_body))
       (list_to_map (zip (r.(pred_args)) args))) M.
 
-(* The elaborated module, bundled -- see local/parameters-redesign.md's
-   "Architecture" section. Positioned here (not right after proc_set/etc.
-   above): ProcRecord/InvRecord/PredRecord all need to already exist, and
-   StackFree below needs inv_map/pred_map ambient, so this is the earliest
-   point everything lines up. Not ra_map/ra_set (see that decision in the
-   same doc) -- those stay Global Parameter in lang.v. *)
+(* The elaborated module, bundled. Positioned here (not right after
+   proc_set/etc. above): ProcRecord/InvRecord/PredRecord all need to
+   already exist, and StackFree below needs inv_map/pred_map ambient, so
+   this is the earliest point everything lines up. Not ra_map/ra_set --
+   those stay Global Parameter in lang.v. *)
 Record Program := {
   prog_proc_set : gset proc_name;
   prog_pred_set : gset pred_name;
@@ -1214,8 +1213,8 @@ Fixpoint assertion_inv_names (a : assertion) : gset inv_name :=
   | _ => ∅
   end.
 
-(* A procedure's own required mask (Step 6, local/parameters-redesign.md):
-   the invariants it must already hold (as a bare LInv fact) in its own
+(* A procedure's own required mask: the invariants it must already hold
+   (as a bare LInv fact) in its own
    precondition, and hence the invariants any RavenHoareTriple derivation
    for its body might need to open via InvAccessBlockRule. Mirrors the
    standard Iris pattern for a spec that internally opens an invariant N
@@ -1234,10 +1233,10 @@ Definition proc_required_mask (proc_record : ProcRecord) : gset inv_name :=
 
 (* Scope-correct free variables: unlike assertion_lexpr_fvars, this
    subtracts LExists's own bound variable from its body's fvars, so it
-   never over-approximates through a genuine existential (see Finding 2 in
-   local/binders.md -- assertion_lexpr_fvars deliberately keeps the bug,
-   since the reserved-namespace design tolerates it; this function is the
-   accurate version needed where that tolerance isn't good enough, namely
+   never over-approximates through a genuine existential.
+   assertion_lexpr_fvars deliberately over-approximates instead, since the
+   reserved-namespace design tolerates it; this function is the accurate
+   version needed where that tolerance isn't good enough, namely
    trnsl_assertion_mp_irrelevant_reserved below).
    LForall's bound variable is *not* subtracted, matching
    assertion_exists_binders and trnsl_assertion_forall: LForall's binder is
@@ -1353,9 +1352,8 @@ Qed.
    Reserved names are never chosen by anything except the author of an
    invariant/predicate/proc contract's own binder, and never appear as a
    formal-argument name or as a key/value some substitution map could
-   mention -- see subst_map_avoids_reserved below and local/binders.md
-   for the full argument. This is what lets ProgramWF's own
-   binder-freshness obligations become purely syntactic, local checks
+   mention -- see subst_map_avoids_reserved below. This is what lets
+   ProgramWF's own binder-freshness obligations become purely syntactic, local checks
    instead of an unsatisfiable "forall M" disjointness. *)
 Definition is_reserved (v : lvar) : Prop := String.prefix "$" v = true.
 
@@ -1508,9 +1506,8 @@ Proof.
     + apply IHa2. split_and!; [assumption | intros x Hx; apply HbA; set_solver | intros v Hv; apply HfvA; set_solver].
 Qed.
 
-(* A genuinely rich lvar_typs (Hσ_rich's shape, Step 6,
-   local/parameters-redesign.md/local/binders.md's "Open item, explicitly
-   deferred"): a naive, finite lvar_typs (e.g. one built by hand out of a
+(* A genuinely rich lvar_typs (Hσ_rich's shape): a naive, finite lvar_typs
+   (e.g. one built by hand out of a
    handful of named lvars) only ever has finitely many lvars per type --
    sometimes zero -- failing "forall t excl, exists lv not in excl of
    type t" outright. rich_lvar_typs below has infinitely many lvars of
@@ -1754,8 +1751,8 @@ End RichLvarTyps.
    actually built that way -- e.g. via trnsl_expr_lExpr against an
    ordinary symbolic stack, or via fresh_proc_entry_lvars/Hσ_rich, itself
    expected to be strengthened to avoid the reserved prefix wherever it
-   is finally discharged for a concrete program (see local/binders.md's
-   deferred item; not yet needed to typecheck this file). *)
+   is finally discharged for a concrete program (not yet needed to
+   typecheck this file). *)
 Definition subst_map_avoids_reserved (M : gmap lvar LExpr) : Prop :=
   (∀ v, v ∈ dom M → ¬ is_reserved v) ∧ (∀ v, v ∈ lexpr_map_fvars M → ¬ is_reserved v).
 
@@ -1778,7 +1775,7 @@ Qed.
    Generalized over an extra "safe to leave unsubstituted" set R, disjoint
    from dom M: covers names an over-approximating fvars computation might
    pull in that aren't genuinely free (see assertion_lexpr_fvars's own
-   generalization below, and local/binders.md). Instantiating R := ∅
+   generalization below). Instantiating R := ∅
    recovers the original statement exactly. *)
 Lemma lexpr_subst_compose (e : LExpr) (σ M : gmap var LExpr) (R : gset lvar) :
   R ## dom M →
@@ -1872,7 +1869,7 @@ Qed.
    lexpr fvar of inv_body is either a genuine formal argument or one of
    inv_body's own binders (the latter only ever shows up because
    assertion_lexpr_fvars doesn't subtract LExists/LForall's bound
-   variable -- see local/binders.md). *)
+   variable). *)
 Lemma inv_body_wf_from_scoped (r : InvRecord) :
   (∀ v, v ∈ assertion_lexpr_fvars r.(inv_body) →
      v ∈ (list_to_set r.(inv_args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body)) →
@@ -1906,11 +1903,10 @@ Proof.
 Qed.
 
 (* Ghost-embedding config: namespace/gname bookkeeping needed to embed a
-   program into Iris, distinct from Program (what a .rav author writes) --
-   see local/parameters-redesign.md's "Architecture" section. Not Gamma:
-   Gamma_type sits inside the (already-closed, by this point) nested
-   Section Translation below, so it can't be bundled here without redoing
-   that relocation; stays its own Variable for now. *)
+   program into Iris, distinct from Program (what a .rav author writes).
+   Not Gamma: Gamma_type sits inside the (already-closed, by this point)
+   nested Section Translation below, so it can't be bundled here; stays
+   its own Variable. *)
 Record GhostConfig := {
   gc_ghost_heap_name : gname;
   gc_ghost_heap_namespace : namespace;
@@ -1963,9 +1959,9 @@ Record ProgramWF : Prop := {
   (* LExpr free variables in pre/post are bounded by the formal argument
      names, up to pre/post's own binder names (leaked in by
      assertion_lexpr_fvars's own over-approximation through LExists/
-     LForall -- it doesn't subtract the bound variable, see
-     local/binders.md). pwf_proc_binders_reserved below is what makes
-     those binder names harmless despite not being formal arguments. *)
+     LForall -- it doesn't subtract the bound variable).
+     pwf_proc_binders_reserved below is what makes those binder names
+     harmless despite not being formal arguments. *)
   pwf_proc_fvars_bounded :
     map_Forall (λ _ r,
       (∀ v, v ∈ assertion_lexpr_fvars (proc_precond_of r) →
@@ -1978,10 +1974,9 @@ Record ProgramWF : Prop := {
   (* Every procedure's own pre/postcond binders (its own internal
      existential/universal witnesses, as opposed to lvars threaded through
      the symbolic stack) are drawn from the reserved namespace (is_reserved),
-     so they can never collide with any substitution map's own fvars --
-     replaces the old pwf_proc_binders_fresh, which quantified over *every*
-     M unconditionally and so was unsatisfiable whenever pre/postcond had a
-     genuine existential. See local/binders.md. *)
+     so they can never collide with any substitution map's own fvars -- an
+     unconditional "forall M" disjointness would be unsatisfiable whenever
+     pre/postcond has a genuine existential. *)
   pwf_proc_binders_reserved :
     map_Forall (λ _ r,
       set_Forall is_reserved (assertion_exists_binders (proc_precond_of r)) ∧
@@ -2021,7 +2016,7 @@ Record ProgramWF : Prop := {
      binders) can survive the substitution unaccounted for by either
      disjunct -- concretely false for any invariant whose body actually
      mentions a formal argument, caught while constructing a concrete
-     ProgramWF witness (see local/binders.md). This field is currently
+     ProgramWF witness. This field is currently
      unused elsewhere in the codebase; pwf_pred_fvars_bounded (its
      predicate analogue, used by subst_congr_step's LPred case) already
      always has this length fact on hand from StackFree's own SF_Pred/
@@ -2032,8 +2027,7 @@ Record ProgramWF : Prop := {
         v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(inv_body);
 
   (* Analogous to pwf_proc_binders_reserved: an invariant body's own
-     binders are drawn from the reserved namespace. Replaces the old,
-     unconditional-over-M pwf_inv_binders_fresh. *)
+     binders are drawn from the reserved namespace. *)
   pwf_inv_binders_reserved :
     map_Forall (λ _ r, set_Forall is_reserved (assertion_exists_binders r.(inv_body))) inv_map;
 
@@ -2070,8 +2064,7 @@ Record ProgramWF : Prop := {
         v ∈ (⋃ (lexpr_fvars <$> args) : gset lvar) ∨ v ∈ assertion_exists_binders r.(pred_body);
 
   (* Analogous to pwf_proc_binders_reserved: a predicate body's own binders
-     are drawn from the reserved namespace. Replaces the old,
-     unconditional-over-M pwf_pred_binders_fresh. *)
+     are drawn from the reserved namespace. *)
   pwf_pred_binders_reserved :
     map_Forall (λ _ r, set_Forall is_reserved (assertion_exists_binders r.(pred_body))) pred_map;
 
@@ -2403,12 +2396,12 @@ Proof.
   inversion H2. exact H7.
 Qed.
 
-(* Isolated, single-use extraction of CallTp's new proc_call_ret_well_typed
+(* Isolated, single-use extraction of CallTp's proc_call_ret_well_typed
    premise, keyed to an already-known proc_entry (via Some-injectivity on
    proc_map's lookup) rather than CallTp's own existentially-bound one --
    lets call sites avoid threading this through the large, already-fragile
    auto-numbered "inversion Hwelldef; subst ..." used elsewhere for Call's
-   soundness case (see local/parameters-redesign.md). *)
+   soundness case. *)
 Lemma stmt_well_defined_call_ret_typed ρ v proc args proc_entry :
   stmt_well_defined ρ (Call v proc args) ->
   proc_map !! proc = Some proc_entry ->
@@ -2480,10 +2473,9 @@ Qed.
     intros. unfold transport in *. destruct Heq_car. simpl in *. done.
   Qed.
 
-  (* Narrowed to ra_set (Open item 1, local/parameters-redesign.md): Γ
-     used to be universally quantified over *every* RA_Pack, but every
-     actual call site only ever applies it as Γ (ra_map r) for some
-     r : ra_name -- and a concrete Γ witness genuinely cannot be total
+  (* Γ is scoped to ra_set, not universally quantified over *every*
+     RA_Pack: every actual call site only ever applies it as Γ (ra_map r)
+     for some r : ra_name -- and a concrete Γ witness genuinely cannot be total
      over arbitrary RA_Pack (infinitely many possible carrier types, so
      no finite Sigma could provide a matching camera slot for every one).
      option-valued (not a r ∈ ra_set proof obligation threaded through
@@ -2628,7 +2620,7 @@ Section Translation.
        matching a list of declared types -- used to synthesize a procedure's
        own entry stack out of fresh (not globally shared) lvar names, one per
        formal arg / local variable, so that different procedures' same-named
-       parameters no longer need to agree on a single global type via σ. *)
+       parameters never need to agree on a single global type via σ. *)
     Lemma fresh_lvars_list (σ : lvar_typs)
         (Hrich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ σ lv = t)
         (decls : list (var * typ)) (excl0 : gset lvar) :
@@ -2678,7 +2670,7 @@ Section Translation.
       (* Entry lvars are never reserved -- lets raven_soundness's own
          precond/postcond bridging build subst_map_avoids_reserved facts
          for the symbolic (LVar-valued) substitution map it builds out of
-         dll_args. See local/binders.md. *)
+         dll_args. *)
       dll_args_not_reserved : Forall (fun lv => ¬ is_reserved lv) dll_args;
       dll_locals_not_reserved : Forall (fun lv => ¬ is_reserved lv) dll_locals;
     }.
@@ -3715,7 +3707,7 @@ Definition proc_bodies_translate : Prop :=
 
 (* --- The translation is a Knaster--Tarski least fixpoint --------------------
    Neither [LInv] (a discrete ownership fragment) nor [LPred] (a plain
-   recursive call) is guarded any more, so [trnsl_assertion_pre] is no longer
+   recursive call) is guarded, so [trnsl_assertion_pre] isn't
    Contractive and the step-indexed [fixpoint] is unavailable.  What survives
    -- and is all that is needed -- is monotonicity in the [⊢] order, which is
    exactly [BiMonoPred].  Raven's typing rules (resource assertions never
@@ -3847,9 +3839,10 @@ Proof.
     + iIntros "%Hc". done.
 Qed.
 
-(* [LInv] now denotes a discrete ownership fragment, not an Iris [inv]. The
-   correspondence with the invariant's body is no longer definitional; it is
-   mediated by [Winv] and derived in [Winv_open]/[Winv_alloc] below. *)
+(* [LInv] denotes a discrete ownership fragment, not an Iris [inv]
+   directly. The correspondence with the invariant's body isn't
+   definitional; it is mediated by [Winv] and derived in
+   [Winv_open]/[Winv_alloc] below. *)
 Lemma trnsl_inv_validity' inv' args stk mp :
   match inv_map !! inv' with
   | Some _ =>
@@ -3899,10 +3892,10 @@ Proof.
 Qed.
 
 (* Overriding mp at a lvar the assertion doesn't depend on (lvar_fresh_in_assertion)
-   leaves its translation unchanged. Unlike its subst-based predecessor this
-   covers LStack and LForall -- it never manipulates the AST via subst (a
-   no-op on LStack's own stored map, which is exactly why the old lemma had
-   to exclude it), just mp directly. LPred still needs excluding: its
+   leaves its translation unchanged, covering LStack and LForall too: it
+   never manipulates the AST via subst (which would be a no-op on
+   LStack's own stored map, so a subst-based approach couldn't cover it),
+   just mp directly. LPred still needs excluding: its
    recursion goes through the *global* pred_map table, not a structural
    subterm of a, so a plain induction on a can't produce an induction
    hypothesis for it (the existing subst_congr_cond/least_fixpoint_ind
@@ -4563,7 +4556,7 @@ Proof.
 Qed.
 
 (* Commutes a fixed-stack LAnd past a nested LExists into a single top-level
-   LExists -- lets the new, subst-free ExistsElimRule (which only eliminates
+   LExists -- lets ExistsElimRule (subst-free, which only eliminates
    a top-level LExists) still reach an existential nested under
    LAnd (LStack stk) (LAnd _ p), the shape an invariant/predicate body
    naturally appears in via InvAccessBlockRule/etc. Needs v fresh for both
@@ -4819,8 +4812,8 @@ Section RavenLogic.
 
   (* Purely syntactic entailment on assertions -- deliberately independent
      of trnsl_assertion/Iris (no Sigma/Gamma/GhostConfig/invTokenG needed
-     anywhere in this relation's own definition), so that WeakeningRule
-     (the sole reason RavenHoareTriple used to need those) can be stated
+     anywhere in this relation's own definition), so that WeakeningRule --
+     the only RavenHoareTriple rule that consumes it -- can be stated
      without them. Soundness w.r.t. the real (Iris-level) [entails] is
      proved once, by induction on this relation's derivation -- see
      assertion_entails_sound, alongside trnsl_assertion (this relation is
@@ -5235,8 +5228,9 @@ Section RavenLogic.
   Qed.
 
   (* assertion_entails-typed counterpart of TypeInf's entails_and_stack_exists_swap
-     (now otherwise unused -- WeakeningRule no longer takes entails), derived
-     purely compositionally from the two swap primitives above: pull the
+     (that version is otherwise unused, since WeakeningRule takes
+     assertion_entails, not entails), derived purely compositionally from
+     the two swap primitives above: pull the
      LExists past p (AE_Exists_And_Swap_R) under the fixed LStack via
      AE_And_Mono, then past the LStack itself (AE_And_Exists_Swap_L). *)
   Lemma assertion_entails_and_stack_exists_swap (σ : lvar_typs) (stk : stack) (v : lvar) (t : typ) (body p : assertion) :
@@ -5390,12 +5384,11 @@ Section RavenLogic.
        iInduction keep their names: the fresh result lvar and the call's
        own argument lexprs stay out of the reserved ("$") namespace
        reserved for an authored contract's own internal existentials (see
-       ProgramWF's pwf_*_binders_reserved and local/binders.md). Checkable
+       ProgramWF's pwf_*_binders_reserved). Checkable
        by whoever builds a concrete derivation (just don't pick
        "$"-prefixed names) -- unlike a blanket "no stack/lexpr anywhere
        ever uses a reserved name" assumption, which is simply false
-       (nothing stops an adversarial stk from doing so) and was tried,
-       and abandoned, earlier. *)
+       (nothing stops an adversarial stk from doing so). *)
     ¬ is_reserved lvar_x ->
     (* Bundled via /\, not a separate premise: trnsl.v's rrl_validity
        pattern-matches this constructor's premises via auto-generated,
@@ -5408,9 +5401,8 @@ Section RavenLogic.
        half they need. *)
     Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ∧
     (* The caller's own current mask must already include whatever the
-       callee itself needs to open (proc_required_mask, Step 6,
-       local/parameters-redesign.md) -- mirrors the standard Iris pattern
-       for a spec that internally opens an invariant N (∀ E, ↑N ⊆ E → ...)
+       callee itself needs to open (proc_required_mask) -- mirrors the
+       standard Iris pattern for a spec that internally opens an invariant N (∀ E, ↑N ⊆ E → ...)
        rather than an unconditional ∀ mask, which is what
        all_proc_specs_valid_raven/_iris need on the *other* end to even be
        satisfiable for a callee that opens an invariant at all. *)
@@ -5614,26 +5606,24 @@ Section RavenLogic.
         SkipS mask
       (LAnd (LStack stk) p)
 
-  (* Consolidates the old CASSuccRule/CASFailRule (see git history) into one:
-     the precondition no longer forces the owned chunk to already equal e2
-     (which required knowing, before the atomic step, which outcome would
-     occur -- unknowable in general when old_chunk is an invariant's own
-     existential witness, e.g. counterInv's "v", genuinely independent of
-     whatever value a prior read compared against). old_chunk is a fully
-     generic LExpr; the postcondition's own LIte branches on the *same*
-     equality the CAS itself decides operationally (old_chunk = lexpr2),
-     covering both outcomes in a single rule so the caller decides which
-     branch applies only *after* seeing lvar_v's own value. e2/e3 need not
-     translate to literal constants (see HeapWriteRule/FPURule's identical
-     generalization): lexpr2/lexpr3 become the compared value / new chunk
-     directly, since chunk is itself an LExpr. lvar_v ∉ old_chunk's fvars
-     justifies that its evaluated value is stable under the postcondition's
-     stack update (needed for the failure branch, which reuses old_chunk
-     unchanged; the success branch introduces a fresh chunk expression, so
-     doesn't need this). Unlike the old CASSuccRule, e2's evaluatedness is no
-     longer free from the precondition (which used to force old_chunk =
-     lexpr2 literally), so it now needs its own expr_well_defined premise,
-     just like e3's. *)
+  (* The precondition doesn't force the owned chunk to already equal e2
+     (which would require knowing, before the atomic step, which outcome
+     would occur -- unknowable in general when old_chunk is an invariant's
+     own existential witness, e.g. counterInv's "v", genuinely independent
+     of whatever value a prior read compared against). old_chunk is a
+     fully generic LExpr; the postcondition's own LIte branches on the
+     *same* equality the CAS itself decides operationally (old_chunk =
+     lexpr2), covering both outcomes in a single rule so the caller
+     decides which branch applies only *after* seeing lvar_v's own value.
+     e2/e3 need not translate to literal constants (see HeapWriteRule/
+     FPURule's identical generalization): lexpr2/lexpr3 become the
+     compared value / new chunk directly, since chunk is itself an LExpr.
+     lvar_v ∉ old_chunk's fvars justifies that its evaluated value is
+     stable under the postcondition's stack update (needed for the
+     failure branch, which reuses old_chunk unchanged; the success branch
+     introduces a fresh chunk expression, so doesn't need this). e2's
+     evaluatedness needs its own expr_well_defined premise (not free from
+     the precondition), just like e3's. *)
   | CASRule ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk :
     fresh_lvar stk lvar_v ->
     inf_expr ρ e1 = Some (TpLoc) ->
@@ -5659,19 +5649,17 @@ Section RavenLogic.
      witness-carrying postcondition (e.g. CASSuccRule's own conclusion, which
      an immediately following statement needs to consume via SequenceRule),
      produces an LExists that no other rule can consume directly.
-     Deliberately subst-free (contrast the old, retired rule of this name):
-     body keeps v as an ordinary free lvar in both premise and conclusion,
-     so the soundness proof re-interprets the *same* derivation at mp[v:=v']
-     rather than needing an AST-level substitution -- which is what lets this
-     one rule handle LStack-containing bodies too (subst is a no-op on
-     LStack's own stored map, see lvar_fresh_in_assertion's comment), unlike
-     its predecessor which had to shut those out via elim_safe. Re-entering
-     the premise's own soundness obligation at mp[v:=v'] needs v' to have
-     v's declared type t; since LExists's own translation now restricts its
-     witness to typ_val_match t (see trnsl_assertion_str's LExists case),
-     that comes for free from destructuring the incoming existential -- no
-     separate witness_well_typed side-condition needed any more (contrast
-     this rule's own previous version). Callers needing the old
+     Deliberately subst-free: body keeps v as an ordinary free lvar in
+     both premise and conclusion, so the soundness proof re-interprets
+     the *same* derivation at mp[v:=v'] rather than needing an AST-level
+     substitution -- which is what lets this rule handle LStack-containing
+     bodies too (subst is a no-op on LStack's own stored map, see
+     lvar_fresh_in_assertion's comment). Re-entering the premise's own
+     soundness obligation at mp[v:=v'] needs v' to have v's declared type
+     t; since LExists's own translation restricts its witness to
+     typ_val_match t (see trnsl_assertion_str's LExists case), that comes
+     for free from destructuring the incoming existential -- no separate
+     witness-well-typedness side condition needed. Callers needing the
      LAnd (LStack stk) (LAnd (LExists v body) p) shape get there via a
      separate, purely structural commuting entailment (v fresh for stk/p),
      rather than baking it into the core rule. *)
@@ -5691,11 +5679,12 @@ Section RavenLogic.
      SkipRule, but translates to None' (no physical step), unlike SkipS.
      GhostSkip := Assert (Val (LitBool true)) is the "do nothing, costs no
      step" filler this enables (see the Assert constructor's own comment in
-     stmt, and counter_monotonic.v's incr_body). Placed last (rather than
-     next to SkipRule, its closest sibling) so it lands as the newest,
-     final case in every existing induction over RavenHoareTriple --
-     appending doesn't renumber any of rrl_validity's own numbered-bullet
-     case references in trnsl.v, whereas inserting in the middle would. *)
+     stmt, and counter_monotonic.v's incr_body). Placed last among
+     RavenHoareTriple's constructors (rather than next to SkipRule, its
+     closest sibling): any induction over RavenHoareTriple sees it as the
+     final case, so appending a future constructor here never renumbers
+     rrl_validity's own numbered-bullet case references in trnsl.v, the
+     way inserting one in the middle would. *)
   | AssertRule ρ σ stk mask e p lexpr :
     trnsl_expr_lExpr stk e = Some lexpr ->
     inf_expr ρ e = Some TpBool ->
@@ -5715,7 +5704,7 @@ Section RavenLogic.
      proc_entry_lvars via an opaque existential-elimination
      (fresh_proc_entry_lvars), so all_proc_specs_valid_raven must hold for
      *every* dll, not just the one a concrete derivation happens to be
-     written against -- see local/binders.md.
+     written against.
 
      Hwf is needed wherever a rule substitutes an authored proc/inv/pred
      body: rename_assertion_subst_commute needs that body's own binders to
@@ -6112,8 +6101,8 @@ Section AssertionsProperties.
   (* Restricted version: lexpr_fvars e ⊆ dom M1 → Hbase restricted to dom M1 suffices *)
   (* Generalized via is_reserved directly, rather than a fixed gset R:
      reserved names potentially escaping dom M1's coverage (through
-     assertion_lexpr_fvars's over-approximation, see local/binders.md)
-     aren't confined to a single top-level assertion's own binders --
+     assertion_lexpr_fvars's own over-approximation) aren't confined to a
+     single top-level assertion's own binders --
      subst_congr_step below recurses into predicate bodies fetched fresh
      from pred_map (for recursive predicates), which are not syntactic
      subterms of whatever top-level assertion this all started from, so
@@ -6189,8 +6178,7 @@ Section AssertionsProperties.
      - dom M1 = dom M2
      - the assertion's LExpr fvars are covered by dom M1, up to reserved
        names (assertion_lexpr_fvars's own over-approximation through
-       LExists/LForall can leak an assertion's own binder names in --
-       see local/binders.md)
+       LExists/LForall can leak an assertion's own binder names in)
      - its own binders avoid dom/fvars of either map
      - M1/M2 were built by the ordinary framework machinery, so touch no
        reserved name themselves (subst_map_avoids_reserved) -- needed so
@@ -6518,8 +6506,8 @@ Section AssertionsProperties.
   (* Side conditions under which two symbolic maps mp1/mp2 assign the same
      meaning to a StackFree, once-substituted assertion, *without* needing
      any agreement at reserved names -- unlike subst_congr_cond's Hbase,
-     which needs exactly that (impossible at inv_body_bridge's step 3,
-     see local/binders.md). The trick: assertion_true_fvars is scope-
+     which needs exactly that (impossible at inv_body_bridge's step 3
+     below). The trick: assertion_true_fvars is scope-
      correct (unlike assertion_lexpr_fvars), so every name it reports is
      genuinely read from the ambient mp -- nothing here is a spurious
      over-approximation through a binder, and covering it directly is both
@@ -6739,9 +6727,8 @@ Section AssertionsProperties.
     iApply ("H'" $! a M mp2); iPureIntro; [reflexivity | exact Hcond].
   Qed.
 
-  (* The lemma local/binders.md's "Blocked" section calls for: translating a
-     once-substituted, StackFree assertion doesn't depend on the ambient
-     mp's value anywhere -- not even at reserved names, unlike
+  (* Translating a once-substituted, StackFree assertion doesn't depend on
+     the ambient mp's value anywhere -- not even at reserved names, unlike
      trnsl_assertion_subst_congr's Hbase, which needs exactly that
      agreement and is therefore unusable when mp1/mp2 (e.g. a caller's own
      mp vs the canonical WINV_MP) are genuinely unrelated. Only requires
@@ -6871,10 +6858,10 @@ Section AssertionsProperties.
   Qed.
 
   (* Extra "no key here is reserved" hypotheses (Hargs_ok, Hlvar_x_ok)
-     needed for the new is_reserved x disjunct: when x is reserved, none
+     needed for the is_reserved x disjunct: when x is reserved, none
      of "#ret_val" (never reserved, a different, "#"-prefixed convention),
      args's own formal-argument names (never reserved by the framework's
-     own naming discipline, see local/binders.md), or lvar_x (ditto for
+     own naming discipline), or lvar_x (ditto for
      derivation-fresh witnesses) can equal x, so both sides fall back
      directly to mp/the ret_val update, which trivially agree. *)
   Lemma hbase_lexpr_subst_r (args : list lvar) (lexprs : list LExpr)
@@ -7085,12 +7072,10 @@ Section AssertionsProperties.
   Qed.
 
   (* Hmr: subst_map touches no reserved name -- needed to re-derive the
-     "## dom subst_map" premise InvBodyWF/PredBodyWF now require (in place
-     of the old, unconditional-over-M pwf_*_binders_fresh) for whichever
+     "## dom subst_map" premise InvBodyWF/PredBodyWF require for whichever
      inv/pred body SF_Inv/SF_Pred happens to unfold. Whoever discharges
      this for a concrete subst_map is asserting it was built by the
-     ordinary framework machinery -- see subst_map_avoids_reserved and
-     local/binders.md. *)
+     ordinary framework machinery -- see subst_map_avoids_reserved. *)
   Lemma stack_free_assertion_subst
     (Hwf : ProgramWF)
     assertion subst_map
@@ -7235,8 +7220,7 @@ Section InvariantWorld.
      trnsl_expr_lExpr against some ordinary symbolic stack -- touch no
      reserved lvar. Same status as subst_map_avoids_reserved elsewhere:
      an explicit premise recording that lexprs was actually built by the
-     framework's own machinery, not a proof obligation dischargeable here
-     (see local/binders.md's deferred item). *)
+     framework's own machinery, not a proof obligation dischargeable here. *)
   Lemma inv_body_bridge (Hwf : ProgramWF) (inv' : inv_name) (r : InvRecord)
       (lexprs : list LExpr) (vs : list val) (stk : stack_id) (mp : symb_map)
       (Hlexprs_ok : ∀ v, v ∈ lexpr_map_fvars (list_to_map (zip r.(inv_args) lexprs) : gmap lvar LExpr) → ¬ is_reserved v) :
@@ -7369,7 +7353,7 @@ Section InvariantWorld.
        is the right tool instead: it only needs agreement where inv_body's
        *scope-correct* fvars (assertion_true_fvars, via pwf_inv_fvars_closed)
        actually land, which is exactly dom (inv_arg_map r vs) -- Hval_eval's
-       own domain. See local/binders.md's "Blocked" section. *)
+       own domain. *)
     have Htrue_dom : assertion_true_fvars r.(inv_body) ⊆ dom (inv_arg_map r vs : gmap lvar LExpr).
     { rewrite Hdom2. exact (Hwf.(pwf_inv_fvars_closed) inv' r Hr). }
     apply (trnsl_assertion_mp_irrelevant_reserved Hwf r.(inv_body)

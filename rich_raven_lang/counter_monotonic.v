@@ -7,14 +7,14 @@ From raven_iris.simp_raven_lang Require Import lang.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
 Require Import Coq.Logic.FunctionalExtensionality.
 
-(* Sigma is a Section WithProgram variable in rrl_lang.v now (see its own
+(* Sigma is a Section WithProgram variable in rrl_lang.v (see its own
    header comment) -- redeclared here, same as trnsl.v does, so
    invTokenG's own instance can reference it. This file needs neither
    Gs/I/inGs/the ghost-heap inG instance nor simpLangG: it never calls
-   Winv/Wghost/trnsl_assertion/entails directly (those became dead code
-   and were removed in Step 4), only ProgramWF (Sigma + invTokenG0 only)
-   and RavenHoareTriple (Program only). Picking a concrete Sigma is Step
-   5's adequacy-wrapper job, not this file's -- stays abstract here. *)
+   Winv/Wghost/trnsl_assertion/entails directly, only ProgramWF (Sigma +
+   invTokenG0 only) and RavenHoareTriple (Program only). Picking a
+   concrete Sigma is the adequacy wrapper's job, not this file's -- stays
+   abstract here. *)
 Context {Σ : gFunctors}.
 Context `{!invTokenG Σ}.
 
@@ -24,9 +24,9 @@ Context `{!invTokenG Σ}.
    Auth[MaxNat] this proof actually needs: nothing here ever holds a
    separate authoritative/fragment split, so there is no need to formalize
    Auth on top of it.
-   Carrier is [option nat], not [nat]: the restored ResourceAlgebra axioms
-   (see local/parameters-redesign.md, Step 0) require [frame] to actually
-   reject the [x < y] case via [valid], and plain [nat] has no element to
+   Carrier is [option nat], not [nat]: ResourceAlgebra's own axioms
+   require [frame] to actually reject the [x < y] case via [valid], and
+   plain [nat] has no element to
    reject with. [None] is that invalid sentinel -- mirrors
    lib/library/resource_algebra.rav's own [MaxNat] module, which uses
    [Int]'s [-1] as its sentinel, filtered out by [valid(n) := n >= 0]. *)
@@ -215,10 +215,10 @@ Definition counterInv_record : InvRecord := Inv ["x"] counterInv_body.
 
 (* ----------------------------------------------------------------------- *)
 (* read/incr/make's own ProcRecords, and the concrete Program/GhostConfig
-   built from them -- moved ahead of read/incr/make's own proof
-   development (which used to sit right after each record) so RProg/G
-   exist before RavenHoareTriple/ProgramWF's own Local Notations
-   (needed by every RavenHoareTriple-typed lemma in this file) do. *)
+   built from them, come before each proc's own proof development below:
+   RProg/G must exist before RavenHoareTriple/ProgramWF's own Local
+   Notations (needed by every RavenHoareTriple-typed lemma in this file)
+   do. *)
 
 (* A "do nothing" filler for a branch that must cost no physical step --
    e.g. incr_body's CAS-failure branch below, which sits inside an
@@ -283,24 +283,23 @@ Definition make_precond : assertion := LPure True.
 (* No existential: "#ret_val" is a placeholder for the call's own fresh
    result lvar, substituted in by whoever consumes make_record's contract
    (see all_proc_specs_valid_raven's own <["#ret_val":=LVar lv_final]>
-   substitution). Unlike the old "x"-existential shape, this has no
-   top-level LExists binder -- required by ProgramWF's own
-   pwf_proc_binders_fresh field, an unconditional forall over substitution
-   maps that a top-level binder could never satisfy (pick a map sending some
-   key to LVar "x" to violate disjointness). *)
+   substitution). No top-level LExists binder here: ProgramWF's own
+   pwf_proc_binders_reserved field requires every one of a postcondition's
+   own binders to be a reserved name (is_reserved, i.e. "$"-prefixed), and
+   "x" isn't one. *)
 Definition make_postcond : assertion := LInv "counterInv" [LVar "#ret_val"].
 
 Definition make_record : ProcRecord :=
   Proc [] [("x", TpLoc); ("#ret_val", TpLoc)] make_precond make_postcond make_body.
 
 (* The concrete Program/GhostConfig this file's whole development is
-   about -- replaces the old per-fact axioms (proc_map_read, proc_map_incr,
-   proc_map_make, inv_map_counterInv, proc_map_only, inv_map_only,
-   pred_map_empty, inv_set_eq, ghost_heap_namespace_disjoint_counterInv),
-   all provable lemmas below now. gname/namespace are concrete, inhabited
-   Coq types (gname := positive) -- no allocation is needed to pick *a*
-   name/namespace, only to later prove ownership *at* one (a separate,
-   Step-5 concern, unrelated to picking the value itself). *)
+   about. proc_map_read/proc_map_incr/proc_map_make/inv_map_counterInv/
+   proc_map_only/inv_map_only/pred_map_empty/inv_set_eq/
+   ghost_heap_namespace_disjoint_counterInv below are all provable lemmas
+   about it, not axioms. gname/namespace are concrete, inhabited Coq types
+   (gname := positive) -- no allocation is needed to pick *a* name/
+   namespace, only to later prove ownership *at* one (the adequacy
+   wrapper's own concern, unrelated to picking the value itself). *)
 Definition RProg : Program := {|
   prog_proc_set := {["read"; "incr"; "make"]};
   prog_pred_set := ∅;
@@ -339,13 +338,13 @@ Lemma inv_map_counterInv : inv_map !! "counterInv" = Some counterInv_record.
 Proof. reflexivity. Qed.
 
 (* ----------------------------------------------------------------------- *)
-(* Program-level setup shared by incr/read's derivations. Moved ahead of the
+(* Program-level setup shared by incr/read's derivations, ahead of the
    entails helpers below: entails is parameterized by sigma (see
    rrl_lang.v), so sigma has to exist before the "entails" local notation
    that partially applies it does. *)
 
-(* Per-procedure pvar-typing contexts (Step 6, local/parameters-redesign.md):
-   read/incr/make each declare "#ret_val" with a genuinely different type
+(* Per-procedure pvar-typing contexts: read/incr/make each declare
+   "#ret_val" with a genuinely different type
    (Int/Unit/Loc respectively -- make's return really is a location, not an
    arbitrary choice), which a single global rho could never satisfy for all
    three at once (all_proc_specs_valid_raven's own entry stack needs
@@ -360,9 +359,8 @@ Definition rho_read : pvar_typs := proc_pvar_typs read_record.
 Definition rho_incr : pvar_typs := proc_pvar_typs incr_record.
 Definition rho_make : pvar_typs := proc_pvar_typs make_record.
 
-(* Genuinely rich sigma (Hσ_rich, Step 6, local/binders.md's "Open item,
-   explicitly deferred"): the fixed names above give sigma only finitely
-   many lvars per type -- e.g. only "l_res" ever had TpBool, so excluding
+(* Genuinely rich sigma (Hσ_rich): the fixed names above give sigma only
+   finitely many lvars per type -- e.g. only "l_res" ever had TpBool, so excluding
    it leaves nothing. rrl_lang.v's rich_lvar_typs fixes this generically
    (infinitely many lvars of every type, by construction); layering these
    few fixed names on top via lvar_typs_update inherits richness for free
@@ -611,12 +609,12 @@ Proof.
       * eapply AE_And_True_Intro.
 Qed.
 
-(* The single, symbolic derivation the new ExistsElimRule needs for read's
+(* The single, symbolic derivation ExistsElimRule needs for read's
    FldRd, run with counterInv's own existential witness kept as the free
-   lvar "$v" rather than substituted -- matching the new rule's shape.
+   lvar "$v" rather than substituted -- matching ExistsElimRule's own shape.
 
-   Generalized (Step 6, local/parameters-redesign.md) over an extra,
-   disjointly-merged stack fragment recording placeholder entries for a
+   Generalized over an extra, disjointly-merged stack fragment recording
+   placeholder entries for a
    procedure's own not-yet-touched locals: all_proc_specs_valid_raven's own
    entry stack must bind every declared local from the start (matching
    RTCallStep's allocate-everything-at-once semantics), not just "x", but
@@ -656,12 +654,11 @@ Proof.
 Qed.
 
 (* Eliminates counterInv's own existential to reach read_inner_step_sym_ext.
-   Uses the new, subst-free ExistsElimRule at the top-level LExists shape,
-   so the LStack-fixed precondition is first commuted into that shape via
+   Uses ExistsElimRule (subst-free) at the top-level LExists shape, so the
+   LStack-fixed precondition is first commuted into that shape via
    WeakeningRule + entails_and_stack_exists_swap. The witness's well-typedness
-   ("$v" : Int) now comes directly from sigma's own declaration (sigma "$v" =
-   TpInt), via the rule's new sigma-consistency premise -- no separate
-   witness_well_typed proof needed any more. *)
+   ("$v" : Int) comes directly from sigma's own declaration (sigma "$v" =
+   TpInt), via ExistsElimRule's own sigma-consistency premise. *)
 Lemma read_fldrd_block_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : stack)
     (Hextra_compat : stk_type_compat rho sigma extra)
     (Hextra_ph : extra_placeholder extra) :
@@ -821,9 +818,9 @@ Qed.
 (* Combines the InvAccessBlock (read_invblock_step_ext) with the Assign
    (read_assign_step) via SequenceRule: read_assign_step's own precondition
    is exactly what read_invblock_step_ext's postcondition existentially
-   provides, once "l_v1" is unwrapped via the new, subst-free
-   ExistsElimRule -- straightforward now that read_assign_step's own
-   conclusion (read_postcond) doesn't mention "l_v1" at all. *)
+   provides, once "l_v1" is unwrapped via ExistsElimRule (subst-free) --
+   straightforward since read_assign_step's own conclusion (read_postcond)
+   doesn't mention "l_v1" at all. *)
 Lemma read_body_step :
   RavenHoareTriple rho_read sigma
     (LAnd (LStack (stk0 ∪ extra_read)) read_precond)
@@ -1316,7 +1313,7 @@ Proof.
 Qed.
 
 (* Wraps incr_ifs_res_step's conclusion in a fresh existential over "l_res"
-   itself: sound because entails is now parameterized by sigma, giving
+   itself: sound because entails is parameterized by sigma, giving
    entails_exists_intro access to Henv (via env_typ_well_defined) to justify
    the witness v' := mp "l_res" against sigma "l_res" = TpBool -- an
    unconditional-over-mp entails could never do this (see entails_exists_intro
@@ -1597,13 +1594,13 @@ Qed.
    already keyed at "x" : TpLoc) is needed either -- only a fresh, empty
    entry stack (make has no args, unlike read/incr). *)
 
-(* Widened (Step 6, local/parameters-redesign.md) to bind both of make's
-   own declared locals ("x"/"#ret_val", both TpLoc -- make has no args at
-   all) from the start, matching all_proc_specs_valid_raven's own entry
-   stack shape -- see read_invblock_step_ext's comment for why this is
-   needed in general. Unlike read/incr, make's own chain isn't shared with
-   any other procedure, so no rho/extra-fragment generalization is needed
-   here: stk_make0 itself can just be widened directly. *)
+(* Binds both of make's own declared locals ("x"/"#ret_val", both TpLoc --
+   make has no args at all) from the start, matching
+   all_proc_specs_valid_raven's own entry stack shape -- see
+   read_invblock_step_ext's comment for why this is needed in general.
+   Unlike read/incr, make's own chain isn't shared with any other
+   procedure, so no rho/extra-fragment generalization is needed here:
+   stk_make0 is just this shape directly. *)
 Definition stk_make0 : stack := <["x" := "l_ph_loc1"]> ({[ "#ret_val" := "l_ph_loc2" ]}).
 
 Lemma stk_type_compat_stk_make0 : stk_type_compat rho_make sigma stk_make0.
@@ -1793,7 +1790,7 @@ Qed.
 (* ProgramWF: pin proc_map/inv_map/pred_map/inv_set to this program's own
    concrete records and discharge every field.
 
-   proc_map/inv_map are concrete now (RProg above), so "pinning" them is
+   proc_map/inv_map are concrete (RProg above), so "pinning" them is
    just computation. The individual "contains at least this entry" facts
    above (proc_map_read, proc_map_incr, proc_map_make, inv_map_counterInv)
    already do half of that; *_only below adds the other half ("nothing
@@ -1953,14 +1950,13 @@ Proof.
 Qed.
 
 (* proc_bodies_translate: every registered procedure's own body actually
-   compiles (trnsl_stmt _ <> Error). Purely syntactic, independent of the
-   masks-redesign work blocking Hbodies (local/masks-redesign.md) -- decided
-   entirely by trnsl_stmt's own structural recursion over each concrete
-   body, computed once per procedure via vm_compute/discriminate. incr_body
-   is exactly why this isn't vacuous: its original SkipS-on-CAS-failure
-   shape made trnsl_stmt incr_body compute to Error (trnsl_atomic_block
-   rejected the second InvAccessBlock as needing two physical steps), a
-   real bug this lemma caught -- fixed by GhostSkip above, not just here. *)
+   compiles (trnsl_stmt _ <> Error) -- purely syntactic, decided entirely
+   by trnsl_stmt's own structural recursion over each concrete body,
+   computed once per procedure via vm_compute/discriminate. Not vacuous:
+   incr_body's CAS-failure branch has to be GhostSkip rather than SkipS
+   for this to hold, since its InvAccessBlock's one allowed physical step
+   is already spent on the CAS (see GhostSkip's own comment above
+   incr_body). *)
 Lemma Hpbt : proc_bodies_translate (P:=RProg).
 Proof.
   apply proc_map_forall.

@@ -90,16 +90,16 @@ Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) 
    layer. Naming RAs (rather than embedding RA_Pack values inline in
    typ/val) is what makes equality of RA-typed values decidable: ra_name is
    just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
-(* ra_map/ra_set stay Global Parameter for now: making them Section-
-   parametric turned out to entangle val/expr (RA elements are embedded in
-   val via ra_elem), and beyond that, tactics like `apply` and `lia` on the
-   resulting parameterized heap/val/etc. hit recurring, per-site instance-
-   resolution mismatches (Miller-pattern misfires on `apply`, non-identical
-   but convertible typeclass-instance atoms confusing `lia`) throughout
-   ghost_state.v/lifting.v/rrl_lang.v. Deliberately deferred as orthogonal,
-   follow-up work -- see local/parameters-redesign.md -- while the rest of
-   the axiom-elimination refactor (proc_map/inv_map/pred_map/namespaces/
-   Sigma/Gs/I/Gamma) proceeds without touching this. *)
+(* ra_map/ra_set stay Global Parameter: making them Section-parametric
+   would entangle val/expr (RA elements are embedded in val via ra_elem),
+   and beyond that, tactics like `apply` and `lia` on the resulting
+   parameterized heap/val/etc. hit recurring, per-site instance-resolution
+   mismatches (Miller-pattern misfires on `apply`, non-identical but
+   convertible typeclass-instance atoms confusing `lia`) throughout
+   ghost_state.v/lifting.v/rrl_lang.v. Every other program-specific piece
+   (proc_map/inv_map/pred_map/namespaces/Sigma/Gs/I/Gamma) is a concrete
+   definition rather than an axiom; ra_map/ra_set are the deliberate
+   exception. *)
 Global Parameter ra_set : gset ra_name.
 Global Parameter ra_map : ra_name -> RA_Pack.
 

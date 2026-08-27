@@ -49,13 +49,13 @@ Definition stackUR :=
 Definition ghost_domUR : ucmra :=
   gmapUR heap_addr (exclR unitO).
 
-(* Layer 0 (see local/parameters-redesign.md): the camera capabilities
-   [heapG] needs, without the concrete gnames -- mirrors iris_heap_lang's
-   own heapGpreS/heapGS split. [heapG] itself bundles gnames together with
-   the inG evidence (unlike the standard pre/GS split), so a [heapG]
-   instance can't be derived from [subG] alone; only this "pre" half can.
-   Producing concrete gnames from [heapGpreS] is [own_alloc] work that
-   belongs to the adequacy wrapper (Step 5), not here. *)
+(* Layer 0: the camera capabilities [heapG] needs, without the concrete
+   gnames -- mirrors iris_heap_lang's own heapGpreS/heapGS split. [heapG]
+   itself bundles gnames together with the inG evidence (unlike the
+   standard pre/GS split), so a [heapG] instance can't be derived from
+   [subG] alone; only this "pre" half can. Producing concrete gnames from
+   [heapGpreS] is [own_alloc] work that belongs to the adequacy wrapper,
+   not here. *)
 Class heapGpreS Σ := HeapGpreS {
   heapGpreS_heap_inG :: inG Σ (authR heapUR);
   heapGpreS_stack_inG :: inG Σ (authR stackUR);
@@ -755,8 +755,8 @@ Section updates.
 End updates.
 
 (* ----------------------------------------------------------------------- *)
-(* Layer 0 (see local/parameters-redesign.md): every [ResourceAlgebra]
-   embeds into a discrete CMRA, generically -- reusable by any program's
+(* Layer 0: every [ResourceAlgebra] embeds into a discrete CMRA,
+   generically -- reusable by any program's
    [Γ] witness so it doesn't need to hand-align its own RAs with some
    pre-existing Iris camera. [pcore := fun _ => None]: Raven's RA has no
    notion of a duplicable/persistent part, so "no core" is the honest
