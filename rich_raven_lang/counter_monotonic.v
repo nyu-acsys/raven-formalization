@@ -372,11 +372,20 @@ Definition sigma : lvar_typs := lvar_typs_update
         declared local from the start, matching all_proc_specs_valid_raven's
         own entry-stack shape (every RTCallStep-allocated local is bound at
         once, not just the ones a given derivation happens to touch first).
-        Never read, only overwritten, so one name per type suffices. *)
-     ("l_ph_int", TpInt);
+        Never read, only overwritten -- but *distinct* per simultaneous slot
+        of the same type within one procedure's own entry stack (read/incr
+        each need two live Int placeholders at once, make two Loc ones),
+        since a real dll's own dll_locals are NoDup: reusing one name for
+        two slots would make read_body_step's own entry stack correspond to
+        no valid dll at all, blocking RavenHoareTriple_rename's later
+        instantiation at an arbitrary one (renaming is a function, so it
+        cannot split one placeholder into two distinct targets). *)
+     ("l_ph_int1", TpInt);
+     ("l_ph_int2", TpInt);
      ("l_ph_bool", TpBool);
      ("l_ph_unit", TpUnit);
-     ("l_ph_loc", TpLoc)
+     ("l_ph_loc1", TpLoc);
+     ("l_ph_loc2", TpLoc)
   ] : gmap lvar typ)
   rich_lvar_typs.
 
@@ -458,21 +467,24 @@ Proof. apply lookup_union_Some_l. reflexivity. Qed.
 
 (* An "extra" stack fragment merged into stk0 to widen a procedure's entry
    stack (see read_invblock_step_ext's own comment) never holds anything
-   but one of the four placeholder lvars -- the one invariant every
+   but one of the six placeholder lvars -- the one invariant every
    concrete extra fragment below satisfies by construction, letting a
    single hypothesis stand in for "extra can't possibly clash with any of
    this file's own internal fresh names", rather than restating that
    freshness fact once per internal name (l_v1/l_new_v1/l_res/l_ret/$v). *)
 Definition extra_placeholder (extra : stack) : Prop :=
   ∀ v0 lv0, extra !! v0 = Some lv0 →
-    lv0 = "l_ph_int" ∨ lv0 = "l_ph_bool" ∨ lv0 = "l_ph_unit" ∨ lv0 = "l_ph_loc".
+    lv0 = "l_ph_int1" ∨ lv0 = "l_ph_int2" ∨ lv0 = "l_ph_bool" ∨ lv0 = "l_ph_unit" ∨
+    lv0 = "l_ph_loc1" ∨ lv0 = "l_ph_loc2".
 
 Lemma fresh_lvar_extra_ph (extra : stack) (Hextra_ph : extra_placeholder extra) (lv : lvar) :
-  lv ≠ "l_ph_int" → lv ≠ "l_ph_bool" → lv ≠ "l_ph_unit" → lv ≠ "l_ph_loc" →
+  lv ≠ "l_ph_int1" → lv ≠ "l_ph_int2" → lv ≠ "l_ph_bool" → lv ≠ "l_ph_unit" →
+  lv ≠ "l_ph_loc1" → lv ≠ "l_ph_loc2" →
   fresh_lvar extra lv.
 Proof.
-  intros H1 H2 H3 H4 v0 Heq.
-  destruct (Hextra_ph v0 lv Heq) as [-> | [-> | [-> | ->]]]; [exact (H1 eq_refl) | exact (H2 eq_refl) | exact (H3 eq_refl) | exact (H4 eq_refl)].
+  intros H1 H2 H3 H4 H5 H6 v0 Heq.
+  destruct (Hextra_ph v0 lv Heq) as [-> | [-> | [-> | [-> | [-> | ->]]]]];
+    [exact (H1 eq_refl) | exact (H2 eq_refl) | exact (H3 eq_refl) | exact (H4 eq_refl) | exact (H5 eq_refl) | exact (H6 eq_refl)].
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -614,7 +626,7 @@ Lemma read_inner_step_sym_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : 
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - eapply FrameRule with
       (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True)).
@@ -644,9 +656,9 @@ Lemma read_fldrd_block_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra 
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   have Hfresh_dollarv : fresh_lvar extra "$v" := fresh_lvar_extra_ph extra Hextra_ph "$v"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack (stk0 ∪ extra))
@@ -678,7 +690,7 @@ Lemma read_invblock_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : s
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LInv "counterInv" [LVar "x"]))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - eapply (InvAccessBlockRule rho sigma (stk0 ∪ extra) (<["v1":="l_v1"]> (stk0 ∪ extra)) cmask "counterInv" [Var "x"]
       (FldRd "v1" (Var "x") "c") counterInv_record (LPure True) (LPure True) "l_v1" TpInt [LVar "x"]).
@@ -704,7 +716,7 @@ Qed.
    read_invblock_step_ext's comment). Both keys get overwritten before
    ever being read (FldRd rebinds "v1", the final Assign rebinds
    "#ret_val"), so any placeholder value of the right type is safe. *)
-Definition extra_read : stack := <["v1" := "l_ph_int"]> ({[ "#ret_val" := "l_ph_int" ]}).
+Definition extra_read : stack := <["v1" := "l_ph_int1"]> ({[ "#ret_val" := "l_ph_int2" ]}).
 
 Lemma stk_type_compat_extra_read : stk_type_compat rho_read sigma extra_read.
 Proof.
@@ -719,7 +731,7 @@ Proof.
   intros v0 lv0 Hv0. unfold extra_read in Hv0.
   apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne Hv0]].
   - left. reflexivity.
-  - apply lookup_singleton_Some in Hv0 as [<- <-]. left. reflexivity.
+  - apply lookup_singleton_Some in Hv0 as [<- <-]. right; left. reflexivity.
 Qed.
 
 (* The single, symbolic derivation for read's Assign "#ret_val" (Var "v1")
@@ -818,7 +830,7 @@ Qed.
    reuse extra_read: incr's own "#ret_val" is TpUnit, read's is TpInt, and
    sigma is one global function, so the same lvar can't have both types. *)
 Definition extra_incr : stack :=
-  <["v1" := "l_ph_int"]> (<["new_v1" := "l_ph_int"]> (<["res" := "l_ph_bool"]> ({[ "#ret_val" := "l_ph_unit" ]}))).
+  <["v1" := "l_ph_int1"]> (<["new_v1" := "l_ph_int2"]> (<["res" := "l_ph_bool"]> ({[ "#ret_val" := "l_ph_unit" ]}))).
 
 Lemma stk_type_compat_extra_incr : stk_type_compat rho_incr sigma extra_incr.
 Proof.
@@ -833,9 +845,9 @@ Lemma extra_placeholder_incr : extra_placeholder extra_incr.
 Proof.
   intros v0 lv0 Hv0. unfold extra_incr in Hv0.
   apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne1 Hv0]]; [left; reflexivity |].
-  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne2 Hv0]]; [left; reflexivity |].
-  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne3 Hv0]]; [right; left; reflexivity |].
-  apply lookup_singleton_Some in Hv0 as [<- <-]. right; right; left; reflexivity.
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne2 Hv0]]; [right; left; reflexivity |].
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne3 Hv0]]; [right; right; left; reflexivity |].
+  apply lookup_singleton_Some in Hv0 as [<- <-]. right; right; right; left; reflexivity.
 Qed.
 
 Lemma incr_assign_inner_step :
@@ -950,10 +962,10 @@ Proof.
 Qed.
 
 Lemma fresh_lvar_incr_stk1 (lv : lvar) :
-  lv ≠ "x" -> lv ≠ "l_ph_int" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" -> lv ≠ "l_ph_loc" ->
-  "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> fresh_lvar incr_stk1 lv.
+  lv ≠ "x" -> lv ≠ "l_ph_int1" -> lv ≠ "l_ph_int2" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" ->
+  lv ≠ "l_ph_loc1" -> lv ≠ "l_ph_loc2" -> "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> fresh_lvar incr_stk1 lv.
 Proof.
-  intros Hx Hphi Hphb Hphu Hphl Hv1 Hnv1. unfold incr_stk1.
+  intros Hx Hphi1 Hphi2 Hphb Hphu Hphl1 Hphl2 Hv1 Hnv1. unfold incr_stk1.
   apply fresh_lvar_extend;
     [apply fresh_lvar_extend;
       [apply fresh_lvar_union; [apply fresh_lvar_stk0; exact Hx
@@ -1009,10 +1021,11 @@ Proof.
 Qed.
 
 Lemma fresh_lvar_incr_stk2 (lv : lvar) :
-  lv ≠ "x" -> lv ≠ "l_ph_int" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" -> lv ≠ "l_ph_loc" ->
+  lv ≠ "x" -> lv ≠ "l_ph_int1" -> lv ≠ "l_ph_int2" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" ->
+  lv ≠ "l_ph_loc1" -> lv ≠ "l_ph_loc2" ->
   "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> "l_res" ≠ lv -> fresh_lvar incr_stk2 lv.
 Proof.
-  intros Hx Hphi Hphb Hphu Hphl Hv1 Hnv1 Hres. unfold incr_stk2.
+  intros Hx Hphi1 Hphi2 Hphb Hphu Hphl1 Hphl2 Hv1 Hnv1 Hres. unfold incr_stk2.
   apply fresh_lvar_extend; [apply fresh_lvar_incr_stk1; done | exact Hres].
 Qed.
 
@@ -1440,8 +1453,10 @@ Proof.
     + reflexivity.
     + exact stk_type_compat_incr_stk2.
     + unfold is_reserved. discriminate.
-    + constructor; [| constructor]. intros v Hv. simpl in Hv.
-      apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
+    + split.
+      { constructor; [| constructor]. intros v Hv. simpl in Hv.
+        apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate. }
+      { unfold proc_required_mask, incr_record, incr_precond. simpl. set_solver. }
   - apply entails_and_mono; [exact (entails_refl _) |].
     eapply entails_trans; [exact (entails_and_elim_l _ _) |].
     unfold incr_precond. simpl. exact (entails_refl _).
@@ -1552,7 +1567,7 @@ Qed.
    needed in general. Unlike read/incr, make's own chain isn't shared with
    any other procedure, so no rho/extra-fragment generalization is needed
    here: stk_make0 itself can just be widened directly. *)
-Definition stk_make0 : stack := <["x" := "l_ph_loc"]> ({[ "#ret_val" := "l_ph_loc" ]}).
+Definition stk_make0 : stack := <["x" := "l_ph_loc1"]> ({[ "#ret_val" := "l_ph_loc2" ]}).
 
 Lemma stk_type_compat_stk_make0 : stk_type_compat rho_make sigma stk_make0.
 Proof.
@@ -1562,12 +1577,12 @@ Proof.
   - apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
 Qed.
 
-Lemma fresh_lvar_stk_make0 (lv : lvar) : lv ≠ "l_ph_loc" -> fresh_lvar stk_make0 lv.
+Lemma fresh_lvar_stk_make0 (lv : lvar) : lv ≠ "l_ph_loc1" -> lv ≠ "l_ph_loc2" -> fresh_lvar stk_make0 lv.
 Proof.
-  intros Hne v0 Heq. unfold stk_make0 in Heq.
+  intros Hne1 Hne2 v0 Heq. unfold stk_make0 in Heq.
   apply lookup_insert_Some in Heq as [[<- <-] | [Hne' Heq]].
-  - exact (Hne eq_refl).
-  - apply lookup_singleton_Some in Heq as [<- <-]. exact (Hne eq_refl).
+  - exact (Hne1 eq_refl).
+  - apply lookup_singleton_Some in Heq as [<- <-]. exact (Hne2 eq_refl).
 Qed.
 
 (* The ghost cell's initial value, at the generic ra_of_int operation for

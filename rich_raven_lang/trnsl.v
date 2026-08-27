@@ -749,6 +749,13 @@ Section MainTranslation.
          requirement rrl_validity itself needs to reason about mask narrowing. *)
       ⌜msk ⊆ inv_set⌝ -∗
 
+      (* The caller's own current mask must already include whatever this
+         procedure itself needs to open (proc_required_mask) -- see
+         ProcCallRuleRet's own copy of this comment for why an unconditional
+         ∀ msk is unsatisfiable for any procedure that opens an invariant
+         at all. *)
+      ⌜proc_required_mask proc_record ⊆ msk⌝ -∗
+
       ⌜forall v, v ∈ (proc_args_of proc_record) -> is_Some (stk_frm.(locals) !! v.1)⌝ -∗
 
       ⌜Forall2 (λ var val, stk_frm.(locals) !! var = Some val) (proc_args_of proc_record).*1 stk_vals⌝ -∗
@@ -807,7 +814,7 @@ Section MainTranslation.
       ∀ proc_name proc_record, proc_map !! proc_name = Some proc_record →
         let ρ := proc_pvar_typs proc_record in
         stmt_well_defined ρ (proc_body_of proc_record) ∧
-        ∀ msk, msk ⊆ inv_set →
+        ∀ msk, proc_required_mask proc_record ⊆ msk → msk ⊆ inv_set →
         ∀ (dll : proc_entry_lvars σ proc_record),
           ∃ stk0' lv_final,
             stk0' !! "#ret_val" = Some lv_final ∧
@@ -2009,6 +2016,8 @@ Section MainTranslation.
 
             iSpecialize ("Hproc" with "[%]"). { exact Hmask_sub. }
 
+            iSpecialize ("Hproc" with "[%]"). { exact (proj2 H5). }
+
             assert ((∀ v : var * typ, v ∈ proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body) → is_Some (locals stk_frm' !! v.1))) as HIsSome.
 
             {
@@ -2081,7 +2090,7 @@ Section MainTranslation.
             { apply subst_map_avoids_reserved_of_lexprs.
               - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
                          (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
-              - exact H5. }
+              - exact (proj1 H5). }
             have Hmr2 : subst_map_avoids_reserved
               (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
             { apply subst_map_avoids_reserved_of_lexprs.
@@ -2160,7 +2169,7 @@ Section MainTranslation.
               { apply subst_map_avoids_reserved_of_lexprs.
                 - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
                            (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
-                - exact H5. }
+                - exact (proj1 H5). }
               have Hmr2_base : subst_map_avoids_reserved
                 (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
               { apply subst_map_avoids_reserved_of_lexprs.
@@ -2258,6 +2267,8 @@ Section MainTranslation.
 
             iSpecialize ("Hproc" with "[%]"). { exact Hmask_sub. }
 
+            iSpecialize ("Hproc" with "[%]"). { exact (proj2 H5). }
+
             assert ((∀ v : var * typ, v ∈ proc_args_of (Proc proc_args proc_locals proc_pre proc_post proc_body) → is_Some (locals stk_frm' !! v.1))) as HIsSome.
 
             {
@@ -2326,7 +2337,7 @@ Section MainTranslation.
             { apply subst_map_avoids_reserved_of_lexprs.
               - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
                          (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
-              - exact H5. }
+              - exact (proj1 H5). }
             have Hmr2 : subst_map_avoids_reserved
               (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
             { apply subst_map_avoids_reserved_of_lexprs.
@@ -2403,7 +2414,7 @@ Section MainTranslation.
               { apply subst_map_avoids_reserved_of_lexprs.
                 - exact (Hwf.(pwf_proc_args_not_reserved) proc_name
                            (Proc proc_args proc_locals proc_pre proc_post proc_body) H0).
-                - exact H5. }
+                - exact (proj1 H5). }
               have Hmr2_base : subst_map_avoids_reserved
                 (list_to_map (zip proc_args.*1 (map (λ val : lang.val, LVal (trnsl_val val)) arg_vals)) : gmap lvar LExpr).
               { apply subst_map_avoids_reserved_of_lexprs.
@@ -2587,7 +2598,7 @@ Section MainTranslation.
       iModIntro.
       iIntros (proc proc_record stk_vals) "%Hproc_in_set %Hproc_map".
       iIntros (precond postcond stk_id stk_frm mp stmt msk)
-        "%Henv %Hmsk_sub %Hargs_present %Harg_vals %Hlocals_typed %Hdom_val %Harg_vals_typed %Hprecond_eq %Hpostcond_eq %Hstmt_shape".
+        "%Henv %Hmsk_sub %Hmask_req %Hargs_present %Harg_vals %Hlocals_typed %Hdom_val %Harg_vals_typed %Hprecond_eq %Hpostcond_eq %Hstmt_shape".
 
       (* Matches all_proc_specs_valid_raven's own internal "let ρ := ..." --
          Hbodies proc proc_record Hproc_map below is already stated in
@@ -2614,7 +2625,7 @@ Section MainTranslation.
       have Hargs_locals_lvs_disjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs := dll_disjoint dll.
 
       destruct (Hbodies proc proc_record Hproc_map) as [Hwelldef Hbody_msk].
-      destruct (Hbody_msk msk Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & Hlv_final_typ & HRHT).
+      destruct (Hbody_msk msk Hmask_req Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & Hlv_final_typ & HRHT).
 
       set (args := (proc_args_of proc_record).*1).
       set (loc_names := (proc_locals_of proc_record).*1).

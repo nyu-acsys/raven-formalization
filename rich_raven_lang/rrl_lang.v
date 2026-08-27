@@ -1185,6 +1185,42 @@ Fixpoint assertion_lexpr_fvars (a : assertion) : gset lvar :=
   | _ => ∅
   end.
 
+(* The invariant names a bare, syntactic LInv fact in an assertion
+   mentions -- does NOT unfold into an invariant's own body (mirrors
+   assertion_lexpr_fvars's own "does not descend into LInv/LPred bodies"
+   convention), since a procedure can only ever open an invariant it
+   already holds a bare LInv fact for, never one buried inside some other
+   invariant/predicate's unfolded contents. Used by proc_required_mask
+   below to compute the minimum mask a procedure's own call sites must
+   supply -- see its own comment. *)
+Fixpoint assertion_inv_names (a : assertion) : gset inv_name :=
+  match a with
+  | LInv inv_nm _ => {[inv_nm]}
+  | LForall _ _ body => assertion_inv_names body
+  | LExists _ _ body => assertion_inv_names body
+  | LIte _ then_ else_ => assertion_inv_names then_ ∪ assertion_inv_names else_
+  | LAnd a1 a2 => assertion_inv_names a1 ∪ assertion_inv_names a2
+  | _ => ∅
+  end.
+
+(* A procedure's own required mask (Step 6, local/parameters-redesign.md):
+   the invariants it must already hold (as a bare LInv fact) in its own
+   precondition, and hence the invariants any RavenHoareTriple derivation
+   for its body might need to open via InvAccessBlockRule. Mirrors the
+   standard Iris pattern for a spec that internally opens an invariant N
+   (∀ E, ↑N ⊆ E → {{{P}}} e @ E {{{Q}}}, rather than claiming the triple
+   for every E unconditionally) -- all_proc_specs_valid_raven/_iris and
+   ProcCallRuleRet use this as the side condition on their own mask
+   quantifier/premise, replacing an unconditional ∀ msk that was actually
+   unsatisfiable for any procedure that opens an invariant at all (no rule
+   changes mask, so a derivation that needs "counterInv" ∈ mask can never
+   be transported down to a mask lacking it). Restricted to the
+   precondition alone (not the whole body): the body could only ever
+   reach an invariant it already named up front, since InvAccessBlockRule
+   never manufactures a fresh LInv fact out of nothing. *)
+Definition proc_required_mask (proc_record : ProcRecord) : gset inv_name :=
+  assertion_inv_names (proc_precond_of proc_record).
+
 (* Scope-correct free variables: unlike assertion_lexpr_fvars, this
    subtracts LExists's own bound variable from its body's fvars, so it
    never over-approximates through a genuine existential (see Finding 2 in
@@ -5323,7 +5359,24 @@ Section RavenLogic.
        (nothing stops an adversarial stk from doing so) and was tried,
        and abandoned, earlier. *)
     ¬ is_reserved lvar_x ->
-    Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ->
+    (* Bundled via /\, not a separate premise: trnsl.v's rrl_validity
+       pattern-matches this constructor's premises via auto-generated,
+       positional Hn names (iInduction's blank "| | |" branch), so adding a
+       genuinely new positional premise here would silently renumber every
+       later Hn reference throughout that large, delicate proof. Folding
+       the new fact into the existing last premise via /\ keeps the
+       positional count (and every existing Hn name) unchanged; the few
+       call sites that consume this premise directly there project out the
+       half they need. *)
+    Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs ∧
+    (* The caller's own current mask must already include whatever the
+       callee itself needs to open (proc_required_mask, Step 6,
+       local/parameters-redesign.md) -- mirrors the standard Iris pattern
+       for a spec that internally opens an invariant N (∀ E, ↑N ⊆ E → ...)
+       rather than an unconditional ∀ mask, which is what
+       all_proc_specs_valid_raven/_iris need on the *other* end to even be
+       satisfiable for a callee that opens an invariant at all. *)
+    proc_required_mask proc_record ⊆ mask ->
     let subst_map := list_to_map (zip (proc_args_of proc_record).*1 lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (subst (proc_precond_of proc_record) subst_map))
@@ -5634,7 +5687,7 @@ Section RavenLogic.
       | ρ σ stk mask x e chunk fld lexpr_e lvar_x t Htr Hinf Hfresh Hnotfv Hcompat
       | ρ σ stk mask v fld e old_chunk lv lexpr Hstk Htr Hwd Hcompat
       | ρ σ stk mask x fld_vals ghost_fld_vals lvar_x Hfresh HND1 HND2 Hne Hvalid Hcompat
-      | ρ σ stk mask x pn args lexprs lvar_x proc_record Hfresh Hpm Hlen Hargs Hcompat Hnotres Hlexprs_notres
+      | ρ σ stk mask x pn args lexprs lvar_x proc_record Hfresh Hpm Hlen Hargs Hcompat Hnotres Hlexprs_notres_and_mask
       | ρ σ mask a1 c1 a2 c2 a3 H1 IH1 H2 IH2
       | ρ σ stk1 mask e s1 s2 p Q lexpr Htr Hinf Hcompat H1 IH1 H2 IH2
       | ρ σ stk stk' mask inv args stmt inv_record p q lv t lexprs
@@ -5702,7 +5755,8 @@ Section RavenLogic.
       + exact (trnsl_expr_lExpr_rename_list ren stk args lexprs Hargs).
       + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
       + exact (ren_not_reserved ren Hinj Hren_res lvar_x Hnotres).
-      + exact (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs Hlexprs_notres).
+      + exact (conj (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs (proj1 Hlexprs_notres_and_mask))
+                 (proj2 Hlexprs_notres_and_mask)).
     - (* SequenceRule *)
       exact (SequenceRule ρ σ mask (rename_assertion ren a1) c1 (rename_assertion ren a2) c2
         (rename_assertion ren a3) (IH1 Hren_typ) (IH2 Hren_typ)).
