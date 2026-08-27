@@ -236,6 +236,28 @@ Proof.
       set_solver.
 Qed.
 
+(* Renaming lvar occurrences in a logical expression. Used to transport a
+   derivation built against one fresh-lvar stack to any other, via a fixed
+   injective ren that is required to be the identity on reserved names --
+   see rename_assertion below and its accompanying invariants. *)
+Fixpoint rename_lexpr (ren : lvar -> lvar) (e : LExpr) : LExpr :=
+  match e with
+  | LVar x => LVar (ren x)
+  | LVal v => LVal v
+  | LUnOp op e => LUnOp op (rename_lexpr ren e)
+  | LBinOp op e1 e2 => LBinOp op (rename_lexpr ren e1) (rename_lexpr ren e2)
+  | LIfE e1 e2 e3 => LIfE (rename_lexpr ren e1) (rename_lexpr ren e2) (rename_lexpr ren e3)
+  | LStuck => LStuck
+  end.
+
+(* Renaming an LExpr's free lvars is exactly renaming its fvar set -- the
+   fact the rename theorem's freshness-preservation lemmas reduce to. *)
+Lemma lexpr_fvars_rename (ren : lvar -> lvar) (e : LExpr) :
+  lexpr_fvars (rename_lexpr ren e) = set_map ren (lexpr_fvars e).
+Proof.
+  induction e; simpl; try set_solver.
+Qed.
+
 Definition symb_map : Type := lvar -> val.
 
 Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
@@ -389,6 +411,19 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
   | LStuck => None
   end.
 
+(* Interpreting a renamed LExpr under mp is the same as interpreting the
+   original under mp precomposed with ren -- interp_lexpr only ever reads
+   an lvar leaf through mp, and every other case is a function purely of
+   its own recursive interp_lexpr sub-results (and, for LUnOp/LBinOp, the
+   untouched operator), so rewriting those via IH closes it regardless of
+   op, mirroring inf_lexpr_rename. *)
+Lemma interp_lexpr_rename (ren : lvar -> lvar) (e : LExpr) (mp : symb_map) :
+  interp_lexpr (rename_lexpr ren e) mp = interp_lexpr e (fun x => mp (ren x)).
+Proof.
+  induction e; simpl;
+    try rewrite IHe; try rewrite IHe1; try rewrite IHe2; try rewrite IHe3;
+    reflexivity.
+Qed.
 
 (* "Same RA" closed-form reductions of interp_lexpr's RA cases -- see
    un_op_eval_ra_valid/bin_op_eval_ra_* in lang.v for why UIP_dec is needed
@@ -433,6 +468,10 @@ Definition LExpr_holds (le : LExpr) (mp : symb_map) : Prop :=
   | Some v => v = LitBool true
   | None => False
   end.
+
+Lemma LExpr_holds_rename (ren : lvar -> lvar) (e : LExpr) (mp : symb_map) :
+  LExpr_holds (rename_lexpr ren e) mp <-> LExpr_holds e (fun x => mp (ren x)).
+Proof. unfold LExpr_holds. rewrite interp_lexpr_rename. reflexivity. Qed.
 
 (* Reverse direction of interp_lexpr_ra_fpuvalid: given the LHS's evaluated
    value, extract the RHS's evaluated value (same ra_name, forced by
@@ -543,6 +582,47 @@ Proof.
   - (* LBinOp *) rewrite IHe1 IHe2. reflexivity.
   - (* LIfE *) rewrite IHe1 IHe2 IHe3. reflexivity.
   - (* LStuck *) reflexivity.
+Qed.
+
+(* Renaming after substituting a single lvar for e0 agrees with substituting
+   the renamed lvar for the renamed e0, unconditionally -- unlike
+   lexpr_subst_rename (which needs every other free lvar routed through
+   dom M or reserved), here M's *key* lv is itself in ren's own domain, so
+   both branches of the LVar case go through injectivity alone: x = lv iff
+   ren x = ren lv, and the substitution is a no-op identically on both
+   sides otherwise. Used by the assertion_entails rules that rebind one
+   already-ambient lvar for another (AE_Exists_ValIntro, AE_Exists_Rename_Intro,
+   AE_LExpr_Subst_Eq_Congr), as opposed to substituting a program's own
+   fixed argument names. *)
+Lemma lexpr_subst_singleton_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (e : LExpr) (lv : lvar) (e0 : LExpr) :
+  rename_lexpr ren (lexpr_subst e (<[lv := e0]> ∅)) =
+  lexpr_subst (rename_lexpr ren e) (<[ren lv := rename_lexpr ren e0]> ∅).
+Proof.
+  induction e; simpl.
+  - (* LVar x *)
+    destruct (String.eqb_spec x lv) as [-> | Hne].
+    + rewrite lookup_insert. simpl. rewrite lookup_insert. reflexivity.
+    + rewrite lookup_insert_ne; [| congruence]. rewrite lookup_empty. simpl.
+      rewrite lookup_insert_ne; [| intros Heq; exact (Hne (Hinj _ _ (eq_sym Heq)))].
+      rewrite lookup_empty. reflexivity.
+  - (* LVal *) reflexivity.
+  - (* LUnOp *) f_equal. exact IHe.
+  - (* LBinOp *) f_equal; [exact IHe1 | exact IHe2].
+  - (* LIfE *) f_equal; [exact IHe1 | exact IHe2 | exact IHe3].
+  - (* LStuck *) reflexivity.
+Qed.
+
+(* List-of-args specialization, for LInv/LPred's own argument lists. *)
+Lemma map_lexpr_subst_singleton_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (args : list LExpr) (lv : lvar) (e0 : LExpr) :
+  map (rename_lexpr ren) (map (fun e => lexpr_subst e (<[lv := e0]> ∅)) args) =
+  map (fun e => lexpr_subst e (<[ren lv := rename_lexpr ren e0]> ∅)) (map (rename_lexpr ren) args).
+Proof.
+  induction args as [| a args IH]; simpl; [reflexivity |].
+  f_equal.
+  - apply lexpr_subst_singleton_rename. exact Hinj.
+  - exact IH.
 Qed.
 
 Global Instance val_countable : Countable val.
@@ -774,6 +854,66 @@ Fixpoint subst (ra: assertion) (mp: gmap var LExpr) : assertion := match ra with
 | LAnd a1 a2 => LAnd (subst a1 mp) (subst a2 mp)
 end.
 
+(* Renaming lvar occurrences throughout an assertion via a fixed injective
+   ren : lvar -> lvar that is required to be the identity on reserved names
+   (see RavenHoareTriple_rename below). Applied unconditionally to LExists's
+   own binder: despite being typed var (= lvar as strings), that binder is
+   sometimes a genuine reserved witness (untouched, since ren is identity
+   there, per pwf_*_binders_reserved) and sometimes a fresh lvar minted
+   during a derivation (renamed, same as any other occurrence) -- the two
+   cases need no separate treatment because ren's own required
+   identity-on-reserved property already tells them apart. LForall's own
+   binder is left untouched (unlike LExists): assertion_exists_binders
+   deliberately does not track it, so there is no invariant forcing it to
+   be reserved, and no RavenHoareTriple rule ever mints a fresh lvar via
+   LForall (only via LExists) -- it is also unused by every contract in
+   this development, so this choice is never exercised in practice. *)
+Fixpoint rename_assertion (ren : lvar -> lvar) (ra : assertion) : assertion := match ra with
+| LProc p p_e => LProc p p_e
+| LStack σ => LStack (ren <$> σ)
+| LExprA e => LExprA (rename_lexpr ren e)
+| LPure p => LPure p
+| LOwn e fld chunk => LOwn (rename_lexpr ren e) fld (rename_lexpr ren chunk)
+| LGhostOwn e fld RAPack chunk => LGhostOwn (rename_lexpr ren e) fld RAPack (rename_lexpr ren chunk)
+| LForall v t body => LForall v t (rename_assertion ren body)
+| LExists v t body => LExists (ren v) t (rename_assertion ren body)
+| LIte cond then_ else_ => LIte (rename_lexpr ren cond) (rename_assertion ren then_) (rename_assertion ren else_)
+| LInv inv_name args =>
+    LInv inv_name (map (fun expr => rename_lexpr ren expr) args)
+| LPred pred_name args =>
+    LPred pred_name (map (fun expr => rename_lexpr ren expr) args)
+| LAnd a1 a2 => LAnd (rename_assertion ren a1) (rename_assertion ren a2)
+end.
+
+(* Assertion-level counterpart of lexpr_subst_singleton_rename: subst never
+   touches an assertion's own LForall/LExists binder regardless of whether
+   it coincides with the key being substituted (see lvar_fresh_in_assertion's
+   own comment on this "naive substitution" design), so both sides of the
+   equation recurse into the binder's body identically -- no reserved-namespace
+   or dom-M side condition is needed at all, unlike rename_assertion_subst_commute. *)
+Lemma rename_assertion_subst_singleton (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (a : assertion) (lv : lvar) (e0 : LExpr) :
+  rename_assertion ren (subst a (<[lv := e0]> ∅)) =
+  subst (rename_assertion ren a) (<[ren lv := rename_lexpr ren e0]> ∅).
+Proof.
+  induction a; simpl.
+  - (* LProc *) reflexivity.
+  - (* LStack *) reflexivity.
+  - (* LExprA *) f_equal. apply lexpr_subst_singleton_rename. exact Hinj.
+  - (* LPure *) reflexivity.
+  - (* LOwn *)
+    f_equal; apply lexpr_subst_singleton_rename; exact Hinj.
+  - (* LGhostOwn *)
+    f_equal; apply lexpr_subst_singleton_rename; exact Hinj.
+  - (* LForall *) f_equal. exact IHa.
+  - (* LExists *) f_equal. exact IHa.
+  - (* LIte *)
+    f_equal; [apply lexpr_subst_singleton_rename; exact Hinj | exact IHa1 | exact IHa2].
+  - (* LInv *) f_equal. apply map_lexpr_subst_singleton_rename. exact Hinj.
+  - (* LPred *) f_equal. apply map_lexpr_subst_singleton_rename. exact Hinj.
+  - (* LAnd *) f_equal; [exact IHa1 | exact IHa2].
+Qed.
+
 (* LExists binder variables of an assertion (does NOT descend into LInv/LPred bodies).
    Moved ahead of InvRecord/PredRecord/ProcRecord's own well-formedness
    definitions (InvBodyWF etc. below) so they can state their own "## dom M"
@@ -805,6 +945,32 @@ Definition lvar_subst_map (names : list var) (lvs : list lvar) : gmap var LExpr 
   assoc_map names (map LVar lvs).
 Definition val_subst_map (names : list var) (vals : list lang.val) : gmap var LExpr :=
   assoc_map names (map (fun v => LVal (trnsl_val v)) vals).
+
+(* Mapping f over a zip-built assoc map's values is the same as mapping it
+   over the value list before zipping -- needed to show a proc/inv/pred's
+   own subst_map, rebuilt from a renamed lexprs list, is exactly the
+   renamed original subst_map (rename_lexpr ren <$> list_to_map (zip ks lexprs)). *)
+Lemma fmap_list_to_map_zip {K} `{Countable K} {V : Type} (f : V -> V) (ks : list K) (vs : list V) :
+  f <$> (list_to_map (zip ks vs) : gmap K V) = list_to_map (zip ks (map f vs)).
+Proof.
+  revert vs. induction ks as [| k ks IH]; intros vs; simpl.
+  - rewrite fmap_empty. reflexivity.
+  - destruct vs as [| v vs]; simpl.
+    + rewrite fmap_empty. reflexivity.
+    + rewrite fmap_insert. rewrite IH. reflexivity.
+Qed.
+
+(* dom of a zip-built assoc map from equal-length key/value lists is
+   exactly the key set -- lets a pwf_*_fvars_bounded fact (stated in terms
+   of the formal argument names) be rephrased in terms of dom subst_map. *)
+Lemma dom_list_to_map_zip_eq_len {K} `{Countable K} {V : Type} (ks : list K) (vs : list V) :
+  length ks = length vs → dom (list_to_map (zip ks vs) : gmap K V) = list_to_set ks.
+Proof.
+  revert vs. induction ks as [| k ks IH]; intros vs Hlen; destruct vs; simpl in *;
+    try discriminate.
+  - reflexivity.
+  - rewrite dom_insert_L. rewrite IH; [reflexivity | congruence].
+Qed.
 
 Record InvRecord := Inv {
   inv_args: list var;
@@ -956,6 +1122,54 @@ Fixpoint lvar_fresh_in_assertion (v : lvar) (a : assertion) : Prop :=
   | LAnd a1 a2 => lvar_fresh_in_assertion v a1 /\ lvar_fresh_in_assertion v a2
   end.
 
+(* Freshness of a renamed lvar in a renamed assertion, given freshness of
+   the original -- needed for the assertion_entails rules whose side
+   condition is exactly this (AE_Exists_Elim/AE_Exists_And_Swap_R/
+   AE_And_Exists_Swap_L). The LExists case works uniformly whether or not
+   the assertion's own binder ev happens to equal v: rename_assertion always
+   applies ren to it, and injectivity turns "ev = v" into "ren ev = ren v"
+   and vice versa. LPred is immediate since lvar_fresh_in_assertion is
+   simply False there on both sides. *)
+Lemma lvar_fresh_in_assertion_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (v : lvar) (a : assertion) :
+  lvar_fresh_in_assertion v a → lvar_fresh_in_assertion (ren v) (rename_assertion ren a).
+Proof.
+  induction a; simpl; intro Hfresh.
+  - (* LProc *) exact Logic.I.
+  - (* LStack *) intros v0 Heq.
+    apply lookup_fmap_Some in Heq as [lv0 [Heq0 Hlv0]].
+    apply Hinj in Heq0. subst lv0. exact (Hfresh v0 Hlv0).
+  - (* LExprA *) rewrite lexpr_fvars_rename. intro Hc.
+    apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfresh Hy).
+  - (* LPure *) exact Logic.I.
+  - (* LOwn *) destruct Hfresh as [Hfe Hfc]. split.
+    + rewrite lexpr_fvars_rename. intro Hc.
+      apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfe Hy).
+    + rewrite lexpr_fvars_rename. intro Hc.
+      apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfc Hy).
+  - (* LGhostOwn *) destruct Hfresh as [Hfe Hfc]. split.
+    + rewrite lexpr_fvars_rename. intro Hc.
+      apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfe Hy).
+    + rewrite lexpr_fvars_rename. intro Hc.
+      apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfc Hy).
+  - (* LForall *) exact (IHa Hfresh).
+  - (* LExists ev _ body *) destruct Hfresh as [-> | Hfresh].
+    + left. reflexivity.
+    + right. exact (IHa Hfresh).
+  - (* LIte *) destruct Hfresh as [Hfc [Hft Hfe]]. split; [| split].
+    + rewrite lexpr_fvars_rename. intro Hc.
+      apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hfc Hy).
+    + exact (IHa1 Hft).
+    + exact (IHa2 Hfe).
+  - (* LInv *) apply Forall_forall. intros x Hx.
+    apply elem_of_list_fmap in Hx as [y [-> Hy]].
+    rewrite lexpr_fvars_rename. intro Hc.
+    apply elem_of_map in Hc as [z [Heqz Hz]]. apply Hinj in Heqz. subst z.
+    exact (proj1 (Forall_forall _ _) Hfresh y Hy Hz).
+  - (* LPred *) exact Hfresh.
+  - (* LAnd *) destruct Hfresh as [Hf1 Hf2]. split; [exact (IHa1 Hf1) | exact (IHa2 Hf2)].
+Qed.
+
 (* Free variables appearing in LExpr nodes of an assertion (does NOT descend into LInv/LPred bodies) *)
 Fixpoint assertion_lexpr_fvars (a : assertion) : gset lvar :=
   match a with
@@ -1100,6 +1314,152 @@ Definition is_reserved (v : lvar) : Prop := String.prefix "$" v = true.
 
 Global Instance is_reserved_dec (v : lvar) : Decision (is_reserved v).
 Proof. unfold is_reserved. apply _. Defined.
+
+(* An injective ren that is the identity on reserved names never maps a
+   non-reserved name into the reserved namespace: if it did, that image
+   would be its own fixed point (Hren_res), forcing (by injectivity) the
+   non-reserved source to equal it -- contradiction. Needed throughout the
+   rename theorem wherever a ¬is_reserved side condition must survive
+   renaming. *)
+Lemma ren_not_reserved (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (Hren_res : ∀ lv, is_reserved lv → ren lv = lv) (lv : lvar) :
+  ¬ is_reserved lv → ¬ is_reserved (ren lv).
+Proof.
+  intros Hnres Hres.
+  have Hfix : ren (ren lv) = ren lv := Hren_res (ren lv) Hres.
+  have Heq : lv = ren lv := Hinj lv (ren lv) (eq_sym Hfix).
+  apply Hnres. rewrite Heq. exact Hres.
+Qed.
+
+(* A list of LExprs whose free lvars all avoid the reserved namespace keeps
+   that property after renaming every LExpr in the list -- the
+   ProcCallRuleRet/InvAccessBlockRule/InvAllocRule side condition on their
+   own args' lexprs. *)
+Lemma Forall_lexpr_not_reserved_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (Hren_res : ∀ lv, is_reserved lv → ren lv = lv) (lexprs : list LExpr) :
+  Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) lexprs →
+  Forall (fun le => ∀ v, v ∈ lexpr_fvars le → ¬ is_reserved v) (map (rename_lexpr ren) lexprs).
+Proof.
+  intros Hall. apply Forall_forall. intros le' Hle'.
+  apply elem_of_list_fmap in Hle' as [le [-> Hle]].
+  intros v Hv. rewrite lexpr_fvars_rename in Hv.
+  apply elem_of_map in Hv as [v0 [-> Hv0]].
+  apply ren_not_reserved; [exact Hinj | exact Hren_res |].
+  exact (proj1 (Forall_forall _ _) Hall le Hle v0 Hv0).
+Qed.
+
+(* Renaming an LExpr after substituting M commutes with substituting the
+   renamed M, provided every free lvar of e is either a key of M (handled by
+   the Some branch regardless of ren) or reserved (where ren is required to
+   be the identity, matching what's left over in the None branch). Mirrors
+   the existing dom-M-or-reserved bounding pattern used throughout this file
+   (see subst_congr_step/fvars_bound_mono below) but purely syntactically,
+   with no separation-logic content. *)
+Lemma lexpr_subst_rename (ren : lvar -> lvar) (Hren_res : ∀ lv, is_reserved lv → ren lv = lv)
+    (e : LExpr) (M : gmap var LExpr)
+    (HfvM : ∀ v, v ∈ lexpr_fvars e → v ∈ dom M ∨ is_reserved v) :
+  rename_lexpr ren (lexpr_subst e M) = lexpr_subst e (rename_lexpr ren <$> M).
+Proof.
+  induction e; simpl in *.
+  - (* LVar x *)
+    destruct (M !! x) as [e'|] eqn:HMx.
+    + rewrite lookup_fmap HMx. reflexivity.
+    + rewrite lookup_fmap HMx. simpl.
+      destruct (HfvM x ltac:(set_solver)) as [Hxdom | Hxres].
+      * exfalso. apply not_elem_of_dom in HMx. exact (HMx Hxdom).
+      * f_equal. exact (Hren_res x Hxres).
+  - (* LVal *) reflexivity.
+  - (* LUnOp *) f_equal. apply IHe. exact HfvM.
+  - (* LBinOp *) f_equal.
+    + apply IHe1. intros v Hv. apply HfvM. set_solver.
+    + apply IHe2. intros v Hv. apply HfvM. set_solver.
+  - (* LIfE *) f_equal.
+    + apply IHe1. intros v Hv. apply HfvM. set_solver.
+    + apply IHe2. intros v Hv. apply HfvM. set_solver.
+    + apply IHe3. intros v Hv. apply HfvM. set_solver.
+  - (* LStuck *) reflexivity.
+Qed.
+
+(* List-of-args specialization of lexpr_subst_rename, for LInv/LPred's own
+   argument lists. *)
+Lemma map_lexpr_subst_rename (ren : lvar -> lvar) (Hren_res : ∀ lv, is_reserved lv → ren lv = lv)
+    (args : list LExpr) (M : gmap var LExpr)
+    (HfvM : ∀ v, v ∈ ⋃ (lexpr_fvars <$> args) → v ∈ dom M ∨ is_reserved v) :
+  map (rename_lexpr ren) (map (fun e => lexpr_subst e M) args) =
+  map (fun e => lexpr_subst e (rename_lexpr ren <$> M)) args.
+Proof.
+  induction args as [| a args IH]; simpl; [reflexivity |].
+  f_equal.
+  - apply lexpr_subst_rename; [exact Hren_res |].
+    intros v Hv. apply HfvM. simpl. apply elem_of_union_l. exact Hv.
+  - apply IH. intros v Hv. apply HfvM. simpl. apply elem_of_union_r. exact Hv.
+Qed.
+
+(* Bundles what rename_assertion_subst_commute needs at every subterm during
+   its induction, parametrically in the current subterm a (not the
+   top-level assertion) -- mirrors subst_congr_cond's own style below, but
+   purely syntactic. StackFree rules out LStack (subst never touches it, so
+   it can't be made to agree with rename_assertion's own fmap over it);
+   set_Forall is_reserved (assertion_exists_binders a) is exactly
+   pwf_*_binders_reserved's own conclusion, needed for the LExists case; the
+   dom-M-or-reserved bound is what lexpr_subst_rename/map_lexpr_subst_rename
+   need at the LExpr leaves. *)
+Definition rename_subst_cond (a : assertion) (M : gmap var LExpr) : Prop :=
+  StackFree a ∧
+  set_Forall is_reserved (assertion_exists_binders a) ∧
+  (∀ v, v ∈ assertion_lexpr_fvars a → v ∈ dom M ∨ is_reserved v).
+
+(* The key syntactic fact the renaming theorem needs for ProcCallRuleRet/
+   InvAccessBlockRule/InvAllocRule/PredUnfoldRule/PredFoldRule: renaming
+   after substituting a proc/inv/pred body agrees with substituting the
+   renamed substitution map, since a's own internal binders are reserved
+   (untouched by ren) and every other free lvar of a is a substituted
+   formal name (untouched by ren's identity-on-M-keys-via-Some-branch,
+   handled inside lexpr_subst_rename). *)
+Lemma rename_assertion_subst_commute (ren : lvar -> lvar)
+    (Hren_res : ∀ lv, is_reserved lv → ren lv = lv) :
+  ∀ (a : assertion) (M : gmap var LExpr),
+    rename_subst_cond a M →
+    rename_assertion ren (subst a M) = subst a (rename_lexpr ren <$> M).
+Proof.
+  induction a; intros M (Hsf & HbA & HfvA); simpl in HbA, HfvA |- *.
+  - (* LProc *) reflexivity.
+  - (* LStack *) inversion Hsf.
+  - (* LExprA *) f_equal. apply lexpr_subst_rename; [exact Hren_res | exact HfvA].
+  - (* LPure *) reflexivity.
+  - (* LOwn *)
+    f_equal.
+    + apply lexpr_subst_rename; [exact Hren_res |]. intros v Hv. apply HfvA. set_solver.
+    + apply lexpr_subst_rename; [exact Hren_res |]. intros v Hv. apply HfvA. set_solver.
+  - (* LGhostOwn *)
+    f_equal.
+    + apply lexpr_subst_rename; [exact Hren_res |]. intros v Hv. apply HfvA. set_solver.
+    + apply lexpr_subst_rename; [exact Hren_res |]. intros v Hv. apply HfvA. set_solver.
+  - (* LForall *)
+    inversion Hsf; subst.
+    f_equal. apply IHa. split_and!; [assumption | exact HbA | exact HfvA].
+  - (* LExists *)
+    inversion Hsf; subst.
+    f_equal.
+    + apply Hren_res, HbA. set_solver.
+    + apply IHa. split_and!.
+      * assumption.
+      * intros x Hx. apply HbA. set_solver.
+      * exact HfvA.
+  - (* LIte *)
+    inversion Hsf; subst.
+    f_equal.
+    + apply lexpr_subst_rename; [exact Hren_res |]. intros v Hv. apply HfvA. set_solver.
+    + apply IHa1. split_and!; [assumption | intros x Hx; apply HbA; set_solver | intros v Hv; apply HfvA; set_solver].
+    + apply IHa2. split_and!; [assumption | intros x Hx; apply HbA; set_solver | intros v Hv; apply HfvA; set_solver].
+  - (* LInv *) f_equal. apply map_lexpr_subst_rename; [exact Hren_res | exact HfvA].
+  - (* LPred *) f_equal. apply map_lexpr_subst_rename; [exact Hren_res | exact HfvA].
+  - (* LAnd *)
+    inversion Hsf; subst.
+    f_equal.
+    + apply IHa1. split_and!; [assumption | intros x Hx; apply HbA; set_solver | intros v Hv; apply HfvA; set_solver].
+    + apply IHa2. split_and!; [assumption | intros x Hx; apply HbA; set_solver | intros v Hv; apply HfvA; set_solver].
+Qed.
 
 (* A genuinely rich lvar_typs (Hσ_rich's shape, Step 6,
    local/parameters-redesign.md/local/binders.md's "Open item, explicitly
@@ -1707,6 +2067,84 @@ Record ProgramWF : Prop := {
       inv' ∈ inv_set →
         ghost_heap_namespace ## (inv_namespace_map inv');
 }.
+
+(* The rename_subst_cond bundle (StackFree/binders-reserved/fvars-bounded)
+   for a procedure's precondition against its own formal-argument subst_map
+   -- exactly what rename_assertion_subst_commute needs to push a rename
+   through ProcCallRuleRet's own subst call. pwf_proc_fvars_bounded's own
+   "∨ v ∈ assertion_exists_binders" disjunct is folded into "∨ is_reserved v"
+   via pwf_proc_binders_reserved. *)
+Lemma rename_subst_cond_proc_precond (Hwf : ProgramWF) (proc_name : proc_name) (proc_record : ProcRecord)
+    (Hpm : proc_map !! proc_name = Some proc_record) (lexprs : list LExpr)
+    (Hlen : length lexprs = length (proc_args_of proc_record)) :
+  rename_subst_cond (proc_precond_of proc_record) (list_to_map (zip (proc_args_of proc_record).*1 lexprs)).
+Proof.
+  destruct (Hwf.(pwf_proc_stack_free) proc_name proc_record Hpm) as [Hsf _].
+  destruct (Hwf.(pwf_proc_binders_reserved) proc_name proc_record Hpm) as [Hbr _].
+  destruct (Hwf.(pwf_proc_fvars_bounded) proc_name proc_record Hpm) as [Hfv _].
+  split; [exact Hsf |]. split; [exact Hbr |].
+  intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+  - left. rewrite (dom_list_to_map_zip_eq_len (proc_args_of proc_record).*1 lexprs);
+      [exact Hin | rewrite map_length; symmetry; exact Hlen].
+  - right. exact (Hbr v Hin).
+Qed.
+
+(* Same, for the postcondition against its own subst_map extended with the
+   "#ret_val" binding -- matches pwf_proc_fvars_bounded's postcond bound,
+   which already has {["#ret_val"]} unioned in. *)
+Lemma rename_subst_cond_proc_postcond (Hwf : ProgramWF) (proc_name : proc_name) (proc_record : ProcRecord)
+    (Hpm : proc_map !! proc_name = Some proc_record) (lexprs : list LExpr) (lvar_x : lvar)
+    (Hlen : length lexprs = length (proc_args_of proc_record)) :
+  rename_subst_cond (proc_postcond_of proc_record)
+    (<["#ret_val" := LVar lvar_x]> (list_to_map (zip (proc_args_of proc_record).*1 lexprs))).
+Proof.
+  destruct (Hwf.(pwf_proc_stack_free) proc_name proc_record Hpm) as [_ Hsf].
+  destruct (Hwf.(pwf_proc_binders_reserved) proc_name proc_record Hpm) as [_ Hbr].
+  destruct (Hwf.(pwf_proc_fvars_bounded) proc_name proc_record Hpm) as [_ Hfv].
+  split; [exact Hsf |]. split; [exact Hbr |].
+  intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+  - left. rewrite dom_insert_L.
+    rewrite (dom_list_to_map_zip_eq_len (proc_args_of proc_record).*1 lexprs);
+      [exact Hin | rewrite map_length; symmetry; exact Hlen].
+  - right. exact (Hbr v Hin).
+Qed.
+
+(* Invariant-body analogue, combining pwf_inv_body_stack_free/
+   pwf_inv_binders_reserved/pwf_inv_fvars_scoped the same way. *)
+Lemma rename_subst_cond_inv_body (Hwf : ProgramWF) (inv : inv_name) (inv_record : InvRecord)
+    (Hinvm : inv_map !! inv = Some inv_record) (lexprs : list LExpr)
+    (Hlen : length lexprs = length inv_record.(inv_args)) :
+  rename_subst_cond inv_record.(inv_body) (list_to_map (zip inv_record.(inv_args) lexprs)).
+Proof.
+  have Hsf := Hwf.(pwf_inv_body_stack_free) inv inv_record Hinvm.
+  have Hbr := Hwf.(pwf_inv_binders_reserved) inv inv_record Hinvm.
+  have Hfv := Hwf.(pwf_inv_fvars_scoped) inv inv_record Hinvm.
+  split; [exact Hsf |]. split; [exact Hbr |].
+  intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+  - left. rewrite (dom_list_to_map_zip_eq_len inv_record.(inv_args) lexprs); [exact Hin | symmetry; exact Hlen].
+  - right. exact (Hbr v Hin).
+Qed.
+
+(* Predicate-body analogue of rename_subst_cond_inv_body. ProgramWF has no
+   pwf_pred_body_stack_free field (StackFree of a predicate body is only
+   ever established indirectly, per-call, via StackFree's own SF_Pred
+   constructor on the *substituted* body -- see its comment) so the
+   unconditional StackFree pred_body fact this needs is taken as an
+   explicit extra hypothesis, discharged trivially at any call site whose
+   pred_map is empty (e.g. counter_monotonic.v's Program). *)
+Lemma rename_subst_cond_pred_body (Hwf : ProgramWF) (pred : pred_name) (pred_record : PredRecord)
+    (Hsf : StackFree pred_record.(pred_body))
+    (Hpredm : pred_map !! pred = Some pred_record) (lexprs : list LExpr)
+    (Hlen : length lexprs = length pred_record.(pred_args)) :
+  rename_subst_cond pred_record.(pred_body) (list_to_map (zip pred_record.(pred_args) lexprs)).
+Proof.
+  have Hbr := Hwf.(pwf_pred_binders_reserved) pred pred_record Hpredm.
+  have Hfv := Hwf.(pwf_pred_fvars_scoped) pred pred_record Hpredm.
+  split; [exact Hsf |]. split; [exact Hbr |].
+  intros v Hv. destruct (Hfv v Hv) as [Hin | Hin].
+  - left. rewrite (dom_list_to_map_zip_eq_len pred_record.(pred_args) lexprs); [exact Hin | symmetry; exact Hlen].
+  - right. exact (Hbr v Hin).
+Qed.
 
 (* Type inference for expressions---placed here so expr_well_defined can use it. *)
 Definition typeOf (v: lang.val) : typ :=
@@ -2342,6 +2780,51 @@ Section Translation.
         * exact (IHe2 le2 eq_refl lv Hlv2).
       + exact (IHe3 le3 eq_refl lv Hlv3).
     - injection Htrnsl as <-. simpl in Hlv. exfalso. exact (not_elem_of_empty _ Hlv).
+  Qed.
+
+  (* Translating against a renamed stack yields the renamed translation --
+     the key commutation fact the renaming theorem needs to transport
+     trnsl_expr_lExpr premises across a derivation. *)
+  Lemma trnsl_expr_lExpr_rename (ren : lvar -> lvar) (stk : stack) (e : lang.expr) (le : LExpr) :
+    trnsl_expr_lExpr stk e = Some le →
+    trnsl_expr_lExpr (ren <$> stk) e = Some (rename_lexpr ren le).
+  Proof.
+    revert le.
+    induction e; simpl; intros le Htrnsl.
+    - destruct (stk !! x) as [lv'|] eqn:Hstk; [| discriminate].
+      injection Htrnsl as <-. rewrite lookup_fmap Hstk. reflexivity.
+    - injection Htrnsl as <-. reflexivity.
+    - destruct (trnsl_expr_lExpr stk e) as [le'|] eqn:Hle'; [| discriminate].
+      injection Htrnsl as <-. simpl. rewrite (IHe le' eq_refl). reflexivity.
+    - destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [| discriminate].
+      destruct (trnsl_expr_lExpr stk e2) as [le2|] eqn:Hle2; [| discriminate].
+      injection Htrnsl as <-. simpl.
+      rewrite (IHe1 le1 eq_refl) (IHe2 le2 eq_refl). reflexivity.
+    - destruct (trnsl_expr_lExpr stk e1) as [le1|] eqn:Hle1; [| discriminate].
+      destruct (trnsl_expr_lExpr stk e2) as [le2|] eqn:Hle2; [| discriminate].
+      destruct (trnsl_expr_lExpr stk e3) as [le3|] eqn:Hle3; [| discriminate].
+      injection Htrnsl as <-. simpl.
+      rewrite (IHe1 le1 eq_refl) (IHe2 le2 eq_refl) (IHe3 le3 eq_refl). reflexivity.
+    - injection Htrnsl as <-. reflexivity.
+  Qed.
+
+  (* List-of-arguments specialization, for the RavenHoareTriple rules whose
+     own arg-translation premise has this map-of-Some shape (ProcCallRuleRet,
+     InvAccessBlockRule, InvAllocRule, PredUnfoldRule, PredFoldRule). *)
+  Lemma trnsl_expr_lExpr_rename_list (ren : lvar -> lvar) (stk : stack)
+      (args : list lang.expr) (lexprs : list LExpr) :
+    map (fun arg => trnsl_expr_lExpr stk arg) args = map (fun le => Some le) lexprs →
+    map (fun arg => trnsl_expr_lExpr (ren <$> stk) arg) args =
+    map (fun le => Some le) (map (rename_lexpr ren) lexprs).
+  Proof.
+    revert lexprs.
+    induction args as [| a args IH]; intros lexprs Heq; destruct lexprs as [| le lexprs]; simpl in *;
+      try discriminate.
+    - reflexivity.
+    - injection Heq as Ha Hargs.
+      rewrite (trnsl_expr_lExpr_rename ren stk a le Ha).
+      rewrite (IH lexprs Hargs).
+      reflexivity.
   Qed.
 
   Inductive trnsl_stmt_ret :=
@@ -3494,6 +3977,20 @@ End Translation.
 
 Definition fresh_lvar (stk: stack) v := forall v', not (stk !! v' = Some v).
 
+(* Freshness survives renaming both the stack and the witness by the same
+   injective ren: any occurrence of ren lv in the renamed stack would come
+   (via lookup_fmap) from some lv0 with ren lv0 = ren lv, which injectivity
+   forces to be lv itself, contradicting the original freshness. *)
+Lemma fresh_lvar_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+    (stk : stack) (lv : lvar) :
+  fresh_lvar stk lv → fresh_lvar (ren <$> stk) (ren lv).
+Proof.
+  intros Hfresh v' Heq.
+  apply lookup_fmap_Some in Heq as [lv0 [Heq0 Hlv0]].
+  apply Hinj in Heq0. subst lv0.
+  exact (Hfresh v' Hlv0).
+Qed.
+
 (* A fresh lvar is not in lexpr_fvars of any translated expression *)
 Lemma trnsl_expr_lExpr_fresh_lvar (stk : stack) (e : lang.expr) (le : LExpr) (lv : lvar) :
   trnsl_expr_lExpr stk e = Some le →
@@ -3563,6 +4060,32 @@ Section TypeInf.
   | _ => None
   end.
 
+  (* inf_lexpr only ever inspects an lvar leaf via σ, and Hren_typ makes ren
+     invisible to σ there -- every other case is a function purely of its
+     recursive inf_lexpr sub-results (and, for LUnOp/LBinOp, the untouched
+     operator), so rewriting those via IH closes it regardless of the op. *)
+  Lemma inf_lexpr_rename (ren : lvar -> lvar) (σ : lvar_typs)
+      (Hren_typ : ∀ lv, σ (ren lv) = σ lv) (le : LExpr) :
+    inf_lexpr σ (rename_lexpr ren le) = inf_lexpr σ le.
+  Proof.
+    induction le; simpl;
+      try rewrite IHle; try rewrite IHle1; try rewrite IHle2; try rewrite IHle3;
+      try reflexivity.
+    f_equal. apply Hren_typ.
+  Qed.
+
+  (* stk_type_compat survives renaming the stack (both keeping σ fixed):
+     any binding v -> ren lv0 in the renamed stack came from v -> lv0 in the
+     original (lookup_fmap), whose ρ v = σ lv0 fact transports to
+     ρ v = σ (ren lv0) via Hren_typ. *)
+  Lemma stk_type_compat_rename (ren : lvar -> lvar) (ρ : pvar_typs) (σ : lvar_typs)
+      (Hren_typ : ∀ lv, σ (ren lv) = σ lv) (stk : stack) :
+    stk_type_compat ρ σ stk → stk_type_compat ρ σ (ren <$> stk).
+  Proof.
+    intros Hcompat v lv' Heq.
+    apply lookup_fmap_Some in Heq as [lv0 [<- Hlv0]].
+    rewrite Hren_typ. exact (Hcompat v lv0 Hlv0).
+  Qed.
 
   Definition env_typ_well_defined (σ : lvar_typs) (mp : symb_map) :=
       forall lv,
@@ -4044,6 +4567,15 @@ Fixpoint qf_assertion (a : assertion) : Prop :=
   | _ => False
   end.
 
+(* rename_assertion never changes an assertion's top-level constructor, so
+   qf_assertion (which is purely a case split on that constructor, modulo
+   LAnd's recursion) transports along it unchanged. *)
+Lemma qf_assertion_rename (ren : lvar -> lvar) (a : assertion) :
+  qf_assertion a → qf_assertion (rename_assertion ren a).
+Proof using G inv_namespace_map.
+  induction a; simpl; try tauto.
+Qed.
+
 (* Substituting a concrete value w for lv throughout a qf_assertion, then
    translating at mp, is the same as translating unsubstituted at mp
    updated at lv -- the assertion-level generalization of
@@ -4322,6 +4854,84 @@ Section RavenLogic.
       (forall mp, interp_lexpr chunk1 mp = interp_lexpr chunk2 mp) ->
       assertion_entails σ (LGhostOwn e fld r chunk1) (LGhostOwn e fld r chunk2).
 
+  (* assertion_entails is closed under renaming every lvar occurrence in
+     both sides by a fixed ren, needed for WeakeningRule's own two
+     assertion_entails premises in the RavenHoareTriple renaming theorem
+     below. Most cases are purely structural (rename_assertion is a
+     homomorphism, so it commutes with the rule's own conclusion pattern
+     automatically after simpl); the binder-introducing/eliminating rules
+     (AE_Exists_Mono/Intro/Elim/And_Swap) need Hren_typ/ren_not_reserved-
+     style side-condition transport, and AE_Exists_ValIntro/
+     AE_LExpr_Subst_Eq_Congr/AE_Exists_Rename_Intro need
+     rename_assertion_subst_singleton to push rename through their own
+     subst. AE_LExprA_Impl/AE_GhostOwn_Chunk_Eq are semantic (universally
+     quantified over mp), transported via interp_lexpr_rename/
+     LExpr_holds_rename by precomposing the witness mp with ren. *)
+  Lemma assertion_entails_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+      (Hren_res : ∀ lv, is_reserved lv → ren lv = lv)
+      (σ : lvar_typs) (Hren_typ : ∀ lv, σ (ren lv) = σ lv) (A B : assertion) :
+    assertion_entails σ A B →
+    assertion_entails σ (rename_assertion ren A) (rename_assertion ren B).
+  Proof using G ghost_heap_name ghost_heap_namespace inv_namespace_map.
+    induction 1; simpl.
+    - (* AE_Refl *) apply AE_Refl.
+    - (* AE_Trans *) eapply AE_Trans; eassumption.
+    - (* AE_And_Mono *) apply AE_And_Mono; assumption.
+    - (* AE_And_Comm *) apply AE_And_Comm.
+    - (* AE_And_Assoc_R *) apply AE_And_Assoc_R.
+    - (* AE_And_Assoc_L *) apply AE_And_Assoc_L.
+    - (* AE_And_Elim_L *) apply AE_And_Elim_L.
+    - (* AE_And_Elim_R *) apply AE_And_Elim_R.
+    - (* AE_And_True_Intro *) apply AE_And_True_Intro.
+    - (* AE_And_True_Elim *) apply AE_And_True_Elim.
+    - (* AE_True_Intro *) apply AE_True_Intro.
+    - (* AE_Pure *) apply AE_Pure. assumption.
+    - (* AE_Exists_Mono *) apply AE_Exists_Mono; [rewrite Hren_typ; assumption | assumption].
+    - (* AE_Exists_Intro *) apply AE_Exists_Intro. rewrite Hren_typ. assumption.
+    - (* AE_Exists_ValIntro *)
+      rename H into Hty, H0 into Htv, H1 into Hqf.
+      rewrite (rename_assertion_subst_singleton ren Hinj A lv (LVal w)). simpl.
+      apply AE_Exists_ValIntro.
+      + rewrite Hren_typ. exact Hty.
+      + exact Htv.
+      + exact (qf_assertion_rename ren A Hqf).
+    - (* AE_Exists_Elim *)
+      rename H into Hty, H0 into Hfresh.
+      apply AE_Exists_Elim.
+      + rewrite Hren_typ. exact Hty.
+      + exact (lvar_fresh_in_assertion_rename ren Hinj lv Q Hfresh).
+      + assumption.
+    - (* AE_Exists_And_Swap_R *)
+      apply AE_Exists_And_Swap_R. exact (lvar_fresh_in_assertion_rename ren Hinj lv p H).
+    - (* AE_And_Exists_Swap_L *)
+      apply AE_And_Exists_Swap_L. exact (lvar_fresh_in_assertion_rename ren Hinj lv c H).
+    - (* AE_Ite_True *) apply AE_Ite_True.
+    - (* AE_Ite_False *) apply AE_Ite_False.
+    - (* AE_Ite_Bool_True *) apply AE_Ite_Bool_True.
+    - (* AE_Ite_Bool_False *) apply AE_Ite_Bool_False.
+    - (* AE_LExpr_Subst_Eq_Congr *)
+      rename H into Hqf.
+      rewrite (rename_assertion_subst_singleton ren Hinj A lv (LVar lv2)). simpl.
+      apply AE_LExpr_Subst_Eq_Congr. exact (qf_assertion_rename ren A Hqf).
+    - (* AE_Exists_Rename_Intro *)
+      rename H into Hty1, H0 into Hty2, H1 into Hqf.
+      rewrite (rename_assertion_subst_singleton ren Hinj A lv (LVar lv2)). simpl.
+      apply AE_Exists_Rename_Intro.
+      + rewrite Hren_typ. exact Hty1.
+      + rewrite Hren_typ. exact Hty2.
+      + exact (qf_assertion_rename ren A Hqf).
+    - (* AE_LExprA_Impl *)
+      rename H into Himpl.
+      apply AE_LExprA_Impl. intros mp Hh.
+      apply (LExpr_holds_rename ren e2 mp).
+      apply (LExpr_holds_rename ren e1 mp) in Hh.
+      exact (Himpl _ Hh).
+    - (* AE_GhostOwn_Chunk_Eq *)
+      rename H into Heq.
+      apply AE_GhostOwn_Chunk_Eq. intros mp.
+      rewrite !interp_lexpr_rename. exact (Heq (fun x => mp (ren x))).
+  Qed.
+
   Lemma assertion_entails_sound σ A B : assertion_entails σ A B -> entails σ A B.
   Proof.
     induction 1.
@@ -4564,6 +5174,27 @@ Section RavenLogic.
         LAnd (LGhostOwn lexpr fld r (LVal (LitRAElem (existT r x))))
              (field_list_to_ghost_assertion lexpr ghost_fld_vals)
     end.
+
+  (* Both field-list-to-assertion builders only ever thread lexpr through
+     unchanged at each step (the field/value pairs are literals, inert
+     under rename_lexpr), so renaming commutes with them by a trivial
+     induction on the list -- needed for HeapAllocRule's own conclusion. *)
+  Lemma field_list_to_assertion_rename (ren : lvar -> lvar) (lexpr : LExpr) (fld_vals : list (fld_name * lang.val)) :
+    rename_assertion ren (field_list_to_assertion lexpr fld_vals) =
+    field_list_to_assertion (rename_lexpr ren lexpr) fld_vals.
+  Proof.
+    induction fld_vals as [| [fld val] fld_vals IH]; simpl; [reflexivity |].
+    rewrite IH. reflexivity.
+  Qed.
+
+  Lemma field_list_to_ghost_assertion_rename (ren : lvar -> lvar) (lexpr : LExpr)
+      (ghost_fld_vals : list (fld_name * ra_elem)) :
+    rename_assertion ren (field_list_to_ghost_assertion lexpr ghost_fld_vals) =
+    field_list_to_ghost_assertion (rename_lexpr ren lexpr) ghost_fld_vals.
+  Proof.
+    induction ghost_fld_vals as [| [fld [r x]] ghost_fld_vals IH]; simpl; [reflexivity |].
+    rewrite IH. reflexivity.
+  Qed.
 
   Inductive RavenHoareTriple :
   pvar_typs -> lvar_typs ->
@@ -4943,6 +5574,194 @@ Section RavenLogic.
         c mask
       q
   .
+
+  (* The main renaming theorem: transports a RavenHoareTriple derivation
+     built against one choice of fresh lvars to any other, via a fixed
+     injective ren that must be the identity on the reserved namespace
+     (so it never disturbs an authored contract's own internal witnesses,
+     see rename_assertion's own comment) and type-preserving under σ.
+     Needed because raven_soundness_core's own proof obtains its
+     proc_entry_lvars via an opaque existential-elimination
+     (fresh_proc_entry_lvars), so all_proc_specs_valid_raven must hold for
+     *every* dll, not just the one a concrete derivation happens to be
+     written against -- see local/binders.md.
+
+     Hwf is needed wherever a rule substitutes an authored proc/inv/pred
+     body: rename_assertion_subst_commute needs that body's own binders to
+     be reserved and its fvars bounded by the substitution's domain, both
+     ProgramWF facts.
+
+     Hpred_empty (pred_map is empty) is an extra restriction beyond
+     ProgramWF, needed only for PredUnfoldRule/PredFoldRule: unlike
+     InvAccessBlockRule/InvAllocRule, those two rules carry no
+     length lexprs = length pred_record.(pred_args) premise, so
+     rename_subst_cond_pred_body's dom-subst_map bound (which needs that
+     length fact) isn't derivable from the rule's own premises for an
+     arbitrary predicate call. Every Program with an empty pred_map (e.g.
+     counter_monotonic.v's) can never actually reach these two cases at
+     all (pred_map !! pred = Some _ is unsatisfiable), so the restriction
+     costs nothing there; lifting it in general would need that missing
+     length premise added to the rules themselves. *)
+  Lemma RavenHoareTriple_rename (ren : lvar -> lvar) (Hinj : Inj (=) (=) ren)
+      (Hren_res : ∀ lv, is_reserved lv → ren lv = lv)
+      (Hwf : ProgramWF) (Hpred_empty : pred_map = ∅)
+      (ρ : pvar_typs) (σ : lvar_typs) (Hren_typ : ∀ lv, σ (ren lv) = σ lv)
+      (p q : assertion) (c : stmt) (mask : maskAnnot) :
+    RavenHoareTriple ρ σ p c mask q →
+    RavenHoareTriple ρ σ (rename_assertion ren p) c mask (rename_assertion ren q).
+  Proof.
+    induction 1 as
+      [ ρ σ stk mask v lv e lexpr t Htr Hinf Hfresh Hcompat
+      | ρ σ stk mask x e chunk fld lexpr_e lvar_x t Htr Hinf Hfresh Hnotfv Hcompat
+      | ρ σ stk mask v fld e old_chunk lv lexpr Hstk Htr Hwd Hcompat
+      | ρ σ stk mask x fld_vals ghost_fld_vals lvar_x Hfresh HND1 HND2 Hne Hvalid Hcompat
+      | ρ σ stk mask x pn args lexprs lvar_x proc_record Hfresh Hpm Hlen Hargs Hcompat Hnotres Hlexprs_notres
+      | ρ σ mask a1 c1 a2 c2 a3 H1 IH1 H2 IH2
+      | ρ σ stk1 mask e s1 s2 p Q lexpr Htr Hinf Hcompat H1 IH1 H2 IH2
+      | ρ σ stk stk' mask inv args stmt inv_record p q lv t lexprs
+          Hargs Hmem Hinvm Hlen Hnotres_lexprs Hcompat subm Hfresh Hnotres_lv Hbody IHbody
+      | ρ σ stk mask inv args inv_record p lexprs Hargs Hmem Hinvm Hlen Hnotres_lexprs Hcompat
+      | ρ σ stk mask pred args pred_record lexprs Hargs Hpredm Hcompat
+      | ρ σ stk mask pred args pred_record lexprs Hargs Hcompat Hpredm
+      | ρ σ stk mask e l_expr fld r e_old e_new lexpr_old lexpr_new Htr1 Htr2 Htr3 Hinf Hcompat
+      | ρ σ mask s p q r H IH
+      | ρ σ mask p p' q q' c H IH Hent1 Hent2
+      | ρ σ stk mask p Hcompat
+      | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk
+          Hfresh Hinf Hwd2 Hwd3 Hnotfv Htr1 Htr2 Htr3 Hcompat
+      | ρ σ mask v t body c q Hty Hfresh H IH ]; simpl.
+    - (* VarAssignmentRule *)
+      rewrite fmap_insert.
+      apply VarAssignmentRule.
+      + exact (trnsl_expr_lExpr_rename ren stk e lexpr Htr).
+      + exact Hinf.
+      + exact (fresh_lvar_rename ren Hinj stk lv Hfresh).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* HeapReadRule *)
+      rewrite fmap_insert.
+      apply HeapReadRule.
+      + exact (trnsl_expr_lExpr_rename ren stk e lexpr_e Htr).
+      + rewrite (inf_lexpr_rename ren σ Hren_typ chunk). exact Hinf.
+      + exact (fresh_lvar_rename ren Hinj stk lvar_x Hfresh).
+      + rewrite lexpr_fvars_rename. intro Hc.
+        apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hnotfv Hy).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* HeapWriteRule *)
+      apply HeapWriteRule.
+      + rewrite lookup_fmap Hstk. reflexivity.
+      + exact (trnsl_expr_lExpr_rename ren stk e lexpr Htr).
+      + exact Hwd.
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* HeapAllocRule *)
+      rewrite fmap_insert.
+      rewrite (field_list_to_assertion_rename ren (LVar lvar_x) fld_vals).
+      rewrite (field_list_to_ghost_assertion_rename ren (LVar lvar_x) ghost_fld_vals).
+      simpl.
+      apply HeapAllocRule.
+      + exact (fresh_lvar_rename ren Hinj stk lvar_x Hfresh).
+      + exact HND1.
+      + exact HND2.
+      + exact Hne.
+      + exact Hvalid.
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* ProcCallRuleRet *)
+      have Hlen' : length lexprs = length (proc_args_of proc_record).
+      { assert (Hll : length args = length lexprs).
+        { assert (Hh := f_equal (@length _) Hargs). rewrite !map_length in Hh. exact Hh. }
+        rewrite <- Hll. exact Hlen. }
+      rewrite fmap_insert.
+      rewrite (rename_assertion_subst_commute ren Hren_res (proc_precond_of proc_record) _
+        (rename_subst_cond_proc_precond Hwf pn proc_record Hpm lexprs Hlen')).
+      rewrite (rename_assertion_subst_commute ren Hren_res (proc_postcond_of proc_record) _
+        (rename_subst_cond_proc_postcond Hwf pn proc_record Hpm lexprs lvar_x Hlen')).
+      rewrite fmap_insert. rewrite (fmap_list_to_map_zip (rename_lexpr ren) (proc_args_of proc_record).*1 lexprs).
+      simpl.
+      apply ProcCallRuleRet.
+      + exact (fresh_lvar_rename ren Hinj stk lvar_x Hfresh).
+      + exact Hpm.
+      + exact Hlen.
+      + exact (trnsl_expr_lExpr_rename_list ren stk args lexprs Hargs).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+      + exact (ren_not_reserved ren Hinj Hren_res lvar_x Hnotres).
+      + exact (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs Hlexprs_notres).
+    - (* SequenceRule *)
+      exact (SequenceRule ρ σ mask (rename_assertion ren a1) c1 (rename_assertion ren a2) c2
+        (rename_assertion ren a3) (IH1 Hren_typ) (IH2 Hren_typ)).
+    - (* CondRule *)
+      apply (CondRule ρ σ (ren <$> stk1) mask e s1 s2
+        (rename_assertion ren p) (rename_assertion ren Q) (rename_lexpr ren lexpr)).
+      + exact (trnsl_expr_lExpr_rename ren stk1 e lexpr Htr).
+      + exact Hinf.
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk1 Hcompat).
+      + exact (IH1 Hren_typ).
+      + exact (IH2 Hren_typ).
+    - (* InvAccessBlockRule *)
+      have IHbody' := IHbody Hren_typ.
+      simpl in IHbody'.
+      rewrite (rename_assertion_subst_commute ren Hren_res inv_record.(inv_body) _
+        (rename_subst_cond_inv_body Hwf inv inv_record Hinvm lexprs Hlen)) in IHbody'.
+      rewrite (fmap_list_to_map_zip (rename_lexpr ren) inv_record.(inv_args) lexprs) in IHbody'.
+      apply (InvAccessBlockRule ρ σ (ren <$> stk) (ren <$> stk') mask inv args stmt inv_record
+        (rename_assertion ren p) (rename_assertion ren q) (ren lv) t (map (rename_lexpr ren) lexprs)).
+      + exact (trnsl_expr_lExpr_rename_list ren stk args lexprs Hargs).
+      + exact Hmem.
+      + exact Hinvm.
+      + rewrite map_length. exact Hlen.
+      + exact (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs Hnotres_lexprs).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+      + exact (fresh_lvar_rename ren Hinj stk lv Hfresh).
+      + exact (ren_not_reserved ren Hinj Hren_res lv Hnotres_lv).
+      + exact IHbody'.
+    - (* InvAllocRule *)
+      rewrite (rename_assertion_subst_commute ren Hren_res inv_record.(inv_body) _
+        (rename_subst_cond_inv_body Hwf inv inv_record Hinvm lexprs Hlen)).
+      rewrite (fmap_list_to_map_zip (rename_lexpr ren) inv_record.(inv_args) lexprs).
+      apply InvAllocRule.
+      + exact (trnsl_expr_lExpr_rename_list ren stk args lexprs Hargs).
+      + exact Hmem.
+      + exact Hinvm.
+      + rewrite map_length. exact Hlen.
+      + exact (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs Hnotres_lexprs).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* PredUnfoldRule: unreachable when pred_map is empty. *)
+      exfalso. rewrite Hpred_empty in Hpredm. rewrite lookup_empty in Hpredm. discriminate.
+    - (* PredFoldRule: unreachable when pred_map is empty. *)
+      exfalso. rewrite Hpred_empty in Hpredm. rewrite lookup_empty in Hpredm. discriminate.
+    - (* FPURule *)
+      apply FPURule.
+      + exact (trnsl_expr_lExpr_rename ren stk e l_expr Htr1).
+      + exact (trnsl_expr_lExpr_rename ren stk e_old lexpr_old Htr2).
+      + exact (trnsl_expr_lExpr_rename ren stk e_new lexpr_new Htr3).
+      + exact Hinf.
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* FrameRule *)
+      apply FrameRule. exact (IH Hren_typ).
+    - (* WeakeningRule *)
+      eapply WeakeningRule.
+      + exact (IH Hren_typ).
+      + exact (assertion_entails_rename ren Hinj Hren_res σ Hren_typ p' p Hent1).
+      + exact (assertion_entails_rename ren Hinj Hren_res σ Hren_typ q q' Hent2).
+    - (* SkipRule *)
+      apply SkipRule. exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* CASRule *)
+      rewrite fmap_insert.
+      apply CASRule.
+      + exact (fresh_lvar_rename ren Hinj stk lvar_v Hfresh).
+      + exact Hinf.
+      + exact Hwd2.
+      + exact Hwd3.
+      + rewrite lexpr_fvars_rename. intro Hc.
+        apply elem_of_map in Hc as [y [Heqy Hy]]. apply Hinj in Heqy. subst y. exact (Hnotfv Hy).
+      + exact (trnsl_expr_lExpr_rename ren stk e1 lexpr1 Htr1).
+      + exact (trnsl_expr_lExpr_rename ren stk e2 lexpr2 Htr2).
+      + exact (trnsl_expr_lExpr_rename ren stk e3 lexpr3 Htr3).
+      + exact (stk_type_compat_rename ren ρ σ Hren_typ stk Hcompat).
+    - (* ExistsElimRule *)
+      apply ExistsElimRule.
+      + rewrite Hren_typ. exact Hty.
+      + exact (lvar_fresh_in_assertion_rename ren Hinj v q Hfresh).
+      + exact (IH Hren_typ).
+  Qed.
 
 End RavenLogic.
 
