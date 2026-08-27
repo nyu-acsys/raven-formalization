@@ -9,4 +9,5 @@ simp_raven_lang/lifting.v
 
 rich_raven_lang/rrl_lang.v
 rich_raven_lang/trnsl.v
+rich_raven_lang/soundness.v
 rich_raven_lang/counter_monotonic.v
