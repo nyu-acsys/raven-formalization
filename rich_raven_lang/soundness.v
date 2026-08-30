@@ -286,7 +286,7 @@ Section MainSoundness.
       rewrite (trnsl_assertion_unfold (LExprA (LUnOp NotBoolOp (LVar lv)))) /trnsl_assertion_pre /=.
       iIntros "[Hite %Hlv]".
       unfold LExpr_holds in Hlv. simpl in Hlv.
-      destruct (mp lv) as [b| |i|l|ra] eqn:Hmplv; simpl in Hlv; try contradiction.
+      destruct (mp lv) as [b| | |l|ra] eqn:Hmplv; simpl in Hlv; try contradiction.
       injection Hlv as Hlv. apply negb_true_iff in Hlv. subst b.
       destruct (interp_lexpr cond mp) as [vc|] eqn:Hcond.
       + destruct (val_beq vc (LitBool true)) eqn:Hvc.
