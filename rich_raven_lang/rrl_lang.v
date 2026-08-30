@@ -26,6 +26,12 @@ Require Import Coq.Logic.FunctionalExtensionality.
 Require Import Coq.Program.Equality.
 Require Import Coq.Init.Datatypes.
 
+Module Make (RAs : RA_CONFIG).
+Module lifting := raven_iris.simp_raven_lang.lifting.Make RAs.
+Module ghost_state := lifting.ghost_state.
+Module lang := ghost_state.lang.
+Import lang ghost_state lifting.
+
 (* "All", not "Type": Coq's "Type" default still tries to minimize which
    section variables each proof closes over, and that minimization gets
    confused by broad-search tactics (naive_solver etc.), spuriously
@@ -93,7 +99,7 @@ Definition pred_name := string.
 
 Definition inv_name := string.
 
-(* ResourceAlgebra/RA_Pack/ra_name/ra_set/ra_map/ra_elem live in
+(* ResourceAlgebra/RA_Pack/ra_name/ra_map/ra_elem live in
    simp_raven_lang/lang.v (re-exported here via `Require Export lang`
    above): RA elements are ordinary program values (typ's TpRA, val's
    LitRAElem below), not a ghost-only concept, so they belong at the base
@@ -280,12 +286,12 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       end
     | RAValidOp =>
       match interp_lexpr e mp with
-      | Some (LitRAElem (existT r x)) => Some (LitBool (bool_decide (valid x)))
+      | Some (LitRAElem (existT r x)) => Some (LitBool (bool_decide (ra_base.valid x)))
       | _ => None
       end
     | RAOfIntOp r =>
       match interp_lexpr e mp with
-      | Some (LitInt z) => Some (LitRAElem (existT r (ra_of_int z)))
+      | Some (LitInt z) => Some (LitRAElem (existT r (ra_base.ra_of_int z)))
       | _ => None
       end
     end
@@ -374,7 +380,7 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       match interp_lexpr e1 mp, interp_lexpr e2 mp with
       | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
           match decide (r1 = r2) with
-          | left Heq => Some (LitRAElem (existT r1 (comp x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | left Heq => Some (LitRAElem (existT r1 (ra_base.comp x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
           | right _ => None
           end
       | _, _ => None
@@ -384,7 +390,7 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       match interp_lexpr e1 mp, interp_lexpr e2 mp with
       | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
           match decide (r1 = r2) with
-          | left Heq => Some (LitRAElem (existT r1 (frame x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | left Heq => Some (LitRAElem (existT r1 (ra_base.frame x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
           | right _ => None
           end
       | _, _ => None
@@ -394,7 +400,7 @@ Fixpoint interp_lexpr (le : LExpr) (mp : symb_map) : option val :=
       match interp_lexpr e1 mp, interp_lexpr e2 mp with
       | Some (LitRAElem (existT r1 x1)), Some (LitRAElem (existT r2 x2)) =>
           match decide (r1 = r2) with
-          | left Heq => Some (LitBool (bool_decide (fpuValid x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
+          | left Heq => Some (LitBool (bool_decide (ra_base.fpuValid x1 (eq_rect r2 (fun n => RA_carrier (ra_map n)) x2 r1 (eq_sym Heq)))))
           | right _ => None
           end
       | _, _ => None
@@ -430,13 +436,13 @@ Qed.
    here rather than plain computation. *)
 Lemma interp_lexpr_ra_valid (r : ra_name) (x : RA_carrier (ra_map r)) (e : LExpr) (mp : symb_map) :
   interp_lexpr e mp = Some (LitRAElem (existT r x)) ->
-  interp_lexpr (LUnOp RAValidOp e) mp = Some (LitBool (bool_decide (valid x))).
+  interp_lexpr (LUnOp RAValidOp e) mp = Some (LitBool (bool_decide (ra_base.valid x))).
 Proof. intros H. simpl. rewrite H. reflexivity. Qed.
 
 Lemma interp_lexpr_ra_comp (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
   interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
   interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
-  interp_lexpr (LBinOp RACompOp e1 e2) mp = Some (LitRAElem (existT r (comp x1 x2))).
+  interp_lexpr (LBinOp RACompOp e1 e2) mp = Some (LitRAElem (existT r (ra_base.comp x1 x2))).
 Proof.
   intros H1 H2. simpl. rewrite H1 H2.
   destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
@@ -446,7 +452,7 @@ Qed.
 Lemma interp_lexpr_ra_frame (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
   interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
   interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
-  interp_lexpr (LBinOp RAFrameOp e1 e2) mp = Some (LitRAElem (existT r (frame x1 x2))).
+  interp_lexpr (LBinOp RAFrameOp e1 e2) mp = Some (LitRAElem (existT r (ra_base.frame x1 x2))).
 Proof.
   intros H1 H2. simpl. rewrite H1 H2.
   destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
@@ -456,7 +462,7 @@ Qed.
 Lemma interp_lexpr_ra_fpuvalid (r : ra_name) (x1 x2 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
   interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
   interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) ->
-  interp_lexpr (LBinOp RAFpuValidOp e1 e2) mp = Some (LitBool (bool_decide (fpuValid x1 x2))).
+  interp_lexpr (LBinOp RAFpuValidOp e1 e2) mp = Some (LitBool (bool_decide (ra_base.fpuValid x1 x2))).
 Proof.
   intros H1 H2. simpl. rewrite H1 H2.
   destruct (decide (r = r)) as [Heq | Hne]; [ | exfalso; apply Hne; reflexivity].
@@ -480,7 +486,7 @@ Proof. unfold LExpr_holds. rewrite interp_lexpr_rename. reflexivity. Qed.
 Lemma interp_lexpr_ra_fpuvalid_inv (r : ra_name) (x1 : RA_carrier (ra_map r)) (e1 e2 : LExpr) (mp : symb_map) :
   interp_lexpr e1 mp = Some (LitRAElem (existT r x1)) ->
   LExpr_holds (LBinOp RAFpuValidOp e1 e2) mp ->
-  exists x2 : RA_carrier (ra_map r), interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) /\ fpuValid x1 x2.
+  exists x2 : RA_carrier (ra_map r), interp_lexpr e2 mp = Some (LitRAElem (existT r x2)) /\ ra_base.fpuValid x1 x2.
 Proof.
   intros H1 Hholds.
   unfold LExpr_holds in Hholds. simpl in Hholds. rewrite H1 in Hholds.
@@ -707,7 +713,8 @@ Qed.
    fragment recording that the invariant was established at a concrete argument
    vector.  The carrier is discrete (a plain gset of value lists), so the
    fragment is Timeless -- which is what lets an invariant be opened without a
-   later (see [Winv_open] below). *)
+   later (see [Winv_open] below). Access exclusivity is provided by Iris's
+   mask-changing atomic accessor, not by a client-owned ghost lock token. *)
 Definition inv_argsUR : ucmra := gsetUR (list val).
 
 Class invTokenG (Σ : gFunctors) := InvTokenG {
@@ -864,6 +871,18 @@ Fixpoint subst (ra: assertion) (mp: gmap var LExpr) : assertion := match ra with
     LPred pred_name (map (fun expr => lexpr_subst expr mp) args)
 | LAnd a1 a2 => LAnd (subst a1 mp) (subst a2 mp)
 end.
+
+(* A finite package of symbolic witnesses.  Rules such as HeapReadRule,
+   VarAssignmentRule and InvAccessBlockRule expose a freshly computed value
+   through [LExists]; when that value remains in the final stack of a
+   procedure, it must stay bound rather than being erased by ExistsElimRule.
+   Procedure-body validity uses this wrapper to retain all such live values
+   through return. *)
+Fixpoint lvar_exists_list (xs : list (lvar * typ)) (a : assertion) : assertion :=
+  match xs with
+  | [] => a
+  | (lv, t) :: xs => LExists lv t (lvar_exists_list xs a)
+  end.
 
 (* Renaming lvar occurrences throughout an assertion via a fixed injective
    ren : lvar -> lvar that is required to be the identity on reserved names
@@ -1026,8 +1045,8 @@ Definition PredBodyWF (r : PredRecord) : Prop :=
 (* The elaborated module, bundled. Positioned here (not right after
    proc_set/etc. above): ProcRecord/InvRecord/PredRecord all need to
    already exist, and StackFree below needs inv_map/pred_map ambient, so
-   this is the earliest point everything lines up. Not ra_map/ra_set --
-   those stay Global Parameter in lang.v. *)
+   this is the earliest point everything lines up. Not ra_map -- it stays
+   at the underlying language boundary in lang.v. *)
 Record Program := {
   prog_proc_set : gset proc_name;
   prog_pred_set : gset pred_name;
@@ -1230,6 +1249,16 @@ Fixpoint assertion_inv_names (a : assertion) : gset inv_name :=
    never manufactures a fresh LInv fact out of nothing. *)
 Definition proc_required_mask (proc_record : ProcRecord) : gset inv_name :=
   assertion_inv_names (proc_precond_of proc_record).
+
+(* What a caller gains, for free, just by having called this procedure --
+   the postcondition-derived dual of proc_required_mask. Used by
+   ProcCallRuleRet to widen the caller's own mask_post after a call,
+   without the caller ever having declared the granted invariant as a need
+   of its own. Flat/declaration-level, matching proc_required_mask: no
+   argument-prefix precision (that's mask_entry's job in the real tool,
+   out of scope here per the 4c deferral). *)
+Definition proc_grants_mask (proc_record : ProcRecord) : gset inv_name :=
+  assertion_inv_names (proc_postcond_of proc_record).
 
 (* Scope-correct free variables: unlike assertion_lexpr_fvars, this
    subtracts LExists's own bound variable from its body's fvars, so it
@@ -2106,6 +2135,7 @@ Record ProgramWF : Prop := {
     ∀ inv' : inv_name,
       inv' ∈ inv_set →
         ghost_heap_namespace ## (inv_namespace_map inv');
+
 }.
 
 (* The rename_subst_cond bundle (StackFree/binders-reserved/fvars-bounded)
@@ -4068,6 +4098,15 @@ Section RavenLogic.
          as one to keep AE_Exists_Intro's own simpler soundness proof. *)
       σ lv = t -> σ lv2 = t -> qf_assertion A ->
       assertion_entails σ (subst A (<[lv := LVar lv2]> ∅)) (LExists lv t A)
+  | AE_Stack_Exists_Rename stk x old lv t :
+      (* A symbolic stack slot can be rebound to a fresh logical variable,
+         existentially choosing the slot's current value as its witness.
+         Freshness is essential: if [lv] already occurred in [stk], the
+         existential update could also change that pre-existing slot. *)
+      stk !! x = Some old ->
+      σ old = t -> σ lv = t -> fresh_lvar stk lv ->
+      assertion_entails σ (LStack stk)
+                         (LExists lv t (LStack (<[x := lv]> stk)))
   | AE_LExprA_Impl e1 e2 :
       (* interp_lexpr/LExpr_holds are plain, total functions of LExpr and
          symb_map -- no Sigma/Gamma/GhostConfig/invTokenG involved at all
@@ -4159,6 +4198,14 @@ Section RavenLogic.
       + rewrite Hren_typ. exact Hty1.
       + rewrite Hren_typ. exact Hty2.
       + exact (qf_assertion_rename ren A Hqf).
+    - (* AE_Stack_Exists_Rename *)
+      rename H into Hlookup, H0 into Hty_old, H1 into Hty_lv, H2 into Hfresh.
+      rewrite fmap_insert. simpl.
+      eapply (@AE_Stack_Exists_Rename σ (ren <$> stk) x (ren old) (ren lv) t).
+      + rewrite lookup_fmap Hlookup. reflexivity.
+      + rewrite Hren_typ. exact Hty_old.
+      + rewrite Hren_typ. exact Hty_lv.
+      + exact (fresh_lvar_rename ren Hinj stk lv Hfresh).
     - (* AE_LExprA_Impl *)
       rename H into Himpl.
       apply AE_LExprA_Impl. intros mp Hh.
@@ -4228,7 +4275,7 @@ Section RavenLogic.
   Inductive RavenHoareTriple :
   pvar_typs -> lvar_typs ->
   assertion ->
-      stmt -> maskAnnot ->
+      stmt -> maskAnnot -> maskAnnot ->
   assertion -> Prop :=
 
   | VarAssignmentRule ρ σ stk mask v lv e lexpr t :
@@ -4238,7 +4285,7 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LStack stk)
-        (Assign v e) mask
+        (Assign v e) mask mask
       (LExists lv t
         (LAnd
           (LStack (<[v := lv]> stk))
@@ -4260,7 +4307,7 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LOwn lexpr_e fld chunk))
-        (FldRd x e fld) mask
+        (FldRd x e fld) mask mask
       (LExists lvar_x t (LAnd
         (LStack (<[x := lvar_x]> stk))
         (LAnd
@@ -4283,7 +4330,7 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LOwn (LVar lv) fld old_chunk))
-        (FldWr v fld e) mask
+        (FldWr v fld e) mask mask
       (LAnd (LStack stk) (LOwn (LVar lv) fld lexpr))
 
 
@@ -4305,11 +4352,11 @@ Section RavenLogic.
     NoDup fld_vals.*1 ->
     NoDup ghost_fld_vals.*1 ->
     (ghost_fld_vals ≠ [] -> fld_vals ≠ []) ->
-    Forall (λ fgv, (RA_inst (ra_map (projT1 fgv.2))).(valid) (projT2 fgv.2)) ghost_fld_vals ->
+    Forall (λ fgv, @ra_base.valid _ (RA_inst (ra_map (projT1 fgv.2))) (projT2 fgv.2)) ghost_fld_vals ->
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
        (LStack stk)
-        (Alloc x fld_vals) mask
+        (Alloc x fld_vals) mask mask
       (LExists lvar_x TpLoc (LAnd (LStack (<[x := lvar_x]> stk))
         (LAnd (field_list_to_assertion (LVar lvar_x) fld_vals)
               (field_list_to_ghost_assertion (LVar lvar_x) ghost_fld_vals))))
@@ -4352,23 +4399,23 @@ Section RavenLogic.
     let subst_map := list_to_map (zip (proc_args_of proc_record).*1 lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (subst (proc_precond_of proc_record) subst_map))
-        (Call x proc_name args) mask
+        (Call x proc_name args) mask (mask ∪ proc_grants_mask proc_record)
       (LExists lvar_x (ρ x) (LAnd (LStack (<[x := lvar_x]> stk)) (subst (proc_postcond_of proc_record) (<[ "#ret_val" := LVar lvar_x]> subst_map))))
 
-  | SequenceRule ρ σ mask a1 c1 a2 c2 a3 :
+  | SequenceRule ρ σ mask1 mask2 mask3 a1 c1 a2 c2 a3 :
     RavenHoareTriple ρ σ
       a1
-        c1 mask
+        c1 mask1 mask2
       a2
     ->
     RavenHoareTriple ρ σ
       a2
-        c2 mask
+        c2 mask2 mask3
       a3
     ->
     RavenHoareTriple ρ σ
       a1
-        (Seq c1 c2) mask
+        (Seq c1 c2) mask1 mask3
       a3
 
   (* Q is a fully generic shared postcondition (not decomposed into a fixed
@@ -4388,17 +4435,17 @@ Section RavenLogic.
     stk_type_compat ρ σ stk1 ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) (LAnd p (LExprA (lexpr))) )
-        s1 mask
+        s1 mask mask
       Q
     ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) (LAnd p (LExprA (LUnOp NotBoolOp lexpr))))
-        s2 mask
+        s2 mask mask
       Q
     ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk1) p)
-        (IfS e s1 s2) mask
+        (IfS e s1 s2) mask mask
       Q
 
   (* stk' (rather than stk again) in the inner triple's postcondition: the
@@ -4447,20 +4494,28 @@ Section RavenLogic.
     ¬ is_reserved lv ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (subst inv_record.(inv_body) subst_map) p))
-        stmt (mask ∖ {[inv]})
+        stmt (mask ∖ {[inv]}) (mask ∖ {[inv]})
       (LExists lv t (LAnd (LStack stk') (LAnd (subst inv_record.(inv_body) subst_map) q))) ->
 
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (LInv inv lexprs) p))
-        (InvAccessBlock inv args stmt ) mask
+        (InvAccessBlock inv args stmt ) mask mask
       (LExists lv t (LAnd (LStack stk') (LAnd (LInv inv lexprs) q)))
 
   (* Establishing an invariant: trade its (instantiated) body for the nominal
      [LInv] fact.  There is deliberately no converse rule -- once shared, an
-     invariant stays shared, exactly as with Iris's [inv_alloc]. *)
+     invariant stays shared, exactly as with Iris's [inv_alloc].
+
+     No [inv ∈ mask] premise (dropped, 4a/masks-redesign.md §4a+§4.4): a
+     freshly-established instance lives at a genuinely fresh, always-
+     reserved namespace, needing no ambient mask room to allocate -- matching
+     plain Iris inv_alloc's own lack of a mask premise. mask_post widens to
+     mask ∪ {[inv]} instead, so a later statement in the same body (or a
+     caller receiving this fact via ProcCallRuleRet's grant) can Unfold it,
+     via the syntactic mask_pre/mask_post threading (4b) -- not because the
+     physical ambient needs to change to do so. *)
   | InvAllocRule ρ σ stk mask inv args inv_record p lexprs :
     (map (fun arg => trnsl_expr_lExpr stk arg) args) = (map (fun lexpr => Some lexpr) lexprs) ->
-    inv ∈ mask ->
     inv_map !! inv = Some inv_record ->
     length lexprs = length inv_record.(inv_args) ->
     (* Local, per-application reserved-namespace side condition -- see
@@ -4470,7 +4525,7 @@ Section RavenLogic.
     let subst_map := list_to_map (zip inv_record.(inv_args) lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (subst inv_record.(inv_body) subst_map) p))
-        (FoldInv inv args) mask
+        (FoldInv inv args) mask (mask ∪ {[inv]})
       (LAnd (LStack stk) (LAnd (LInv inv lexprs) p))
 
   | PredUnfoldRule ρ σ stk mask pred args pred_record lexprs :
@@ -4481,7 +4536,7 @@ Section RavenLogic.
     let subst_map := list_to_map (zip pred_record.(pred_args) lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LPred pred lexprs))
-        (UnfoldPred pred args) mask
+        (UnfoldPred pred args) mask mask
       (LAnd (LStack stk) (subst pred_record.(pred_body) subst_map))
 
   | PredFoldRule ρ σ stk mask pred args pred_record lexprs :
@@ -4492,7 +4547,7 @@ Section RavenLogic.
     let subst_map := list_to_map (zip pred_record.(pred_args) lexprs) in
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (subst pred_record.(pred_body) subst_map))
-        (FoldPred pred args) mask
+        (FoldPred pred args) mask mask
       (LAnd (LStack stk) (LPred pred lexprs))
 
   (* e_old/e_new need not translate to literal constants: lexpr_old/lexpr_new
@@ -4513,24 +4568,24 @@ Section RavenLogic.
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd (LGhostOwn l_expr fld r lexpr_old)
                                 (LExprA (LBinOp RAFpuValidOp lexpr_old lexpr_new))))
-        (Fpu e fld r e_old e_new) mask
+        (Fpu e fld r e_old e_new) mask mask
         (LAnd (LStack stk) (LGhostOwn l_expr fld r lexpr_new))
 
-  | FrameRule ρ σ mask s p q r :
+  | FrameRule ρ σ mask_pre mask_post s p q r :
     RavenHoareTriple ρ σ
       p
-        s mask
+        s mask_pre mask_post
       q
     ->
     RavenHoareTriple ρ σ
       (LAnd p r)
-        s mask
+        s mask_pre mask_post
       (LAnd q r)
 
-  | WeakeningRule ρ σ mask p p' q q' c :
+  | WeakeningRule ρ σ mask_pre mask_post p p' q q' c :
     RavenHoareTriple ρ σ
       p
-        c mask
+        c mask_pre mask_post
       q
     ->
     assertion_entails σ p' p ->
@@ -4538,14 +4593,14 @@ Section RavenLogic.
 
     RavenHoareTriple ρ σ
       p'
-        c mask
+        c mask_pre mask_post
       q'
 
   | SkipRule ρ σ stk mask p :
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) p)
-        SkipS mask
+        SkipS mask mask
       (LAnd (LStack stk) p)
 
   (* The precondition doesn't force the owned chunk to already equal e2
@@ -4578,7 +4633,7 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
       RavenHoareTriple ρ σ
         (LAnd (LStack stk) (LOwn lexpr1 fld old_chunk))
-          (CAS v e1 fld e2 e3) mask
+          (CAS v e1 fld e2 e3) mask mask
         (LExists lvar_v TpBool (LAnd (LStack (<[v := lvar_v]> stk))
           (LIte (LBinOp EqOp old_chunk lexpr2)
             (LAnd (LOwn lexpr1 fld lexpr3) (LExprA (LBinOp EqOp (LVar lvar_v) (LVal (LitBool true)))))
@@ -4605,13 +4660,13 @@ Section RavenLogic.
      LAnd (LStack stk) (LAnd (LExists v body) p) shape get there via a
      separate, purely structural commuting entailment (v fresh for stk/p),
      rather than baking it into the core rule. *)
-  | ExistsElimRule ρ σ mask v t body c q :
+  | ExistsElimRule ρ σ mask_pre mask_post v t body c q :
     σ v = t ->
     lvar_fresh_in_assertion v q ->
-    RavenHoareTriple ρ σ body c mask q ->
+    RavenHoareTriple ρ σ body c mask_pre mask_post q ->
     RavenHoareTriple ρ σ
       (LExists v t body)
-        c mask
+        c mask_pre mask_post
       q
 
   (* A ghost-only, proof-only check: e must already be provable from the
@@ -4633,9 +4688,77 @@ Section RavenLogic.
     stk_type_compat ρ σ stk ->
     RavenHoareTriple ρ σ
       (LAnd (LStack stk) (LAnd p (LExprA lexpr)))
-        (Assert e) mask
+        (Assert e) mask mask
       (LAnd (LStack stk) (LAnd p (LExprA lexpr)))
   .
+
+  (* Every constructor's own mask_post is either literally mask_pre or
+     mask_pre unioned with something (ProcCallRuleRet's grants) -- never a
+     strict subset. Purely structural: no side hypotheses, unlike the
+     proc_grants_mask/proc_required_mask relationship, which genuinely
+     needs all_proc_specs_valid_raven and is program-global rather than a
+     fact about one derivation. Used by rrl_validity's SequenceRule case to
+     justify widening c1's own ambient up to c2's (wp_mask_mono, the free
+     narrow-to-wide direction) before composing. *)
+  Lemma RavenHoareTriple_mask_mono ρ σ p c mask_pre mask_post q :
+    RavenHoareTriple ρ σ p c mask_pre mask_post q -> mask_pre ⊆ mask_post.
+  Proof using G P fld_set inv_map inv_namespace_map inv_set pred_map pred_set proc_map proc_set.
+    induction 1; set_solver.
+  Qed.
+
+  (* Purely syntactic: does c contain a FoldInv/InvAccessBlock targeting
+     invr anywhere in its own AST? Deliberately opaque at Call -- a
+     procedure call's own callee body is a *separate* RavenHoareTriple
+     derivation (verified independently, all_proc_specs_valid_raven), not
+     part of c's own syntax, so this says nothing about what a callee might
+     do internally. *)
+  Fixpoint stmt_targets_inv (invr : inv_name) (c : stmt) : Prop :=
+    match c with
+    | Seq s1 s2 => stmt_targets_inv invr s1 \/ stmt_targets_inv invr s2
+    | IfS _ s1 s2 => stmt_targets_inv invr s1 \/ stmt_targets_inv invr s2
+    | InvAccessBlock inv _ body => inv = invr \/ stmt_targets_inv invr body
+    | FoldInv inv _ => inv = invr
+    | _ => False
+    end.
+
+  (* A syntactic corollary of mask monotonicity: if invr is
+     excluded from a derivation's own mask_post, then invr is never
+     established or accessed anywhere in c's own syntax -- not just at c's
+     own top level, but at *every* node reachable through Seq/IfS/
+     InvAccessBlock's own wrapped statement. A nested InvAllocRule(invr,...)
+     would need invr in *its own*
+     mask_post, forcing invr ∈ mask_post transitively via
+     RavenHoareTriple_mask_mono at each SequenceRule/InvAccessBlockRule
+     step in between, contradicting the hypothesis here. *)
+  Lemma RavenHoareTriple_no_inv_target (invr : inv_name) ρ σ p c mask_pre mask_post q :
+    RavenHoareTriple ρ σ p c mask_pre mask_post q ->
+    invr ∉ mask_post ->
+    ¬ stmt_targets_inv invr c.
+  Proof using G P fld_set inv_map inv_namespace_map inv_set pred_map pred_set proc_map proc_set.
+    induction 1; intros Hout Htarget; simpl in Htarget; try (exact Htarget).
+    - (* SequenceRule *)
+      destruct Htarget as [Hc1 | Hc2].
+      + apply IHRavenHoareTriple1; [| exact Hc1].
+        have Hmono := RavenHoareTriple_mask_mono _ _ _ _ _ _ _ H0.
+        set_solver.
+      + exact (IHRavenHoareTriple2 Hout Hc2).
+    - (* CondRule *)
+      destruct Htarget as [Hc1 | Hc2].
+      + exact (IHRavenHoareTriple1 Hout Hc1).
+      + exact (IHRavenHoareTriple2 Hout Hc2).
+    - (* InvAccessBlockRule *)
+      destruct Htarget as [Heq | Hc].
+      + apply Hout. subst invr. exact H0.
+      + apply IHRavenHoareTriple; [set_solver | exact Hc].
+    - (* InvAllocRule *)
+      apply Hout. subst invr. set_solver.
+    - (* FrameRule *)
+      exact (IHRavenHoareTriple Hout Htarget).
+    - (* WeakeningRule *)
+      exact (IHRavenHoareTriple Hout Htarget).
+    - (* ExistsElimRule *)
+      exact (IHRavenHoareTriple Hout Htarget).
+  Qed.
 
   (* The main renaming theorem: transports a RavenHoareTriple derivation
      built against one choice of fresh lvars to any other, via a fixed
@@ -4668,9 +4791,9 @@ Section RavenLogic.
       (Hren_res : ∀ lv, is_reserved lv → ren lv = lv)
       (Hwf : ProgramWF) (Hpred_empty : pred_map = ∅)
       (ρ : pvar_typs) (σ : lvar_typs) (Hren_typ : ∀ lv, σ (ren lv) = σ lv)
-      (p q : assertion) (c : stmt) (mask : maskAnnot) :
-    RavenHoareTriple ρ σ p c mask q →
-    RavenHoareTriple ρ σ (rename_assertion ren p) c mask (rename_assertion ren q).
+      (p q : assertion) (c : stmt) (mask_pre mask_post : maskAnnot) :
+    RavenHoareTriple ρ σ p c mask_pre mask_post q →
+    RavenHoareTriple ρ σ (rename_assertion ren p) c mask_pre mask_post (rename_assertion ren q).
   Proof.
     induction 1 as
       [ ρ σ stk mask v lv e lexpr t Htr Hinf Hfresh Hcompat
@@ -4678,20 +4801,20 @@ Section RavenLogic.
       | ρ σ stk mask v fld e old_chunk lv lexpr Hstk Htr Hwd Hcompat
       | ρ σ stk mask x fld_vals ghost_fld_vals lvar_x Hfresh HND1 HND2 Hne Hvalid Hcompat
       | ρ σ stk mask x pn args lexprs lvar_x proc_record Hfresh Hpm Hlen Hargs Hcompat Hnotres Hlexprs_notres_and_mask
-      | ρ σ mask a1 c1 a2 c2 a3 H1 IH1 H2 IH2
+      | ρ σ mask1 mask2 mask3 a1 c1 a2 c2 a3 H1 IH1 H2 IH2
       | ρ σ stk1 mask e s1 s2 p Q lexpr Htr Hinf Hcompat H1 IH1 H2 IH2
       | ρ σ stk stk' mask inv args stmt inv_record p q lv t lexprs
           Hargs Hmem Hinvm Hlen Hnotres_lexprs Hcompat subm Hfresh Hnotres_lv Hbody IHbody
-      | ρ σ stk mask inv args inv_record p lexprs Hargs Hmem Hinvm Hlen Hnotres_lexprs Hcompat
+      | ρ σ stk mask inv args inv_record p lexprs Hargs Hinvm Hlen Hnotres_lexprs Hcompat
       | ρ σ stk mask pred args pred_record lexprs Hargs Hpredm Hcompat
       | ρ σ stk mask pred args pred_record lexprs Hargs Hcompat Hpredm
       | ρ σ stk mask e l_expr fld r e_old e_new lexpr_old lexpr_new Htr1 Htr2 Htr3 Hinf Hcompat
-      | ρ σ mask s p q r H IH
-      | ρ σ mask p p' q q' c H IH Hent1 Hent2
+      | ρ σ mask_pre mask_post s p q r H IH
+      | ρ σ mask_pre mask_post p p' q q' c H IH Hent1 Hent2
       | ρ σ stk mask p Hcompat
       | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk
           Hfresh Hinf Hwd2 Hwd3 Hnotfv Htr1 Htr2 Htr3 Hcompat
-      | ρ σ mask v t body c q Hty Hfresh H IH
+      | ρ σ mask_pre mask_post v t body c q Hty Hfresh H IH
       | ρ σ stk mask e p lexpr Htr Hinf Hcompat ]; simpl.
     - (* VarAssignmentRule *)
       rewrite fmap_insert.
@@ -4749,7 +4872,7 @@ Section RavenLogic.
       + exact (conj (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs (proj1 Hlexprs_notres_and_mask))
                  (proj2 Hlexprs_notres_and_mask)).
     - (* SequenceRule *)
-      exact (SequenceRule ρ σ mask (rename_assertion ren a1) c1 (rename_assertion ren a2) c2
+      exact (SequenceRule ρ σ mask1 mask2 mask3 (rename_assertion ren a1) c1 (rename_assertion ren a2) c2
         (rename_assertion ren a3) (IH1 Hren_typ) (IH2 Hren_typ)).
     - (* CondRule *)
       apply (CondRule ρ σ (ren <$> stk1) mask e s1 s2
@@ -4782,7 +4905,6 @@ Section RavenLogic.
       rewrite (fmap_list_to_map_zip (rename_lexpr ren) inv_record.(inv_args) lexprs).
       apply InvAllocRule.
       + exact (trnsl_expr_lExpr_rename_list ren stk args lexprs Hargs).
-      + exact Hmem.
       + exact Hinvm.
       + rewrite map_length. exact Hlen.
       + exact (Forall_lexpr_not_reserved_rename ren Hinj Hren_res lexprs Hnotres_lexprs).
@@ -4992,3 +5114,5 @@ End LExpr_embed.
    [trnsl_assertion] is total, so there is no circularity. *)
 
 End WithProgram.
+
+End Make.

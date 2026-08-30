@@ -3,20 +3,8 @@
    algebra) against rrl_lang.v/lang.v, together with a RavenHoareTriple
    derivation for incr/read/make. *)
 From stdpp Require Import gmap namespaces.
-From raven_iris.simp_raven_lang Require Import lang.
-From raven_iris.rich_raven_lang Require Import rrl_lang.
+From raven_iris.simp_raven_lang Require Import ra_base.
 Require Import Coq.Logic.FunctionalExtensionality.
-
-(* Sigma is a Section WithProgram variable in rrl_lang.v (see its own
-   header comment) -- redeclared here, same as trnsl.v does, so
-   invTokenG's own instance can reference it. This file needs neither
-   Gs/I/inGs/the ghost-heap inG instance nor simpLangG: it never calls
-   Winv/Wghost/trnsl_assertion/entails directly, only ProgramWF (Sigma +
-   invTokenG0 only) and RavenHoareTriple (Program only). Picking a
-   concrete Sigma is the adequacy wrapper's job, not this file's -- stays
-   abstract here. *)
-Context {Σ : gFunctors}.
-Context `{!invTokenG Σ}.
 
 (* ----------------------------------------------------------------------- *)
 (* The resource algebra: a plain monotone nat -- comp/frame is max, and a
@@ -97,6 +85,7 @@ Proof.
   - rewrite Pos.add_1_r. rewrite Pos2Nat.inj_succ. lia.
   - destruct p as [p' | p' | ]; simpl; lia.
 Qed.
+
 
 Lemma mn_fpuAxiom : forall x y : MonoNat, mn_fpuValid x y ->
   mn_valid x /\ mn_valid y /\ forall c, mn_valid (mn_comp x c) -> mn_valid (mn_comp y c).
@@ -190,7 +179,29 @@ Definition MonoNatPack : RA_Pack := {|
 
 Definition h_ra : ra_name := "h_ra".
 
-Axiom ra_map_h_ra : ra_map h_ra = MonoNatPack.
+From iris.proofmode Require Import tactics.
+From raven_iris.simp_raven_lang Require Import lang.
+From raven_iris.rich_raven_lang Require Import soundness.
+
+Module CounterRAConfig.
+  Definition ra_map (_ : ra_name) : RA_Pack := MonoNatPack.
+End CounterRAConfig.
+
+Module soundness := raven_iris.rich_raven_lang.soundness.Make CounterRAConfig.
+Module trnsl := soundness.trnsl.
+Module rrl_lang := soundness.rrl_lang.
+Module lifting := soundness.lifting.
+Module ghost_state := soundness.ghost_state.
+Module lang := soundness.lang.
+Import lang ghost_state lifting rrl_lang trnsl soundness.
+
+Section CounterMonotonic.
+
+Context {Σ : gFunctors}.
+Context `{!invTokenG Σ}.
+
+Lemma ra_map_h_ra : ra_map h_ra = MonoNatPack.
+Proof. reflexivity. Qed.
 
 (* Isolates the ra_map h_ra = MonoNatPack rewrite (needed to fall back from
    the RA-generic ra_of_int/fpuValid to their concrete MonoNat definitions)
@@ -200,7 +211,8 @@ Lemma h_ra_fpuValid_mono (z1 z2 : Z) :
   z2 = (z1 + 1)%Z ->
   @fpuValid (RA_carrier (ra_map h_ra)) (ra_inst_instance (ra_map h_ra)) (ra_of_int z1) (ra_of_int z2).
 Proof.
-  intros ->. rewrite ra_map_h_ra. simpl. apply mn_of_int_mono.
+  intros ->. change (mn_fpuValid (mn_of_int z1) (mn_of_int (z1 + 1))).
+  apply mn_of_int_mono.
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -270,7 +282,7 @@ Definition incr_postcond : assertion := LPure True.
    nothing about it, so its non-deterministically-chosen entry value is
    simply never touched or observed -- same status as a void return. *)
 Definition incr_record : ProcRecord :=
-  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool); ("#ret_val", TpUnit)]
+  Proc [("x", TpLoc)] [("v1", TpInt); ("new_v1", TpInt); ("res", TpBool); ("call_res", TpUnit); ("#ret_val", TpUnit)]
     incr_precond incr_postcond incr_body.
 
 Definition make_body : stmt :=
@@ -393,6 +405,7 @@ Definition sigma : lvar_typs := lvar_typs_update
      ("l_ph_int2", TpInt);
      ("l_ph_bool", TpBool);
      ("l_ph_unit", TpUnit);
+     ("l_ph_unit2", TpUnit);
      ("l_ph_loc1", TpLoc);
      ("l_ph_loc2", TpLoc)
   ] : gmap lvar typ)
@@ -400,6 +413,178 @@ Definition sigma : lvar_typs := lvar_typs_update
 
 Lemma Hsigma_rich : ∀ (t : typ) (excl : gset lvar), ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ sigma lv = t.
 Proof. exact (lvar_typs_update_rich _ rich_lvar_typs rich_lvar_typs_rich). Qed.
+
+(* Type-preserving transpositions are the building blocks used below to
+   transport the three canonical body derivations to the arbitrary fresh
+   entry lvars chosen by raven_soundness. *)
+Definition lvar_swap (a b x : lvar) : lvar :=
+  if decide (x = a) then b else if decide (x = b) then a else x.
+
+Lemma lvar_swap_involutive a b : a ≠ b → ∀ x, lvar_swap a b (lvar_swap a b x) = x.
+Proof.
+  intros Hab x. unfold lvar_swap. repeat case_decide; congruence.
+Qed.
+
+Lemma lvar_swap_inj a b : a ≠ b → Inj (=) (=) (lvar_swap a b).
+Proof.
+  intros Hab x y Hxy.
+  rewrite <-(lvar_swap_involutive a b Hab x), <-(lvar_swap_involutive a b Hab y), Hxy.
+  reflexivity.
+Qed.
+
+Lemma lvar_swap_typ a b : sigma a = sigma b → ∀ x, sigma (lvar_swap a b x) = sigma x.
+Proof.
+  intros Hab x. unfold lvar_swap.
+  destruct (decide (x = a)) as [-> | Hxa]; [exact (eq_sym Hab) |].
+  destruct (decide (x = b)) as [-> | Hxb]; [exact Hab | reflexivity].
+Qed.
+
+Lemma lvar_swap_reserved a b :
+  ¬ is_reserved a → ¬ is_reserved b → ∀ x, is_reserved x → lvar_swap a b x = x.
+Proof.
+  intros Hna Hnb x Hx. unfold lvar_swap.
+  destruct (decide (x = a)) as [-> | Hxa]; [contradiction |].
+  destruct (decide (x = b)) as [-> | Hxb]; [contradiction | reflexivity].
+Qed.
+
+Lemma lvar_swap_not_reserved a b :
+  ¬ is_reserved a → ¬ is_reserved b → ∀ x, ¬ is_reserved x → ¬ is_reserved (lvar_swap a b x).
+Proof.
+  intros Hna Hnb x Hx. unfold lvar_swap.
+  destruct (decide (x = a)) as [-> | Hxa]; [simpl; exact Hnb |].
+  destruct (decide (x = b)) as [-> | Hxb]; [simpl; exact Hna | exact Hx].
+Qed.
+
+Lemma lvar_swap_eq_iff a b x y : a ≠ b →
+  lvar_swap a b x = y ↔ x = lvar_swap a b y.
+Proof.
+  intros Hab. split; intro H.
+  - apply (f_equal (lvar_swap a b)) in H.
+    rewrite !(lvar_swap_involutive a b Hab) in H. exact H.
+  - apply (f_equal (lvar_swap a b)) in H.
+    rewrite !(lvar_swap_involutive a b Hab) in H. exact H.
+Qed.
+
+(* A finite, type-preserving change of names.  The [protected] list is
+   useful when this lemma is used inductively: it records names that the
+   remaining swaps must leave alone.  Taking it to be [[]] gives the usual
+   form needed to transport a canonical body proof to its fresh entry
+   lvars. *)
+Lemma finite_lvar_renaming (xs ys protected : list lvar) :
+  NoDup xs →
+  NoDup ys →
+  Forall (fun x => ¬ is_reserved x) xs →
+  Forall (fun y => ¬ is_reserved y) ys →
+  Forall2 (fun x y => sigma x = sigma y) xs ys →
+  (∀ z, z ∈ protected → z ∉ xs ∧ z ∉ ys) →
+  ∃ ren : lvar → lvar,
+    Inj (=) (=) ren ∧
+    (∀ z, sigma (ren z) = sigma z) ∧
+    (∀ z, is_reserved z → ren z = z) ∧
+    (∀ z, z ∈ protected → ren z = z) ∧
+    map ren xs = ys.
+Proof.
+  remember (length xs) as n eqn:Hlen.
+  revert xs ys protected Hlen.
+  induction n as [|n IH]; intros xs ys protected Hlen Hndx Hndy Hnr_x Hnr_y Htys Hprotected.
+  - destruct xs as [|a xs]; [|discriminate Hlen].
+    destruct ys as [|b ys]; [|inversion Htys].
+    exists (fun z => z).
+    split.
+    { intros x y Hxy. exact Hxy. }
+    split.
+    { intros z. reflexivity. }
+    split.
+    { intros z _. reflexivity. }
+    split.
+    { intros z _. reflexivity. }
+    { reflexivity. }
+  - destruct xs as [|a xs]; [discriminate Hlen|].
+    simpl in Hlen. apply Nat.succ_inj in Hlen.
+    destruct ys as [|b ys]; [inversion Htys|].
+    inversion Hndx as [|? ? Hnotin_a Hndx']; subst.
+    inversion Hndy as [|? ? Hnotin_b Hndy']; subst.
+    inversion Hnr_x as [|? ? Hnres_a Hnr_x']; subst.
+    inversion Hnr_y as [|? ? Hnres_b Hnr_y']; subst.
+    inversion Htys as [|? ? ? ? Hty_ab Htys']; subst.
+    destruct (decide (a = b)) as [Hab|Hab].
+    + subst b.
+      have Hprotected' : ∀ z, z ∈ a :: protected → z ∉ xs ∧ z ∉ ys.
+      { intros z Hz. apply elem_of_cons in Hz as [Hza|Hz].
+        - subst z. exact (conj Hnotin_a Hnotin_b).
+        - specialize (Hprotected z Hz). simpl in Hprotected.
+          split; intro Hzin; [apply (proj1 Hprotected) | apply (proj2 Hprotected)];
+            apply elem_of_cons; right; exact Hzin. }
+      destruct (IH xs ys (a :: protected) eq_refl Hndx' Hndy' Hnr_x' Hnr_y' Htys' Hprotected')
+        as [ren [Hinj [Htyp [Hres [Hfix Hmap]]]]].
+      exists ren.
+      refine (conj Hinj (conj Htyp (conj Hres (conj _ _)))).
+      * intros z Hz. apply Hfix. apply elem_of_cons; right; exact Hz.
+      * have Ha_protected : a ∈ a :: protected by (apply elem_of_cons; left; reflexivity).
+        simpl. rewrite (Hfix a Ha_protected). f_equal. exact Hmap.
+    + have Hswap_inj : Inj (=) (=) (lvar_swap a b) := lvar_swap_inj a b Hab.
+      have Hnd_swap : NoDup (map (lvar_swap a b) xs).
+      { apply NoDup_map_of_inj; [intros x y; apply Hswap_inj | exact Hndx']. }
+      have Hnr_swap : Forall (fun x => ¬ is_reserved x) (map (lvar_swap a b) xs).
+      { apply Forall_forall. intros z Hz.
+        apply elem_of_list_fmap in Hz as [x [Hx Hxz]].
+        rewrite Hx.
+        apply lvar_swap_not_reserved; try assumption.
+        apply (proj1 (Forall_forall _ _) Hnr_x' x Hxz). }
+      have Htys_swap : Forall2 (fun x y => sigma x = sigma y) (map (lvar_swap a b) xs) ys.
+      { assert (Haux : ∀ xs0 ys0,
+            Forall2 (fun x y => sigma x = sigma y) xs0 ys0 →
+            Forall2 (fun x y => sigma x = sigma y) (map (lvar_swap a b) xs0) ys0).
+        { intros xs0 ys0 Hxy. induction Hxy; simpl; constructor; auto.
+          rewrite lvar_swap_typ; assumption. }
+        exact (Haux xs ys Htys'). }
+      have Hprotected' : ∀ z, z ∈ b :: protected →
+        z ∉ map (lvar_swap a b) xs ∧ z ∉ ys.
+      { intros z Hz. apply elem_of_cons in Hz as [Hzb|Hz].
+        subst z.
+        - split.
+          + intro Hb. apply elem_of_list_fmap in Hb as [x [Hxb Hx]].
+            apply Hnotin_a. symmetry in Hxb.
+            apply (lvar_swap_eq_iff a b x b Hab) in Hxb.
+            unfold lvar_swap in Hxb.
+            rewrite decide_False in Hxb; [|congruence].
+            rewrite decide_True in Hxb; [|reflexivity].
+            subst x. exact Hx.
+          + exact Hnotin_b.
+        - specialize (Hprotected z Hz) as [Hzx Hzy]. split.
+          2: { intro Hzin. apply Hzy. right. exact Hzin. }
+          intro Hzswap. apply elem_of_list_fmap in Hzswap as [x [Hxswap Hx]].
+          have Hza : z ≠ a.
+          { set_solver. }
+          have Hzb : z ≠ b.
+          { set_solver. }
+          symmetry in Hxswap.
+          apply (lvar_swap_eq_iff a b x z Hab) in Hxswap.
+          unfold lvar_swap in Hxswap.
+          rewrite decide_False in Hxswap; [|exact Hza].
+          rewrite decide_False in Hxswap; [|exact Hzb].
+          subst x. apply Hzx. right. exact Hx.
+      }
+      destruct (IH (map (lvar_swap a b) xs) ys (b :: protected)
+        ltac:(rewrite map_length; reflexivity) Hnd_swap Hndy' Hnr_swap Hnr_y' Htys_swap Hprotected')
+        as [ren [Hinj [Htyp [Hres [Hfix Hmap]]]]].
+      exists (fun z => ren (lvar_swap a b z)).
+      repeat split.
+      * intros x y Hxy. apply Hswap_inj. apply Hinj. exact Hxy.
+      * intro z. rewrite Htyp. apply lvar_swap_typ. exact Hty_ab.
+      * intros z Hz. rewrite (lvar_swap_reserved a b Hnres_a Hnres_b z Hz). exact (Hres z Hz).
+      * intros z Hz. specialize (Hprotected z Hz) as [Hzx Hzy].
+        assert (Hza : z ≠ a).
+        { set_solver. }
+        assert (Hzb : z ≠ b).
+        { set_solver. }
+        unfold lvar_swap. rewrite decide_False; [|exact Hza]. rewrite decide_False; [|exact Hzb].
+        apply Hfix. right. exact Hz.
+      * have Hb_protected : b ∈ b :: protected by (apply elem_of_cons; left; reflexivity).
+        simpl. unfold lvar_swap at 1. rewrite decide_True; [|reflexivity].
+        rewrite (Hfix b Hb_protected).
+        rewrite <- Hmap. rewrite map_map. reflexivity.
+Qed.
 
 Definition stk0 : stack := {[ "x" := "x" ]}.
 Definition cmask : maskAnnot := {[ "counterInv" ]}.
@@ -476,7 +661,7 @@ Proof. apply lookup_union_Some_l. reflexivity. Qed.
 
 (* An "extra" stack fragment merged into stk0 to widen a procedure's entry
    stack (see read_invblock_step_ext's own comment) never holds anything
-   but one of the six placeholder lvars -- the one invariant every
+   but one of the seven placeholder lvars -- the one invariant every
    concrete extra fragment below satisfies by construction, letting a
    single hypothesis stand in for "extra can't possibly clash with any of
    this file's own internal fresh names", rather than restating that
@@ -484,16 +669,18 @@ Proof. apply lookup_union_Some_l. reflexivity. Qed.
 Definition extra_placeholder (extra : stack) : Prop :=
   ∀ v0 lv0, extra !! v0 = Some lv0 →
     lv0 = "l_ph_int1" ∨ lv0 = "l_ph_int2" ∨ lv0 = "l_ph_bool" ∨ lv0 = "l_ph_unit" ∨
-    lv0 = "l_ph_loc1" ∨ lv0 = "l_ph_loc2".
+    lv0 = "l_ph_unit2" ∨ lv0 = "l_ph_loc1" ∨ lv0 = "l_ph_loc2".
 
 Lemma fresh_lvar_extra_ph (extra : stack) (Hextra_ph : extra_placeholder extra) (lv : lvar) :
   lv ≠ "l_ph_int1" → lv ≠ "l_ph_int2" → lv ≠ "l_ph_bool" → lv ≠ "l_ph_unit" →
+  lv ≠ "l_ph_unit2" →
   lv ≠ "l_ph_loc1" → lv ≠ "l_ph_loc2" →
   fresh_lvar extra lv.
 Proof.
-  intros H1 H2 H3 H4 H5 H6 v0 Heq.
-  destruct (Hextra_ph v0 lv Heq) as [-> | [-> | [-> | [-> | [-> | ->]]]]];
-    [exact (H1 eq_refl) | exact (H2 eq_refl) | exact (H3 eq_refl) | exact (H4 eq_refl) | exact (H5 eq_refl) | exact (H6 eq_refl)].
+  intros H1 H2 H3 H4 H5 H6 H7 v0 Heq.
+  destruct (Hextra_ph v0 lv Heq) as [-> | [-> | [-> | [-> | [-> | [-> | ->]]]]]];
+    [exact (H1 eq_refl) | exact (H2 eq_refl) | exact (H3 eq_refl) | exact (H4 eq_refl) |
+     exact (H5 eq_refl) | exact (H6 eq_refl) | exact (H7 eq_refl)].
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -635,11 +822,11 @@ Lemma read_inner_step_sym_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : 
           (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LOwn (LVar "x") "c" (LVar "$v")))
                 (LPure True)))
-      (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]})
+      (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - eapply FrameRule with
       (r := LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v"))) (LPure True)).
@@ -664,15 +851,15 @@ Lemma read_fldrd_block_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra 
     (Hextra_ph : extra_placeholder extra) :
   RavenHoareTriple rho sigma
     (LAnd (LStack (stk0 ∪ extra)) (LAnd counterInv_body (LPure True)))
-      (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]})
+      (FldRd "v1" (Var "x") "c") (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LAnd counterInv_body (LPure True)))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   have Hfresh_dollarv : fresh_lvar extra "$v" := fresh_lvar_extra_ph extra Hextra_ph "$v"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
-  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
+  - apply (ExistsElimRule rho sigma (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack (stk0 ∪ extra))
             (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                         (LOwn (LVar "x") "c" (LVar "$v")))
@@ -698,11 +885,11 @@ Lemma read_invblock_step_ext (rho : pvar_typs) (Hx : rho "x" = TpLoc) (extra : s
     (Hextra_ph : extra_placeholder extra) :
   RavenHoareTriple rho sigma
     (LAnd (LStack (stk0 ∪ extra)) (LInv "counterInv" [LVar "x"]))
-      (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c")) cmask
+      (InvAccessBlock "counterInv" [Var "x"] (FldRd "v1" (Var "x") "c")) cmask cmask
     (LExists "l_v1" TpInt (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra))) (LInv "counterInv" [LVar "x"]))).
 Proof.
   have Hfresh_l_v1 : fresh_lvar extra "l_v1" := fresh_lvar_extra_ph extra Hextra_ph "l_v1"
-    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
+    ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate) ltac:(discriminate).
   eapply WeakeningRule.
   - eapply (InvAccessBlockRule rho sigma (stk0 ∪ extra) (<["v1":="l_v1"]> (stk0 ∪ extra)) cmask "counterInv" [Var "x"]
       (FldRd "v1" (Var "x") "c") counterInv_record (LPure True) (LPure True) "l_v1" TpInt [LVar "x"]).
@@ -754,7 +941,7 @@ Qed.
 Lemma read_assign_inner_step :
   RavenHoareTriple rho_read sigma
     (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read)))
-      (Assign "#ret_val" (Var "v1")) cmask
+      (Assign "#ret_val" (Var "v1")) cmask cmask
     (LExists "l_ret" TpInt (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))))
                             (LExprA (LBinOp EqOp (LVar "l_ret") (LVar "l_v1"))))).
 Proof.
@@ -763,7 +950,8 @@ Proof.
   - reflexivity.
   - apply fresh_lvar_extend;
       [apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate
-        | apply (fresh_lvar_extra_ph extra_read extra_placeholder_read); discriminate]
+        | apply (fresh_lvar_extra_ph extra_read extra_placeholder_read);
+          [discriminate | discriminate | discriminate | discriminate | discriminate | discriminate | discriminate]]
       | discriminate].
   - eapply stk_type_compat_extend;
       [eapply stk_type_compat_union; [exact (stk_type_compat_stk0 rho_read eq_refl) | exact stk_type_compat_extra_read]
@@ -783,7 +971,7 @@ Proof. exact (AE_True_Intro sigma X). Qed.
    SkipS (see GhostSkip's own comment above incr_body). *)
 Lemma ghostskip_step (ρ : pvar_typs) (mask : maskAnnot) (stk : stack) (p : assertion) :
   stk_type_compat ρ sigma stk ->
-  RavenHoareTriple ρ sigma (LAnd (LStack stk) p) GhostSkip mask (LAnd (LStack stk) p).
+  RavenHoareTriple ρ sigma (LAnd (LStack stk) p) GhostSkip mask mask (LAnd (LStack stk) p).
 Proof.
   intros Hcompat.
   eapply WeakeningRule.
@@ -806,13 +994,20 @@ Qed.
 Lemma read_assign_step :
   RavenHoareTriple rho_read sigma
     (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read))) (LInv "counterInv" [LVar "x"]))
-      (Assign "#ret_val" (Var "v1")) cmask
-    read_postcond.
+      (Assign "#ret_val" (Var "v1")) cmask cmask
+    (LExists "l_v1" TpInt
+      (LExists "l_ret" TpInt
+        (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))))
+              read_postcond))).
 Proof.
   eapply WeakeningRule.
   - exact read_assign_inner_step.
   - exact (entails_and_elim_l _ _).
-  - unfold read_postcond. apply entails_true_intro.
+  - eapply AE_Trans.
+    + eapply AE_Exists_Mono; [reflexivity |].
+      eapply AE_And_Mono; [eapply AE_Refl |].
+      unfold read_postcond. eapply AE_True_Intro.
+    + eapply AE_Exists_Intro. reflexivity.
 Qed.
 
 (* Combines the InvAccessBlock (read_invblock_step_ext) with the Assign
@@ -824,18 +1019,24 @@ Qed.
 Lemma read_body_step :
   RavenHoareTriple rho_read sigma
     (LAnd (LStack (stk0 ∪ extra_read)) read_precond)
-      read_body cmask
-    read_postcond.
+      read_body cmask cmask
+    (LExists "l_v1" TpInt
+      (LExists "l_ret" TpInt
+        (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))))
+              read_postcond))).
 Proof.
   unfold read_body, read_precond.
   eapply SequenceRule.
   - exact (read_invblock_step_ext rho_read eq_refl extra_read stk_type_compat_extra_read extra_placeholder_read).
-  - apply (ExistsElimRule rho_read sigma cmask "l_v1" TpInt
+  - apply (ExistsElimRule rho_read sigma cmask cmask "l_v1" TpInt
       (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_read))) (LInv "counterInv" [LVar "x"]))
       (Assign "#ret_val" (Var "v1"))
-      read_postcond).
+      (LExists "l_v1" TpInt
+        (LExists "l_ret" TpInt
+          (LAnd (LStack (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))))
+                read_postcond)))).
     + reflexivity.
-    + unfold read_postcond. exact I.
+    + simpl. left. reflexivity.
     + exact read_assign_step.
 Qed.
 
@@ -864,7 +1065,9 @@ Qed.
    reuse extra_read: incr's own "#ret_val" is TpUnit, read's is TpInt, and
    sigma is one global function, so the same lvar can't have both types. *)
 Definition extra_incr : stack :=
-  <["v1" := "l_ph_int1"]> (<["new_v1" := "l_ph_int2"]> (<["res" := "l_ph_bool"]> ({[ "#ret_val" := "l_ph_unit" ]}))).
+  <["v1" := "l_ph_int1"]> (<["new_v1" := "l_ph_int2"]>
+    (<["res" := "l_ph_bool"]> (<["call_res" := "l_ph_unit2"]>
+      ({[ "#ret_val" := "l_ph_unit" ]})))).
 
 Lemma stk_type_compat_extra_incr : stk_type_compat rho_incr sigma extra_incr.
 Proof.
@@ -872,6 +1075,7 @@ Proof.
   apply lookup_insert_Some in Hv as [[<- <-] | [Hne1 Hv]]; [reflexivity |].
   apply lookup_insert_Some in Hv as [[<- <-] | [Hne2 Hv]]; [reflexivity |].
   apply lookup_insert_Some in Hv as [[<- <-] | [Hne3 Hv]]; [reflexivity |].
+  apply lookup_insert_Some in Hv as [[<- <-] | [Hne4 Hv]]; [reflexivity |].
   apply lookup_singleton_Some in Hv as [<- <-]. reflexivity.
 Qed.
 
@@ -881,13 +1085,15 @@ Proof.
   apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne1 Hv0]]; [left; reflexivity |].
   apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne2 Hv0]]; [right; left; reflexivity |].
   apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne3 Hv0]]; [right; right; left; reflexivity |].
+  apply lookup_insert_Some in Hv0 as [[<- <-] | [Hne4 Hv0]];
+    [right; right; right; right; left; reflexivity |].
   apply lookup_singleton_Some in Hv0 as [<- <-]. right; right; right; left; reflexivity.
 Qed.
 
 Lemma incr_assign_inner_step :
   RavenHoareTriple rho_incr sigma
     (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr)))
-      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask
+      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask cmask
     (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))).
 Proof.
@@ -898,7 +1104,8 @@ Proof.
   - reflexivity.
   - apply fresh_lvar_extend;
       [apply fresh_lvar_union; [apply fresh_lvar_stk0; discriminate
-        | apply (fresh_lvar_extra_ph extra_incr extra_placeholder_incr); discriminate]
+        | apply (fresh_lvar_extra_ph extra_incr extra_placeholder_incr);
+          [discriminate | discriminate | discriminate | discriminate | discriminate | discriminate | discriminate]]
       | discriminate].
   - eapply stk_type_compat_extend;
       [eapply stk_type_compat_union; [exact (stk_type_compat_stk0 rho_incr eq_refl) | exact stk_type_compat_extra_incr]
@@ -913,12 +1120,12 @@ Qed.
 Lemma incr_assign_step :
   RavenHoareTriple rho_incr sigma
     (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr))) (LInv "counterInv" [LVar "x"]))
-      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask
+      (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1)))) cmask cmask
     (LExists "l_new_v1" TpInt (LAnd (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))) (LInv "counterInv" [LVar "x"]))).
 Proof.
   eapply WeakeningRule.
-  - apply (FrameRule rho_incr sigma cmask (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
+  - apply (FrameRule rho_incr sigma cmask cmask (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
       (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr)))
       (LExists "l_new_v1" TpInt (LAnd (LStack (<["new_v1":="l_new_v1"]> (<["v1":="l_v1"]> (stk0 ∪ extra_incr))))
         (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
@@ -997,9 +1204,10 @@ Qed.
 
 Lemma fresh_lvar_incr_stk1 (lv : lvar) :
   lv ≠ "x" -> lv ≠ "l_ph_int1" -> lv ≠ "l_ph_int2" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" ->
+  lv ≠ "l_ph_unit2" ->
   lv ≠ "l_ph_loc1" -> lv ≠ "l_ph_loc2" -> "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> fresh_lvar incr_stk1 lv.
 Proof.
-  intros Hx Hphi1 Hphi2 Hphb Hphu Hphl1 Hphl2 Hv1 Hnv1. unfold incr_stk1.
+  intros Hx Hphi1 Hphi2 Hphb Hphu Hphu2 Hphl1 Hphl2 Hv1 Hnv1. unfold incr_stk1.
   apply fresh_lvar_extend;
     [apply fresh_lvar_extend;
       [apply fresh_lvar_union; [apply fresh_lvar_stk0; exact Hx
@@ -1019,7 +1227,7 @@ Lemma incr_cas_step :
           (LAnd (LOwn (LVar "x") "c" (LVar "$v"))
                 (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))))
-      (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1")) (cmask ∖ {["counterInv"]})
+      (CAS "res" (Var "x") "c" (Var "v1") (Var "new_v1")) (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd
       (LAnd (LStack (<["res":="l_res"]> incr_stk1))
         (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
@@ -1056,10 +1264,11 @@ Qed.
 
 Lemma fresh_lvar_incr_stk2 (lv : lvar) :
   lv ≠ "x" -> lv ≠ "l_ph_int1" -> lv ≠ "l_ph_int2" -> lv ≠ "l_ph_bool" -> lv ≠ "l_ph_unit" ->
+  lv ≠ "l_ph_unit2" ->
   lv ≠ "l_ph_loc1" -> lv ≠ "l_ph_loc2" ->
   "l_v1" ≠ lv -> "l_new_v1" ≠ lv -> "l_res" ≠ lv -> fresh_lvar incr_stk2 lv.
 Proof.
-  intros Hx Hphi1 Hphi2 Hphb Hphu Hphl1 Hphl2 Hv1 Hnv1 Hres. unfold incr_stk2.
+  intros Hx Hphi1 Hphi2 Hphb Hphu Hphu2 Hphl1 Hphl2 Hv1 Hnv1 Hres. unfold incr_stk2.
   apply fresh_lvar_extend; [apply fresh_lvar_incr_stk1; done | exact Hres].
 Qed.
 
@@ -1094,7 +1303,7 @@ Lemma incr_fpu_step :
           (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_v1")))
                 (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
       (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")))).
 Proof.
   eapply WeakeningRule.
@@ -1121,7 +1330,7 @@ Lemma incr_fpu_step_framed :
                       (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
                 (LOwn (LVar "x") "c" (LVar "l_new_v1"))))
       (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2)
           (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "l_new_v1")))
                 (LOwn (LVar "x") "c" (LVar "l_new_v1")))).
@@ -1211,7 +1420,7 @@ Lemma incr_true_branch_step :
                          (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
             (LExprA (LVar "l_res"))))
       (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   eapply WeakeningRule.
@@ -1266,7 +1475,7 @@ Lemma incr_false_branch_step :
                          (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1)))))))
             (LExprA (LUnOp NotBoolOp (LVar "l_res")))))
       GhostSkip
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   eapply WeakeningRule.
@@ -1291,7 +1500,7 @@ Lemma incr_ifs_res_step :
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
         GhostSkip)
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True))).
 Proof.
   apply (CondRule rho_incr sigma incr_stk2 (cmask ∖ {["counterInv"]})
@@ -1333,7 +1542,7 @@ Lemma incr_ifs_res_step_wrapped :
       (IfS (Var "res")
         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
         GhostSkip)
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
@@ -1359,7 +1568,7 @@ Lemma incr_invblock2_inner_sym :
            (IfS (Var "res")
              (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
              GhostSkip))
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply SequenceRule.
@@ -1370,7 +1579,7 @@ Proof.
       * apply entails_and_mono; [exact (entails_and_comm _ _) | exact (entails_refl _)].
       * exact (entails_and_assoc_r _ _ _).
     + exact (entails_refl _).
-  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) "l_res" TpBool
+  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]}) "l_res" TpBool
       (LAnd (LAnd (LStack incr_stk2)
                (LIte (LBinOp EqOp (LVar "$v") (LVar "l_v1"))
                   (LAnd (LOwn (LVar "x") "c" (LVar "l_new_v1")) (LExprA (LBinOp EqOp (LVar "l_res") (LVal (LitBool true)))))
@@ -1407,11 +1616,11 @@ Lemma incr_invblock2_v_elim_step :
            (IfS (Var "res")
              (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
              GhostSkip))
-      (cmask ∖ {["counterInv"]})
+      (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]})
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) "$v" TpInt
+  - apply (ExistsElimRule rho_incr sigma (cmask ∖ {["counterInv"]}) (cmask ∖ {["counterInv"]}) "$v" TpInt
       (LAnd (LStack incr_stk1)
             (LAnd (LAnd (LGhostOwn (LVar "x") "h" h_ra (LUnOp (RAOfIntOp h_ra) (LVar "$v")))
                         (LOwn (LVar "x") "c" (LVar "$v")))
@@ -1442,7 +1651,7 @@ Lemma incr_invblock2_step :
              (IfS (Var "res")
                (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
                GhostSkip)))
-      cmask
+      cmask cmask
     (LExists "l_res" TpBool (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))).
 Proof.
   eapply (InvAccessBlockRule rho_incr sigma incr_stk1 incr_stk2 cmask "counterInv" [Var "x"]
@@ -1455,7 +1664,7 @@ Proof.
     (LPure True) "l_res" TpBool [LVar "x"]).
   - reflexivity.
   - set_solver.
-  - exact inv_map_counterInv.
+  - reflexivity.
   - reflexivity.
   - constructor; [| constructor]. intros v Hv. simpl in Hv.
     apply elem_of_singleton in Hv as ->. unfold is_reserved. discriminate.
@@ -1476,8 +1685,9 @@ Qed.
 Lemma incr_retry_true_step :
   RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LExprA (LUnOp NotBoolOp (LVar "l_res")))))
-      (Call "call_res" "incr" [Var "x"]) cmask
-    (LPure True).
+      (Call "call_res" "incr" [Var "x"]) cmask cmask
+    (LExists "l_call" TpUnit
+      (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True))).
 Proof.
   eapply WeakeningRule.
   - apply (ProcCallRuleRet rho_incr sigma incr_stk2 cmask "call_res" "incr" [Var "x"] [LVar "x"] "l_call" incr_record).
@@ -1494,23 +1704,24 @@ Proof.
   - apply entails_and_mono; [exact (entails_refl _) |].
     eapply entails_trans; [exact (entails_and_elim_l _ _) |].
     unfold incr_precond. simpl. exact (entails_refl _).
-  - exact (entails_true_intro _).
+  - simpl. exact (entails_refl _).
 Qed.
 
 Lemma incr_retry_step :
   RavenHoareTriple rho_incr sigma
     (LAnd (LStack incr_stk2) (LInv "counterInv" [LVar "x"]))
       (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)
-      cmask
-    incr_postcond.
+      cmask cmask
+    (LExists "l_call" TpUnit
+      (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True))).
 Proof.
-  unfold incr_postcond.
   apply (CondRule rho_incr sigma incr_stk2 cmask
     (UnOp NotBoolOp (Var "res"))
     (Call "call_res" "incr" [Var "x"])
     SkipS
     (LInv "counterInv" [LVar "x"])
-    (LPure True)
+    (LExists "l_call" TpUnit
+      (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True)))
     (LUnOp NotBoolOp (LVar "l_res"))).
   - reflexivity.
   - reflexivity.
@@ -1520,8 +1731,27 @@ Proof.
     + apply (SkipRule rho_incr sigma incr_stk2 cmask (LInv "counterInv" [LVar "x"])).
       exact stk_type_compat_incr_stk2.
     + apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_elim_l _ _)].
-    + exact (entails_true_intro _).
+    + eapply AE_Trans.
+      * exact (entails_and_elim_l _ _).
+      * eapply AE_Trans.
+        -- eapply (AE_Stack_Exists_Rename sigma incr_stk2 "call_res"
+              "l_ph_unit2" "l_call" TpUnit).
+           ++ reflexivity.
+           ++ reflexivity.
+           ++ reflexivity.
+           ++ apply fresh_lvar_incr_stk2; discriminate.
+        -- eapply AE_Exists_Mono; [reflexivity |].
+           exact (entails_and_true_intro _).
 Qed.
+
+Definition incr_final_assertion : assertion :=
+  LExists "l_v1" TpInt
+    (LExists "l_new_v1" TpInt
+      (LExists "l_res" TpBool
+        (LExists "l_ph_unit" TpUnit
+          (LExists "l_call" TpUnit
+            (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2))
+                  incr_postcond))))).
 
 (* ----------------------------------------------------------------------- *)
 (* incr's full body: nested SequenceRule/ExistsElimRule chaining the four
@@ -1529,13 +1759,13 @@ Qed.
 Lemma incr_body_step :
   RavenHoareTriple rho_incr sigma
     (LAnd (LStack (stk0 ∪ extra_incr)) incr_precond)
-      incr_body cmask
-    incr_postcond.
+      incr_body cmask cmask
+    incr_final_assertion.
 Proof.
   unfold incr_body, incr_precond.
   eapply SequenceRule.
   - exact (read_invblock_step_ext rho_incr eq_refl extra_incr stk_type_compat_extra_incr extra_placeholder_incr).
-  - apply (ExistsElimRule rho_incr sigma cmask "l_v1" TpInt
+  - apply (ExistsElimRule rho_incr sigma cmask cmask "l_v1" TpInt
       (LAnd (LStack (<["v1":="l_v1"]> (stk0 ∪ extra_incr))) (LInv "counterInv" [LVar "x"]))
       (Seq (Assign "new_v1" (BinOp AddOp (Var "v1") (Val (lang.LitInt 1))))
            (Seq (InvAccessBlock "counterInv" [Var "x"]
@@ -1544,12 +1774,12 @@ Proof.
                          (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
                          GhostSkip)))
                 (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)))
-      incr_postcond).
+      incr_final_assertion).
     + reflexivity.
-    + unfold incr_postcond. exact I.
+    + unfold incr_final_assertion. simpl. left. reflexivity.
     + eapply SequenceRule.
       * exact incr_assign_step.
-      * apply (ExistsElimRule rho_incr sigma cmask "l_new_v1" TpInt
+      * apply (ExistsElimRule rho_incr sigma cmask cmask "l_new_v1" TpInt
           (LAnd (LAnd (LStack incr_stk1) (LExprA (LBinOp EqOp (LVar "l_new_v1") (LBinOp AddOp (LVar "l_v1") (LVal (LitInt 1))))))
                 (LInv "counterInv" [LVar "x"]))
           (Seq (InvAccessBlock "counterInv" [Var "x"]
@@ -1558,9 +1788,9 @@ Proof.
                         (Fpu (Var "x") "h" h_ra (UnOp (RAOfIntOp h_ra) (Var "v1")) (UnOp (RAOfIntOp h_ra) (Var "new_v1")))
                         GhostSkip)))
                (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS))
-          incr_postcond).
+          incr_final_assertion).
         -- reflexivity.
-        -- unfold incr_postcond. exact I.
+        -- unfold incr_final_assertion. simpl. right. left. reflexivity.
         -- eapply SequenceRule.
            ++ eapply WeakeningRule.
               ** exact incr_invblock2_step.
@@ -1568,16 +1798,35 @@ Proof.
                  --- exact (entails_and_assoc_r _ _ _).
                  --- apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_comm _ _)].
               ** exact (entails_refl _).
-           ++ apply (ExistsElimRule rho_incr sigma cmask "l_res" TpBool
+           ++ apply (ExistsElimRule rho_incr sigma cmask cmask "l_res" TpBool
                  (LAnd (LStack incr_stk2) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
                  (IfS (UnOp NotBoolOp (Var "res")) (Call "call_res" "incr" [Var "x"]) SkipS)
-                 incr_postcond).
+                 incr_final_assertion).
                 --- reflexivity.
-                --- unfold incr_postcond. exact I.
+                --- unfold incr_final_assertion. simpl. right. right. left. reflexivity.
                 --- eapply WeakeningRule.
                     +++ exact incr_retry_step.
                     +++ apply entails_and_mono; [exact (entails_refl _) | exact (entails_and_true_elim _)].
-                    +++ exact (entails_refl _).
+                    +++ unfold incr_final_assertion.
+                        eapply AE_Trans with (Q :=
+                          LExists "l_ph_unit" TpUnit
+                            (LExists "l_call" TpUnit
+                              (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True)))).
+                        *** eapply AE_Exists_Intro. reflexivity.
+                        *** eapply AE_Trans with (Q :=
+                              LExists "l_res" TpBool
+                                (LExists "l_ph_unit" TpUnit
+                                  (LExists "l_call" TpUnit
+                                    (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True))))).
+                            { eapply AE_Exists_Intro. reflexivity. }
+                            eapply AE_Trans with (Q :=
+                              LExists "l_new_v1" TpInt
+                                (LExists "l_res" TpBool
+                                  (LExists "l_ph_unit" TpUnit
+                                    (LExists "l_call" TpUnit
+                                      (LAnd (LStack (<["call_res" := "l_call"]> incr_stk2)) (LPure True)))))).
+                            { eapply AE_Exists_Intro. reflexivity. }
+                            eapply AE_Exists_Intro. reflexivity.
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -1626,8 +1875,8 @@ Qed.
    to relate the two. *)
 Definition h0 : RA_carrier (ra_map h_ra) := ra_of_int 0.
 
-Lemma h0_valid : (RA_inst (ra_map h_ra)).(valid) h0.
-Proof. unfold h0. rewrite ra_map_h_ra. simpl. by exists 0%nat. Qed.
+Lemma h0_valid : @ra_base.valid _ (RA_inst (ra_map h_ra)) h0.
+Proof. unfold h0. change (mn_valid (mn_of_int 0)). by exists 0%nat. Qed.
 
 (* Folds the two field-initialization lists HeapAllocRule's own conclusion
    produces (one real, one ghost) down into counterInv_body. *)
@@ -1653,14 +1902,14 @@ Proof.
     + eapply AE_And_True_Intro.
 Qed.
 
-Lemma make_alloc_step :
+Lemma make_alloc_step_ext (msk : maskAnnot) :
   RavenHoareTriple rho_make sigma
     (LStack stk_make0)
-      (Alloc "x" [("c", lang.LitInt 0)]) cmask
+      (Alloc "x" [("c", lang.LitInt 0)]) msk msk
     (LExists "x" TpLoc (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))).
 Proof.
   eapply WeakeningRule.
-  - apply (HeapAllocRule rho_make sigma stk_make0 cmask "x"
+  - apply (HeapAllocRule rho_make sigma stk_make0 msk "x"
       [("c", lang.LitInt 0)] [("h", existT h_ra h0)] "x").
     + apply fresh_lvar_stk_make0; discriminate.
     + constructor; [set_solver | constructor].
@@ -1674,22 +1923,28 @@ Proof.
         entails_alloc_fields_to_counterInv)).
 Qed.
 
+Lemma make_alloc_step :
+  RavenHoareTriple rho_make sigma
+    (LStack stk_make0)
+      (Alloc "x" [("c", lang.LitInt 0)]) cmask cmask
+    (LExists "x" TpLoc (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))).
+Proof. exact (make_alloc_step_ext cmask). Qed.
+
 (* fold counterInv(x): InvAllocRule at the freshly allocated location, with
    counterInv_body's own "x" substituted to itself (subst_map is the
    identity map {"x" := LVar "x"} here, exactly as at every other
    InvAccessBlockRule/InvAllocRule call site in this file that reuses
    stk0's pvar-"x"-to-lvar-"x" naming), so subst counterInv_body {"x" :=
    LVar "x"} reduces to counterInv_body itself via simpl. *)
-Lemma make_foldinv_step :
+Lemma make_foldinv_step_ext (msk : maskAnnot) :
   RavenHoareTriple rho_make sigma
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
-      (FoldInv "counterInv" [Var "x"]) cmask
+      (FoldInv "counterInv" [Var "x"]) msk (msk ∪ {["counterInv"]})
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))).
 Proof.
-  apply (InvAllocRule rho_make sigma (<["x":="x"]> stk_make0) cmask "counterInv" [Var "x"]
+  apply (InvAllocRule rho_make sigma (<["x":="x"]> stk_make0) msk "counterInv" [Var "x"]
     counterInv_record (LPure True) [LVar "x"]).
   - reflexivity.
-  - set_solver.
   - exact inv_map_counterInv.
   - reflexivity.
   - constructor; [| constructor]. intros v Hv. simpl in Hv.
@@ -1697,23 +1952,42 @@ Proof.
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
 Qed.
 
+Lemma make_foldinv_step :
+  RavenHoareTriple rho_make sigma
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
+      (FoldInv "counterInv" [Var "x"]) cmask cmask
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))).
+Proof.
+  have Hmask : cmask ∪ {["counterInv"]} = cmask by set_solver.
+  rewrite <- Hmask.
+  exact (make_foldinv_step_ext cmask).
+Qed.
+
 (* make's own Assign "#ret_val" (Var "x") step: bare VarAssignmentRule,
    picking "l_x_ret" (typed TpLoc in sigma) as the assignment's own fresh
    witness. Mirrors read_assign_inner_step/incr_assign_inner_step exactly. *)
-Lemma make_assign_inner_step :
+Lemma make_assign_inner_step_ext (msk : maskAnnot) :
   RavenHoareTriple rho_make sigma
     (LStack (<["x":="x"]> stk_make0))
-      (Assign "#ret_val" (Var "x")) cmask
+      (Assign "#ret_val" (Var "x")) msk msk
     (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
                              (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))))).
 Proof.
-  apply (VarAssignmentRule rho_make sigma (<["x":="x"]> stk_make0) cmask "#ret_val" "l_x_ret"
+  apply (VarAssignmentRule rho_make sigma (<["x":="x"]> stk_make0) msk "#ret_val" "l_x_ret"
     (Var "x") (LVar "x") TpLoc).
   - reflexivity.
   - reflexivity.
   - apply fresh_lvar_extend; [apply fresh_lvar_stk_make0; discriminate | discriminate].
   - eapply stk_type_compat_extend; [exact stk_type_compat_stk_make0 | reflexivity | reflexivity].
 Qed.
+
+Lemma make_assign_inner_step :
+  RavenHoareTriple rho_make sigma
+    (LStack (<["x":="x"]> stk_make0))
+      (Assign "#ret_val" (Var "x")) cmask cmask
+    (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+                             (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))))).
+Proof. exact (make_assign_inner_step_ext cmask). Qed.
 
 (* Frames counterInv's own LInv fact (established by make_foldinv_step)
    through the Assign, then rewrites the LInv's own argument from "x" (the
@@ -1733,28 +2007,43 @@ Qed.
    "#ret_val" placeholder is exactly the job of the later step that
    connects make_body_step to all_proc_specs_valid_raven's own
    ∃ stk0' lv_final, via its <["#ret_val":=LVar lv_final]> substitution). *)
-Lemma make_assign_step :
+Lemma make_assign_step_ext (msk : maskAnnot) :
   RavenHoareTriple rho_make sigma
     (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
-      (Assign "#ret_val" (Var "x")) cmask
-    (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
+      (Assign "#ret_val" (Var "x")) msk msk
+    (LExists "x" TpLoc
+      (LExists "l_x_ret" TpLoc
+        (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+          (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True))))).
 Proof.
   eapply WeakeningRule.
-  - apply (FrameRule rho_make sigma cmask (Assign "#ret_val" (Var "x"))
+  - apply (FrameRule rho_make sigma msk msk (Assign "#ret_val" (Var "x"))
       (LStack (<["x":="x"]> stk_make0))
       (LExists "l_x_ret" TpLoc (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
                                (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x")))))
       (LAnd (LInv "counterInv" [LVar "x"]) (LPure True))
-      make_assign_inner_step).
+      (make_assign_inner_step_ext msk)).
   - exact (entails_refl _).
   - eapply AE_Trans.
+    2: { eapply AE_Exists_Intro. reflexivity. }
+    eapply AE_Trans.
     { eapply AE_Exists_And_Swap_R. simpl. split; [apply Forall_singleton; set_solver | exact I]. }
     eapply AE_Exists_Mono; [reflexivity | ].
-    eapply (AE_Trans sigma _
-      (LAnd (LExprA (LBinOp EqOp (LVar "l_x_ret") (LVar "x"))) (LInv "counterInv" [LVar "x"])) _).
-    + eapply AE_And_Mono; [eapply AE_And_Elim_R | eapply AE_And_Elim_L].
-    + exact (AE_LExpr_Subst_Eq_Congr sigma "l_x_ret" "x" (LInv "counterInv" [LVar "l_x_ret"]) I).
+    eapply AE_Trans; [eapply AE_And_Assoc_R |].
+    eapply AE_And_Mono; [eapply AE_Refl |].
+    exact (AE_LExpr_Subst_Eq_Congr sigma "l_x_ret" "x"
+      (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True)) (conj I I)).
 Qed.
+
+Lemma make_assign_step :
+  RavenHoareTriple rho_make sigma
+    (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd (LInv "counterInv" [LVar "x"]) (LPure True)))
+      (Assign "#ret_val" (Var "x")) cmask cmask
+    (LExists "x" TpLoc
+      (LExists "l_x_ret" TpLoc
+        (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+          (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True))))).
+Proof. exact (make_assign_step_ext cmask). Qed.
 
 (* make's full body: HeapAllocRule, then InvAllocRule, then the Assign that
    exposes the allocated/folded location as "#ret_val"'s own fresh witness
@@ -1763,27 +2052,65 @@ Qed.
    Assign. Concludes at an "l_x_ret"-existential, not raw make_postcond
    itself -- see make_assign_step's own comment for why the latter is
    unreachable directly from a derivation. *)
-Lemma make_body_step :
+Lemma make_body_step_ext (msk : maskAnnot) :
   RavenHoareTriple rho_make sigma
     (LAnd (LStack stk_make0) make_precond)
-      make_body cmask
-    (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"])).
+      make_body msk (msk ∪ {["counterInv"]})
+    (LExists "x" TpLoc
+      (LExists "l_x_ret" TpLoc
+        (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+          (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True))))).
 Proof.
   unfold make_body, make_precond.
   eapply SequenceRule.
   - eapply WeakeningRule.
-    + exact make_alloc_step.
+    + exact (make_alloc_step_ext msk).
     + exact (entails_and_true_elim (LStack stk_make0)).
     + exact (entails_refl _).
-  - apply (ExistsElimRule rho_make sigma cmask "x" TpLoc
+  - apply (ExistsElimRule rho_make sigma msk (msk ∪ {["counterInv"]}) "x" TpLoc
       (LAnd (LStack (<["x":="x"]> stk_make0)) (LAnd counterInv_body (LPure True)))
       (Seq (FoldInv "counterInv" [Var "x"]) (Assign "#ret_val" (Var "x")))
-      (LExists "l_x_ret" TpLoc (LInv "counterInv" [LVar "l_x_ret"]))).
+      (LExists "x" TpLoc
+        (LExists "l_x_ret" TpLoc
+          (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+            (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True)))))).
     + reflexivity.
-    + simpl. right. apply Forall_singleton. set_solver.
+    + simpl. left. reflexivity.
     + eapply SequenceRule.
-      * exact make_foldinv_step.
-      * exact make_assign_step.
+      * exact (make_foldinv_step_ext msk).
+      * exact (make_assign_step_ext (msk ∪ {["counterInv"]})).
+Qed.
+
+Lemma make_body_step :
+  RavenHoareTriple rho_make sigma
+    (LAnd (LStack stk_make0) make_precond)
+      make_body cmask cmask
+    (LExists "x" TpLoc
+      (LExists "l_x_ret" TpLoc
+        (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+          (LAnd (LInv "counterInv" [LVar "l_x_ret"]) (LPure True))))).
+Proof.
+  have Hmask : cmask ∪ {["counterInv"]} = cmask by set_solver.
+  rewrite <- Hmask.
+  exact (make_body_step_ext cmask).
+Qed.
+
+Lemma make_body_spec_ext (msk : maskAnnot) :
+  RavenHoareTriple rho_make sigma
+    (LAnd (LStack stk_make0) make_precond)
+      make_body msk (msk ∪ {["counterInv"]})
+    (LExists "x" TpLoc
+      (LExists "l_x_ret" TpLoc
+        (LAnd (LStack (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)))
+          (LInv "counterInv" [LVar "l_x_ret"])))).
+Proof.
+  eapply WeakeningRule.
+  - exact (make_body_step_ext msk).
+  - exact (entails_refl _).
+  - eapply AE_Exists_Mono; [reflexivity |].
+    eapply AE_Exists_Mono; [reflexivity |].
+    eapply AE_And_Mono; [eapply AE_Refl |].
+    exact (entails_and_true_elim _).
 Qed.
 
 (* ----------------------------------------------------------------------- *)
@@ -1964,3 +2291,599 @@ Proof.
   - (* read *) vm_compute. discriminate.
   - (* incr *) vm_compute. discriminate.
 Qed.
+
+(* The body-validity package below also asks for the ordinary syntactic
+   well-definedness judgment.  Keep the two non-recursive bodies in named
+   lemmas: they are exactly the constructor trees used by the package, and
+   spelling them out here avoids coupling that bookkeeping to the much
+   larger semantic derivations above. *)
+Lemma make_body_well_defined : @stmt_well_defined RProg rho_make make_body.
+Proof.
+  unfold make_body. repeat constructor; vm_compute; eauto.
+Qed.
+
+Lemma read_body_well_defined : @stmt_well_defined RProg rho_read read_body.
+Proof.
+  unfold read_body. repeat constructor; vm_compute; eauto.
+Qed.
+
+Lemma incr_body_well_defined : @stmt_well_defined RProg rho_incr incr_body.
+Proof.
+  unfold incr_body, GhostSkip.
+  repeat constructor; try (vm_compute; eauto).
+  eapply (CallTp rho_incr "call_res" "incr" incr_record [Var "x"]).
+  - vm_compute. set_solver.
+  - exact proc_map_incr.
+  - reflexivity.
+  - vm_compute. eauto.
+  - constructor; [reflexivity | constructor].
+  - vm_compute. reflexivity.
+Qed.
+
+(* The body-validity proofs use assertion renaming from the translation layer.
+   Keep this import after the concrete resource-algebra instance above to avoid
+   shadowing its [valid] field during construction. *)
+
+Lemma ren_not_reserved (ren : lvar → lvar) :
+  Inj (=) (=) ren →
+  (∀ z, is_reserved z → ren z = z) →
+  ∀ z, ¬ is_reserved z → ¬ is_reserved (ren z).
+Proof.
+  intros Hinj Hres z Hnz Hz.
+  have Heq : ren (ren z) = ren z := Hres _ Hz.
+  apply Hinj in Heq. apply Hnz. rewrite <- Heq. exact Hz.
+Qed.
+
+Lemma proc_entry_all_nodup {pr : ProcRecord} (dll : proc_entry_lvars sigma pr) :
+  NoDup (dll_args dll ++ dll_locals dll).
+Proof.
+  apply NoDup_app. repeat split.
+  - exact (dll_args_nodup dll).
+  - intros lv Ha Hl. exact (dll_disjoint dll lv Ha Hl).
+  - exact (dll_locals_nodup dll).
+Qed.
+
+Lemma proc_entry_all_not_reserved {pr : ProcRecord} (dll : proc_entry_lvars sigma pr) :
+  Forall (fun lv => ¬ is_reserved lv) (dll_args dll ++ dll_locals dll).
+Proof. apply Forall_app. split; [exact (dll_args_not_reserved dll) | exact (dll_locals_not_reserved dll)]. Qed.
+
+Lemma ren_ne_target (ren : lvar → lvar) (Hinj : Inj (=) (=) ren)
+    (x y target : lvar) :
+  ren x = target → y ≠ x → ren y ≠ target.
+Proof.
+  intros Htarget Hne Heq.
+  rewrite <- Htarget in Heq. apply Hinj in Heq. exact (Hne Heq).
+Qed.
+
+Lemma incr_entry_names_nodup :
+  NoDup ["x"; "l_ph_int1"; "l_ph_int2"; "l_ph_bool"; "l_ph_unit2"; "l_ph_unit"].
+Proof.
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver | constructor].
+Qed.
+
+Lemma incr_live_names_nodup :
+  NoDup ["l_v1"; "l_new_v1"; "l_res"; "l_ph_unit"; "l_call"].
+Proof.
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver | constructor].
+Qed.
+
+Lemma make_entry_names_nodup : NoDup ["l_ph_loc1"; "l_ph_loc2"].
+Proof.
+  constructor; [set_solver |].
+  constructor; [set_solver | constructor].
+Qed.
+
+Lemma read_entry_names_nodup : NoDup ["x"; "l_ph_int1"; "l_ph_int2"].
+Proof.
+  constructor; [set_solver |].
+  constructor; [set_solver |].
+  constructor; [set_solver | constructor].
+Qed.
+Lemma make_body_valid :
+  @stmt_well_defined RProg (proc_pvar_typs make_record) (proc_body_of make_record) ∧
+  ∀ msk, proc_required_mask make_record ⊆ msk → msk ⊆ inv_set →
+  ∀ dll : proc_entry_lvars sigma make_record,
+    ∃ stk_final lv_ret xs msk_post,
+      stk_final !! "#ret_val" = Some lv_ret ∧
+      ¬ is_reserved lv_ret ∧ lv_ret ∈ xs.*1 ∧
+      proc_ret_typ_opt make_record = Some (sigma lv_ret) ∧
+      msk_post ⊆ inv_set ∧ msk_post ⊆ msk ∪ proc_grants_mask make_record ∧
+      NoDup xs.*1 ∧
+      Forall (λ xt, sigma xt.1 = xt.2 ∧ ¬ is_reserved xt.1) xs ∧
+      Forall (λ xt, xt.1 ∉ dll_args dll) xs ∧
+      (∀ x lv, stk_final !! x = Some lv → lv ∈ dll_args dll ∨ lv ∈ xs.*1) ∧
+      RavenHoareTriple (proc_pvar_typs make_record) sigma
+        (LAnd (LStack (assoc_map (proc_args_of make_record ++ proc_locals_of make_record).*1
+                                  (dll_args dll ++ dll_locals dll)))
+          (subst (proc_precond_of make_record)
+             (lvar_subst_map (proc_args_of make_record).*1 (dll_args dll))))
+        (proc_body_of make_record) msk msk_post
+        (lvar_exists_list xs
+          (LAnd (LStack stk_final)
+            (subst (proc_postcond_of make_record)
+              (<["#ret_val" := LVar lv_ret]>
+                (lvar_subst_map (proc_args_of make_record).*1 (dll_args dll)))))).
+Proof.
+  split; [exact make_body_well_defined |].
+  intros msk Hreq Hmsk dll.
+  have Halen := dll_args_len dll. have Hllen := dll_locals_len dll.
+  simpl in Halen, Hllen.
+  destruct (dll_args dll) as [|arg args] eqn:Ha; [|discriminate Halen].
+  destruct (dll_locals dll) as [|lx locals] eqn:Hl; [discriminate Hllen|].
+  destruct locals as [|lr locals]; [discriminate Hllen|].
+  destruct locals as [|extra locals]; [|discriminate Hllen].
+  have Htarget_nd : NoDup [lx; lr].
+  { have H := proc_entry_all_nodup dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Htarget_nr : Forall (fun z => ¬ is_reserved z) [lx; lr].
+  { have H := proc_entry_all_not_reserved dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Htyped := dll_locals_typed dll. rewrite Hl in Htyped. simpl in Htyped.
+  inversion Htyped as [|? ? ? ? Hlx Htyped']; subst.
+  inversion Htyped' as [|? ? ? ? Hlr Hnil]; subst.
+  destruct (finite_lvar_renaming ["l_ph_loc1"; "l_ph_loc2"] [lx; lr] [])
+    as [ren [Hinj [Htyp [Hres [Hfix Hmap]]]]].
+  - exact make_entry_names_nodup.
+  - exact Htarget_nd.
+  - repeat constructor; not_reserved.
+  - exact Htarget_nr.
+  - constructor; [simpl; symmetry; exact Hlx |].
+    constructor; [simpl; symmetry; exact Hlr | constructor].
+  - intros z Hz. inversion Hz.
+  - simpl in Hmap. injection Hmap as Hph1 Hph2.
+  have Hx_nr : ¬ is_reserved (ren "x") := ren_not_reserved ren Hinj Hres "x" ltac:(not_reserved).
+  have Hr_nr : ¬ is_reserved (ren "l_x_ret") := ren_not_reserved ren Hinj Hres "l_x_ret" ltac:(not_reserved).
+  exists (<["#ret_val" := ren "l_x_ret"]>
+            (<["x" := ren "x"]>
+              (<["x" := lx]> ({[ "#ret_val" := lr ]})))).
+  exists (ren "l_x_ret").
+  exists [(ren "x", TpLoc); (ren "l_x_ret", TpLoc)].
+  exists (msk ∪ {["counterInv"]}).
+  repeat match goal with |- _ /\ _ => split end.
+  + reflexivity.
+  + exact Hr_nr.
+  + simpl. right. left.
+  + simpl. rewrite Htyp. reflexivity.
+  + rewrite inv_set_eq. rewrite inv_set_eq in Hmsk.
+    intros i Hi. apply elem_of_union in Hi as [Hi | Hi].
+    * exact (Hmsk _ Hi).
+    * exact Hi.
+  + unfold proc_grants_mask, make_record, make_postcond. simpl. reflexivity.
+  + have Hneq : ren "x" ≠ ren "l_x_ret".
+    { intro Heq. apply Hinj in Heq. discriminate. }
+    change (NoDup [ren "x"; ren "l_x_ret"]).
+    constructor.
+    * rewrite elem_of_list_singleton. exact Hneq.
+    * exact (NoDup_singleton _).
+  + constructor.
+    * split; [rewrite Htyp; reflexivity | exact Hx_nr].
+    * constructor.
+      -- split; [rewrite Htyp; reflexivity | exact Hr_nr].
+      -- constructor.
+  + constructor.
+    * rewrite elem_of_nil. tauto.
+    * constructor; [rewrite elem_of_nil; tauto | constructor].
+  + intros v lv Hv. simpl in Hv.
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hret Hv]].
+    { right. simpl. right. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hxv Hv]].
+    { right. simpl. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+    apply lookup_singleton_Some in Hv as [<- <-]. congruence.
+  + pose proof (RavenHoareTriple_rename ren Hinj Hres counter_monotonic_ProgramWF
+      pred_map_empty rho_make sigma Htyp _ _ _ _ _ (make_body_spec_ext msk)) as Htr.
+    have Hentry : ren <$> stk_make0 = <["x" := lx]> ({[ "#ret_val" := lr ]}).
+    { unfold stk_make0. apply map_eq. intros k. rewrite lookup_fmap.
+      destruct (decide (k = "x")) as [-> | Hkx].
+      - rewrite !lookup_insert. simpl. rewrite Hph1. reflexivity.
+      - rewrite lookup_insert_ne; [|exact (not_eq_sym Hkx)].
+        destruct (decide (k = "#ret_val")) as [-> | Hkr].
+        + rewrite !lookup_singleton. simpl. rewrite Hph2. reflexivity.
+        + rewrite lookup_singleton_ne; [|exact (not_eq_sym Hkr)].
+          rewrite lookup_insert_ne; [|exact (not_eq_sym Hkx)].
+          rewrite lookup_singleton_ne; [|exact (not_eq_sym Hkr)]. reflexivity. }
+    have Hfinal :
+      ren <$> (<["#ret_val":="l_x_ret"]> (<["x":="x"]> stk_make0)) =
+      <["#ret_val" := ren "l_x_ret"]>
+        (<["x" := ren "x"]> (<["x" := lx]> ({[ "#ret_val" := lr ]}))).
+    { rewrite fmap_insert. rewrite fmap_insert. rewrite Hentry. reflexivity. }
+    simpl in Htr. rewrite Hentry Hfinal in Htr. exact Htr.
+Qed.
+Lemma incr_body_valid :
+  @stmt_well_defined RProg (proc_pvar_typs incr_record) (proc_body_of incr_record) ∧
+  ∀ msk, proc_required_mask incr_record ⊆ msk → msk ⊆ inv_set →
+  ∀ dll : proc_entry_lvars sigma incr_record,
+    ∃ stk_final lv_ret xs msk_post,
+      stk_final !! "#ret_val" = Some lv_ret ∧
+      ¬ is_reserved lv_ret ∧ lv_ret ∈ xs.*1 ∧
+      proc_ret_typ_opt incr_record = Some (sigma lv_ret) ∧
+      msk_post ⊆ inv_set ∧ msk_post ⊆ msk ∪ proc_grants_mask incr_record ∧
+      NoDup xs.*1 ∧
+      Forall (λ xt, sigma xt.1 = xt.2 ∧ ¬ is_reserved xt.1) xs ∧
+      Forall (λ xt, xt.1 ∉ dll_args dll) xs ∧
+      (∀ x lv, stk_final !! x = Some lv → lv ∈ dll_args dll ∨ lv ∈ xs.*1) ∧
+      RavenHoareTriple (proc_pvar_typs incr_record) sigma
+        (LAnd (LStack (assoc_map (proc_args_of incr_record ++ proc_locals_of incr_record).*1
+                                  (dll_args dll ++ dll_locals dll)))
+          (subst (proc_precond_of incr_record)
+             (lvar_subst_map (proc_args_of incr_record).*1 (dll_args dll))))
+        (proc_body_of incr_record) msk msk_post
+        (lvar_exists_list xs
+          (LAnd (LStack stk_final)
+            (subst (proc_postcond_of incr_record)
+              (<["#ret_val" := LVar lv_ret]>
+                (lvar_subst_map (proc_args_of incr_record).*1 (dll_args dll)))))).
+Proof.
+  split; [exact incr_body_well_defined |].
+  intros msk Hreq Hmsk dll.
+  have Hmask : msk = cmask.
+  { have Hreq' := Hreq.
+    unfold proc_required_mask, incr_record, incr_precond in Hreq'. simpl in Hreq'.
+    have Hmsk' := Hmsk. rewrite inv_set_eq in Hmsk'.
+    apply set_eq. intros i. split; [exact (Hmsk' i) | exact (Hreq' i)]. }
+  subst msk.
+  have Halen := dll_args_len dll. have Hllen := dll_locals_len dll.
+  simpl in Halen, Hllen.
+  destruct (dll_args dll) as [|dx dxs] eqn:Ha; [discriminate Halen |].
+  destruct dxs as [|extra_args dxs]; [|discriminate Halen].
+  destruct (dll_locals dll) as [|dv1 dlocals] eqn:Hl; [discriminate Hllen |].
+  destruct dlocals as [|dnew dlocals]; [discriminate Hllen |].
+  destruct dlocals as [|dres dlocals]; [discriminate Hllen |].
+  destruct dlocals as [|dcall dlocals]; [discriminate Hllen |].
+  destruct dlocals as [|dret dlocals]; [discriminate Hllen |].
+  destruct dlocals as [|extra_locals dlocals]; [|discriminate Hllen].
+  have Htarget_nd : NoDup [dx; dv1; dnew; dres; dcall; dret].
+  { have H := proc_entry_all_nodup dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Htarget_nr : Forall (fun z => ¬ is_reserved z) [dx; dv1; dnew; dres; dcall; dret].
+  { have H := proc_entry_all_not_reserved dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Hargs_typed := dll_args_typed dll. rewrite Ha in Hargs_typed. simpl in Hargs_typed.
+  inversion Hargs_typed as [|? ? ? ? Hdx Hargs_nil]; subst.
+  have Htyped := dll_locals_typed dll. rewrite Hl in Htyped. simpl in Htyped.
+  inversion Htyped as [|? ? ? ? Hdv1 Htyped1]; subst.
+  inversion Htyped1 as [|? ? ? ? Hdnew Htyped2]; subst.
+  inversion Htyped2 as [|? ? ? ? Hdres Htyped3]; subst.
+  inversion Htyped3 as [|? ? ? ? Hdcall Htyped4]; subst.
+  inversion Htyped4 as [|? ? ? ? Hdret Hnil]; subst.
+  destruct (finite_lvar_renaming
+      ["x"; "l_ph_int1"; "l_ph_int2"; "l_ph_bool"; "l_ph_unit2"; "l_ph_unit"]
+      [dx; dv1; dnew; dres; dcall; dret] [])
+    as [ren [Hinj [Htyp [Hres [Hfix Hmap]]]]].
+  - exact incr_entry_names_nodup.
+  - exact Htarget_nd.
+  - repeat constructor; not_reserved.
+  - exact Htarget_nr.
+  - constructor; [simpl; symmetry; exact Hdx |].
+    constructor; [simpl; symmetry; exact Hdv1 |].
+    constructor; [simpl; symmetry; exact Hdnew |].
+    constructor; [simpl; symmetry; exact Hdres |].
+    constructor; [simpl; symmetry; exact Hdcall |].
+    constructor; [simpl; symmetry; exact Hdret | constructor].
+  - intros z Hz. inversion Hz.
+  - simpl in Hmap. injection Hmap as Hx Hpint1 Hpint2 Hpbool Hpunit2 Hpunit.
+  have Hv1_nr : ¬ is_reserved (ren "l_v1") := ren_not_reserved ren Hinj Hres "l_v1" ltac:(not_reserved).
+  have Hnew_nr : ¬ is_reserved (ren "l_new_v1") := ren_not_reserved ren Hinj Hres "l_new_v1" ltac:(not_reserved).
+  have Hres_nr : ¬ is_reserved (ren "l_res") := ren_not_reserved ren Hinj Hres "l_res" ltac:(not_reserved).
+  have Hret_nr : ¬ is_reserved (ren "l_ph_unit") := ren_not_reserved ren Hinj Hres "l_ph_unit" ltac:(not_reserved).
+  have Hcall_nr : ¬ is_reserved (ren "l_call") := ren_not_reserved ren Hinj Hres "l_call" ltac:(not_reserved).
+  exists (ren <$> (<["call_res" := "l_call"]> incr_stk2)).
+  exists (ren "l_ph_unit").
+  exists [(ren "l_v1", TpInt); (ren "l_new_v1", TpInt); (ren "l_res", TpBool);
+          (ren "l_ph_unit", TpUnit); (ren "l_call", TpUnit)].
+  exists cmask.
+  repeat match goal with |- _ /\ _ => split end.
+  + have Hlookup : (<["call_res" := "l_call"]> incr_stk2) !! "#ret_val" =
+        Some "l_ph_unit".
+    { unfold incr_stk2, incr_stk1, stk0, extra_incr.
+      repeat (rewrite lookup_insert_ne; [|discriminate]).
+      rewrite lookup_union.
+      rewrite lookup_singleton_ne; [|discriminate].
+      reflexivity. }
+    apply lookup_fmap_Some.
+    exists "l_ph_unit". split; [reflexivity | exact Hlookup].
+  + exact Hret_nr.
+  + simpl. right. right. right. left.
+  + simpl. rewrite Htyp. reflexivity.
+  + rewrite inv_set_eq. reflexivity.
+  + unfold proc_required_mask, incr_record, incr_precond in Hreq. simpl in Hreq.
+    unfold proc_grants_mask, incr_record, incr_postcond. simpl.
+    unfold cmask. intros i Hi. apply elem_of_union_l. exact (Hreq _ Hi).
+  + change (NoDup [ren "l_v1"; ren "l_new_v1"; ren "l_res"; ren "l_ph_unit"; ren "l_call"]).
+    change (NoDup (ren <$> ["l_v1"; "l_new_v1"; "l_res"; "l_ph_unit"; "l_call"])).
+    apply (NoDup_fmap_2_strong ren).
+    { intros x y _ _ Heq. exact (Hinj _ _ Heq). }
+    { exact incr_live_names_nodup. }
+  + constructor.
+    * split; [rewrite Htyp; reflexivity | exact Hv1_nr].
+    * constructor.
+      -- split; [rewrite Htyp; reflexivity | exact Hnew_nr].
+      -- constructor.
+         ++ split; [rewrite Htyp; reflexivity | exact Hres_nr].
+         ++ constructor.
+            ** split; [rewrite Htyp; reflexivity | exact Hret_nr].
+            ** constructor.
+               --- split; [rewrite Htyp; reflexivity | exact Hcall_nr].
+               --- constructor.
+  + have Hv1_arg : ren "l_v1" ≠ dx :=
+      ren_ne_target ren Hinj "x" "l_v1" dx Hx ltac:(discriminate).
+    have Hnew_arg : ren "l_new_v1" ≠ dx :=
+      ren_ne_target ren Hinj "x" "l_new_v1" dx Hx ltac:(discriminate).
+    have Hres_arg : ren "l_res" ≠ dx :=
+      ren_ne_target ren Hinj "x" "l_res" dx Hx ltac:(discriminate).
+    have Hret_arg : ren "l_ph_unit" ≠ dx :=
+      ren_ne_target ren Hinj "x" "l_ph_unit" dx Hx ltac:(discriminate).
+    have Hcall_arg : ren "l_call" ≠ dx :=
+      ren_ne_target ren Hinj "x" "l_call" dx Hx ltac:(discriminate).
+    constructor; [rewrite elem_of_list_singleton; exact Hv1_arg |].
+    constructor; [rewrite elem_of_list_singleton; exact Hnew_arg |].
+    constructor; [rewrite elem_of_list_singleton; exact Hres_arg |].
+    constructor; [rewrite elem_of_list_singleton; exact Hret_arg |].
+    constructor; [rewrite elem_of_list_singleton; exact Hcall_arg | constructor].
+  + intros v lv Hv.
+    apply lookup_fmap_Some in Hv as [lv0 [<- Hv]].
+    unfold incr_stk2, incr_stk1, stk0, extra_incr in Hv.
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hcall Hv]].
+    { right. simpl. right. right. right. right. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hresv Hv]].
+    { right. simpl. right. right. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hnew Hv]].
+    { right. simpl. right. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hv1 Hv]].
+    { right. simpl. left. }
+    apply lookup_union_Some_raw in Hv as [Hv | [_ Hv]].
+    { apply lookup_singleton_Some in Hv as [<- <-].
+      left. simpl. rewrite Hx. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+    apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+    apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+    apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+    apply lookup_singleton_Some in Hv as [<- <-].
+    right. simpl. right. right. right. left.
+  + pose proof (RavenHoareTriple_rename ren Hinj Hres counter_monotonic_ProgramWF
+      pred_map_empty rho_incr sigma Htyp _ _ _ _ _ incr_body_step) as Htr.
+    have Hentry : ren <$> (stk0 ∪ extra_incr) =
+      assoc_map (proc_args_of incr_record ++ proc_locals_of incr_record).*1
+        [dx; dv1; dnew; dres; dcall; dret].
+    { unfold stk0, extra_incr, assoc_map.
+      rewrite map_fmap_union. rewrite map_fmap_singleton.
+      repeat rewrite fmap_insert.
+      rewrite Hx Hpint1 Hpint2 Hpbool Hpunit2 Hpunit.
+      reflexivity. }
+    simpl in Htr. rewrite Hentry in Htr. rewrite Hx in Htr. exact Htr.
+Qed.
+Lemma read_body_valid :
+  @stmt_well_defined RProg (proc_pvar_typs read_record) (proc_body_of read_record) ∧
+  ∀ msk, proc_required_mask read_record ⊆ msk → msk ⊆ inv_set →
+  ∀ dll : proc_entry_lvars sigma read_record,
+    ∃ stk_final lv_ret xs msk_post,
+      stk_final !! "#ret_val" = Some lv_ret ∧
+      ¬ is_reserved lv_ret ∧ lv_ret ∈ xs.*1 ∧
+      proc_ret_typ_opt read_record = Some (sigma lv_ret) ∧
+      msk_post ⊆ inv_set ∧ msk_post ⊆ msk ∪ proc_grants_mask read_record ∧
+      NoDup xs.*1 ∧
+      Forall (λ xt, sigma xt.1 = xt.2 ∧ ¬ is_reserved xt.1) xs ∧
+      Forall (λ xt, xt.1 ∉ dll_args dll) xs ∧
+      (∀ x lv, stk_final !! x = Some lv → lv ∈ dll_args dll ∨ lv ∈ xs.*1) ∧
+      RavenHoareTriple (proc_pvar_typs read_record) sigma
+        (LAnd (LStack (assoc_map (proc_args_of read_record ++ proc_locals_of read_record).*1
+                                  (dll_args dll ++ dll_locals dll)))
+          (subst (proc_precond_of read_record)
+             (lvar_subst_map (proc_args_of read_record).*1 (dll_args dll))))
+        (proc_body_of read_record) msk msk_post
+        (lvar_exists_list xs
+          (LAnd (LStack stk_final)
+            (subst (proc_postcond_of read_record)
+              (<["#ret_val" := LVar lv_ret]>
+                (lvar_subst_map (proc_args_of read_record).*1 (dll_args dll)))))).
+Proof.
+  split; [exact read_body_well_defined |].
+  intros msk Hreq Hmsk dll.
+  have Hmask : msk = cmask.
+  { have Hreq' := Hreq.
+    unfold proc_required_mask, read_record, read_precond in Hreq'. simpl in Hreq'.
+    have Hmsk' := Hmsk. rewrite inv_set_eq in Hmsk'.
+    apply set_eq. intros i. split; [exact (Hmsk' i) | exact (Hreq' i)]. }
+  subst msk.
+  have Halen := dll_args_len dll. have Hllen := dll_locals_len dll.
+  simpl in Halen, Hllen.
+  destruct (dll_args dll) as [|arg args] eqn:Ha; [discriminate Halen |].
+  destruct args as [|extra_arg args]; [|discriminate Halen].
+  destruct (dll_locals dll) as [|lx locals] eqn:Hl; [discriminate Hllen|].
+  destruct locals as [|lr locals]; [discriminate Hllen |].
+  destruct locals as [|extra locals]; [|discriminate Hllen].
+  have Htarget_nd : NoDup [arg; lx; lr].
+  { have H := proc_entry_all_nodup dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Htarget_nr : Forall (fun z => ¬ is_reserved z) [arg; lx; lr].
+  { have H := proc_entry_all_not_reserved dll. rewrite Ha Hl in H. simpl in H. exact H. }
+  have Harg_typed := dll_args_typed dll. rewrite Ha in Harg_typed. simpl in Harg_typed.
+  inversion Harg_typed as [|? ? ? ? Harg Hargs_nil]; subst.
+  have Htyped := dll_locals_typed dll. rewrite Hl in Htyped. simpl in Htyped.
+  inversion Htyped as [|? ? ? ? Hlx Htyped']; subst.
+  inversion Htyped' as [|? ? ? ? Hlr Hlocals_nil]; subst.
+  destruct (finite_lvar_renaming ["x"; "l_ph_int1"; "l_ph_int2"] [arg; lx; lr] [])
+    as [ren [Hinj [Htyp [Hres [Hfix Hmap]]]]].
+  - exact read_entry_names_nodup.
+  - exact Htarget_nd.
+  - repeat constructor; not_reserved.
+  - exact Htarget_nr.
+  - constructor; [simpl; symmetry; exact Harg |].
+    constructor; [simpl; symmetry; exact Hlx |].
+    constructor; [simpl; symmetry; exact Hlr | constructor].
+  - intros z Hz. inversion Hz.
+  - simpl in Hmap. injection Hmap as Hxmap Hph1 Hph2.
+  have Hx_nr : ¬ is_reserved (ren "x") := ren_not_reserved ren Hinj Hres "x" ltac:(not_reserved).
+  have Hv1_nr : ¬ is_reserved (ren "l_v1") := ren_not_reserved ren Hinj Hres "l_v1" ltac:(not_reserved).
+  have Hret_nr : ¬ is_reserved (ren "l_ret") := ren_not_reserved ren Hinj Hres "l_ret" ltac:(not_reserved).
+  exists (ren <$> (<["#ret_val" := "l_ret"]>
+            (<["v1" := "l_v1"]> (stk0 ∪ extra_read)))).
+  exists (ren "l_ret").
+  exists [(ren "l_v1", TpInt); (ren "l_ret", TpInt)].
+  exists cmask.
+  repeat match goal with |- _ /\ _ => split end.
+  + rewrite fmap_insert. rewrite fmap_insert. simpl. reflexivity.
+  + exact Hret_nr.
+  + simpl. right. left.
+  + simpl. rewrite Htyp. reflexivity.
+  + rewrite inv_set_eq. reflexivity.
+  + unfold proc_grants_mask, read_record, read_postcond. simpl.
+    intros i Hi. apply elem_of_union_l. exact Hi.
+  + have Hneq : ren "l_v1" ≠ ren "l_ret".
+    { intro Heq. apply Hinj in Heq. discriminate. }
+    change (NoDup [ren "l_v1"; ren "l_ret"]).
+    constructor.
+    * rewrite elem_of_list_singleton. exact Hneq.
+    * exact (NoDup_singleton _).
+  + constructor.
+    * split; [simpl; rewrite Htyp; reflexivity | exact Hv1_nr].
+    * constructor.
+      -- split; [simpl; rewrite Htyp; reflexivity | exact Hret_nr].
+      -- constructor.
+  + have Hv1_arg : ren "l_v1" ≠ arg :=
+      ren_ne_target ren Hinj "x" "l_v1" arg Hxmap ltac:(discriminate).
+    have Hret_arg : ren "l_ret" ≠ arg :=
+      ren_ne_target ren Hinj "x" "l_ret" arg Hxmap ltac:(discriminate).
+    constructor; [rewrite elem_of_list_singleton; exact Hv1_arg |].
+    constructor; [rewrite elem_of_list_singleton; exact Hret_arg | constructor].
+  + intros v lv Hv.
+    apply lookup_fmap_Some in Hv as [lv0 [<- Hv]].
+    unfold stk0, extra_read in Hv.
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hretv Hv]].
+    { right. simpl. right. left. }
+    apply lookup_insert_Some in Hv as [[<- <-] | [Hv1v Hv]].
+    { right. simpl. left. }
+    apply lookup_union_Some_raw in Hv as [Hv | [_ Hv]].
+    * apply lookup_singleton_Some in Hv as [<- <-].
+      left. rewrite elem_of_list_singleton. exact Hxmap.
+    * apply lookup_insert_Some in Hv as [[<- <-] | [_ Hv]]; [congruence |].
+      apply lookup_singleton_Some in Hv as [<- <-]. congruence.
+  + pose proof (RavenHoareTriple_rename ren Hinj Hres counter_monotonic_ProgramWF
+      pred_map_empty rho_read sigma Htyp _ _ _ _ _ read_body_step) as Htr.
+    have Hentry : ren <$> (stk0 ∪ extra_read) =
+        <["x" := arg]> (<["v1" := lx]> ({[ "#ret_val" := lr ]})).
+    { unfold stk0, extra_read.
+      rewrite map_fmap_union. rewrite map_fmap_singleton.
+      repeat rewrite fmap_insert.
+      rewrite Hxmap Hph1 Hph2. reflexivity. }
+    have Hfinal :
+      ren <$> (<["#ret_val":="l_ret"]> (<["v1":="l_v1"]> (stk0 ∪ extra_read))) =
+      <["#ret_val" := ren "l_ret"]>
+        (<["v1" := ren "l_v1"]> (ren <$> (stk0 ∪ extra_read))).
+    { rewrite fmap_insert. rewrite fmap_insert. reflexivity. }
+    simpl in Htr. rewrite Hxmap Hentry Hfinal in Htr. exact Htr.
+Qed.
+Lemma counter_monotonic_all_proc_specs_valid_raven :
+  @all_proc_specs_valid_raven RProg sigma.
+Proof.
+  unfold all_proc_specs_valid_raven.
+  apply proc_map_forall.
+  - exact make_body_valid.
+  - exact read_body_valid.
+  - exact incr_body_valid.
+Qed.
+
+(* The semantic soundness theorem allocates the ghost heap and invariant
+   token names itself.  Consequently its ProgramWF premise is uniform in
+   those freshly chosen names.  All structural fields are inherited from
+   the concrete witness above; the three name/namespace fields are
+   immediate because this program has exactly one invariant. *)
+
+Local Instance counter_invTokenGpreS : invTokenGpreS Σ :=
+  {| invtoken_pre_inG := invtoken_inG |}.
+
+Lemma counter_monotonic_ProgramWF_allocated
+    (gamma_g gamma_i : gname) :
+  @rrl_lang.ProgramWF Σ (mkInvTokenG gamma_i)
+    RProg
+    (mkGhostConfig (nroot .@ "ghost_heap") (nroot .@ "counterInv") gamma_g).
+Proof.
+  destruct counter_monotonic_ProgramWF.
+  constructor; try assumption.
+  - rewrite inv_set_eq. intros inv1 inv2 Hin1 Hin2 _.
+    apply elem_of_singleton in Hin1 as ->.
+    apply elem_of_singleton in Hin2 as ->. reflexivity.
+  - rewrite inv_set_eq. intros inv1 inv2 Hin1 Hin2 Hne.
+    apply elem_of_singleton in Hin1 as ->.
+    apply elem_of_singleton in Hin2 as ->. contradiction.
+  - rewrite inv_set_eq. intros inv' Hin.
+    apply elem_of_singleton in Hin as ->.
+    apply ndot_ne_disjoint. congruence.
+Qed.
+
+End CounterMonotonic.
+
+Section CounterMonotonicSoundnessSetup.
+  Context {Σ : gFunctors} `{!invTokenGpreS Σ}.
+
+  Local Instance counter_proof_invTokenG : invTokenG Σ :=
+    mkInvTokenG 1%positive.
+
+Section CounterMonotonicSoundness.
+  Context {I : Type} (Gs : I -> cmra) `{!inGs Σ Gs}.
+  Context `{!inG Σ (authR (gmap.gmapUR heap_addr (agreeR gnameO)))}.
+  Context `{!simpLangG Σ}.
+  Context (wh : Γ_witness Gs h_ra).
+
+  Theorem counter_monotonic_soundness :
+    all_proc_tbl_chunks (RProg:=RProg) -∗
+    |={⊤}=> ∃ gamma_g gamma_i,
+      all_proc_specs_valid_iris Gs sigma (RProg:=RProg)
+        (G:=mkGhostConfig (nroot .@ "ghost_heap")
+              (nroot .@ "counterInv") gamma_g)
+        (Γ:=Γ0 Gs h_ra wh)
+        (invTokenG0:=mkInvTokenG gamma_i).
+  Proof.
+    iApply (raven_soundness Gs RProg h_ra wh "counterInv" inv_set_eq
+      (nroot .@ "ghost_heap") (nroot .@ "counterInv")
+      ghost_heap_namespace_disjoint_counterInv sigma
+      counter_monotonic_ProgramWF_allocated Hsigma_rich Hpbt
+      counter_monotonic_all_proc_specs_valid_raven).
+  Qed.
+End CounterMonotonicSoundness.
+
+Definition counter_monotonic_initial_state : lang.state :=
+  lang.State ∅ (trnsl.translated_proc_map (RProg:=RProg)) ∅ 0.
+
+Lemma counter_monotonic_initial_state_wf :
+  ghost_state.state_wf counter_monotonic_initial_state.
+Proof.
+  unfold counter_monotonic_initial_state.
+  apply ghost_state.mk_state_wf.
+  - exact (Z.le_refl 0).
+  - intros k v Hlookup. rewrite lookup_empty in Hlookup. discriminate.
+  - intros l f v Hlookup. rewrite lookup_empty in Hlookup. discriminate.
+  - intros k frame Hlookup. rewrite lookup_empty in Hlookup. discriminate.
+Qed.
+
+Section CounterMonotonicInitializedSoundness.
+  Context {I : Type} (Gs : I -> cmra) `{!inGs Σ Gs}.
+  Context `{!inG Σ (authR (gmap.gmapUR heap_addr (agreeR gnameO)))}.
+  Context `{!invGS Σ} `{!heapGpreS Σ}.
+  Context (wh : Γ_witness Gs h_ra).
+
+  Theorem counter_monotonic_soundness_initialized :
+    ⊢ |={⊤}=> ∃ gamma_h gamma_s gamma_p gamma_d gamma_g gamma_i,
+      let hG := initialized_heapG gamma_h gamma_s gamma_p gamma_d in
+      let sG := initialized_simpLangG gamma_h gamma_s gamma_p gamma_d in
+      @ghost_state.state_interp Σ hG counter_monotonic_initial_state ∗
+      @all_proc_specs_valid_iris I Gs Σ inGs0 inG0 sG RProg
+        (mkGhostConfig (nroot .@ "ghost_heap")
+          (nroot .@ "counterInv") gamma_g)
+        (Γ0 Gs h_ra wh) (mkInvTokenG gamma_i) sigma.
+  Proof.
+    iApply (raven_soundness_initialized Gs RProg h_ra wh "counterInv"
+      inv_set_eq (nroot .@ "ghost_heap") (nroot .@ "counterInv")
+      ghost_heap_namespace_disjoint_counterInv sigma
+      counter_monotonic_ProgramWF_allocated Hsigma_rich Hpbt
+      counter_monotonic_all_proc_specs_valid_raven
+      counter_monotonic_initial_state eq_refl
+      counter_monotonic_initial_state_wf).
+  Qed.
+End CounterMonotonicInitializedSoundness.
+
+End CounterMonotonicSoundnessSetup.

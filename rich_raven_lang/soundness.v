@@ -21,6 +21,14 @@ From raven_iris.rich_raven_lang Require Import rrl_lang.
 From raven_iris.rich_raven_lang Require Import trnsl.
 Require Import Coq.Logic.FunctionalExtensionality.
 
+Module Make (RAs : RA_CONFIG).
+Module trnsl := raven_iris.rich_raven_lang.trnsl.Make RAs.
+Module rrl_lang := trnsl.rrl_lang.
+Module lifting := trnsl.lifting.
+Module ghost_state := trnsl.ghost_state.
+Module lang := trnsl.lang.
+Import lang ghost_state lifting rrl_lang trnsl.
+
 Set Default Proof Using "All".
 
 Section MainSoundness.
@@ -85,6 +93,7 @@ Section MainSoundness.
     Local Notation trnsl_assertion_forall := (@trnsl_assertion_forall I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation trnsl_assertion_ite := (@trnsl_assertion_ite I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation trnsl_assertion_impl := (@trnsl_assertion_impl I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
+    Local Notation symb_map_updates_preserve := (@symb_map_updates_preserve I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation RAPack_fpuValid := (@RAPack_fpuValid I Gs Σ inGs0 inG0 simpLangG0 RProg G).
     Local Notation trnsl_assertion_pre := (@trnsl_assertion_pre I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation fresh_lvar_not_in_lexpr_map_fvars_zip := (@fresh_lvar_not_in_lexpr_map_fvars_zip I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
@@ -97,6 +106,7 @@ Section MainSoundness.
     Local Notation inv_set_to_namespace_subseteq_trnsl_mask := (@inv_set_to_namespace_subseteq_trnsl_mask I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation ghost_heap_namespace_subseteq_trnsl_mask := (@ghost_heap_namespace_subseteq_trnsl_mask I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation inv_map_subseteq := (@inv_map_subseteq I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
+    Local Notation trnsl_mask_mono := (@trnsl_mask_mono I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation inv_map_set_minus_subseteq := (@inv_map_set_minus_subseteq I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation trnsl_expr_interp_lexpr_compatibility := (@trnsl_expr_interp_lexpr_compatibility I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
     Local Notation trnsl_expr_interp_lexpr_compatibility2 := (@trnsl_expr_interp_lexpr_compatibility2 I Gs Σ inGs0 inG0 simpLangG0 RProg G Γ invTokenG0).
@@ -324,6 +334,32 @@ Section MainSoundness.
       + iPureIntro. specialize (Henv lv2). rewrite Hty2 in Henv.
         destruct (σ lv2), (mp lv2); simpl in *; try done.
       + iExact "H".
+    - (* AE_Stack_Exists_Rename *)
+      rename H into Hlookup, H0 into Hty_old, H1 into Hty_lv, H2 into Hfresh.
+      apply entails_intro. intros stk_id mp Henv.
+      rewrite trnsl_assertion_exists.
+      iIntros "Hstk". iExists (mp old). iSplitR.
+      + iPureIntro. specialize (Henv old). rewrite Hty_old in Henv.
+        destruct (σ old), (mp old); simpl in *; try done.
+      + rewrite (trnsl_assertion_unfold (LStack (<[x := lv]> stk))) /trnsl_assertion_pre /=.
+        iEval (rewrite (trnsl_assertion_unfold (LStack stk)) /trnsl_assertion_pre /=) in "Hstk".
+        assert (symb_stk_to_stk_frm (<[x := lv]> stk)
+                  (fun y => if (y =? lv)%string then mp old else mp y) =
+                symb_stk_to_stk_frm stk mp) as Hframe.
+        { unfold symb_stk_to_stk_frm. f_equal. apply map_eq. intros y.
+          rewrite !lookup_fmap.
+          destruct (stk !! y) as [lvy|] eqn:Hy.
+          - destruct (String.eqb_spec y x) as [-> | Hne_x].
+            + rewrite lookup_insert. rewrite Hlookup in Hy. injection Hy as <-.
+              rewrite Hlookup. simpl. rewrite String.eqb_refl. reflexivity.
+            + rewrite lookup_insert_ne; [| exact (not_eq_sym Hne_x)]. rewrite Hy. simpl.
+              destruct (String.eqb_spec lvy lv) as [-> | Hne_lv].
+              * exfalso. exact (Hfresh y Hy).
+              * reflexivity.
+          - rewrite lookup_insert_ne.
+            + rewrite Hy. reflexivity.
+            + intro Heq. subst y. rewrite Hlookup in Hy. discriminate. }
+        rewrite Hframe. iExact "Hstk".
     - (* AE_LExprA_Impl *)
       rename H into Himpl.
       apply entails_intro. intros stk mp Henv.
@@ -358,14 +394,22 @@ Section MainSoundness.
        whatever extension of the ambient mp a given case's witness needs. *)
 
 
-    Theorem rrl_validity ρ σ stk_id p msk cmd q
+    (* The semantic triple is polymorphic in an Iris ambient [E] containing
+       the translation of [mask_post].  Keying the lower bound on the final
+       mask is what makes grants and fresh allocations available to earlier
+       sequence components without pretending that a WP mask grows while a
+       command executes. *)
+    Theorem rrl_validity ρ σ stk_id p mask_pre mask_post cmd q
       (Hwf : ProgramWF) (Hpbt : proc_bodies_translate) :
       stmt_well_defined ρ cmd ->
-      msk ⊆ inv_set ->
-       □ all_inv_worlds ∗ □ Wghost_world ∗ □ all_proc_tbl_chunks ∗ ▷ (all_proc_specs_valid_iris σ) ∗ ⌜RavenHoareTriple ρ σ p cmd msk q⌝
-      ⊢  (∀ mp, ⌜env_typ_well_defined σ mp⌝ -∗ trnsl_hoare_triple stk_id p msk cmd q mp).
+      mask_pre ⊆ inv_set ->
+      mask_post ⊆ inv_set ->
+       □ all_inv_worlds ∗ □ Wghost_world ∗ □ all_proc_tbl_chunks ∗ ▷ (all_proc_specs_valid_iris σ) ∗ ⌜RavenHoareTriple ρ σ p cmd mask_pre mask_post q⌝
+      ⊢  (∀ E, ⌜trnsl_mask mask_post ⊆ E⌝ -∗
+             ∀ mp, ⌜env_typ_well_defined σ mp⌝ -∗
+               trnsl_hoare_triple stk_id p E cmd q mp).
     Proof.
-      iIntros (Hwelldef Hmask_sub) "[#Hworlds [#Hgworld [#HprocTbl [#Calls %H]]]]".
+      iIntros (Hwelldef Hmask_pre_sub Hmask_post_sub) "[#Hworlds [#Hgworld [#HprocTbl [#Calls %H]]]]".
       iInduction H as
       [ ρ σ stk mask v lv e lexpr t Htrnsl Hinf Hfresh Hstkcompat |
       ρ σ stk mask x e rdchunk fld lexpr_e lvar_x t Htrnsl Htyp Hfresh Hnotin Hstkcompat
@@ -374,12 +418,12 @@ Section MainSoundness.
         Hfresh HNoDupFV HNoDupGFV HgfvFsNe HgfvValid Hstkcompat
       | | |
       | ρ σ stk stk' mask invr args stmt inv_record p q lv0 t0 lexprs Hargs Hinv_mask Hinv_record Hinv_len Hlexprs_res Hstk_tp subst Hlvfresh Hlv0_res Hbody IHHbody
-      | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_mask Hinv_record Hinv_len Hlexprs_res Hstk_tp subst
+      | ρ σ stk mask invr args inv_record p lexprs Hargs Hinv_record Hinv_len Hlexprs_res Hstk_tp subst
       | | | | | |
       | ρ σ stk mask v e1 fld e2 e3 lvar_v lexpr1 lexpr2 lexpr3 old_chunk Hfresh Hinf Hwd2 Hwd3 Hnotin Htrnsl1 Htrnsl2 Htrnsl3 Hstkcompat
-      | ρ σ mask v t body c q Hsigma Hqfresh
+      | ρ σ mask_pre mask_post v t body c q Hsigma Hqfresh
       | ρ σ stk mask e p lexpr Htrnsl Hinf Hstkcompat ] "IH";
-      iIntros (mp) "%Henv".
+      iIntros (E) "%HE"; iIntros (mp) "%Henv".
       3: { 
         (* FIELD WRITE *)
         unfold trnsl_hoare_triple.
@@ -434,8 +478,10 @@ Section MainSoundness.
 
         inversion Hwelldef as [ | | | | | | | | | | | | | rho' inv' args' stmt' HInvSet HargsWellDef HBodywelldef | | | ];
           subst stmt' args'.
-        have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
+        have Hsub0 : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
         { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
+        have Hsub : ↑(inv_namespace_map invr) ⊆ E.
+        { etrans; [exact Hsub0 | exact HE]. }
         have HInvs : trnsl_mask (mask ∖ {[invr]}) = trnsl_mask mask ∖ ↑inv_namespace_map invr.
         { rewrite /trnsl_mask.
           have HInvs' : inv_set_to_namespace (mask ∖ {[invr]})
@@ -465,18 +511,20 @@ Section MainSoundness.
             (lexpr_map_fvars_zip_no_reserved inv_record.(inv_args) lexprs Hlexprs_res)
             Hinv_record Hinv_len HF2.
           iEval (rewrite <- Hbridge) in "Hbody".
-          iPoseProof ("IH" with "[%] [%]") as "IH1".
+          iPoseProof ("IH" with "[%] [%] [%]") as "IH1".
           { done. }
           { set_solver. }
-          iPoseProof ("IH1" $! mp with "[%] [Hstk Hbody Hu]") as "IH2".
+          { set_solver. }
+          iPoseProof ("IH1" $! (E ∖ ↑(inv_namespace_map invr)) with "[%]") as "IH2".
+          { rewrite HInvs. apply difference_mono_r. exact HE. }
+          iPoseProof ("IH2" $! mp with "[%] [Hstk Hbody Hu]") as "IH3".
           { done. }
           { iEval (rewrite !trnsl_assertion_and). iFrame. }
-          iEval (rewrite HInvs) in "IH2".
-          iMod "IH2" as "IH2".
-          iEval (rewrite trnsl_assertion_exists) in "IH2".
-          iDestruct "IH2" as (v') "[%Htyp IH2]".
-          iEval (rewrite !trnsl_assertion_and) in "IH2".
-          iDestruct "IH2" as "[Hstk [Hbody' Hq]]".
+          iMod "IH3" as "IH3".
+          iEval (rewrite trnsl_assertion_exists) in "IH3".
+          iDestruct "IH3" as (v') "[%Htyp IH3]".
+          iEval (rewrite !trnsl_assertion_and) in "IH3".
+          iDestruct "IH3" as "[Hstk [Hbody' Hq]]".
           have Hdom_sm : dom subst = list_to_set inv_record.(inv_args).
           { apply dom_list_to_map_zip. lia. }
           have Hfv_sm : assertion_true_fvars (inv_body inv_record) ⊆ dom subst.
@@ -530,10 +578,12 @@ Section MainSoundness.
             (lexpr_map_fvars_zip_no_reserved inv_record.(inv_args) lexprs Hlexprs_res)
             Hinv_record Hinv_len HF2.
           iEval (rewrite <- Hbridge) in "Hbody".
-          rewrite <- HInvs.
-          iPoseProof ("IH" with "[%] [%]") as "IH1".
+          iPoseProof ("IH" with "[%] [%] [%]") as "IH1".
           { done. }
           { set_solver. }
+          { set_solver. }
+          iSpecialize ("IH1" $! (E ∖ ↑(inv_namespace_map invr)) with "[%]").
+          { rewrite HInvs. apply difference_mono_r. exact HE. }
           iApply ("IH1" $! mp with "[%] [Hstk Hbody Hu]").
           { done. }
           { iEval (rewrite !trnsl_assertion_and). iFrame. }
@@ -583,8 +633,13 @@ Section MainSoundness.
         unfold trnsl_hoare_triple. simpl.
         inversion Hwelldef as [ | | | | | | | | | | | | | | rho' inv' args' HInvSet HargsWellDef | | ];
           subst args'.
-        have Hsub : ↑(inv_namespace_map invr) ⊆ trnsl_mask mask.
-        { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask]. apply inv_map_subseteq; done. }
+        (* Allocation publishes [invr], so its namespace is available in the
+           ambient mask promised by this rule's post-mask. *)
+        have Hsub0 : ↑(inv_namespace_map invr) ⊆ trnsl_mask (mask ∪ {[invr]}).
+        { etrans; [| apply inv_set_to_namespace_subseteq_trnsl_mask].
+          apply inv_map_subseteq. set_solver. }
+        have Hsub : ↑(inv_namespace_map invr) ⊆ E.
+        { etrans; [exact Hsub0 | exact HE]. }
         iDestruct (all_inv_worlds_elem invr HInvSet with "Hworlds") as "Hiw".
         destruct (args_interp_values ρ σ stk mp args lexprs Hstk_tp Henv HargsWellDef Hargs)
           as [vs HF2].
@@ -672,8 +727,11 @@ Section MainSoundness.
 
       9 : {
         (* FRAME RULE *)
-        iPoseProof ("IH" with  "[%]") as "IH2". { done. }
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH2"; try done.
         iClear "IH".
+
+        iPoseProof ("IH2" $! E with "[%]") as "IH2'". { exact HE. }
+        iClear "IH2".
 
         unfold trnsl_hoare_triple. simpl.
         destruct (trnsl_stmt s) eqn:Htrnsl; try done.
@@ -681,7 +739,7 @@ Section MainSoundness.
           setoid_rewrite trnsl_assertion_unfold.
 
           iIntros "[Hu Hu1]".
-          iPoseProof ("IH2" with "[%] [%] [Hu]") as ">IH3"; try iFrame; try done.
+          iPoseProof ("IH2'" $! mp with "[%] [Hu]") as ">IH3"; try iFrame; try done.
 
         }
 
@@ -689,7 +747,7 @@ Section MainSoundness.
           iIntros (Φ).
           setoid_rewrite trnsl_assertion_unfold.
           iModIntro. iIntros "[Hu Hu1] HΦ".
-          iApply ("IH2" with "[%] [%] [Hu]"); try iFrame; try done.
+          iApply ("IH2'" $! mp with "[%] [Hu]"); try iFrame; try done.
           iNext. iIntros "Hu0". iApply "HΦ". iFrame.
         }
       }
@@ -769,7 +827,7 @@ Section MainSoundness.
              mirroring the real-field induction below but via Wghost_alloc
              (a fancy update -- hence wp_fupd above) instead of a bare
              field_list_to_iprop fact. *)
-          iAssert (|={trnsl_mask mask}=> trnsl_assertion (field_list_to_ghost_assertion (LVar lvar_x) ghost_fld_vals) stk_id mp')%I
+          iAssert (|={E}=> trnsl_assertion (field_list_to_ghost_assertion (LVar lvar_x) ghost_fld_vals) stk_id mp')%I
             with "[Hgfrag]" as "Hghost".
           { iInduction ghost_fld_vals as [ | [gfld [r gx]] gfvs'] "IHg".
             - iModIntro. setoid_rewrite trnsl_assertion_unfold. done.
@@ -785,10 +843,12 @@ Section MainSoundness.
               iDestruct "Hgfrag" as "[Hgfrag1 Hgfragr]".
               iMod ("IHg2" with "Hgfragr") as "Hrest".
               destruct (Γ r) as [[i [U [Hdis [Heq_car [Heq_cmra [Hop Hvalid]]]]]] | ] eqn:HΓeq.
-              + pose proof (Wghost_alloc (trnsl_mask mask) r l gfld gx (Forall_inv HgfvValid)
+              + pose proof (Wghost_alloc E r l gfld gx (Forall_inv HgfvValid)
                   (existT i (exist _ U (conj Hdis (exist _ Heq_car (conj Heq_cmra (conj Hop Hvalid))))))
                   HΓeq) as HWalloc.
-                specialize (HWalloc (ghost_heap_namespace_subseteq_trnsl_mask mask)).
+                have Hghostsub : ↑ghost_heap_namespace ⊆ E.
+                { etrans; [apply ghost_heap_namespace_subseteq_trnsl_mask | exact HE]. }
+                specialize (HWalloc Hghostsub).
                 iMod (HWalloc with "Hgworld Hgfrag1") as (γ) "[Hmap Hown]".
                 iModIntro.
                 setoid_rewrite trnsl_assertion_unfold.
@@ -869,8 +929,15 @@ Section MainSoundness.
       2 : {
         (* SEQ *)
         inversion Hwelldef.
-        iPoseProof ("IH" with "[%] [%]") as "IH'"; try done.
-        iPoseProof ("IH1" with "[%] [%]") as "IH1'"; try done.
+        have Hmono2 := RavenHoareTriple_mask_mono (G:=G)
+          ρ σ a2 c2 mask2 mask3 a3 H0.
+        have Hmask2_sub : mask2 ⊆ inv_set by etrans; [exact Hmono2 | exact Hmask_post_sub].
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH'"; try done.
+        iPoseProof ("IH1" with "[%] [%] [%]") as "IH1'"; try done.
+        have HE2 : trnsl_mask mask2 ⊆ E.
+        { etrans; [apply trnsl_mask_mono; exact Hmono2 | exact HE]. }
+        iSpecialize ("IH'" $! E with "[%]"). { exact HE2. }
+        iSpecialize ("IH1'" $! E with "[%]"). { exact HE. }
         iSpecialize ("IH'" $! mp). iSpecialize ("IH1'" $! mp).
         iClear "IH IH1".
 
@@ -1047,7 +1114,8 @@ Section MainSoundness.
         destruct (trnsl_stmt c) eqn:HtrnslStmt; try done.
 
         -
-        iPoseProof ("IH" with "[%] [%]") as "IH1"; try done.
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH1"; try done.
+        iSpecialize ("IH1" $! E with "[%]"). { exact HE. }
         iSpecialize ("IH1" $! mp).
         iEval (unfold trnsl_hoare_triple) in "IH1".
         rewrite HP HQ.
@@ -1059,7 +1127,8 @@ Section MainSoundness.
         iFrame.
 
         -
-        iPoseProof ("IH" with "[%] [%]") as "IH1"; try done.
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH1"; try done.
+        iSpecialize ("IH1" $! E with "[%]"). { exact HE. }
         iSpecialize ("IH1" $! mp).
         iEval (unfold trnsl_hoare_triple) in "IH1".
         rewrite HP HQ.
@@ -1072,8 +1141,11 @@ Section MainSoundness.
       2 : {
         (* IF *)
         inversion Hwelldef; subst e0 s0 s3.
-        iPoseProof ("IH" with "[%]") as "IH'"; try done.
-        iPoseProof ("IH1" with "[%]") as "IH1'"; try done.
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH'"; try done.
+        iPoseProof ("IH1" with "[%] [%] [%]") as "IH1'"; try done.
+        iSpecialize ("IH'" $! E with "[%]"). { exact HE. }
+        iSpecialize ("IH1'" $! E with "[%]"). { exact HE. }
+        iSpecialize ("IH'" $! mp). iSpecialize ("IH1'" $! mp).
         iClear "IH IH1".
         unfold trnsl_hoare_triple. simpl.
 
@@ -1089,27 +1161,24 @@ Section MainSoundness.
         - destruct b0.
 
           + setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu]".
-            iPoseProof ("IH'" with "[%] [%] [Hstk Hu]") as "Hpost".
-            { done. }
+            iPoseProof ("IH'" with "[%] [Hstk Hu]") as "Hpost".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. rewrite Hinterp_lexpr. done. }
             iMod "Hpost" as "HQ". iModIntro. iFrame.
 
           + setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu]".
-            iPoseProof ("IH1'" with "[%] [%] [Hstk Hu]") as "Hpost".
-            { done. }
+            iPoseProof ("IH1'" with "[%] [Hstk Hu]") as "Hpost".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. simpl. rewrite Hinterp_lexpr. done. }
             iMod "Hpost" as "HQ". iModIntro. iFrame.
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. rewrite Hinterp_lexpr. done.  }
             iMod "HQ" as "HQ". iEval (rewrite <- (trnsl_assertion_unfold Q stk_id mp)) in "HQ".
@@ -1122,13 +1191,12 @@ Section MainSoundness.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (RTSkipS stk_id) (to_rtstmt stk_id s) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH1'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH1'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. simpl. rewrite Hinterp_lexpr. done.  }
             iApply "HQ". iNext.
@@ -1141,13 +1209,12 @@ Section MainSoundness.
 
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. rewrite Hinterp_lexpr. done.  }
             iApply "HQ". iNext. iIntros "HQ". iApply "HΦ'". iFrame.
@@ -1157,13 +1224,12 @@ Section MainSoundness.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (to_rtstmt stk_id s) (RTSkipS stk_id) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH1'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH1'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. simpl. rewrite Hinterp_lexpr. done. }
 
@@ -1178,13 +1244,12 @@ Section MainSoundness.
 
         - iIntros (Φ). iModIntro. setoid_rewrite trnsl_assertion_unfold. iIntros "[Hstk Hu] HΦ".
           destruct b0.
-          + iApply (wp_if_t e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_t e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             *  apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool true) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. rewrite Hinterp_lexpr. done.  }
             iApply "HQ". iNext. iIntros "HQ". iApply "HΦ'". iFrame.
@@ -1194,13 +1259,12 @@ Section MainSoundness.
             * iNext. iIntros "HQ". iApply "HΦ".
               iEval (rewrite (trnsl_assertion_unfold Q stk_id mp)) in "HQ". iFrame.
 
-          + iApply (wp_if_f e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) (trnsl_mask mask) with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
+          + iApply (wp_if_f e (to_rtstmt stk_id s) (to_rtstmt stk_id s0) stk_id (symb_stk_to_stk_frm stk1 mp) (trnsl_assertion p stk_id mp) (trnsl_assertion Q stk_id mp) (lang.LitUnit) E with "[IH'] [IH' Hstk Hu] [HΦ]"); try iFrame.
             * apply (trnsl_expr_interp_lexpr_compatibility _ e lexpr (LitBool false) mp); try done.
 
             * iIntros (Φ'). iModIntro. iIntros "[Hstk Hu] HΦ'".
             setoid_rewrite trnsl_assertion_unfold.
-            iPoseProof ("IH1'" with "[%] [%] [Hstk Hu]") as "HQ".
-            { done. }
+            iPoseProof ("IH1'" with "[%] [Hstk Hu]") as "HQ".
             { done. }
             { iFrame. iPureIntro. unfold LExpr_holds. simpl. rewrite Hinterp_lexpr. done. }
             iApply "HQ". iNext. iIntros "HQ". iApply "HΦ'". iFrame.
@@ -1214,6 +1278,7 @@ Section MainSoundness.
       
       1 : {
         (* CALL *)
+        set (proc_name := proc_name0).
         unfold trnsl_hoare_triple. simpl (trnsl_stmt (Call x proc_name args)). case_match; try discriminate.
         pose proof H0 as H0'.
         apply Hwf.(pwf_proc_args_unique) in H0'.
@@ -1229,7 +1294,7 @@ Section MainSoundness.
         apply Hwf.(pwf_proc_stack_free) in Hspec_StackFree.
         pose proof (stmt_well_defined_call_ret_typed ρ x proc_name args proc_record Hwelldef H0) as Hret_wt.
 
-        inversion Hwelldef; subst ρ0 v proc args0.
+        inversion Hwelldef; subst.
 
         assert (exists arg_vals, Forall2 (fun e v => expr_step e (symb_stk_to_stk_frm stk mp) (Val v)) args arg_vals) as Harg_vals.
 
@@ -1320,6 +1385,7 @@ Section MainSoundness.
           set (fun ret_val => proc_frame_post ret_val ∗
             ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I as proc_frame_post_typed.
 
+        iApply (wp_mask_mono _ _ _ _ _ HE).
         iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post_typed with "[] [Hstk Hu1]"); try iFrame; try done.
 
           {
@@ -1336,7 +1402,7 @@ Section MainSoundness.
 
             iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
-            iSpecialize ("Hproc" with "[%]"). { exact Hmask_sub. }
+            iSpecialize ("Hproc" with "[%]"). { exact Hmask_pre_sub. }
 
             iSpecialize ("Hproc" with "[%]"). { exact (proj2 H5). }
 
@@ -1571,6 +1637,7 @@ Section MainSoundness.
           set (fun ret_val => proc_frame_post ret_val ∗
             ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I as proc_frame_post_typed.
 
+        iApply (wp_mask_mono _ _ _ _ _ HE).
         iApply (wp_call _ _ _ _ _ _ (lang.Proc proc_name proc_args proc_locals _) _ u1 proc_frame_post_typed with "[] [Hstk Hu1]"); try iFrame; try done.
 
           {
@@ -1587,7 +1654,7 @@ Section MainSoundness.
 
             iSpecialize ("Hproc" with "[%]"). { exact Henv. }
 
-            iSpecialize ("Hproc" with "[%]"). { exact Hmask_sub. }
+            iSpecialize ("Hproc" with "[%]"). { exact Hmask_pre_sub. }
 
             iSpecialize ("Hproc" with "[%]"). { exact (proj2 H5). }
 
@@ -1823,7 +1890,7 @@ Section MainSoundness.
          iModIntro. rewrite H_RA_Pack. iExists l, chunk_new, γ. iFrame.
          iPureIntro. split; [exact Heq | exact Hnew_eval].
 
-        - (* r ∉ ra_set: LGhostOwn is vacuously True on both sides *)
+        - (* Γ has no registration for r: LGhostOwn is vacuously True on both sides *)
           iModIntro.
           simpl.
           rewrite H_RA_Pack.
@@ -1833,7 +1900,8 @@ Section MainSoundness.
 
       1 : {
         (* EXISTS ELIM *)
-        iPoseProof ("IH" with "[%] [%]") as "IH1"; try done.
+        iPoseProof ("IH" with "[%] [%] [%]") as "IH1"; try done.
+        iSpecialize ("IH1" $! E with "[%]"). { exact HE. }
         unfold trnsl_hoare_triple. simpl.
         destruct (trnsl_stmt c) eqn:Htrnsl; try done.
         { (* None' branch: ghost-only step *)
@@ -1955,7 +2023,11 @@ Section MainSoundness.
       have Hargs_locals_lvs_disjoint : ∀ lv, lv ∈ args_lvs → lv ∉ locals_lvs := dll_disjoint dll.
 
       destruct (Hbodies proc proc_record Hproc_map) as [Hwelldef Hbody_msk].
-      destruct (Hbody_msk msk Hmask_req Hmsk_sub dll) as (stk0' & lv_final & Hrv_final & Hlv_final_res & Hlv_final_typ & HRHT).
+      destruct (Hbody_msk msk Hmask_req Hmsk_sub dll) as
+        (stk0' & lv_final & xs & msk_post &
+         Hret_lookup & Hret_notres & Hret_in_xs & Hret_decl &
+         Hpost_sub & Hpost_bound & Hxs_nodup & Hxs_typed & Hxs_fresh &
+         Hstk_cover & HRHT).
 
       set (args := (proc_args_of proc_record).*1).
       set (loc_names := (proc_locals_of proc_record).*1).
@@ -2162,16 +2234,19 @@ Section MainSoundness.
           HfvA HdomEq Hmr1 Hmr2 Hstab Hbase'.
         rewrite Heq. exact Hprecond_eq. }
 
-      set (ret_val := trnsl_lval (mp0 lv_final)).
-
-      have Hpostcond_bridge :
+      have Hpostcond_bridge (mp_final : symb_map)
+          (Henv_final : env_typ_well_defined σ mp_final)
+          (Hpres_args : ∀ lv, lv ∈ args_lvs → mp_final lv = mp0 lv)
+          (Hpres_res : ∀ lv, is_reserved lv → mp_final lv = mp0 lv) :
+        let ret_val := trnsl_lval (mp_final lv_final) in
         (trnsl_assertion
           (subst (proc_postcond_of proc_record)
              (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
-          stk_id mp0 ∗
+          stk_id mp_final ∗
          ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
         ≡ postcond ret_val.
-      { set (M1 := <["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))) : gmap var LExpr).
+      { simpl. set (ret_val := trnsl_lval (mp_final lv_final)).
+        set (M1 := <["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))) : gmap var LExpr).
         set (M2 := <["#ret_val" := LVal (trnsl_val ret_val)]>
                      (list_to_map (zip args (map (λ val, LVal (trnsl_val val)) stk_vals))) : gmap var LExpr).
         have Hmr1_base : subst_map_avoids_reserved (list_to_map (zip args (map LVar args_lvs)) : gmap var LExpr).
@@ -2186,7 +2261,7 @@ Section MainSoundness.
         have Hmr1 : subst_map_avoids_reserved M1.
         { unfold M1. apply subst_map_avoids_reserved_insert.
           - exact ret_val_not_reserved.
-          - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact Hlv_final_res.
+          - intros v Hv. simpl in Hv. apply elem_of_singleton in Hv as ->. exact Hret_notres.
           - exact Hmr1_base. }
         have Hmr2 : subst_map_avoids_reserved M2.
         { unfold M2. apply subst_map_avoids_reserved_insert.
@@ -2216,7 +2291,7 @@ Section MainSoundness.
         have HdomEq : dom M1 = dom M2.
         { unfold M1, M2. rewrite !dom_insert_L. rewrite HdomEq0. reflexivity. }
         have Hstab := hstab_lexpr_subst_r args (map LVar args_lvs) stk_vals lv_final ret_val HdomEq.
-        have Hbase : ∀ x, x ∈ dom M1 → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        have Hbase : ∀ x, x ∈ dom M1 → eval_lvar M1 mp_final x = eval_lvar M2 mp x.
         { intros x Hx.
           destruct (decide (x = "#ret_val")) as [-> | Hne].
           - unfold eval_lvar, M1, M2. rewrite !lookup_insert. simpl.
@@ -2242,7 +2317,9 @@ Section MainSoundness.
             { apply (elem_of_list_lookup_2 _ i). apply lookup_zip_with_Some. exists x, val. done. }
             rewrite (zip_wrap_map_lookup_arg args args_lvs LVar x lv Hargs_nodup Hzip_lvs_in).
             rewrite (zip_wrap_map_lookup_arg args stk_vals (λ val0, LVal (trnsl_val val0)) x val Hargs_nodup Hzip_vals_in).
-            simpl. unfold mp0.
+            simpl. rewrite (Hpres_args lv).
+            2: { apply elem_of_list_lookup_2 with i. exact Hlv. }
+            unfold mp0.
             have Hzip_lvs_full : (lv, val) ∈ zip lvs vals.
             { unfold lvs, vals. rewrite (zip_with_app pair args_lvs locals_lvs stk_vals local_vals (eq_trans (eq_sym Hargs_len_lvs) Hargs_len2)).
               apply elem_of_app. left.
@@ -2263,13 +2340,13 @@ Section MainSoundness.
             have Hmp0_lv : (list_to_map (zip lvs vals) : gmap lvar lang.val) !! lv = Some val.
           { apply elem_of_list_to_map_1; [rewrite (fst_zip _ _ (Nat.eq_le_incl _ _ (eq_trans (eq_sym Hlen1) Hlen2))); exact Hnodup_lvs | exact Hzip_lvs_full]. }
           rewrite Hmp0_lv. done. }
-        have Hbase' : ∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp0 x = eval_lvar M2 mp x.
+        have Hbase' : ∀ x, x ∈ dom M1 ∨ is_reserved x → eval_lvar M1 mp_final x = eval_lvar M2 mp x.
         { intros x [Hx | Hx]; [exact (Hbase x Hx) |].
           unfold eval_lvar.
           have Hn1 : M1 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr1 x Hin Hx). }
           have Hn2 : M2 !! x = None. { apply not_elem_of_dom. intro Hin. exact (proj1 Hmr2 x Hin Hx). }
-          rewrite Hn1 Hn2. f_equal. exact (Hreserved_mp0 x Hx). }
-        have Heq := trnsl_assertion_subst_congr Hwf (proc_postcond_of proc_record) M1 M2 stk_id mp0 mp
+          rewrite Hn1 Hn2. f_equal. rewrite (Hpres_res x Hx). exact (Hreserved_mp0 x Hx). }
+        have Heq := trnsl_assertion_subst_congr Hwf (proc_postcond_of proc_record) M1 M2 stk_id mp_final mp
           Hpost_free HbA_M1 HbA_M2
           HfvA HdomEq Hmr1 Hmr2 Hstab Hbase'.
         rewrite Heq. exact (Hpostcond_eq ret_val). }
@@ -2277,11 +2354,12 @@ Section MainSoundness.
       iPoseProof (rrl_validity ρ σ stk_id
         (LAnd (LStack (list_to_map (zip names lvs)))
            (subst (proc_precond_of proc_record) (list_to_map (zip args (map LVar args_lvs)))))
-        msk (proc_body_of proc_record)
-        (LAnd (LStack stk0')
-           (subst (proc_postcond_of proc_record)
-              (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs))))))
-        Hwf Hpbt Hwelldef Hmsk_sub with "[]") as "Htriple".
+        msk msk_post (proc_body_of proc_record)
+        (lvar_exists_list xs
+           (LAnd (LStack stk0')
+              (subst (proc_postcond_of proc_record)
+                 (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))))
+        Hwf Hpbt Hwelldef Hmsk_sub Hpost_sub with "[]") as "Htriple".
       { iSplitR.
         { iModIntro. iApply "Hworlds". }
         iSplitR.
@@ -2291,71 +2369,120 @@ Section MainSoundness.
         iSplitR.
         { iApply "IH". }
         iPureIntro. exact HRHT. }
+      iSpecialize ("Htriple" $! (trnsl_mask (msk ∪ proc_grants_mask proc_record)) with "[%]").
+      { apply trnsl_mask_mono. exact Hpost_bound. }
       iSpecialize ("Htriple" $! mp0 Henv0).
+
+      have Hupdates_env : ∀ xs0 vs0 mp',
+          Forall (λ xt, σ xt.1 = xt.2 ∧ ¬ is_reserved xt.1) xs0 →
+          Forall2 (λ xt v, typ_val_match xt.2 v) xs0 vs0 →
+          env_typ_well_defined σ mp' →
+          env_typ_well_defined σ (symb_map_updates xs0 vs0 mp').
+      { intros xs0. induction xs0 as [| [lv tp] xs0 IH]; intros vs0 mp' Htypes Hvals Henv';
+          inversion Htypes as [| ? ? [Hlv _] Htypes']; subst; inversion Hvals; subst; simpl; [exact Henv'|].
+        apply IH; [exact Htypes' | assumption |].
+        apply env_typ_well_defined_update; [exact Henv' |]. rewrite Hlv. assumption. }
 
       destruct Hstmt_shape as [Hstmt_shape | [Hstmt_shape ->]];
         iEval (rewrite /trnsl_hoare_triple Hstmt_shape) in "Htriple".
 
       - (* proc_body_of proc_record translates to a real statement *)
-        iEval (setoid_rewrite trnsl_assertion_unfold; simpl) in "Htriple".
         have Hprecond_bridge' := Hprecond_bridge.
         rewrite trnsl_assertion_unfold in Hprecond_bridge'.
-        have Hpostcond_bridge' := Hpostcond_bridge.
-        rewrite trnsl_assertion_unfold in Hpostcond_bridge'.
+        iEval (setoid_rewrite trnsl_assertion_unfold; simpl) in "Htriple".
         iIntros (Φ). iModIntro.
         iIntros "[Hstk Hpre] HΦ'".
         iApply ("Htriple" with "[Hstk Hpre]").
-        { rewrite Hstk0_eq.
-          iSplitL "Hstk"; [iFrame |]. iEval (rewrite Hprecond_bridge'). iFrame. }
-        iNext. iIntros "[Hpost_stk Hpost_pred]".
+        { rewrite Hstk0_eq. iSplitL "Hstk"; [iFrame |].
+          iEval (rewrite Hprecond_bridge'). iFrame. }
+        iNext. iIntros "Hpost".
+        iEval (rewrite trnsl_assertion_exists_list_pre) in "Hpost".
+        iDestruct "Hpost" as (vs_final) "[%Hvals_final Hpost]".
+        set (mp_final := symb_map_updates xs vs_final mp0).
+        have Henv_final : env_typ_well_defined σ mp_final.
+        { apply Hupdates_env; [exact Hxs_typed | exact Hvals_final | exact Henv0]. }
+        have Hpres_args_final : ∀ lv, lv ∈ args_lvs → mp_final lv = mp0 lv.
+        { intros lv Hin. apply symb_map_updates_preserve.
+          eapply Forall_impl; [exact Hxs_fresh |].
+          intros [x tp] Hfresh Heq. simpl in Heq. subst x. exact (Hfresh Hin). }
+        have Hpres_res_final : ∀ lv, is_reserved lv → mp_final lv = mp0 lv.
+        { intros lv Hres. apply symb_map_updates_preserve.
+          eapply Forall_impl; [exact Hxs_typed |].
+          intros [x tp] [_ Hnotres] Heq. simpl in Heq. subst x. exact (Hnotres Hres). }
+        set (ret_val := trnsl_lval (mp_final lv_final)).
+        have Hpostcond_bridge_final :=
+          Hpostcond_bridge mp_final Henv_final Hpres_args_final Hpres_res_final.
+        iEval (rewrite trnsl_assertion_and) in "Hpost".
+        iDestruct "Hpost" as "[Hpost_stk Hpost_pred]".
+        iEval (rewrite trnsl_assertion_unfold /trnsl_assertion_pre /=) in "Hpost_stk".
         iApply "HΦ'".
-        iExists ret_val, (symb_stk_to_stk_frm stk0' mp0).
+        iExists ret_val, (symb_stk_to_stk_frm stk0' mp_final).
         iFrame "Hpost_stk".
         iSplitR.
-        + iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
+        + iPureIntro. simpl. rewrite lookup_fmap Hret_lookup. reflexivity.
         + iAssert (trnsl_assertion
               (subst (proc_postcond_of proc_record)
                  (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
-              stk_id mp0 ∗
+              stk_id mp_final ∗
             ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
             with "[Hpost_pred]" as "Hpost_pred2".
           { iSplitL "Hpost_pred".
-            - iEval (rewrite trnsl_assertion_unfold). iExact "Hpost_pred".
+            - iExact "Hpost_pred".
             - iPureIntro. unfold ret_val.
-              rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final) (mp0 lv_final) mp0 Henv0 eq_refl eq_refl).
-              exact Hlv_final_typ. }
-          iEval (rewrite Hpostcond_bridge) in "Hpost_pred2". iFrame.
+              rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final)
+                (mp_final lv_final) mp_final Henv_final eq_refl eq_refl).
+              exact Hret_decl. }
+          iEval (rewrite Hpostcond_bridge_final) in "Hpost_pred2". iFrame.
 
       - (* trnsl_stmt (proc_body_of proc_record) = None': body is ghost-only, runs as Skip *)
         have Hprecond_bridge' := Hprecond_bridge.
         rewrite trnsl_assertion_unfold in Hprecond_bridge'.
-        have Hpostcond_bridge' := Hpostcond_bridge.
-        rewrite trnsl_assertion_unfold in Hpostcond_bridge'.
         iEval (setoid_rewrite trnsl_assertion_unfold; simpl) in "Htriple".
         iIntros (Φ). iModIntro.
         iIntros "[Hstk Hpre] HΦ'".
-        iMod ("Htriple" with "[Hstk Hpre]") as "[Hpost_stk Hpost_pred]".
+        iMod ("Htriple" with "[Hstk Hpre]") as "Hpost".
         { rewrite Hstk0_eq.
           iSplitL "Hstk"; [iFrame |]. iEval (rewrite Hprecond_bridge'). iFrame. }
+        iEval (rewrite trnsl_assertion_exists_list_pre) in "Hpost".
+        iDestruct "Hpost" as (vs_final) "[%Hvals_final Hpost]".
+        set (mp_final := symb_map_updates xs vs_final mp0).
+        have Henv_final : env_typ_well_defined σ mp_final.
+        { apply Hupdates_env; [exact Hxs_typed | exact Hvals_final | exact Henv0]. }
+        have Hpres_args_final : ∀ lv, lv ∈ args_lvs → mp_final lv = mp0 lv.
+        { intros lv Hin. apply symb_map_updates_preserve.
+          eapply Forall_impl; [exact Hxs_fresh |].
+          intros [x tp] Hfresh Heq. simpl in Heq. subst x. exact (Hfresh Hin). }
+        have Hpres_res_final : ∀ lv, is_reserved lv → mp_final lv = mp0 lv.
+        { intros lv Hres. apply symb_map_updates_preserve.
+          eapply Forall_impl; [exact Hxs_typed |].
+          intros [x tp] [_ Hnotres] Heq. simpl in Heq. subst x. exact (Hnotres Hres). }
+        set (ret_val := trnsl_lval (mp_final lv_final)).
+        have Hpostcond_bridge_final :=
+          Hpostcond_bridge mp_final Henv_final Hpres_args_final Hpres_res_final.
+        iEval (rewrite trnsl_assertion_and) in "Hpost".
+        iDestruct "Hpost" as "[Hpost_stk Hpost_pred]".
+        iEval (rewrite trnsl_assertion_unfold /trnsl_assertion_pre /=) in "Hpost_stk".
         iApply (wp_skip
           (∃ ret_val0 stk_frm'', stack_own[stk_id, stk_frm''] ∗
              ⌜locals stk_frm'' !! "#ret_val" = Some ret_val0⌝ ∗ postcond ret_val0)%I
-          (trnsl_mask msk) stk_id with "[Hpost_stk Hpost_pred]").
-        { iExists ret_val, (symb_stk_to_stk_frm stk0' mp0). iFrame "Hpost_stk".
+          (trnsl_mask (msk ∪ proc_grants_mask proc_record)) stk_id
+          with "[Hpost_stk Hpost_pred]").
+        { iExists ret_val, (symb_stk_to_stk_frm stk0' mp_final). iFrame "Hpost_stk".
           iSplitR.
-          - iPureIntro. simpl. rewrite lookup_fmap Hrv_final. reflexivity.
+          - iPureIntro. simpl. rewrite lookup_fmap Hret_lookup. reflexivity.
           - iAssert (trnsl_assertion
                 (subst (proc_postcond_of proc_record)
                    (<["#ret_val" := LVar lv_final]> (list_to_map (zip args (map LVar args_lvs)))))
-                stk_id mp0 ∗
+                stk_id mp_final ∗
               ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I
               with "[Hpost_pred]" as "Hpost_pred2".
             { iSplitL "Hpost_pred".
-              - iEval (rewrite trnsl_assertion_unfold). iExact "Hpost_pred".
+              - iExact "Hpost_pred".
               - iPureIntro. unfold ret_val.
-                rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final) (mp0 lv_final) mp0 Henv0 eq_refl eq_refl).
-                exact Hlv_final_typ. }
-            iEval (rewrite Hpostcond_bridge) in "Hpost_pred2". iFrame. }
+                rewrite (interp_lexpr_typ_compat σ (LVar lv_final) (σ lv_final)
+                  (mp_final lv_final) mp_final Henv_final eq_refl eq_refl).
+                exact Hret_decl. }
+            iEval (rewrite Hpostcond_bridge_final) in "Hpost_pred2". iFrame. }
         iNext. iIntros "[Hpost _]".
         iApply "HΦ'". iFrame "Hpost".
     Qed.
@@ -2374,7 +2501,7 @@ Section MainSoundness.
    accept.
 
    Scoped to a single RA and a single invariant, parametric over which ones
-   -- not generic over an arbitrary finite ra_set/inv_set, which would need
+   -- not generic over an arbitrary finite RA vocabulary/inv_set, which would need
    a fold/induction over finite sets no caller in this project needs
    (counter_monotonic.v uses exactly one RA, h_ra, and one invariant,
    "counterInv"). Establishing Winv/Wghost "from nothing" (at the empty
@@ -2451,3 +2578,102 @@ Section AdequacyWrapper.
   Qed.
 
 End AdequacyWrapper.
+
+(* Full initialization wrapper.  Unlike [raven_soundness], this theorem
+   starts from the pre-S camera capabilities, chooses all names used by the
+   simplified-language state interpretation, and keeps the authoritative
+   resources together as [state_interp initial_state]. *)
+Section InitializedAdequacyWrapper.
+  Context {Σ : gFunctors} `{!invGS Σ} `{!heapGpreS Σ}.
+  Context `{!invTokenGpreS Σ}.
+  Context {I : Type} (Gs : I → cmra) `{!inGs Σ Gs}.
+  Context `{!inG Σ (authR (gmap.gmapUR heap_addr (agreeR gnameO)))}.
+
+  Definition initialized_heapG
+      (γh γs γp γd : gname) : heapG Σ := {|
+    heap_heap_inG := heapGpreS_heap_inG;
+    heap_heap_name := γh;
+    heap_stack_inG := heapGpreS_stack_inG;
+    heap_stack_name := γs;
+    heap_proctbl_inG := heapGpreS_proctbl_inG;
+    heap_proctbl_name := γp;
+    heap_ghostdom_inG := heapGpreS_ghostdom_inG;
+    heap_ghostdom_name := γd;
+  |}.
+
+  Definition initialized_simpLangG
+      (γh γs γp γd : gname) : simpLangG Σ :=
+    SimpLangG Σ invGS0 (initialized_heapG γh γs γp γd).
+
+  Lemma proc_table_fragments_persist `{!ghost_mapG Σ proc_name lang.proc}
+      (γp : gname) (m : gmap proc_name lang.proc) :
+    ([∗ map] p ↦ body ∈ m, p ↪[γp] body) ==∗
+    ([∗ map] p ↦ body ∈ m, p ↪[γp]□ body).
+  Proof.
+    iIntros "Hfrags". iApply big_sepM_bupd.
+    iApply (big_sepM_impl with "Hfrags").
+    iIntros "!#" (p body) "_". iApply ghost_map_elem_persist.
+  Qed.
+
+  Theorem raven_soundness_initialized
+      (RProg : Program) (r0 : ra_name) (w0 : Γ_witness Gs r0)
+      (iname0 : inv_name) (Hinv_set : prog_inv_set RProg = {[iname0]})
+      (ghost_heap_ns inv_ns : namespace) (Hns_disj : ghost_heap_ns ## inv_ns)
+      (sigma : lvar_typs)
+      (Hwf : ∀ γg γi,
+        ProgramWF (P:=RProg)
+          (G:=mkGhostConfig ghost_heap_ns inv_ns γg)
+          (invTokenG0:=mkInvTokenG γi))
+      (Hsigma_rich : ∀ (t : typ) (excl : gset lvar),
+        ∃ lv, lv ∉ excl ∧ ¬ is_reserved lv ∧ sigma lv = t)
+      (Hpbt : proc_bodies_translate (P:=RProg))
+      (Hbodies : all_proc_specs_valid_raven (RProg:=RProg) sigma)
+      (initial_state : lang.state)
+      (Hprocs : initial_state.(lang.procs) =
+        trnsl.translated_proc_map (RProg:=RProg))
+      (Hstate_wf : ghost_state.state_wf initial_state) :
+    ⊢ |={⊤}=> ∃ γh γs γp γd γg γi,
+      let hG := initialized_heapG γh γs γp γd in
+      let sG := initialized_simpLangG γh γs γp γd in
+      @ghost_state.state_interp Σ hG initial_state ∗
+      @all_proc_specs_valid_iris I Gs Σ inGs0 inG0 sG RProg
+        (mkGhostConfig ghost_heap_ns inv_ns γg) (Γ0 Gs r0 w0)
+        (mkInvTokenG γi) sigma.
+  Proof.
+    iMod (own_alloc (● ghost_state.to_heapUR initial_state.(lang.global_heap)))
+      as (γh) "Hheap".
+    { apply auth_auth_valid. intros a. rewrite /ghost_state.to_heapUR lookup_fmap.
+      destruct (initial_state.(lang.global_heap) !! a) eqn:Ha;
+        rewrite Ha; simpl.
+      - rewrite Some_valid pair_valid. split; [apply frac_valid_1 | done].
+      - change True. exact Logic.I. }
+    iMod (own_alloc (● ghost_state.to_stackR initial_state.(lang.stack)))
+      as (γs) "Hstack".
+    { apply auth_auth_valid. intros sid. rewrite /ghost_state.to_stackR lookup_fmap.
+      destruct (initial_state.(lang.stack) !! sid); simpl.
+      - rewrite Some_valid. change True. exact Logic.I.
+      - change True. exact Logic.I. }
+    iMod (ghost_map_alloc (trnsl.translated_proc_map (RProg:=RProg)))
+      as (γp) "[Hprocs_auth Hprocs_frag]".
+    iMod (own_alloc (● (∅ : ghost_state.ghost_domUR)))
+      as (γd) "Hdom"; first by apply auth_auth_valid.
+    iMod (proc_table_fragments_persist with "Hprocs_frag") as "#Hprocs_frag".
+    set (hG := initialized_heapG γh γs γp γd).
+    set (sG := initialized_simpLangG γh γs γp γd).
+    iMod (@raven_soundness Σ I Gs inGs0 inG0 sG invTokenGpreS0
+      RProg r0 w0 iname0 Hinv_set ghost_heap_ns inv_ns Hns_disj sigma
+      Hwf Hsigma_rich Hpbt Hbodies with "[Hprocs_frag]") as (γg γi) "Hspecs".
+    { rewrite /all_proc_tbl_chunks /proc_tbl_chunk. iExact "Hprocs_frag". }
+    iModIntro. iExists γh, γs, γp, γd, γg, γi. simpl.
+    iFrame "Hspecs". rewrite /ghost_state.state_interp.
+    rewrite /ghost_state.heap_interp /ghost_state.proc_tbl_interp
+      /ghost_state.stack_interp /ghost_state.ghost_dom_interp.
+    rewrite Hprocs. iFrame. iSplit.
+    - iExists ∅. rewrite gset_to_gmap_empty. iFrame.
+      iPureIntro. intros a Ha. exfalso. exact (not_elem_of_empty a Ha).
+    - iPureIntro. exact Hstate_wf.
+  Qed.
+
+End InitializedAdequacyWrapper.
+
+End Make.

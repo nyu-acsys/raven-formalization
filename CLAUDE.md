@@ -1,6 +1,7 @@
 
 # General Guidelines
 - Only make Git commits when the user explicitly asks for one in that specific instance.
+- As appropriate, delegate simple, independent subtasks to subagents using the Terra or Luna models. Prefer Luna for routine mechanical work and Terra when the task benefits from somewhat deeper review or judgment.
 
 # Rocq/Iris Verification Rules
 

@@ -10,6 +10,11 @@ Import weakestpre.
 
 From stdpp Require Import countable.
 
+Module Make (RAs : RA_CONFIG).
+Module ghost_state := raven_iris.simp_raven_lang.ghost_state.Make RAs.
+Module lang := ghost_state.lang.
+Import lang ghost_state.
+
 Class simpLangG Σ := SimpLangG {
   simpLangG_invG : invGS Σ;
   simpLangG_gen_heapG :: heapG Σ
@@ -425,7 +430,7 @@ Section lifting.
          
         have Hstk' : stack σ' !! stk_id = Some stk_frm.
         { unfold σ'. simpl. exact HstkPure. }
-        change (state_interp (update_lvar σ' x stk_id (LitBool true)) (S ns) κs nt) with
+        change (weakestpre.state_interp (update_lvar σ' x stk_id (LitBool true)) (S ns) κs nt) with
           (ghost_state.state_interp (update_lvar σ' x stk_id (LitBool true))).
         unfold ghost_state.state_interp.
         replace (global_heap (update_lvar σ' x stk_id (LitBool true))) with (global_heap σ') by
@@ -491,7 +496,7 @@ Section lifting.
 
         iDestruct "Hstk_upd" as ">[Hstk Hstack]".
         iModIntro. iSplitR; try done.
-        change (state_interp σ' (S ns) κs nt) with
+        change (weakestpre.state_interp σ' (S ns) κs nt) with
           (ghost_state.state_interp σ').
         unfold ghost_state.state_interp.
         replace (global_heap σ') with (global_heap σ) by
@@ -523,8 +528,9 @@ Section lifting.
     
     iSpecialize ("Hhoare" $! Φ with "[Hstk Hp] HΦ"); iFrame.
       iPoseProof (wp_unfold with "Hhoare") as "Hhoare".
-      unfold wp_pre.
-      rewrite Hs1_val.
+      iEval (unfold wp_pre) in "Hhoare".
+      change (language.to_val s1 = None) in Hs1_val.
+      iEval (rewrite Hs1_val) in "Hhoare".
       iAssert (∃ D0, ghost_dom_interp D0 ∗
                 ⌜∀ a, a ∈ D0 → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z⌝)%I
         with "[Hgdom]" as "Hgdom_bundle".
@@ -634,8 +640,9 @@ Section lifting.
     
     iSpecialize ("Hhoare" $! Φ with "[Hstk Hp] HΦ"); iFrame.
       iPoseProof (wp_unfold with "Hhoare") as "Hhoare".
-      unfold wp_pre.
-      rewrite Hs2_val.
+      iEval (unfold wp_pre) in "Hhoare".
+      change (language.to_val s2 = None) in Hs2_val.
+      iEval (rewrite Hs2_val) in "Hhoare".
       iAssert (∃ D0, ghost_dom_interp D0 ∗
                 ⌜∀ a, a ∈ D0 → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z⌝)%I
         with "[Hgdom]" as "Hgdom_bundle".
@@ -946,7 +953,7 @@ Section lifting.
       apply (ActiveCallStep σ1 stk_id' stk_id x LitUnit stk_frm'' ret_val); try done.
 
       * iNext. iIntros (e2 σ2 efs H') "Hcred'".
-       inversion H'; subst var callee_stk_id caller_stk_id σ0 κ e2 σ2 efs.
+       inversion H'; subst callee_stk_id caller_stk_id σ0 κ e2 σ2 efs.
        assert (callee_stack = stk_frm'') as Hcallee.
        { rewrite HstkPure3 in H11. injection H11. done. }
        subst callee_stack.
@@ -954,7 +961,7 @@ Section lifting.
        { rewrite Hret in H15. injection H15. done. }
        subst ret_val0.
        iModIntro. iSplitR; try done.
-       change (state_interp σ' (S ns0) κs0 nt0) with (ghost_state.state_interp σ').
+       change (weakestpre.state_interp σ' (S ns0) κs0 nt0) with (ghost_state.state_interp σ').
        unfold ghost_state.state_interp.
        replace (global_heap σ') with (global_heap σ1) by
          (unfold σ', update_lvar; rewrite HstkPure2; done).
@@ -968,4 +975,4 @@ Section lifting.
 
 End lifting.
 
-
+End Make.

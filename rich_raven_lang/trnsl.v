@@ -5,6 +5,7 @@ From stdpp Require Import gmap list sets.
 
 From iris Require Import options.
 From iris.algebra Require Import ofe cmra agree auth gset gmap.
+From iris.algebra.lib Require Import excl_auth.
 From iris.bi Require Import derived_laws.
 From iris.bi.lib Require Import fixpoint_mono.
 From iris.base_logic Require Import upred.
@@ -19,6 +20,16 @@ From iris.program_logic Require Import ectx_lifting.
 From raven_iris.simp_raven_lang Require Import lang lifting ghost_state.
 From raven_iris.rich_raven_lang Require Import rrl_lang.
 Require Import Coq.Logic.FunctionalExtensionality.
+
+Module Make (RAs : RA_CONFIG).
+Module rrl_lang := raven_iris.rich_raven_lang.rrl_lang.Make RAs.
+Module lifting := rrl_lang.lifting.
+Module ghost_state := rrl_lang.ghost_state.
+Module lang := rrl_lang.lang.
+Import lang ghost_state lifting rrl_lang.
+Local Notation comp := ra_base.comp.
+Local Notation valid := ra_base.valid.
+Local Notation fpuValid := ra_base.fpuValid.
 
 (* "All", not "Type": with this many Let-bound cross-file names in one
    Section, "Type" mode's minimization guesses wrong far more often here
@@ -101,14 +112,13 @@ Qed.
     intros. unfold transport in *. destruct Heq_car. simpl in *. done.
   Qed.
 
-  (* Γ is scoped to ra_set, not universally quantified over *every*
-     RA_Pack: every actual call site only ever applies it as Γ (ra_map r)
+  (* Γ is partial, not universally populated over *every* RA_Pack: every
+     actual call site only ever applies it as Γ (ra_map r)
      for some r : ra_name -- and a concrete Γ witness genuinely cannot be total
      over arbitrary RA_Pack (infinitely many possible carrier types, so
      no finite Sigma could provide a matching camera slot for every one).
-     option-valued (not a r ∈ ra_set proof obligation threaded through
-     every call site): a concrete Γ only needs to answer for the
-     program's own, finite ra_set; every other r maps to None, mirroring
+     A concrete Γ only needs to answer for the program's own finite RA
+     vocabulary; every other r maps to None, mirroring
      inv_map/pred_map's own partial-lookup shape (trnsl_assertion_str's
      LGhostOwn case below matches on this the same way LInv/LPred already
      match on inv_map/pred_map !! _). *)
@@ -274,7 +284,7 @@ Qed.
        in the original ghost_map design, so FPURule's frame-preserving
        update never has to touch the map at all. *)
     | LGhostOwn l_expr fld RAPack chunk_expr =>
-      (* RAPack not in ra_set (Γ RAPack = Γ_absent) is vacuously True,
+      (* An unregistered RAPack (Γ RAPack = Γ_absent) is vacuously True,
          mirroring LInv/LPred's own "name not declared" case below --
          never actually reached for a well-formed program's own LGhostOwn
          nodes, only needed for trnsl_assertion_str's own totality. *)
@@ -450,6 +460,67 @@ Lemma trnsl_assertion_exists v t body stk mp :
 Proof.
   rewrite (trnsl_assertion_unfold (LExists v t body)) /trnsl_assertion_pre /=.
   apply bi.exist_proper. intros v'. apply bi.sep_proper; [done|]. symmetry. apply trnsl_assertion_unfold.
+Qed.
+
+(* The concrete environment induced by the finite package of symbolic
+   witnesses in [lvar_exists_list].  Updates are applied from the outermost
+   binder to the innermost one, exactly as repeated uses of
+   [trnsl_assertion_exists] do. *)
+Fixpoint symb_map_updates (xs : list (lvar * typ)) (vs : list val) (mp : symb_map) : symb_map :=
+  match xs, vs with
+  | (lv, _) :: xs, v :: vs =>
+      symb_map_updates xs vs (λ x, if String.eqb x lv then v else mp x)
+  | _, _ => mp
+  end.
+
+Lemma trnsl_assertion_exists_list (xs : list (lvar * typ)) (body : assertion) stk mp :
+  trnsl_assertion (lvar_exists_list xs body) stk mp ⊣⊢
+  (∃ vs : list val,
+     ⌜Forall2 (λ xt v, typ_val_match xt.2 v) xs vs⌝ ∗
+     trnsl_assertion body stk (symb_map_updates xs vs mp)).
+Proof.
+  revert mp. induction xs as [| [lv t] xs IH]; intros mp.
+  - simpl. apply bi.equiv_entails; split.
+    + iIntros "H". iExists []. iSplitR; [done|]. iExact "H".
+    + iIntros "H". iDestruct "H" as (vs) "[%Hvs H]".
+      inversion Hvs. iExact "H".
+  - simpl. rewrite trnsl_assertion_exists.
+    apply bi.equiv_entails; split.
+    + iIntros "H". iDestruct "H" as (v) "[%Hv H]".
+      iEval (rewrite (IH (fun x => if String.eqb x lv then v else mp x))) in "H".
+      iDestruct "H" as (vs) "[%Hvs H]".
+      iExists (v :: vs). iSplitR.
+      { iPureIntro. constructor; done. }
+      iExact "H".
+    + iIntros "H". iDestruct "H" as (vs) "[%Hvs H]".
+      destruct vs as [| v vs]; inversion Hvs as [| ? ? ? ? Hv Hvs']; subst.
+      iExists v. iSplitR; [done|].
+      iEval (rewrite (IH (fun x => if String.eqb x lv then v else mp x))).
+      iExists vs. iSplitR; [done|]. iExact "H".
+Qed.
+
+Lemma trnsl_assertion_exists_list_pre (xs : list (lvar * typ)) (body : assertion) stk mp :
+  trnsl_assertion_pre trnsl_assertion (lvar_exists_list xs body) stk mp ⊣⊢
+  (∃ vs : list val,
+     ⌜Forall2 (λ xt v, typ_val_match xt.2 v) xs vs⌝ ∗
+     trnsl_assertion body stk (symb_map_updates xs vs mp)).
+Proof.
+  rewrite <- trnsl_assertion_unfold. apply trnsl_assertion_exists_list.
+Qed.
+
+Lemma symb_map_updates_preserve (xs : list (lvar * typ)) (vs : list val)
+    (mp : symb_map) (x : lvar) :
+  Forall (λ xt, xt.1 ≠ x) xs →
+  symb_map_updates xs vs mp x = mp x.
+Proof.
+  revert vs mp. induction xs as [| [lv t] xs IH]; intros vs mp Hfresh; simpl in *.
+  - destruct vs; reflexivity.
+  - inversion Hfresh as [| [lv' t'] xs' Hlv Hfresh']; subst lv' xs'.
+    destruct vs as [| v vs]; [reflexivity|].
+    rewrite IH; [| exact Hfresh']. destruct (String.eqb_spec x lv) as [Heq | Hne].
+    + subst x. exfalso. apply Hlv. reflexivity.
+    + destruct (String.eqb x lv) eqn:Heqb; [| reflexivity].
+      apply String.eqb_eq in Heqb. contradiction.
 Qed.
 
 Lemma trnsl_assertion_ite cnd then_ else_ stk mp :
@@ -1183,14 +1254,14 @@ Section AssertionsProperties.
       apply bi.sep_mono.
       { apply bi.pure_mono. unfold LExpr_holds.
         have Hfv_dom : ∀ v, v ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) → v ∈ dom M1 ∨ is_reserved v.
-        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld chunk))); [simpl; set_solver | exact HfvA]. }
+        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld0 chunk))); [simpl; set_solver | exact HfvA]. }
         have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
           (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
         simpl in Hcongr |- *. rewrite Hcongr. tauto. }
       apply bi.sep_mono; [| done].
       apply bi.pure_mono. intro Hchunk.
       have Hfv_dom2 : ∀ v, v ∈ lexpr_fvars chunk → v ∈ dom M1 ∨ is_reserved v.
-      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld chunk))); [simpl; set_solver | exact HfvA]. }
+      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LOwn e fld0 chunk))); [simpl; set_solver | exact HfvA]. }
       have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
         chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
       rewrite <- Hcongr2. exact Hchunk.
@@ -1203,14 +1274,14 @@ Section AssertionsProperties.
       apply bi.sep_mono.
       { apply bi.pure_mono. unfold LExpr_holds.
         have Hfv_dom : ∀ v, v ∈ lexpr_fvars (LBinOp EqOp e (LVal (LitLoc l))) → v ∈ dom M1 ∨ is_reserved v.
-        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld r chunk))); [simpl; set_solver | exact HfvA]. }
+        { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld0 r chunk))); [simpl; set_solver | exact HfvA]. }
         have Hcongr := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
           (LBinOp EqOp e (LVal (LitLoc l))) M1 M2 mp1 mp2 Hfv_dom Hbase.
         simpl in Hcongr |- *. rewrite Hcongr. tauto. }
       apply bi.sep_mono; [| done].
       apply bi.pure_mono. intro Hchunk.
       have Hfv_dom2 : ∀ v, v ∈ lexpr_fvars chunk → v ∈ dom M1 ∨ is_reserved v.
-      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld r chunk))); [simpl; set_solver | exact HfvA]. }
+      { apply (fvars_bound_mono _ (assertion_lexpr_fvars (LGhostOwn e fld0 r chunk))); [simpl; set_solver | exact HfvA]. }
       have Hcongr2 := interp_lexpr_lexpr_subst_eval_lvar_congr_dom
         chunk M1 M2 mp1 mp2 Hfv_dom2 Hbase.
       rewrite <- Hcongr2. exact Hchunk.
@@ -1287,7 +1358,7 @@ Section AssertionsProperties.
           -- set_solver.
           -- apply (fvars_bound_mono _ (assertion_lexpr_fvars (LIte cond a0_1 a0_2))); [simpl; set_solver | exact HfvA].
     - (* LInv: a leaf -- only the argument evaluations must be transferred *)
-      simpl. destruct (inv_map !! inv_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       apply bi.exist_mono. intro vs. apply bi.sep_mono; [| done].
       apply bi.pure_mono. apply Forall2_interp_subst_congr.
       intros le Hle.
@@ -1300,19 +1371,19 @@ Section AssertionsProperties.
          pwf_pred_binders_reserved (not HbA1/HbA2, which are about a0's
          own, unrelated, empty binder set) combined with Hmr1/Hmr2 to
          re-derive HbA1/HbA2- and HfvA-shaped facts for it. *)
-      simpl. destruct (pred_map !! pred_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (pred_map !! pred_name0) as [r|] eqn:Hr; [| done].
       have Hbr1 : assertion_exists_binders r.(pred_body) ## (dom M1 ∪ lexpr_map_fvars M1).
       { apply reserved_disjoint_dom.
-        - exact (Hwf.(pwf_pred_binders_reserved) pred_name r Hr).
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
         - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
             [exact (proj1 Hmr1 v Hv) | exact (proj2 Hmr1 v Hv)]. }
       have Hbr2 : assertion_exists_binders r.(pred_body) ## (dom M2 ∪ lexpr_map_fvars M2).
       { apply reserved_disjoint_dom.
-        - exact (Hwf.(pwf_pred_binders_reserved) pred_name r Hr).
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
         - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
             [exact (proj1 Hmr2 v Hv) | exact (proj2 Hmr2 v Hv)]. }
       have HPredBodyWF := pred_body_wf_from_scoped r
-        (Hwf.(pwf_pred_fvars_scoped) pred_name r Hr).
+        (Hwf.(pwf_pred_fvars_scoped) pred_name0 r Hr).
       inversion Hsf. rewrite Hr in H1. inversion H1. subst pred_record.
       rewrite (HPredBodyWF args M1 H2 ltac:(set_solver));
         rewrite (HPredBodyWF args M2 H2 ltac:(set_solver)).
@@ -1324,9 +1395,9 @@ Section AssertionsProperties.
       + rewrite assertion_exists_binders_subst. exact Hbr1.
       + rewrite assertion_exists_binders_subst. exact Hbr2.
       + intros v Hv.
-        destruct (Hwf.(pwf_pred_fvars_bounded) pred_name r args Hr H2 v Hv) as [Hin | Hin].
+        destruct (Hwf.(pwf_pred_fvars_bounded) pred_name0 r args Hr H2 v Hv) as [Hin | Hin].
         * exact (HfvA v Hin).
-        * right. exact (Hwf.(pwf_pred_binders_reserved) pred_name r Hr v Hin).
+        * right. exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr v Hin).
     - (* LAnd *)
       inversion Hsf. subst.
       apply bi.sep_mono.
@@ -1543,7 +1614,7 @@ Section AssertionsProperties.
           -- set_solver.
           -- intros x Hx. apply Hbase. simpl. set_solver.
     - (* LInv: a leaf -- only the argument evaluations must be transferred *)
-      simpl. destruct (inv_map !! inv_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       apply bi.exist_mono. intro vs. apply bi.sep_mono; [| done].
       apply bi.pure_mono. apply (Forall2_interp_subst_congr args vs M M mp1 mp2).
       intros le Hle.
@@ -1557,14 +1628,14 @@ Section AssertionsProperties.
          (pwf_pred_fvars_closed), so once substituted by the call's own args
          they land inside assertion_true_fvars (LPred pred_name args) --
          exactly Hbase's domain, no reserved leftover. *)
-      simpl. destruct (pred_map !! pred_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (pred_map !! pred_name0) as [r|] eqn:Hr; [| done].
       have Hbr : assertion_exists_binders r.(pred_body) ## (dom M ∪ lexpr_map_fvars M).
       { apply reserved_disjoint_dom.
-        - exact (Hwf.(pwf_pred_binders_reserved) pred_name r Hr).
+        - exact (Hwf.(pwf_pred_binders_reserved) pred_name0 r Hr).
         - intros v Hv. apply elem_of_union in Hv as [Hv|Hv];
             [exact (proj1 Hmr v Hv) | exact (proj2 Hmr v Hv)]. }
       have HPredBodyWF := pred_body_wf_from_scoped r
-        (Hwf.(pwf_pred_fvars_scoped) pred_name r Hr).
+        (Hwf.(pwf_pred_fvars_scoped) pred_name0 r Hr).
       inversion Hsf. rewrite Hr in H1. inversion H1. subst pred_record.
       rewrite (HPredBodyWF args M H2 ltac:(set_solver)).
       rewrite /trnsl_assertion_curry.
@@ -1575,7 +1646,7 @@ Section AssertionsProperties.
       + assumption.
       + rewrite assertion_exists_binders_subst. exact Hbr.
       + exact Hmr.
-      + have Hclosed := Hwf.(pwf_pred_fvars_closed) pred_name r Hr.
+      + have Hclosed := Hwf.(pwf_pred_fvars_closed) pred_name0 r Hr.
         have Hdom : assertion_true_fvars r.(pred_body) ⊆
           dom (list_to_map (zip r.(pred_args) args) : gmap lvar LExpr).
         { rewrite (dom_list_to_map_zip r.(pred_args) args (eq_sym H2)). exact Hclosed. }
@@ -1924,10 +1995,10 @@ Section AssertionsProperties.
         etrans; [| apply bi.equiv_entails_1_1, (trnsl_assertion_unfold a2 stk' mp)].
         by apply (IHa2 stk stk' mp).
     - (* LInv: a leaf, independent of the stack *)
-      simpl. destruct (inv_map !! inv_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (inv_map !! inv_name0) as [r|] eqn:Hr; [| done].
       iIntros "H". iExact "H".
     - (* LPred: the fixpoint induction hypothesis fires here *)
-      simpl. destruct (pred_map !! pred_name) as [r|] eqn:Hr; [| done].
+      simpl. destruct (pred_map !! pred_name0) as [r|] eqn:Hr; [| done].
       inversion Hsf. rewrite Hr in H1. inversion H1. subst pred_record.
       rewrite /trnsl_assertion_curry.
       iIntros "H". by iApply ("H" $! stk').
@@ -2040,10 +2111,10 @@ Section AssertionsProperties.
     - (* LAnd *)
       rewrite trnsl_assertion_and. apply bi.sep_timeless; [apply IHHsf1 | apply IHHsf2].
     - (* LInv: a discrete ownership fragment *)
-      have Hv := trnsl_inv_validity' inv_name args stk mp.
+      have Hv := trnsl_inv_validity' inv_name0 args stk mp.
       rewrite H in Hv. rewrite Hv. apply _.
     - (* LPred *)
-      have Hv := trnsl_pred_validity' pred_name args stk mp.
+      have Hv := trnsl_pred_validity' pred_name0 args stk mp.
       rewrite H in Hv. simpl in Hv. rewrite <- Hv. apply IHHsf.
   Qed.
 
@@ -2068,9 +2139,9 @@ Section InvariantWorld.
     end.
 
   Definition Winv (inv' : inv_name) : iProp Σ :=
-    (∃ I : gset (list val),
-       own (invtoken_names inv') (● (I : inv_argsUR)) ∗
-       [∗ set] vs ∈ I, inv_body_at inv' vs)%I.
+    (∃ Iset : gset (list val),
+       own (invtoken_names inv') (● (Iset : inv_argsUR)) ∗
+       [∗ set] vs ∈ Iset, inv_body_at inv' vs)%I.
 
   Lemma inv_body_at_timeless (Hwf : ProgramWF) inv' vs : Timeless (inv_body_at inv' vs).
   Proof.
@@ -2086,7 +2157,7 @@ Section InvariantWorld.
 
   Lemma Winv_timeless (Hwf : ProgramWF) inv' : Timeless (Winv inv').
   Proof.
-    rewrite /Winv. apply bi.exist_timeless. intro Iopen.
+    rewrite /Winv. apply bi.exist_timeless. intro Iset.
     apply bi.sep_timeless; [apply _ |].
     apply big_sepS_timeless. intros vs _. by apply inv_body_at_timeless.
   Qed.
@@ -2261,8 +2332,9 @@ Section InvariantWorld.
     apply gset_included in Hincl. iPureIntro. set_solver.
   Qed.
 
-  (* Opening an invariant: no later, no later credit.  The whole point of the
-     nominal encoding is that this is available in plain Iris. *)
+  (* Opening an invariant: no later and no later credit.  The namespace is
+     removed from the ambient mask while the body is checked out, exactly as
+     required by [wp_atomic] for the physical branch. *)
   Lemma Winv_open (Hwf : ProgramWF) (E : coPset) (inv' : inv_name)
       (r : InvRecord) (vs : list val) :
     inv_map !! inv' = Some r →
@@ -2429,12 +2501,8 @@ Qed.
     Definition inv_set_to_namespace (s : gset inv_name) : coPset :=
       set_fold (λ inv acc, acc ∪ ↑(inv_namespace_map inv)) ∅ s.
 
-    (* The mask every trnsl_hoare_triple WP goal actually runs at: the
-       user-declared Raven invariants named by msk, plus the ghost heap's
-       own namespace, always -- Wghost is a built-in, like state_interp,
-       not something a Raven program's own mask annotation gates (no rule
-       ever puts ghost_heap_namespace into an inv_set/mask, since it isn't
-       a user-declared invariant at all). *)
+    (* Raven invariant namespaces are selected by the syntactic mask.  The
+       ghost heap remains available independently of Raven annotations. *)
     Definition trnsl_mask (msk : maskAnnot) : coPset :=
       inv_set_to_namespace msk ∪ ↑ghost_heap_namespace.
 
@@ -2458,6 +2526,29 @@ Qed.
       destruct (decide (x = invr)) as [->|Hneq].
       + set_solver.
       + set_solver.
+    Qed.
+
+    Lemma inv_set_to_namespace_mono mask1 mask2 :
+      mask1 ⊆ mask2 -> inv_set_to_namespace mask1 ⊆ inv_set_to_namespace mask2.
+    Proof.
+      intros Hsub.
+      unfold inv_set_to_namespace at 1.
+      apply (set_fold_ind (λ acc s, s ⊆ mask2 → acc ⊆ inv_set_to_namespace mask2)).
+      - solve_proper.
+      - set_solver.
+      - intros inv s acc Hfresh IH Hs.
+        apply union_subseteq. apply conj.
+        + apply IH. set_solver.
+        + apply inv_map_subseteq. apply Hs. set_solver.
+      - exact Hsub.
+    Qed.
+
+    Lemma trnsl_mask_mono mask1 mask2 :
+      mask1 ⊆ mask2 -> trnsl_mask mask1 ⊆ trnsl_mask mask2.
+    Proof.
+      intros Hsub. rewrite /trnsl_mask.
+      pose proof (inv_set_to_namespace_mono mask1 mask2 Hsub).
+      set_solver.
     Qed.
 
     (* [mask ⊆ inv_set] is genuinely needed: an invariant name outside [inv_set]
@@ -2805,14 +2896,14 @@ Qed.
         injection Htrnsl as <-. simpl. inversion Hstep.
     Qed.
 
-    Definition trnsl_hoare_triple (stk_id: stack_id) (p : assertion) (msk : maskAnnot) (cmd : stmt) (q : assertion) (mp : symb_map) : iProp Σ :=
+    Definition trnsl_hoare_triple (stk_id: stack_id) (p : assertion) (E : coPset) (cmd : stmt) (q : assertion) (mp : symb_map) : iProp Σ :=
         match (trnsl_stmt cmd) with
         | Error => True
         | None' =>
           match (trnsl_assertion p stk_id mp),
                 (trnsl_assertion q stk_id mp) with
           | p', q' =>
-            p' ={trnsl_mask msk}=∗ q'
+            p' ={E}=∗ q'
           end
 
         | Some' s =>
@@ -2820,7 +2911,7 @@ Qed.
                 (trnsl_assertion q stk_id mp) with
           | p', q' =>
             {{{ p' }}}
-              to_rtstmt stk_id s @ (trnsl_mask msk)
+              to_rtstmt stk_id s @ E
             {{{ RET lang.LitUnit; q'}}}
           end
         end
@@ -2853,14 +2944,17 @@ Qed.
        state was set up, never allocated by any rule -- see
        ProcCallRuleRet's soundness case, the only consumer), so it's an
        explicit premise of raven_soundness instead. *)
+    Definition translated_proc_map : gmap proc_name lang.proc :=
+      map_imap (λ proc_name proc_record, Some (
+        lang.Proc proc_name (proc_args_of proc_record) (proc_locals_of proc_record)
+          match trnsl_stmt (proc_body_of proc_record) with
+          | Some' s => s
+          | _ => lang.SkipS
+          end)) proc_map.
+
     Definition all_proc_tbl_chunks : iProp Σ :=
-      ([∗ map] proc_name ↦ proc_record ∈ proc_map,
-        proc_tbl_chunk proc_name
-          (lang.Proc proc_name (proc_args_of proc_record) (proc_locals_of proc_record)
-             match trnsl_stmt (proc_body_of proc_record) with
-             | Some' s => s
-             | _ => lang.SkipS
-             end))%I.
+      ([∗ map] proc_name ↦ proc ∈ translated_proc_map,
+        proc_tbl_chunk proc_name proc)%I.
 
     Lemma all_proc_tbl_chunks_elem (proc_name : proc_name) (proc_record : ProcRecord) :
       proc_map !! proc_name = Some proc_record ->
@@ -2872,8 +2966,9 @@ Qed.
            | _ => lang.SkipS
            end).
     Proof.
-      intros Hin. rewrite /all_proc_tbl_chunks.
-      iIntros "H". by iApply (big_sepM_lookup with "H").
+      intros Hin. rewrite /all_proc_tbl_chunks /translated_proc_map.
+      iIntros "H". iApply (big_sepM_lookup with "H").
+      by rewrite map_lookup_imap Hin.
     Qed.
 
     Lemma fresh_var_trnsl_expr_invariant stk lv e lexpr mp v0:
@@ -3105,7 +3200,8 @@ Qed.
                    ⌜proc_ret_typ_opt proc_record = Some (typeOf ret_val)⌝)%I ≡ postcond ret_val⌝ -∗
 
       ⌜(trnsl_stmt (proc_body_of proc_record) = Some' stmt) \/ (trnsl_stmt (proc_body_of proc_record) = None' /\ stmt = lang.SkipS)⌝ -∗
-      {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt) @ (trnsl_mask msk)
+      {{{ stack_own[stk_id, stk_frm] ∗ precond }}} (to_rtstmt stk_id stmt)
+          @ (trnsl_mask (msk ∪ proc_grants_mask proc_record))
         {{{ RET lang.LitUnit; ∃ ret_val stk_frm'', stack_own[stk_id, stk_frm''] ∗
               ⌜ (locals stk_frm'' !! "#ret_val") = Some ret_val ⌝ ∗
               postcond ret_val }}}.
@@ -3132,20 +3228,36 @@ Qed.
         stmt_well_defined ρ (proc_body_of proc_record) ∧
         ∀ msk, proc_required_mask proc_record ⊆ msk → msk ⊆ inv_set →
         ∀ (dll : proc_entry_lvars σ proc_record),
-          ∃ stk0' lv_final,
-            stk0' !! "#ret_val" = Some lv_final ∧
-            ¬ is_reserved lv_final ∧
-            proc_ret_typ_opt proc_record = Some (σ lv_final) ∧
+          ∃ stk_final lv_ret xs msk_post,
+            stk_final !! "#ret_val" = Some lv_ret ∧
+            ¬ is_reserved lv_ret ∧
+            lv_ret ∈ xs.*1 ∧
+            proc_ret_typ_opt proc_record = Some (σ lv_ret) ∧
+            msk_post ⊆ inv_set ∧
+            msk_post ⊆ msk ∪ proc_grants_mask proc_record ∧
+            (* [xs] lists the fresh symbolic names whose values remain live
+               in [stk_final].  They are bound around the entire final
+               assertion, so the translation can recover their concrete
+               values before reconstructing the return frame. *)
+            NoDup xs.*1 ∧
+            Forall (λ xt, σ xt.1 = xt.2 ∧ ¬ is_reserved xt.1) xs ∧
+            (* Bindings may reuse an untouched entry local (in particular an
+               unassigned [#ret_val]), but never an argument: the latter
+               remain fixed by the caller and occur free in the contract. *)
+            Forall (λ xt, xt.1 ∉ dll_args dll) xs ∧
+            (∀ x lv, stk_final !! x = Some lv →
+                lv ∈ dll_args dll ∨ lv ∈ xs.*1) ∧
             RavenHoareTriple ρ σ
               (LAnd (LStack (assoc_map (proc_args_of proc_record ++ proc_locals_of proc_record).*1
                                         (dll_args dll ++ dll_locals dll)))
                  (subst (proc_precond_of proc_record)
                     (lvar_subst_map (proc_args_of proc_record).*1 (dll_args dll))))
-              (proc_body_of proc_record) msk
-              (LAnd (LStack stk0')
-                 (subst (proc_postcond_of proc_record)
-                    (<["#ret_val" := LVar lv_final]>
-                       (lvar_subst_map (proc_args_of proc_record).*1 (dll_args dll))))).
+              (proc_body_of proc_record) msk msk_post
+              (lvar_exists_list xs
+                 (LAnd (LStack stk_final)
+                    (subst (proc_postcond_of proc_record)
+                       (<["#ret_val" := LVar lv_ret]>
+                          (lvar_subst_map (proc_args_of proc_record).*1 (dll_args dll)))))).
 
     (* Combines two separately-held translated assertions into one LAnd fact
        -- used by ExistsElimRule's soundness case to reassemble the pieces of
@@ -3338,3 +3450,5 @@ Qed.
     Qed.
 
   End MainTranslation.
+
+End Make.

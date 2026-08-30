@@ -2,11 +2,7 @@ From stdpp Require Export strings.
 From stdpp Require Import gmap list sets countable.
 Require Import Eqdep_dec.
 From iris.program_logic Require Export language ectx_language ectxi_language.
-
-(* Named here, ahead of bin_op/un_op, purely so RAOfIntOp below can be
-   parameterized by it; see ResourceAlgebra for what a name actually
-   resolves to (ra_map) and why RAs are named rather than embedded inline. *)
-Definition ra_name := string.
+From raven_iris.simp_raven_lang Require Export ra_base.
 
 Inductive bin_op : Set :=
 | AddOp | SubOp | MulOp | DivOp | ModOp
@@ -26,82 +22,14 @@ Inductive un_op : Set :=
    choice, made entirely by whoever registers that RA_Pack. *)
 | RAOfIntOp (r : ra_name).
 
-(* Resource algebras usable as RA-typed program values (see typ/val below).
-   Defined here, at the base of the language, rather than in the ghost/spec
-   layer: RA elements are ordinary values a real program variable can hold
-   and manipulate via RACompOp/RAFrameOp/RAValidOp/RAFpuValidOp, tracked by
-   the real stack frame like any other value -- not a separate ghost-only
-   bookkeeping structure. *)
-Class ResourceAlgebra (A: Type) := {
-  comp : A -> A -> A;
-  frame : A -> A -> A;
-  valid : A -> Prop;
-  valid_dec :: forall x : A, Decision (valid x);
-  fpuValid : A -> A -> Prop;
-  fpuValid_dec :: forall x y : A, Decision (fpuValid x y);
-  fpuAxiom : forall x y, fpuValid x y -> valid x /\ valid y /\ forall c, (valid (comp x c) -> valid (comp y c));
-  (* The identity/unit element, and its defining left-identity law -- matches
-     how Raven's own RA formalization presents an RA (id together with
-     comp), and gives canonical_val below a natural witness value. *)
-  ra_id : A;
-  ra_id_comp : forall x, comp ra_id x = x;
-  (* The remaining RA axioms, matching lib/library/resource_algebra.rav's
-     `interface ResourceAlgebra` one-for-one (idValid/compCommute/compAssoc/
-     compValid/frameId/compFrameInv/weak_frameCompInv). Not exercised by the
-     Iris camera embedding (Γ) itself, but relied on elsewhere in the ghost
-     layer's proof machinery -- any RA instance registered in ra_map must
-     satisfy them, same as in the tool. compId (right identity) isn't listed
-     separately: it's derivable from ra_id_comp plus comp_comm. *)
-  ra_id_valid : valid ra_id;
-  comp_comm : forall x y, comp x y = comp y x;
-  comp_assoc : forall x y z, comp (comp x y) z = comp x (comp y z);
-  comp_valid : forall x y, valid (comp x y) -> valid x /\ valid y;
-  frame_id : forall x, valid x -> frame x ra_id = x;
-  comp_frame_inv : forall x y, valid (frame x y) -> comp (frame x y) y = x;
-  weak_frame_comp_inv : forall x y, valid (comp x y) -> valid (frame (comp x y) y);
-  (* How this RA embeds an integer as one of its elements -- backs
-     RAOfIntOp. Total: an RA with no natural reading of some (or any)
-     integer as one of its elements (e.g. a token or exclusive-lock-state
-     RA) falls back to ra_id for those inputs, rather than getting stuck --
-     keeps RAOfIntOp on par with every other un_op (NotBoolOp/NegOp), whose
-     typing rule can promise it always evaluates a well-typed operand. *)
-  ra_of_int : Z -> A;
-}.
-
-Record RA_Pack := {
-  RA_carrier :> Type;
-  RA_carrier_eqdec :> EqDecision RA_carrier;
-  RA_carrier_countable :> Countable RA_carrier;
-  RA_inst :> ResourceAlgebra RA_carrier;
-}.
-
-(* RA_Pack's fields use plain Record coercion (:>), not Class instance
-   fields, so they aren't picked up by typeclass search automatically --
-   register them explicitly. *)
-Global Instance ra_carrier_eqdec_instance (r : RA_Pack) : EqDecision (RA_carrier r) :=
-  RA_carrier_eqdec r.
-Global Instance ra_carrier_countable_instance (r : RA_Pack) : Countable (RA_carrier r) :=
-  RA_carrier_countable r.
-Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) :=
-  RA_inst r.
-
 (* Every RA usable in an RA-typed expression is looked up by name out of a
    fixed, total registry -- mirrors fld_map/pred_map/inv_map in the ghost
    layer. Naming RAs (rather than embedding RA_Pack values inline in
    typ/val) is what makes equality of RA-typed values decidable: ra_name is
    just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
-(* ra_map/ra_set stay Global Parameter: making them Section-parametric
-   would entangle val/expr (RA elements are embedded in val via ra_elem),
-   and beyond that, tactics like `apply` and `lia` on the resulting
-   parameterized heap/val/etc. hit recurring, per-site instance-resolution
-   mismatches (Miller-pattern misfires on `apply`, non-identical but
-   convertible typeclass-instance atoms confusing `lia`) throughout
-   ghost_state.v/lifting.v/rrl_lang.v. Every other program-specific piece
-   (proc_map/inv_map/pred_map/namespaces/Sigma/Gs/I/Gamma) is a concrete
-   definition rather than an axiom; ra_map/ra_set are the deliberate
-   exception. *)
-Global Parameter ra_set : gset ra_name.
-Global Parameter ra_map : ra_name -> RA_Pack.
+Module Make (RAs : RA_CONFIG).
+
+Definition ra_map : ra_name -> RA_Pack := RAs.ra_map.
 
 (* A concrete element of some named RA, its name bundled alongside it --
    the payload of val's LitRAElem case below. *)
@@ -956,7 +884,7 @@ Proof.
 Qed.
 
 Lemma atomic_fld_wr v fld e stk_id : 
-  Atomic WeaklyAtomic (to_rtstmt stk_id (lang.FldWr v fld e)).
+  Atomic WeaklyAtomic (to_rtstmt stk_id (FldWr v fld e)).
 Proof.
   unfold Atomic. intros.
   inversion H.
@@ -1068,3 +996,5 @@ Proof.
   destruct H.
   destruct H1; done.
 Qed.
+
+End Make.

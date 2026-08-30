@@ -7,13 +7,17 @@ From iris.bi Require Import fractional.
 From iris.base_logic Require Export lib.own.
 From iris.base_logic.lib Require Import ghost_map.
 From iris.proofmode Require Export tactics.
-From raven_iris.simp_raven_lang Require Export lang.
+From raven_iris.simp_raven_lang Require Import ra_base lang.
 
 From iris.base_logic Require Import iprop.
 From iris.proofmode Require Import proofmode.
 
 Set Default Proof Using "Type".
 Import uPred.
+
+Module Make (RAs : RA_CONFIG).
+Module lang := raven_iris.simp_raven_lang.lang.Make RAs.
+Import lang.
 
 Inductive stackvar_addr :=
 | mk_stkvar_addr (stk_id : stack_id) (v : var).
@@ -770,9 +774,9 @@ Section ra_cmra.
   Local Instance ra_pcore : PCore A := fun _ => None.
   Local Instance ra_op : Op A := comp.
   (* [valid] as a bare identifier is ambiguous with iris.algebra.cmra's own
-     [Valid] class field of the same name; the [lang.valid] qualified path
+     [Valid] class field of the same name; the [ra_base.valid] qualified path
      disambiguates to ResourceAlgebra's own field. *)
-  Local Instance ra_valid_inst : Valid A := lang.valid.
+  Local Instance ra_valid_inst : Valid A := ra_base.valid.
 
   Lemma ra_cmra_mixin : RAMixin A.
   Proof.
@@ -791,3 +795,4 @@ Section ra_cmra.
   Definition ra_cmra : cmra := discreteR A ra_cmra_mixin.
 End ra_cmra.
 
+End Make.
