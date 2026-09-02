@@ -32,6 +32,7 @@ Module WithRuntimeValidity
 
 Module Export Normalized := RuntimeAdapter.AlignedNormalization Resources
   ProcedureContracts Leaf Defs.
+Local Existing Instance Normalized.Validity.Model.concrete_irisG.
 
 (** Canonical relative-region result replacing the structural part of the
     legacy focused-access path.  This is deliberately not named a closed
@@ -189,7 +190,7 @@ Qed.
     lives in this already-instantiated functor: re-applying the runtime
     functors in a separate module would create incompatible generative
     contract signatures. *)
-Record aligned_net_trace
+Record aligned_normalized_trace
     {cost : RuntimeAdapter.Atomicity.cost_model} {Γ F Δ} {entry}
     {pre : Runtime.Translation.Assertions.assertion Γ F Δ} {stack_in} {exit}
     {post : Runtime.Translation.Assertions.assertion Γ F Δ} {stack_out} : Type := {
@@ -208,7 +209,7 @@ Lemma normalize_aligned_net_trace
     (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
     (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
       (RuntimeAdapter.Atomicity.analysis_open entry) stack_in) :
-    exists _ : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+    exists _ : @aligned_normalized_trace cost Γ F Δ entry pre stack_in exit post
       stack_out, True.
 Proof.
   destruct (Normalized.aligned_suffix_traced_normalization suffix Hwf Hstack)
@@ -219,7 +220,7 @@ Qed.
 
 Definition aligned_trace_structured_cps_valid
     {cost Γ F Δ entry pre stack_in exit post stack_out}
-    (aligned : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+    (aligned : @aligned_normalized_trace cost Γ F Δ entry pre stack_in exit post
       stack_out) : Prop :=
   RuntimeAdapter.Atomicity.state_wf entry ->
   forall (runtime : Normalized.Validity.Model.stack_context Γ)
@@ -455,7 +456,7 @@ Qed.
 
 Theorem aligned_trace_structured_cps_valid_from_trust
     {cost Γ F Δ entry pre stack_in exit post stack_out}
-    (aligned : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+    (aligned : @aligned_normalized_trace cost Γ F Δ entry pre stack_in exit post
       stack_out) :
   trace_runtime_trusted
     (RuntimeAdapter.traced_net_source _ aligned.(aligned_net_normal)) ->
@@ -482,7 +483,7 @@ Qed.
 
 Theorem aligned_trace_structured_cps_valid_complete
     {cost Γ F Δ entry pre stack_in exit post stack_out}
-    (aligned : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+    (aligned : @aligned_normalized_trace cost Γ F Δ entry pre stack_in exit post
       stack_out) :
   aligned_trace_structured_cps_valid aligned.
 Proof.
@@ -498,7 +499,7 @@ Theorem aligned_suffix_has_structured_cps_valid
   RuntimeAdapter.Atomicity.state_wf entry ->
   RuntimeAdapter.Atomicity.access_stack_consistent
     (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
-  exists aligned : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+  exists aligned : @aligned_normalized_trace cost Γ F Δ entry pre stack_in exit post
       stack_out,
     aligned_trace_structured_cps_valid aligned.
 Proof.
@@ -1725,6 +1726,19 @@ Module AlignedTraceNormalization.
         (@RuntimeAdapter.TraceExpansion cost Γ entry exit mode tail stack_out
           flat source tree expansion flat_trace).
 
+  Lemma aligned_net_trace_source_eq
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+        suffix trace}
+      (aligned : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+        stack_out mode tail source tree suffix trace) :
+    source =
+      Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
+        suffix.
+  Proof.
+    induction aligned; simpl; try reflexivity.
+    - exact Hsource.
+  Qed.
+
   Definition has_aligned_ordinary_normalization
       {cost Γ F Δ entry pre stack exit post stack_out}
       (suffix : Validity.aligned_operational_suffix cost Γ F Δ entry pre
@@ -2407,7 +2421,8 @@ Module AlignedTraceNormalization.
       {cost Γ fuel entry statement exit}
       (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
         entry statement exit) :
-      forall F Δ pre post,
+      forall (F Δ : typed_core.TypedCore.context)
+        (pre post : Runtime.Translation.Assertions.assertion Γ F Δ),
         Validity.Certified.Rules.RavenHoareTriple pre statement
           (RuntimeAdapter.Atomicity.analysis_mask entry)
           (RuntimeAdapter.Atomicity.analysis_mask exit) post -> Type :=
@@ -2579,6 +2594,292 @@ Module AlignedTraceNormalization.
     unfold RuntimeAdapter.Atomicity.state_wf in *. simpl.
     rewrite Hmask. rewrite Hopen. exact Hwf.
   Qed.
+
+  (** The conditional certificate itself contains the two guard-indexed
+      branch derivations, but an aligned witness may put any of the four
+      structural Hoare wrappers around that certificate.  In particular the
+      existential wrappers change the logical-binder context, so flattening
+      this information into a same-context record would be unsound.  This
+      small wrapper tree retains the context change explicitly.  The
+      subsequent conditional proof consumes it by induction. *)
+  Inductive aligned_conditional_wrapper (cost : RuntimeAdapter.Atomicity.cost_model)
+      Γ F Δ : Type :=
+  | ConditionalWrapperCore : forall (fuel : nat)
+      (state : RuntimeAdapter.Atomicity.analysis_state)
+      (node : typed_core.TypedCore.node_id)
+      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
+      (frame : Runtime.Translation.Assertions.assertion Γ F Δ)
+      (condition : Runtime.IR.pexpr Γ typed_core.TypedCore.TBool)
+      (then_branch else_branch : Runtime.IR.stmt Γ)
+      (then_exit else_exit : RuntimeAdapter.Atomicity.analysis_state)
+      (post : Runtime.Translation.Assertions.assertion Γ F Δ)
+      (view : Runtime.RegionSyntax.view
+        (Runtime.IR.TIf node condition then_branch else_branch) =
+        typed_analysis_view.TypedAnalysisView.ViewConditional then_branch
+          else_branch)
+      (then_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel state then_branch then_exit)
+      (else_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel state else_branch else_exit)
+      (open_equal : RuntimeAdapter.Atomicity.analysis_open then_exit =
+        RuntimeAdapter.Atomicity.analysis_open else_exit)
+      (atomic_equal : RuntimeAdapter.Atomicity.analysis_in_atomic then_exit =
+        RuntimeAdapter.Atomicity.analysis_in_atomic else_exit)
+      (then_derivation : Validity.Certified.Rules.RavenHoareTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Validation.Hoare.symbolize_expr store condition))))
+        then_branch (RuntimeAdapter.Atomicity.analysis_mask state)
+        (RuntimeAdapter.Atomicity.analysis_mask state) post)
+      (else_derivation : Validity.Certified.Rules.RavenHoareTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Core.EUnOp Runtime.Core.UNot
+                (Runtime.Validation.Hoare.symbolize_expr store condition)))))
+        else_branch (RuntimeAdapter.Atomicity.analysis_mask state)
+        (RuntimeAdapter.Atomicity.analysis_mask state) post)
+      (then_mask : RuntimeAdapter.Atomicity.analysis_mask then_exit =
+        RuntimeAdapter.Atomicity.analysis_mask state)
+      (else_mask : RuntimeAdapter.Atomicity.analysis_mask else_exit =
+        RuntimeAdapter.Atomicity.analysis_mask state),
+      Validity.Certified.certificate_hoare_aligned cost then_certificate
+        (Validity.Certified.hoare_mask_transport then_derivation eq_refl
+          (eq_sym then_mask)) ->
+      Validity.Certified.certificate_hoare_aligned cost else_certificate
+        (Validity.Certified.hoare_mask_transport else_derivation eq_refl
+          (eq_sym else_mask)) ->
+      aligned_conditional_wrapper cost Γ F Δ
+  | ConditionalWrapperFrame : forall
+      (frame : Runtime.Translation.Assertions.assertion Γ F Δ),
+      aligned_conditional_wrapper cost Γ F Δ ->
+      aligned_conditional_wrapper cost Γ F Δ
+  | ConditionalWrapperConsequence : forall
+      (pre pre' post post' : Runtime.Translation.Assertions.assertion Γ F Δ),
+      Runtime.Validation.Hoare.assertion_entails pre' pre ->
+      Runtime.Validation.Hoare.assertion_entails post post' ->
+      aligned_conditional_wrapper cost Γ F Δ ->
+      aligned_conditional_wrapper cost Γ F Δ
+  | ConditionalWrapperExistsElim : forall (t : typed_core.TypedCore.typ),
+      aligned_conditional_wrapper cost Γ F (t :: Δ) ->
+      aligned_conditional_wrapper cost Γ F Δ
+  | ConditionalWrapperExistsPreserve : forall (t : typed_core.TypedCore.typ),
+      aligned_conditional_wrapper cost Γ F (t :: Δ) ->
+      aligned_conditional_wrapper cost Γ F Δ.
+
+  Definition aligned_conditional_decomposition_target
+      {cost Γ fuel entry statement exit}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit) :
+      forall (F Δ : typed_core.TypedCore.context)
+        (pre post : Runtime.Translation.Assertions.assertion Γ F Δ),
+        Validity.Certified.Rules.RavenHoareTriple pre statement
+          (RuntimeAdapter.Atomicity.analysis_mask entry)
+          (RuntimeAdapter.Atomicity.analysis_mask exit) post -> Type :=
+    match certificate as certificate' in
+        RuntimeAdapter.Atomicity.analysis_certificate _ Γ' fuel' entry'
+          statement' exit'
+      return forall (F' Δ' : typed_core.TypedCore.context)
+        (pre' post' : Runtime.Translation.Assertions.assertion Γ' F' Δ'),
+        Validity.Certified.Rules.RavenHoareTriple pre' statement'
+          (RuntimeAdapter.Atomicity.analysis_mask entry')
+          (RuntimeAdapter.Atomicity.analysis_mask exit') post' -> Type
+    with
+    | @RuntimeAdapter.Atomicity.CertConditional _ Γ' fuel' state' statement'
+        then_branch else_branch then_exit else_exit view then_certificate
+        else_certificate open_equal atomic_equal =>
+        fun F' Δ' _ _ _ => aligned_conditional_wrapper cost Γ' F' Δ'
+    | _ => fun _ _ _ _ _ => unit
+    end.
+
+  Fixpoint aligned_conditional_decompose_fix
+      {cost Γ F Δ fuel entry statement exit pre post}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit}
+      {derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post}
+      (Haligned : Validity.Certified.certificate_hoare_aligned cost certificate
+        derivation) {struct Haligned} :
+    aligned_conditional_decomposition_target certificate F Δ pre post derivation.
+  Proof.
+    destruct Haligned; simpl; try exact tt.
+    - exact (ConditionalWrapperCore cost Γ F Δ fuel state node store frame
+        condition then_branch else_branch then_exit else_exit post view
+        then_certificate else_certificate open_equal atomic_equal
+        then_derivation else_derivation then_mask else_mask Haligned1
+        Haligned2).
+    - dependent destruction certificate; simpl; try exact tt.
+      refine (ConditionalWrapperFrame cost Γ F Δ frame _).
+      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
+        Haligned).
+    - dependent destruction certificate; simpl; try exact tt.
+      refine (ConditionalWrapperConsequence cost Γ F Δ pre pre' post post'
+        pre_entails post_entails _).
+      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
+        Haligned).
+    - dependent destruction certificate; simpl; try exact tt.
+      refine (ConditionalWrapperExistsElim cost Γ F Δ t _).
+      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
+        Haligned).
+    - dependent destruction certificate; simpl; try exact tt.
+      refine (ConditionalWrapperExistsPreserve cost Γ F Δ t _).
+      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
+        Haligned).
+  Defined.
+
+  (** Assembly point for the core conditional.  Wrapper cases supply the
+      three displayed entailments while recursively preserving their binder
+      environment.  Keeping those transports explicit prevents the old
+      runtime-only proof from choosing an arm independently of the concrete
+      guard. *)
+  Lemma aligned_conditional_semantic_assembly
+      {Γ F Δ node state then_exit else_exit}
+      (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env)
+      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
+      (frame outer_pre then_pre else_pre :
+        Runtime.Translation.Assertions.assertion Γ F Δ)
+      (condition : Runtime.IR.pexpr Γ typed_core.TypedCore.TBool)
+      (ambient : coPset) (then_branch else_branch : Runtime.IR.stmt Γ)
+      (access post : iProp Resources.Σ) (then_refine :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms then_pre ∗ access) ⊢
+        Validity.translated_runtime_wp runtime ambient state then_exit
+          then_branch post)
+      (else_refine :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms else_pre ∗ access) ⊢
+        Validity.translated_runtime_wp runtime ambient state else_exit
+          else_branch post)
+      (pre_transport :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms outer_pre ∗ access) ⊢
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store) frame) ∗ access))
+      (then_transport :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store)
+             (Runtime.Translation.Assertions.AAnd frame
+               (Runtime.Translation.Assertions.AExpr
+                 (Runtime.Validation.Hoare.symbolize_expr store condition)))) ∗
+         access) ⊢
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms then_pre ∗ access))
+      (else_transport :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store)
+             (Runtime.Translation.Assertions.AAnd frame
+               (Runtime.Translation.Assertions.AExpr
+                 (Runtime.Core.EUnOp Runtime.Core.UNot
+                   (Runtime.Validation.Hoare.symbolize_expr store
+                     condition))))) ∗ access) ⊢
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms else_pre ∗ access))
+      (open_equal : RuntimeAdapter.Atomicity.analysis_open then_exit =
+        RuntimeAdapter.Atomicity.analysis_open else_exit) :
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms outer_pre ∗ access) ⊢
+    Validity.translated_runtime_wp runtime ambient state
+      (RuntimeAdapter.conditional_join then_exit else_exit)
+      (Runtime.IR.TIf node condition then_branch else_branch) post.
+  Proof.
+    etrans; first exact pre_transport.
+    eapply ConcreteChunks.aligned_conditional_interpreted_runtime_refinement;
+      [| |exact open_equal].
+    - etrans; first exact then_transport. exact then_refine.
+    - etrans; first exact else_transport. exact else_refine.
+  Qed.
+
+  (** Phase 7 remaining semantic interfaces.
+
+      This is the assertion-aware, concrete-runtime counterpart of
+      [Validity.aligned_runtime_certificate_valid].  It is deliberately
+      indexed by the original derivation: structural Hoare wrappers may
+      change assertions and binder contexts even though the underlying
+      analysis certificate is unchanged. *)
+  Definition aligned_certificate_translated_runtime_refinement
+      {cost Γ F Δ fuel entry statement exit pre post}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post) : Prop :=
+    forall stack_in stack_out,
+    Validity.Model.runtime_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.lifo_certificate certificate stack_in stack_out ->
+    Validity.Certified.certificate_hoare_aligned cost certificate derivation ->
+    forall (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env) (ambient : coPset),
+    Validity.Model.runtime_mask
+      (RuntimeAdapter.Atomicity.certificate_footprint certificate) ⊆ ambient ->
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms pre ∗
+     Validity.World.access_stack_interp atoms ambient stack_in) ⊢
+    Validity.translated_runtime_wp runtime ambient entry exit statement
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms post ∗
+       Validity.World.access_stack_interp atoms ambient stack_out).
+
+  (** The next proof must recurse through [certificate_hoare_aligned], using
+      the interpreted guard at [AlignedConditional] and transporting Frame,
+      Consequence, ExistsElim, and ExistsPreserve without flattening their
+      assertion or binder indices. *)
+  Theorem aligned_conditional_certificate_translated_runtime_refinement
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel state node condition then_branch else_branch
+        then_exit else_exit pre post}
+      (view : Runtime.RegionSyntax.view
+        (Runtime.IR.TIf node condition then_branch else_branch) =
+        typed_analysis_view.TypedAnalysisView.ViewConditional then_branch
+          else_branch)
+      (then_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel state then_branch then_exit)
+      (else_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel state else_branch else_exit)
+      (open_equal : RuntimeAdapter.Atomicity.analysis_open then_exit =
+        RuntimeAdapter.Atomicity.analysis_open else_exit)
+      (atomic_equal : RuntimeAdapter.Atomicity.analysis_in_atomic then_exit =
+        RuntimeAdapter.Atomicity.analysis_in_atomic else_exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple
+        pre
+        (Runtime.IR.TIf node condition then_branch else_branch)
+        (RuntimeAdapter.Atomicity.analysis_mask state)
+        (RuntimeAdapter.Atomicity.analysis_mask
+          (RuntimeAdapter.conditional_join then_exit else_exit)) post) :
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ) (pre := pre) (post := post)
+      (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state
+        (Runtime.IR.TIf node condition then_branch else_branch) then_branch
+        else_branch then_exit else_exit view then_certificate else_certificate
+        open_equal atomic_equal) derivation.
+  Proof.
+  Admitted.
 
   Record aligned_sequence_decomposition
       {cost Γ F Δ fuel entry first middle second next pre post}
@@ -2944,19 +3245,20 @@ Module AlignedTraceNormalization.
       Hwf Hstack).
   Defined.
 
-  (** Semantic target of the remaining closed reification induction.  Keeping
-      the certificate [source] explicit avoids imposing syntactic
-      associativity on translated sequences; the singleton corollary below
-      rewrites this target to [translated_runtime_wp] only at the procedure
-      boundary. *)
-  Definition closed_aligned_trace_runtime_refinement
-      {cost Γ F Δ entry pre exit post source tree suffix trace}
-      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre [] exit post []
-        None [] source tree suffix trace) : Prop :=
+  (** Assertion-aware semantic target for the final reification induction.
+      Unlike the runtime-only helper judgments below, this relation retains
+      the interpreted symbolic state needed to select a concrete conditional
+      arm.  Its mode and access-stack indices remain general so the same
+      induction can cover ordinary execution and focused slices. *)
+  Definition aligned_trace_runtime_refinement
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+        suffix trace}
+      (_ : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+        stack_out mode tail source tree suffix trace) : Prop :=
     Validity.Model.runtime_cost_model_sound cost ->
     RuntimeAdapter.Atomicity.state_wf entry ->
     RuntimeAdapter.Atomicity.access_stack_consistent
-      (RuntimeAdapter.Atomicity.analysis_open entry) [] ->
+      (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
     forall (runtime : Validity.Model.stack_context Γ)
       (formals : Runtime.Core.formal_env F)
       (binders : Runtime.Core.binder_env Δ)
@@ -2965,21 +3267,351 @@ Module AlignedTraceNormalization.
     (Validity.global_world_context atoms ∗
      Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
        runtime formals binders atoms pre ∗
-     Validity.World.access_stack_interp atoms ambient []) ⊢
+     Validity.World.access_stack_interp atoms ambient stack_in) ⊢
     ConcreteOrdinaryTrace.source_translated_wp source runtime ambient
       (Validity.global_world_context atoms ∗
        Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
          runtime formals binders atoms post ∗
-       Validity.World.access_stack_interp atoms ambient []).
+       Validity.World.access_stack_interp atoms ambient stack_out).
+
+  (** Final Phase 7 reification induction.  Its proof is intentionally left
+      as one visible obligation while the constructor lemmas are assembled:
+      ordinary conditionals use the preceding translated-certificate
+      boundary and a shared continuation; focused conditionals split into
+      preserving and branch-local-close cases. *)
+  Theorem aligned_trace_runtime_refinement_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+        suffix trace}
+      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre stack_in exit
+        post stack_out mode tail source tree suffix trace) :
+    aligned_trace_runtime_refinement aligned_trace.
+  Proof.
+  Admitted.
+
+  (** Closed adequacy consumes the empty-stack, ordinary-mode specialization
+      of the assertion-aware relation.  Keeping the certificate [source]
+      explicit avoids imposing syntactic associativity on translated
+      sequences. *)
+  Definition closed_aligned_trace_runtime_refinement
+      {cost Γ F Δ entry pre exit post source tree suffix trace}
+      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre [] exit post []
+        None [] source tree suffix trace) : Prop :=
+    aligned_trace_runtime_refinement aligned_trace.
+
+  (** Runtime-only half of ordinary reification.  The structured CPS theorem
+      already proves all assertion and resource transport along a normalized
+      trace.  What remains is solely that executing that trace refines the
+      concrete translation of its source suffix.  This judgment is restricted
+      to ordinary mode: focused execution must retain the explicit Iris mask
+      bracket through its first matching close, and is handled separately. *)
+  Definition ordinary_trace_cps_source_refinement
+      {cost Γ F Δ entry pre stack_in exit post stack_out source tree suffix trace}
+      (_ : @aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+        stack_out None stack_in source tree suffix trace) : Prop :=
+    forall (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (final : iProp Resources.Σ),
+    Validity.Model.runtime_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
+    Validity.Model.runtime_mask (Normalized.suffix_footprint source) ⊆ ambient ->
+    trace_runtime_cps_wp trace runtime ambient (fun _ => final) ⊢
+      ConcreteOrdinaryTrace.source_translated_wp source runtime ambient final.
+
+  (** Runtime-only first-close judgment for focused execution.  The outer
+      Iris mask is reconstructed from the Raven open-set stored in the access
+      marker.  Both mask changes stay explicit until the matching close, so
+      this statement does not conflate Raven masks with Iris masks or execute
+      the focused physical fragment at the enclosing mask. *)
+  Definition focused_close_trace_cps_source_refinement
+      {cost Γ F Δ invariant outer tail entry pre closed post source tree suffix
+        trace}
+      (_ : @aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) closed post tail
+        (Some (invariant, outer)) tail source tree suffix trace) : Prop :=
+    forall (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (final : iProp Resources.Σ),
+    Validity.Model.runtime_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry)
+      ((invariant, outer) :: tail) ->
+    Validity.Model.runtime_mask (Normalized.suffix_footprint source) ⊆ ambient ->
+    let outer_mask := Validity.Model.enabled_runtime_mask ambient outer in
+    ((|={outer_mask, Validity.Model.active_runtime_mask ambient entry}=>
+       trace_runtime_cps_wp trace runtime ambient
+         (fun _ =>
+           |={Validity.Model.active_runtime_mask ambient closed, outer_mask}=>
+             final)) ⊢
+      Validity.runtime_option_wp outer_mask outer_mask
+        (ConcreteOrdinaryTrace.source_runtime source runtime) final)%I.
+
+  (** Internal induction judgment while the focused slice is still at its
+      active masks.  It composes through preserving prefixes; the enclosing
+      Iris-mask transition is applied only after the complete first-close
+      slice has been assembled. *)
+  Definition focused_inner_trace_cps_source_refinement
+      {cost Γ F Δ invariant outer tail entry pre closed post source tree suffix
+        trace}
+      (_ : @aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) closed post tail
+        (Some (invariant, outer)) tail source tree suffix trace) : Prop :=
+    forall (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (final : iProp Resources.Σ),
+    Validity.Model.runtime_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry)
+      ((invariant, outer) :: tail) ->
+    Validity.Model.runtime_mask (Normalized.suffix_footprint source) ⊆ ambient ->
+    trace_runtime_cps_wp trace runtime ambient (fun _ => final) ⊢
+      ConcreteOrdinaryTrace.source_translated_wp source runtime ambient final.
+
+  Lemma focused_fold_cps_source_runtime_refinement
+      {cost Γ fuel entry node invariant arguments outer}
+      (view : Runtime.RegionSyntax.view
+        (Runtime.IR.TFold node invariant arguments) =
+        typed_analysis_view.TypedAnalysisView.ViewFold invariant)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (final : iProp Resources.Σ) :
+    let closed := RuntimeAdapter.Atomicity.fold_invariant invariant entry in
+    let certificate := RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+      (Runtime.IR.TFold node invariant arguments) invariant view in
+    let outer_mask := Validity.Model.enabled_runtime_mask ambient outer in
+    ((|={outer_mask, Validity.Model.active_runtime_mask ambient entry}=>
+        Validity.aligned_runtime_region_wp certificate runtime ambient
+          (|={Validity.Model.active_runtime_mask ambient closed, outer_mask}=>
+            final)) ⊢
+      Validity.runtime_option_wp outer_mask outer_mask
+        (Validity.certificate_runtime_statement certificate runtime) final)%I.
+  Proof.
+    simpl. iIntros "Hclose". iMod "Hclose". iMod "Hclose".
+    iMod "Hclose". iModIntro. iExact "Hclose".
+  Qed.
+
+  Lemma focused_close_direct_done_cps_source
+      {cost Γ F Δ fuel entry statement closed pre closed_assertion invariant
+        outer tail certificate derivation aligned lifo closing}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        closed ((invariant, outer) :: tail) tail certificate closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        closed closing) :
+    focused_close_trace_cps_source_refinement
+      (@AlignedTraceFocusedClose cost Γ F Δ fuel entry statement closed closed
+        pre closed_assertion closed_assertion (invariant, outer) tail tail
+        certificate derivation aligned lifo
+        (Validity.AlignedOperationalDone closed closed_assertion tail) closing
+        Hclosing close_ok
+        (@RuntimeAdapter.NetOrdinary tail tail closed closed
+          (RuntimeAdapter.Slice.ExecDone closed tail))
+        (@RuntimeAdapter.TraceDoneNet cost Γ closed tail)
+        (@AlignedTraceDone cost Γ F Δ closed closed_assertion tail)).
+  Proof.
+    intros runtime ambient final _ _ _ _. simpl.
+    dependent destruction Hclosing.
+    all: try (exfalso;
+      repeat match goal with
+      | H : @eq (list _) _ _ |- _ =>
+          pose proof (f_equal (@List.length _) H); clear H
+      end; simpl in *; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. simpl.
+    iIntros "Hclose". iMod "Hclose". iMod "Hclose".
+    iMod "Hclose". iModIntro. iExact "Hclose".
+  Qed.
+
+  Lemma focused_close_direct_done_inner_source
+      {cost Γ F Δ fuel entry statement closed pre closed_assertion invariant
+        outer tail certificate derivation aligned lifo closing}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        closed ((invariant, outer) :: tail) tail certificate closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        closed closing) :
+    focused_inner_trace_cps_source_refinement
+      (@AlignedTraceFocusedClose cost Γ F Δ fuel entry statement closed closed
+        pre closed_assertion closed_assertion (invariant, outer) tail tail
+        certificate derivation aligned lifo
+        (Validity.AlignedOperationalDone closed closed_assertion tail) closing
+        Hclosing close_ok
+        (@RuntimeAdapter.NetOrdinary tail tail closed closed
+          (RuntimeAdapter.Slice.ExecDone closed tail))
+        (@RuntimeAdapter.TraceDoneNet cost Γ closed tail)
+        (@AlignedTraceDone cost Γ F Δ closed closed_assertion tail)).
+  Proof.
+    intros runtime ambient final _ _ _ _. simpl.
+    dependent destruction Hclosing.
+    all: try (exfalso;
+      repeat match goal with
+      | H : @eq (list _) _ _ |- _ =>
+          pose proof (f_equal (@List.length _) H); clear H
+      end; simpl in *; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. simpl.
+    iIntros "Hclose". iMod "Hclose". iModIntro. iExact "Hclose".
+  Qed.
+
+  Lemma balanced_chunk_region_runtime_refinement
+      {cost Γ fuel entry statement middle stack certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (post : iProp Resources.Σ) :
+    Validity.aligned_runtime_region_wp certificate runtime ambient post ⊢
+      Validity.translated_runtime_wp runtime ambient entry middle statement
+        post.
+  Proof.
+    dependent destruction Hchunk.
+    - reflexivity.
+    - exfalso. pose proof (f_equal (@List.length _) x0). simpl in *. lia.
+    - exfalso. pose proof (f_equal (@List.length _) x0). simpl in *. lia.
+    - destruct statement; simpl in view; try discriminate.
+      inversion view; subst. simpl.
+      unfold Validity.translated_runtime_wp. simpl.
+      unfold Validity.Model.active_runtime_mask.
+      destruct (RuntimeAdapter.Atomicity.fold_fresh_invariant invariant entry
+        closed) as [_ Hopen]. rewrite Hopen.
+      unfold Validity.Execution.Primitives.operation_wp. simpl.
+      iIntros "Hpost". iMod "Hpost".
+      unfold Validity.Model.active_runtime_mask. rewrite Hopen.
+      iModIntro. iExact "Hpost".
+    - reflexivity.
+  Qed.
+
+  Lemma focused_inner_prepend_preserving
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+        invariant outer tail certificate derivation aligned lifo rest chunk
+        Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : @aligned_net_trace cost Γ F Δ middle middle_assertion
+        ((invariant, outer) :: tail) exit post tail
+        (Some (invariant, outer)) tail
+        (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
+          rest) rest_tree rest Hrest)
+      (IHrest : focused_inner_trace_cps_source_refinement aligned_rest) :
+    focused_inner_trace_cps_source_refinement
+      (@AlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement middle
+        exit pre middle_assertion post (invariant, outer) tail tail certificate
+        derivation aligned lifo rest chunk Hchunk head_ok rest_tree Hrest
+        aligned_rest).
+  Proof.
+    intros runtime ambient final Hcost Hwf Hstack Henvelope. simpl.
+    have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle.
+    { exact (RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry
+        statement middle Hwf certificate). }
+    have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open middle)
+        ((invariant, outer) :: tail).
+    { exact (RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+        certificate _ _ Hwf lifo Hstack). }
+    have Hrest_envelope : Validity.Model.runtime_mask
+        (Normalized.suffix_footprint
+          (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
+            rest)) ⊆ ambient.
+    { etrans; last exact Henvelope. apply Validity.Model.runtime_mask_mono.
+      apply Normalized.suffix_footprint_rest_subset. }
+    have Hopen : RuntimeAdapter.Atomicity.analysis_open entry =
+        RuntimeAdapter.Atomicity.analysis_open middle.
+    { eapply RuntimeAdapter.Atomicity.access_stack_consistent_functional;
+        eauto. }
+    pose proof (IHrest runtime ambient final Hcost Hmiddle_wf Hmiddle_stack
+      Hrest_envelope) as IHsource.
+    etrans.
+    - apply aligned_runtime_region_wp_mono. exact IHsource.
+    - etrans.
+      + exact (balanced_chunk_region_runtime_refinement Hchunk runtime
+          ambient _).
+      + apply ConcreteOrdinaryTrace.translated_runtime_wp_prepend_source.
+        exact Hopen.
+  Qed.
+
+  (** Closed reification is the empty-stack specialization consumed by the
+      top-level assembly theorem. *)
+  Definition closed_trace_cps_source_refinement
+      {cost Γ F Δ entry pre exit post source tree suffix trace}
+      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre [] exit post
+        [] None [] source tree suffix trace) : Prop :=
+    ordinary_trace_cps_source_refinement aligned_trace.
+
+  Lemma closed_aligned_trace_runtime_refinement_from_cps
+      {cost Γ F Δ entry pre exit post source tree suffix trace}
+      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre [] exit post []
+        None [] source tree suffix trace) :
+    closed_trace_cps_source_refinement aligned_trace ->
+    closed_aligned_trace_runtime_refinement aligned_trace.
+  Proof.
+    intros Hsource Hcost Hwf Hstack runtime formals binders atoms ambient
+      Henvelope.
+    pose proof (aligned_net_trace_source_eq aligned_trace) as Hsource_eq.
+    subst source.
+    pose (normalization :=
+      {| RuntimeAdapter.traced_net_normal :=
+          {| RuntimeAdapter.suffix_net_lifo :=
+              Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix_has_lifo
+                suffix;
+             RuntimeAdapter.suffix_net_tree := tree |};
+         RuntimeAdapter.traced_net_source := trace |}).
+    pose (structured :=
+      {| aligned_net_suffix := suffix;
+         aligned_net_normal := normalization |}).
+    pose proof (aligned_trace_structured_cps_valid_complete structured)
+      as Hstructured.
+    iIntros "Hresources".
+    iApply (Hsource runtime ambient _ Hcost Hwf Hstack Henvelope).
+    iApply (Hstructured Hwf runtime formals binders atoms ambient Henvelope
+      (fun _ =>
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms post ∗
+         Validity.World.access_stack_interp atoms ambient [])%I)).
+    - reflexivity.
+    - iExact "Hresources".
+  Qed.
+
+  Lemma closed_trace_cps_source_done
+      {cost Γ F Δ state assertion} :
+    closed_trace_cps_source_refinement
+      (@AlignedTraceDone cost Γ F Δ state assertion []).
+  Proof.
+    intros runtime ambient final _ _ _ _. simpl.
+    unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
+    iIntros "Hfinal". iModIntro. iExact "Hfinal".
+  Qed.
+
+  Lemma ordinary_trace_cps_source_done
+      {cost Γ F Δ state assertion stack} :
+    ordinary_trace_cps_source_refinement
+      (@AlignedTraceDone cost Γ F Δ state assertion stack).
+  Proof.
+    intros runtime ambient final _ _ _ _. simpl.
+    unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
+    iIntros "Hfinal". iModIntro. iExact "Hfinal".
+  Qed.
+
+  Lemma aligned_trace_done_runtime_refinement
+      {cost Γ F Δ state assertion stack} :
+    aligned_trace_runtime_refinement
+      (@AlignedTraceDone cost Γ F Δ state assertion stack).
+  Proof.
+    intros _ _ _ runtime formals binders atoms ambient _. simpl.
+    unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
+    iIntros "Hresources". iModIntro. iExact "Hresources".
+  Qed.
+
+  Lemma aligned_trace_focused_done_runtime_refinement
+      {cost Γ F Δ state assertion focused tail} :
+    aligned_trace_runtime_refinement
+      (@AlignedTraceDoneFocused cost Γ F Δ state assertion focused tail).
+  Proof.
+    intros _ _ _ runtime formals binders atoms ambient _. simpl.
+    unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
+    iIntros "Hresources". iModIntro. iExact "Hresources".
+  Qed.
 
   Lemma closed_aligned_trace_done_runtime_refinement
       {cost Γ F Δ state assertion} :
     closed_aligned_trace_runtime_refinement
       (@AlignedTraceDone cost Γ F Δ state assertion []).
   Proof.
-    intros _ _ _ runtime formals binders atoms ambient _.
-    unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
-    iIntros "Hresources". iModIntro. iExact "Hresources".
+    apply aligned_trace_done_runtime_refinement.
   Qed.
 
   Lemma aligned_leaf_prepend_source_runtime_refinement
@@ -3289,6 +3921,39 @@ Module AlignedTraceNormalization.
     - exact Hrest.
   Qed.
 
+  Lemma aligned_trace_chunk_runtime_refinement
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+        stack stack_out certificate derivation aligned lifo suffix chunk Hchunk
+        rest_tree Hrest}
+      (aligned_rest : @aligned_net_trace cost Γ F Δ middle middle_assertion
+        stack exit post stack_out None stack
+        (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
+          suffix) rest_tree suffix Hrest)
+      (IHrest : aligned_trace_runtime_refinement aligned_rest) :
+    aligned_trace_runtime_refinement
+      (@AlignedTraceChunk cost Γ F Δ fuel entry statement middle exit pre
+        middle_assertion post stack stack_out certificate derivation aligned
+        lifo suffix chunk Hchunk rest_tree Hrest aligned_rest).
+  Proof.
+    intros Hcost Hwf Hstack runtime formals binders atoms ambient Henvelope.
+    have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle.
+    { exact (RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry
+        statement middle Hwf certificate). }
+    have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open middle) stack.
+    { exact (RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+        certificate stack stack Hwf lifo Hstack). }
+    have Hrest_envelope : Validity.Model.runtime_mask
+        (Normalized.suffix_footprint
+          (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
+            suffix)) ⊆ ambient.
+    { etrans; last exact Henvelope. apply Validity.Model.runtime_mask_mono.
+      apply Normalized.suffix_footprint_rest_subset. }
+    pose proof (IHrest Hcost Hmiddle_wf Hmiddle_stack runtime formals binders
+      atoms ambient Hrest_envelope) as Hrest_refinement.
+    eapply aligned_preserving_chunk_prepend_source_runtime_refinement; eauto.
+  Qed.
+
   Lemma closed_aligned_trace_chunk_runtime_refinement
       {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
         certificate derivation aligned lifo suffix chunk Hchunk rest_tree Hrest}
@@ -3302,23 +3967,7 @@ Module AlignedTraceNormalization.
         middle_assertion post [] [] certificate derivation aligned lifo suffix
         chunk Hchunk rest_tree Hrest aligned_rest).
   Proof.
-    intros Hcost Hwf Hstack runtime formals binders atoms ambient Henvelope.
-    have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle.
-    { exact (RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry
-        statement middle Hwf certificate). }
-    have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
-        (RuntimeAdapter.Atomicity.analysis_open middle) [].
-    { exact (RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
-        certificate [] [] Hwf lifo Hstack). }
-    have Hrest_envelope : Validity.Model.runtime_mask
-        (Normalized.suffix_footprint
-          (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
-            suffix)) ⊆ ambient.
-    { etrans; last exact Henvelope. apply Validity.Model.runtime_mask_mono.
-      apply Normalized.suffix_footprint_rest_subset. }
-    pose proof (IHrest Hcost Hmiddle_wf Hmiddle_stack runtime formals binders
-      atoms ambient Hrest_envelope) as Hrest_refinement.
-    eapply aligned_preserving_chunk_prepend_source_runtime_refinement; eauto.
+    exact (aligned_trace_chunk_runtime_refinement aligned_rest IHrest).
   Qed.
 
   (** A certificate-boundary factorization used by the direct-close and
@@ -3739,6 +4388,74 @@ Module AlignedTraceNormalization.
   Proof.
     simpl.
     apply ConcreteAccessNodes.matched_fold_node_runtime_refinement;
+      assumption.
+  Qed.
+
+  (** The direct-close endpoint already has the concrete source-WP shape.
+      Keeping this conversion explicit is useful for the first focused-prefix
+      slice: the erased [TFold] has no physical runtime statement, so the
+      singleton source suffix reduces definitionally to the same mask-changing
+      WP as the endpoint lemma above. *)
+  Lemma focused_close_slice_source_runtime_refinement
+      {cost Γ F Δ fuel node invariant arguments store body entry outer tail}
+      (view : Runtime.RegionSyntax.view
+        (Runtime.IR.TFold node invariant arguments) =
+        typed_analysis_view.TypedAnalysisView.ViewFold invariant)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hopen : invariant ∈ RuntimeAdapter.Atomicity.analysis_open entry)
+      (Houter : invariant ∉ outer)
+      (Hopen_eq : RuntimeAdapter.Atomicity.analysis_open entry =
+        {[invariant]} ∪ outer)
+      (instantiated : Contracts.instantiated_invariant Γ F Δ
+        (Logic.invariant_args invariant) invariant
+        (Runtime.Validation.Hoare.symbolize_expr_list store arguments) body)
+      (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env) (ambient : coPset) :
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms
+       (Runtime.Translation.Assertions.AAnd
+         (Runtime.Translation.Assertions.AStack store) body) ∗
+     Validity.World.access_stack_interp atoms ambient
+       ((invariant, outer) :: tail)) ⊢
+    ConcreteOrdinaryTrace.source_translated_wp
+      (RuntimeAdapter.SuffixCons
+        (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+          (Runtime.IR.TFold node invariant arguments) invariant view)
+        (RuntimeAdapter.SuffixDone
+          (RuntimeAdapter.Atomicity.fold_invariant invariant entry)))
+      runtime ambient
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms
+         (Runtime.Translation.Assertions.AAnd
+           (Runtime.Translation.Assertions.AStack store)
+           (Runtime.Translation.Assertions.AInvariant invariant
+             (Runtime.Validation.Hoare.symbolize_expr_list store arguments))) ∗
+       Validity.World.access_stack_interp atoms ambient tail).
+  Proof.
+    change ((Validity.global_world_context atoms ∗
+      Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+        runtime formals binders atoms
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) ∗
+      Validity.World.access_stack_interp atoms ambient
+        ((invariant, outer) :: tail)) ⊢
+      Validity.translated_runtime_wp runtime ambient entry
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry)
+        (Runtime.IR.TFold node invariant arguments)
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store)
+             (Runtime.Translation.Assertions.AInvariant invariant
+               (Runtime.Validation.Hoare.symbolize_expr_list store arguments))) ∗
+         Validity.World.access_stack_interp atoms ambient tail)).
+    apply (focused_close_slice_runtime_refinement
+      (cost := cost) (fuel := fuel));
       assumption.
   Qed.
 End AlignedTraceNormalization.

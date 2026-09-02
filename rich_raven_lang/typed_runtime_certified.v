@@ -58,6 +58,11 @@ Module Structural := BaseExecution.StructuralValidity Contracts.
 Local Notation iProp := (iProp Resources.Σ).
 Local Existing Instance Model.concrete_irisG.
 Local Existing Instance Model.concrete_heapG.
+Local Existing Instance weakestpre.wp'.
+Local Instance concrete_wp :
+    Wp iProp LegacyLang.runtime_stmt LegacyLang.val stuckness :=
+  @weakestpre.wp' HasLc LegacyLang.simp_lang Resources.Σ
+    Model.concrete_irisG.
 Import Translation.Assertions.
 
 (** Executable layout selected for each registered typed procedure.  Phase 7
@@ -329,6 +334,84 @@ Proof.
   etrans; [exact Hformals|].
   apply VSemantics.S.interp_rename_bound_assertion.
   apply binder_cons_return_bound_renaming.
+Qed.
+
+(** Concrete execution boundary for a discarded procedure result.  This
+    lemma isolates the legacy call-frame protocol from the typed contract
+    transports: its delayed premise is precisely the body specification that
+    the certified-body theorem supplies after choosing the canonical fresh
+    frame. *)
+Lemma procedure_discard_legacy_assembly
+    {callee_variables callee_formals}
+    (callee : typed_procedure callee_variables callee_formals)
+    (caller_id : LegacyLang.stack_id)
+    (caller_frame : LegacyLang.stack_frame)
+    (arguments : list LegacyLang.expr)
+    (values : list LegacyLang.val) (mask : coPset)
+    (p : iProp) (q : LegacyLang.val -> iProp)
+    (Hin : List.In (pack_typed_procedure callee)
+      (procedure_entries ProcedureContracts.procedures))
+    (Hlength : length arguments = length callee_formals)
+    (Harguments : Forall2 (fun expression value =>
+      LegacyLang.expr_step expression caller_frame (LegacyLang.Val value))
+      arguments values)
+    (Hbody : (⊢ ▷ (∀ stack_id frame,
+      ⌜Forall2 (fun variable value => frame.(LegacyLang.locals) !! variable =
+          Some value)
+          (LegacyLang.proc_args
+            (runtime_procedure_entry (pack_typed_procedure callee))).*1 values /\
+        (forall variable type,
+          (variable, type) ∈ LegacyLang.proc_local_vars
+            (runtime_procedure_entry (pack_typed_procedure callee)) ->
+          exists value, frame.(LegacyLang.locals) !! variable = Some value /\
+            LegacyLang.val_has_typ value type) /\
+        dom frame.(LegacyLang.locals) =
+          list_to_set (LegacyLang.proc_args
+            (runtime_procedure_entry (pack_typed_procedure callee))).*1 ∪
+          list_to_set (LegacyLang.proc_local_vars
+            (runtime_procedure_entry (pack_typed_procedure callee))).*1⌝ -∗
+      {{{ LegacyGhost.stack_frame_own stack_id frame ∗ p }}}
+        LegacyLang.to_rtstmt stack_id
+          (LegacyLang.proc_stmt
+            (runtime_procedure_entry (pack_typed_procedure callee))) @ mask
+      {{{ RET LegacyLang.LitUnit; ∃ return_value frame',
+          LegacyGhost.stack_frame_own stack_id frame' ∗
+          ⌜frame'.(LegacyLang.locals) !! "#ret_val" = Some return_value⌝ ∗
+          q return_value }}}))%I) :
+  LegacyGhost.stack_frame_own caller_id caller_frame ∗
+    registered_procedure_chunk (pack_typed_procedure callee) ∗ p ⊢
+  Model.runtime_wp mask
+    (LegacyLang.RTCallNoStore
+      (Resources.procedure_name (procedure_identity _ _ callee))
+      arguments caller_id)
+    (fun result => ⌜result = LegacyLang.LitUnit⌝ ∗
+      ∃ return_value,
+        LegacyGhost.stack_frame_own caller_id caller_frame ∗
+        q return_value ∗ £ 1)%I.
+Proof.
+  iPoseProof Hbody as "#Hbody".
+  pose proof (runtime_procedure_entry_coherent
+    (pack_typed_procedure callee) Hin) as Hregistration.
+  destruct Hregistration as [Hname Hargs Hlocals Hargs_nodup Hlocals_nodup
+    Hdisjoint Hreturn_local Hregistered_body].
+  assert (Hentry_length : length arguments =
+      length (LegacyLang.proc_args
+        (runtime_procedure_entry (pack_typed_procedure callee)))).
+  { rewrite Hargs. rewrite Model.runtime_procedure_arguments_length.
+    exact Hlength. }
+  rewrite /registered_procedure_chunk.
+  unfold Model.runtime_wp.
+  iIntros "[Hcaller [Hchunk Hp]]".
+  iPoseProof (LegacyLifting.wp_call_nostore
+    caller_id caller_frame arguments values
+    (Resources.procedure_name (procedure_identity _ _ callee))
+    (runtime_procedure_entry (pack_typed_procedure callee)) mask p q
+    Hargs_nodup Hlocals_nodup Hdisjoint Hreturn_local Hentry_length Harguments
+    with "Hbody") as "Hcall".
+  iApply ("Hcall" with "[$Hcaller $Hchunk $Hp]").
+  iNext. iIntros "Hresult".
+  iSplit; first done.
+  iExact "Hresult".
 Qed.
 
 (** Runtime target of the aligned-certificate refinement.  A statement with
@@ -2373,19 +2456,19 @@ Definition verified_procedure_specs : iProp :=
       (VSemantics.S.interp_assertion (Leaf.predicates atoms)
         runtime formals binders atoms post))%I.
 
-(** Registered certified bodies need only establish the environment assuming
-    it one step later.  This is the exact guarded premise produced when body
-    validity is assembled from the finite typed procedure table. *)
-Parameter verified_procedure_bodies_guarded :
-  all_registered_procedure_chunks ∗ ▷ verified_procedure_specs ⊢
-    verified_procedure_specs.
-
-Lemma verified_procedure_specs_valid :
+(** Close any concrete guarded body proof by Löb induction.  The guarded
+    premise is supplied downstream, where the closed certificate
+    normalization theorem is available; keeping it explicit here avoids a
+    cyclic dependency and, crucially, avoids postulating procedure
+    soundness. *)
+Lemma verified_procedure_specs_valid
+    (Hguarded : all_registered_procedure_chunks ∗
+      ▷ verified_procedure_specs ⊢ verified_procedure_specs) :
   all_registered_procedure_chunks ⊢ verified_procedure_specs.
 Proof.
   iIntros "#Hprocedures".
   iLöb as "IH".
-  iApply verified_procedure_bodies_guarded.
+  iApply Hguarded.
   iFrame "Hprocedures". iNext. iExact "IH".
 Qed.
 
