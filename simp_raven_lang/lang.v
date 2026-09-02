@@ -337,10 +337,15 @@ Inductive runtime_stmt :=
 | RTVal (v : val)
 | RTCall (v : var) (proc : proc_name) (args : list expr) (stk_id : stack_id)
 | RTActiveCall (v : var) (s : runtime_stmt) (callee_stk_id : stack_id) (caller_stk_id : stack_id) 
-| RTFldWr (v : var) (fld : fld_name) (e : expr) (stk_id : stack_id)
+(** A call whose return value is intentionally not stored.  Keeping this
+    distinct from [RTCall] prevents void/discard calls from manufacturing a
+    reserved caller-local destination. *)
+| RTCallNoStore (proc : proc_name) (args : list expr) (stk_id : stack_id)
+| RTActiveCallNoStore (s : runtime_stmt) (callee_stk_id : stack_id)
+| RTFldWr (base : expr) (fld : fld_name) (e : expr) (stk_id : stack_id)
 | RTFldRd (v : var) (e : expr) (fld : fld_name) (stk_id : stack_id)
 | RTCAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr) (stk_id : stack_id)
-| RTAlloc (v : var) (fs : list (fld_name * val)) (stk_id : stack_id)
+| RTAlloc (v : var) (fs : list (fld_name * expr)) (stk_id : stack_id)
 | RTSpawn (proc : proc_name) (args : list expr) (stk_id : stack_id)
 .
 
@@ -358,12 +363,14 @@ Proof. destruct e=>//=. by intros [= <-]. Qed.
 
 Inductive ectx_item :=
 | SeqCtx (s : runtime_stmt)
-| ActiveCallCtx (v : var) (c_id : stack_id) (cr_id : stack_id).
+| ActiveCallCtx (v : var) (c_id : stack_id) (cr_id : stack_id)
+| ActiveCallNoStoreCtx (c_id : stack_id).
 
 Definition fill_item (Ki : ectx_item) (s : runtime_stmt) : runtime_stmt :=
   match Ki with
   | SeqCtx s1 => RTSeq s s1
   | ActiveCallCtx v c_id cr_id => RTActiveCall v s c_id cr_id
+  | ActiveCallNoStoreCtx c_id => RTActiveCallNoStore s c_id
   end.
 
 Fixpoint to_rtstmt (stk_id : stack_id) (s : stmt) :=
@@ -377,10 +384,11 @@ match s with
 | StuckS => RTStuckS (* stuck statement *)
 (* | ExprS (e : expr) *)
 | Call v proc args => RTCall v proc args stk_id 
-| FldWr v fld e => RTFldWr v fld e stk_id
+| FldWr v fld e => RTFldWr (Var v) fld e stk_id
 | FldRd v e fld => RTFldRd v e fld stk_id
 | CAS v e1 fld e2 e3 => RTCAS v e1 fld e2 e3 stk_id
-| Alloc v fs => RTAlloc v fs stk_id
+| Alloc v fs => RTAlloc v (map (fun '(field, value) => (field, Val value)) fs)
+    stk_id
 | Spawn proc args => RTSpawn proc args stk_id
 end
 .
@@ -562,12 +570,12 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   runtime_step (RTCall v proc args stk_id) σ []
   (RTActiveCall v new_stmt new_stk_id stk_id) σ'' []
 
-| FldWrStep σ stk_id stk_frm v fld e l val:
+| FldWrStep σ stk_id stk_frm base fld e l val:
   σ.(stack) !! stk_id = Some stk_frm ->
-  stk_frm.(locals) !! v = Some (LitLoc l) ->
+  expr_step base stk_frm (Val (LitLoc l)) ->
   expr_step e stk_frm (Val val) ->
   let σ' := update_heap σ l fld val in
-  runtime_step (RTFldWr v fld e stk_id) σ [] (RTVal LitUnit) σ' []
+  runtime_step (RTFldWr base fld e stk_id) σ [] (RTVal LitUnit) σ' []
 
 | FldRdStep σ stk_id stk_frm v e fld l v2 :
   σ.(stack) !! stk_id = Some stk_frm ->
@@ -594,11 +602,16 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   let σ' := update_lvar σ v stk_id (LitBool false) in
   runtime_step (RTCAS v e1 fld e2 e3 stk_id) σ [] (RTVal LitUnit) σ' []
 
-| AllocStep σ stk_id v fs :
+| AllocStep σ stk_id stk_frm v initializers fs :
+  σ.(stack) !! stk_id = Some stk_frm ->
+  Forall2 (fun initializer field_value =>
+    fst initializer = fst field_value /\
+    expr_step (snd initializer) stk_frm (Val (snd field_value)))
+    initializers fs ->
   let l := fresh_loc σ.(global_heap) in
   let σ' := (foldr (fun f_v acc => update_heap acc l (fst f_v) (snd f_v)) σ fs) in
   let σ'' := update_lvar σ' v stk_id (LitLoc l) in
-  runtime_step (RTAlloc v fs stk_id) σ [] (RTVal LitUnit) σ'' []
+  runtime_step (RTAlloc v initializers stk_id) σ [] (RTVal LitUnit) σ'' []
 
 | SpawnStep σ stk_id stk_frm proc args arg_vals procedure local_vals :
   σ.(stack) !! stk_id = Some stk_frm ->
@@ -625,6 +638,28 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
 
 | SeqStep σ v s2:
   runtime_step (RTSeq (RTVal v) s2) σ [] s2 σ []
+
+| RTCallNoStoreStep σ stk_id stk_frm proc args arg_vals procedure local_vals :
+  σ.(stack) !! stk_id = Some stk_frm ->
+  σ.(procs) !! proc = Some procedure ->
+  length procedure.(proc_args) = length args ->
+  Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+  "#ret_val" ∈ (map fst procedure.(proc_local_vars)) ->
+  Forall2 (fun decl val => val_has_typ val (snd decl))
+    procedure.(proc_local_vars) local_vals ->
+  let (new_stk_id, σ') := fresh_stk_id σ in
+  let new_stk_frame := StackFrame
+      (list_to_map (decls_zip_vals procedure.(proc_args) arg_vals
+                    ++ decls_zip_vals procedure.(proc_local_vars) local_vals)) in
+  let σ'' := update_stack σ' new_stk_id new_stk_frame in
+  let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
+  runtime_step (RTCallNoStore proc args stk_id) σ []
+    (RTActiveCallNoStore new_stmt new_stk_id) σ'' []
+
+| ActiveCallNoStoreStep σ callee_stk_id value callee_stack :
+  σ.(stack) !! callee_stk_id = Some callee_stack ->
+  runtime_step (RTActiveCallNoStore (RTVal value) callee_stk_id) σ []
+    (RTVal LitUnit) σ []
 
   .
 
@@ -883,8 +918,8 @@ Proof.
     symmetry in H0. contradiction.
 Qed.
 
-Lemma atomic_fld_wr v fld e stk_id : 
-  Atomic WeaklyAtomic (to_rtstmt stk_id (FldWr v fld e)).
+Lemma atomic_fld_wr base fld e stk_id :
+  Atomic WeaklyAtomic (RTFldWr base fld e stk_id).
 Proof.
   unfold Atomic. intros.
   inversion H.
@@ -893,7 +928,7 @@ Proof.
   destruct K eqn:HK.
   + simpl in *. subst. inversion H2. apply val_irreducible. simpl. done.
   + simpl in *.
-    pose proof (fill_not_atomic e1 e0 e1' (RTFldWr v fld e stk_id)); simpl in *.
+    pose proof (fill_not_atomic e1 e0 e1' (RTFldWr base fld e stk_id)); simpl in *.
     specialize (H3 I).
     symmetry in H0. contradiction.
 Qed.

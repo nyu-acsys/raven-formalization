@@ -31,9 +31,22 @@ Global Instance simpLang_irisG `{!simpLangG Σ} : irisGS simp_lang Σ := {
 Section lifting.
   Context `{!simpLangG Σ}.
 
-  Lemma wp_heap_wr stk_id stk_frm v e val l f x msk :
-    {{{ stack_own[ stk_id, stk_frm] ∗ l#f ↦{1%Qp} x ∗ ⌜stk_frm.(locals) !! v = Some (LitLoc l)⌝ ∗ ⌜expr_step e stk_frm (Val val)⌝}}}
-      (RTFldWr v f e stk_id) @ msk
+  (** Convenience bundle for clients that carry the complete operational
+      procedure-frame layout. *)
+  Record proc_call_layout (proc_entry : lang.proc) : Prop := {
+    proc_call_args_nodup : NoDup (proc_args proc_entry).*1;
+    proc_call_locals_nodup : NoDup (proc_local_vars proc_entry).*1;
+    proc_call_args_locals_disjoint :
+      (proc_args proc_entry).*1 ## (proc_local_vars proc_entry).*1;
+    proc_call_return_local :
+      "#ret_val" ∈ (proc_local_vars proc_entry).*1
+  }.
+
+  Lemma wp_heap_wr_expr stk_id stk_frm base e val l f x msk :
+    {{{ stack_own[ stk_id, stk_frm] ∗ l#f ↦{1%Qp} x ∗
+        ⌜expr_step base stk_frm (Val (LitLoc l))⌝ ∗
+        ⌜expr_step e stk_frm (Val val)⌝}}}
+      (RTFldWr base f e stk_id) @ msk
     {{{RET LitUnit; stack_own[ stk_id, stk_frm] ∗ l#f ↦{1%Qp} val ∗ £1 }}}.
   Proof.
     iIntros (Φ) "[Hstk [Hl [%He %He2]]] HΦ" .
@@ -51,23 +64,17 @@ Section lifting.
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [  |  |  |  |  |
         | σ0 stk_id0 stk_frm0 e1 fld e' l0 v0 Hstk_frm0  Hl0 Hv0 
-      |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 fld stk_id0 e' e1 e2; simpl; iFrame.
+      |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 fld stk_id0 e' e1 e2; simpl; iFrame.
       
-      assert (l = l0) as Hlsubst. 
-        { 
-          rewrite  HstkPure in Hstk_frm0. injection Hstk_frm0 as Hstk_frm0. subst stk_frm0. 
-        
-        assert (Some (LitLoc l) = Some (LitLoc l0) -> l = l0) as H0. { intros Htemp; inversion Htemp; done. }
-
-        apply H0.
-
-        rewrite <- Hl0.
-        rewrite He. done.
-        } subst l0.
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. { 
           rewrite HstkPure in Hstk_frm0.  
           injection Hstk_frm0 as Hstk_frm0; try done.
       } subst stk_frm0. 
+      assert (l = l0) as Hlsubst.
+        { have Hlocation : LitLoc l = LitLoc l0 :=
+            expr_step_val_unique _ _ _ _ He Hl0.
+          injection Hlocation. trivial. }
+      subst l0.
       assert (val = v0) as Hvsubst. 
         { apply (expr_step_val_unique _ _ _ _ He2 Hv0). } subst v0.
       
@@ -83,6 +90,20 @@ Section lifting.
         { exact (ghost_dom_bound_update_heap_overwrite _ _ _ _ _ _ HHeapPure HgdomB). }
         { exact (state_wf_update_heap_overwrite _ _ _ _ _ HHeapPure Hwf). }
       + iApply "HΦ". iFrame.
+  Qed.
+
+  Lemma wp_heap_wr stk_id stk_frm v e val l f x msk :
+    {{{ stack_own[ stk_id, stk_frm] ∗ l#f ↦{1%Qp} x ∗
+        ⌜stk_frm.(locals) !! v = Some (LitLoc l)⌝ ∗
+        ⌜expr_step e stk_frm (Val val)⌝}}}
+      (RTFldWr (Var v) f e stk_id) @ msk
+    {{{RET LitUnit; stack_own[ stk_id, stk_frm] ∗ l#f ↦{1%Qp} val ∗ £1 }}}.
+  Proof.
+    iIntros (Φ) "[Hstk [Hfield [%Hbase %Hvalue]]] HΦ".
+    iApply (wp_heap_wr_expr stk_id stk_frm (Var v) e val l f x msk
+      with "[Hstk Hfield]").
+    { iFrame. iPureIntro. split; [apply VarStep; exact Hbase|exact Hvalue]. }
+    iApply "HΦ".
   Qed.
 
 
@@ -105,7 +126,7 @@ Section lifting.
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [  |  |  |
         σ0 stk_id0 stk_frm0 e1 v0 e0 Hstk_frm0 Hv0 
-      |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl. 
+      |  |  |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. { 
           rewrite HstkPure in Hstk_frm0.  
@@ -156,7 +177,7 @@ Section lifting.
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [ | | | | | | |
           σ0 stk_id0 stk_frm0 v0 e0 fld0 l0 v2 Hstk_frm0 HexSt HlookUp
-        |  |  |  |  |  |  ]; subst v0 e0 fld0 stk_id0 σ0 κ e2 σ2 efs. simpl.
+        |  |  |  |  |  |  |  |  ]; subst v0 e0 fld0 stk_id0 σ0 κ e2 σ2 efs. simpl.
       iSplitR; try done.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. {
@@ -197,6 +218,42 @@ Section lifting.
   | (fld,val) :: fld_vals => ( lexpr#fld ↦{1%Qp}(val)) ∗(field_list_to_iprop lexpr fld_vals)
   end.
 
+  Lemma field_initializer_steps_unique stk
+      (initializers : list (fld_name * expr))
+      (values1 values2 : list (fld_name * lang.val)) :
+    Forall2 (fun initializer field_value =>
+      fst initializer = fst field_value /\
+      expr_step (snd initializer) stk (Val (snd field_value)))
+      initializers values1 ->
+    Forall2 (fun initializer field_value =>
+      fst initializer = fst field_value /\
+      expr_step (snd initializer) stk (Val (snd field_value)))
+      initializers values2 ->
+    values1 = values2.
+  Proof.
+    intros Hsteps1. revert values2.
+    induction Hsteps1; intros values2 Hsteps2; inversion Hsteps2; subst.
+    - reflexivity.
+    - destruct x as [field initializer], y as [field1 value1], y0 as [field2 value2].
+      simpl in *. destruct H as [Hfield1 Hvalue1].
+      destruct H2 as [Hfield2 Hvalue2]. subst field1 field2.
+      have Hvalue : value1 = value2 :=
+        expr_step_val_unique _ _ _ _ Hvalue1 Hvalue2.
+      subst value2. f_equal. eapply IHHsteps1. exact H4.
+  Qed.
+
+  Lemma field_value_initializers_steps stk
+      (values : list (fld_name * lang.val)) :
+    Forall2 (fun initializer field_value =>
+      fst initializer = fst field_value /\
+      expr_step (snd initializer) stk (Val (snd field_value)))
+      (map (fun '(field, value) => (field, Val value)) values) values.
+  Proof.
+    induction values as [|[field value] values IH].
+    - constructor.
+    - constructor; [split; [reflexivity|constructor]|exact IH].
+  Qed.
+
   (* gfs is a list of *ghost* field names -- purely a naming/freshness
      bookkeeping list for rich_raven_lang's ghost heap (see Wghost in
      rrl_lang.v), carrying no values and never touching fs/the real heap
@@ -205,17 +262,23 @@ Section lifting.
      a freshly-allocated location's ghost cells were never claimed before
      -- via plain exclusivity in ghost_dom_frag -- without needing to
      relate ghost ownership to the real heap in any other way. *)
-  Lemma wp_alloc stk_id stk_frm fs gfs x msk:
+  Lemma wp_alloc_expr stk_id stk_frm
+      (initializers : list (fld_name * expr))
+      (fs : list (fld_name * lang.val)) gfs x msk:
+    Forall2 (fun initializer field_value =>
+      fst initializer = fst field_value /\
+      expr_step (snd initializer) stk_frm (Val (snd field_value)))
+      initializers fs ->
     NoDup (fs.*1) ->
     NoDup gfs ->
     (gfs ≠ [] -> fs ≠ []) ->
     {{{ stack_own[ stk_id, stk_frm ] }}}
-      (RTAlloc x fs stk_id) @ msk
+      (RTAlloc x initializers stk_id) @ msk
     {{{RET LitUnit; ∃ l: loc, stack_own[ stk_id, StackFrame (<[x:=LitLoc l]>stk_frm.(locals))] ∗
         field_list_to_iprop l fs ∗
         ghost_dom_frag (list_to_set (map (heap_addr_constr l) gfs)) ∗ £1}}}.
   Proof.
-    intros HNoDup HNoDupGfs HgfsFs.
+    intros Hinitializers HNoDup HNoDupGfs HgfsFs.
     iIntros (Φ) "Hstk HΦ".
     iApply wp_lift_atomic_base_step_no_fork; first done.
     iIntros (σ ns κ κs nt) "Hstate".
@@ -228,14 +291,19 @@ Section lifting.
         set (σ'' := update_lvar σ' x stk_id (LitLoc l)). 
       iExists [], (RTVal LitUnit), σ'', [].
       iPureIntro.
-      apply (AllocStep σ stk_id x fs); try done.
+      apply (AllocStep σ stk_id stk_frm x initializers fs); done.
 
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
     inversion H as [  |  |  |  |  |  |  |  |  |
-        | σ0 stk_id0 x0 fs0
-        |  |  |  ]; subst x0 fs0 stk_id0 σ0 κ e2 σ2 efs; simpl;
+        | σ0 stk_id0 stk_frm0 x0 initializers0 fs0 Hstack0 Hinitializers0
+        |  |  |  |  |  ]; subst x0 initializers0 stk_id0 σ0 κ e2 σ2 efs; simpl;
         iRevert "Hgdom"; iFrame; iIntros "Hgdom".
         iSplitR; try done.
+
+      assert (stk_frm0 = stk_frm) as ->.
+      { rewrite HstkPure in Hstack0. by injection Hstack0. }
+      assert (fs0 = fs) as ->.
+      { eapply field_initializer_steps_unique; eassumption. }
 
       iCombine "Hstack" "Hstk" as "Hcomb".
 
@@ -256,7 +324,7 @@ Section lifting.
       }
 
       assert ((stack σ) = (stack σ')) as H0. {
-        clear H HgfsFs.
+        clear H HgfsFs Hinitializers Hinitializers0 Hstack0.
 
         induction fs.
         - simpl in σ'. subst σ'. done.
@@ -289,7 +357,7 @@ Section lifting.
       replace (global_heap σ'') with (global_heap σ') by (unfold σ'', update_lvar; rewrite <- H0; rewrite HstkPure; done).
       replace (procs σ'') with (procs σ') by (unfold σ'', update_lvar; rewrite <- H0; rewrite HstkPure; done).
       assert (procs σ' = procs σ) as Hprocs.
-      { clear H H0 HgfsFs. subst σ'. induction fs.
+      { clear H H0 HgfsFs Hinitializers Hinitializers0 Hstack0. subst σ'. induction fs.
       - simpl. done.
       - simpl. unfold update_heap. simpl. apply IHfs. inversion HNoDup. done. }
       rewrite Hprocs. iFrame.
@@ -314,7 +382,8 @@ Section lifting.
       iApply "HΦ".
       iExists l. iFrame.
 
-      clear H H0 Hprocs Hwf_σ' Hwf_alloc HgfsFs HgdomB HgdomB' Hgh_eq.
+      clear H H0 Hprocs Hwf_σ' Hwf_alloc HgfsFs HgdomB HgdomB' Hgh_eq
+        Hinitializers Hinitializers0 Hstack0.
       iInduction fs as [| a fss'] "IHfs" forall (HNoDup).
       + simpl. iDestruct "HHp2" as "_". iPureIntro. done.
       + simpl in fs_heap_map.
@@ -340,6 +409,25 @@ Section lifting.
         destruct a as [fld val]. simpl. iFrame.
         iApply ("IHfs" with "[%]"). { exact H_NoDup'. } iApply "HHp3".
 
+  Qed.
+
+  Lemma wp_alloc stk_id stk_frm fs gfs x msk:
+    NoDup (fs.*1) ->
+    NoDup gfs ->
+    (gfs ≠ [] -> fs ≠ []) ->
+    {{{ stack_own[ stk_id, stk_frm ] }}}
+      (RTAlloc x (map (fun '(field, value) => (field, Val value)) fs) stk_id) @ msk
+    {{{RET LitUnit; ∃ l: loc,
+        stack_own[ stk_id, StackFrame (<[x:=LitLoc l]>stk_frm.(locals))] ∗
+        field_list_to_iprop l fs ∗
+        ghost_dom_frag (list_to_set (map (heap_addr_constr l) gfs)) ∗ £1}}}.
+  Proof.
+    intros Hfields Hghost Hnonempty.
+    apply (wp_alloc_expr stk_id stk_frm _ fs gfs x msk).
+    - apply field_value_initializers_steps.
+    - exact Hfields.
+    - exact Hghost.
+    - exact Hnonempty.
   Qed.
 
   Lemma wp_seq p q r s1 s2 mask:
@@ -375,6 +463,40 @@ Section lifting.
     iMod "Hemp". iModIntro.
     iFrame. iFrame (HgdomB Hwf).
     iApply ("Hs2" with "Hq"). iNext; iFrame.
+  Qed.
+
+  (** A result-indexed sequence rule.  This is the direct counterpart of
+      [wp_seq]: the second command may return an arbitrary value, and its WP
+      is carried as the continuation of the unit result of the first one. *)
+  Lemma wp_seq_wp s1 s2 (Φ : val -> iProp Σ) mask :
+    WP s1 @ mask {{ v, ⌜v = LitUnit⌝ ∗ WP s2 @ mask {{ Φ }} }} -∗
+    WP RTSeq s1 s2 @ mask {{ Φ }}.
+  Proof.
+    iIntros "Hs1".
+    iApply (wp_bind (fill_item (SeqCtx s2)) _ _ _ _).
+    iApply (wp_wand with "Hs1").
+    iIntros (v) "Hunit".
+    iDestruct "Hunit" as "[%Hunit Hs2]".
+    destruct v; try discriminate.
+    simpl.
+
+    iApply wp_lift_base_step; first done.
+    iIntros (σ ns κ κs nt) "Hstate".
+    iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+    iApply fupd_mask_intro. { set_unfold. try done. }
+    iIntros "Hemp".
+
+    iSplitR.
+    - iPureIntro. unfold base_reducible.
+      exists [], s2, σ, [].
+      apply SeqStep.
+
+    - iModIntro. iIntros (e2 σ2 efs).
+      iIntros "%H Hcred".
+      inversion H; subst s0 σ0 κ s2 σ2 efs. iFrame.
+      simpl.
+      iMod "Hemp". iModIntro.
+      iFrame. iFrame (HgdomB Hwf).
   Qed.
 
   Lemma wp_skip p mask stk_id :
@@ -732,6 +854,233 @@ Section lifting.
      }
   Qed.
 
+  (** Result-indexed versions of the conditional lifting rules.  Unlike the
+      Texan-triple rules above, these preserve an arbitrary continuation
+      directly, which is the form needed at the typed runtime boundary. *)
+  Lemma wp_if_t_wp e s1 s2 stk_id stk_frm p (Φ : val -> iProp Σ) mask :
+    expr_step e stk_frm (Val (LitBool true)) ->
+    (stack_own[ stk_id, stk_frm ] ∗ p -∗ WP s1 @ mask {{ Φ }}) -∗
+    stack_own[ stk_id, stk_frm ] ∗ p -∗
+      WP RTIfS e s1 s2 stk_id @ mask {{ Φ }}.
+  Proof.
+    intros Hstp.
+    iIntros "Hwp [Hstk Hp]".
+
+    destruct (to_val s1) eqn:Hs1_val.
+    2: {
+      iApply wp_unfold.
+      iIntros (σ ns κ κs nt) "Hstate".
+
+      iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+      iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+
+      iSpecialize ("Hwp" with "[Hstk Hp]"); iFrame.
+      iPoseProof (wp_unfold with "Hwp") as "Hwp".
+      iEval (unfold wp_pre) in "Hwp".
+      change (language.to_val s1 = None) in Hs1_val.
+      iEval (rewrite Hs1_val) in "Hwp".
+      iAssert (∃ D0, ghost_dom_interp D0 ∗
+                ⌜∀ a, a ∈ D0 → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z⌝)%I
+        with "[Hgdom]" as "Hgdom_bundle".
+      { iExists D. iFrame. iPureIntro. exact HgdomB. }
+      iMod ("Hwp" $! σ ns κ κs nt with "[Hhp Hproc Hstack Hgdom_bundle]") as "[%Hred Hrest]".
+      { iFrame. iFrame (Hwf). }
+      iModIntro.
+      destruct Hred.
+      destruct H as [e' [σ' [efs Hprim]]].
+      simpl in x.
+
+      iSplitR.
+      + iPureIntro. unfold base_reducible. exists [], e', σ', efs.
+        apply (Ectx_step [] (RTIfS e s1 s2 stk_id) e'); try done.
+        apply (RTIfTStep σ stk_id stk_frm e s1 s2 e' σ' efs); try done.
+        pose proof (obs_list_empty _ _ _ _ _ _ Hprim) as Hx_empt; subst.
+        destruct Hprim.
+        exists e1', e2', K.
+        split; try done.
+
+      + iIntros (e2 σ2 efs0).
+        iSpecialize ("Hrest" $! e2 σ2 efs0).
+        iIntros "%Hbase".
+        simpl in *.
+        inversion Hbase; subst. simpl in *.
+
+        pose proof (obs_list_empty _ _ _ _ _ _ Hbase) as Hx_empt; subst.
+
+        assert (K = []).
+        { destruct K; try done. simpl in *.
+          pose proof (fill_not_if K e0 e1' e s1 s2 stk_id). symmetry in H. contradiction. }
+        subst. simpl in *. subst.
+
+        inversion H1; subst.
+
+        2: { rewrite HstkPure in H5. inversion H5; subst.
+             pose proof (expr_step_val_unique _ _ _ _ Hstp H9). discriminate. }
+
+        2: { rewrite HstkPure in H5. inversion H5; subst.
+             pose proof (expr_step_val_unique _ _ _ _ Hstp H9).
+             inversion H; subst. destruct s1; simpl; try (exfalso; done). }
+
+        ++ simpl in *. assert (prim_step s1 σ [] e2' σ2 efs0).
+           { destruct H10 as [e1'' [e2'' [K [Hfill1 [Hfill2 Hrtm]]]]].
+             apply (Ectx_step K e1'' e2''); try done. }
+           iSpecialize ("Hrest" $! H).
+           iExact "Hrest".
+    }
+
+    1: {
+      iApply wp_lift_base_step; first done.
+      iIntros (σ ns κ κs nt) "Hstate".
+      iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+      iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+      iApply fupd_mask_intro. { set_unfold. try done. }
+
+      iSpecialize ("Hwp" with "[Hstk Hp]"); iFrame.
+
+      iIntros "Hfupd".
+      iSplitR.
+      - iPureIntro. unfold base_reducible. exists [], s1, σ, [].
+        destruct s1 eqn:Hs1; simpl in Hs1_val; try discriminate.
+        rewrite <- Hs1.
+        apply (RTIfValStep σ stk_id stk_frm e s1 s2 true); try done.
+        rewrite Hs1. done.
+
+      - iIntros (e2 σ2 efs).
+        iNext. iIntros "%Hbase Hcr".
+        iMod "Hfupd". iModIntro.
+        inversion Hbase; subst.
+        1: {
+          destruct s1 eqn:Hs1; simpl in Hs1_val; try discriminate.
+          destruct H10 as [e1' [e2' [K [Hs1' [Hs2' Hrtm]]]]].
+
+          assert (K = []).
+          { destruct K; try done. simpl in *.
+            pose proof (lang.fill_not_val K e0 e1' v0). symmetry in Hs1'. contradiction. }
+          subst. simpl in *. symmetry in Hs1'. subst.
+          inversion Hrtm.
+        }
+
+        2: { rewrite HstkPure in H8. inversion H8; subst.
+             pose proof (expr_step_val_unique e stk_frm0 _ _ Hstp H9).
+             inversion H; subst. iFrame. simpl in *. iFrame. iFrame (HgdomB Hwf). }
+
+        1: { rewrite HstkPure in H8. inversion H8; subst.
+             pose proof (expr_step_val_unique e stk_frm0 _ _ Hstp H9). inversion H. }
+    }
+  Qed.
+
+  Lemma wp_if_f_wp e s1 s2 stk_id stk_frm p (Φ : val -> iProp Σ) mask :
+    expr_step e stk_frm (Val (LitBool false)) ->
+    (stack_own[ stk_id, stk_frm ] ∗ p -∗ WP s2 @ mask {{ Φ }}) -∗
+    stack_own[ stk_id, stk_frm ] ∗ p -∗
+      WP RTIfS e s1 s2 stk_id @ mask {{ Φ }}.
+  Proof.
+    intros Hstp.
+    iIntros "Hwp [Hstk Hp]".
+
+    destruct (to_val s2) eqn:Hs2_val.
+    2: {
+      iApply wp_unfold.
+      iIntros (σ ns κ κs nt) "Hstate".
+
+      iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+      iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+
+      iSpecialize ("Hwp" with "[Hstk Hp]"); iFrame.
+      iPoseProof (wp_unfold with "Hwp") as "Hwp".
+      iEval (unfold wp_pre) in "Hwp".
+      change (language.to_val s2 = None) in Hs2_val.
+      iEval (rewrite Hs2_val) in "Hwp".
+      iAssert (∃ D0, ghost_dom_interp D0 ∗
+                ⌜∀ a, a ∈ D0 → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ)))%Z⌝)%I
+        with "[Hgdom]" as "Hgdom_bundle".
+      { iExists D. iFrame. iPureIntro. exact HgdomB. }
+      iMod ("Hwp" $! σ ns κ κs nt with "[Hhp Hproc Hstack Hgdom_bundle]") as "[%Hred Hrest]".
+      { iFrame. iFrame (Hwf). }
+      iModIntro.
+      destruct Hred.
+      destruct H as [e' [σ' [efs Hprim]]].
+      simpl in x.
+
+      iSplitR.
+      + iPureIntro. unfold base_reducible. exists [], e', σ', efs.
+        apply (Ectx_step [] (RTIfS e s1 s2 stk_id) e'); try done.
+        apply (RTIfFStep σ stk_id stk_frm e s1 s2 e' σ' efs); try done.
+        pose proof (obs_list_empty _ _ _ _ _ _ Hprim) as Hx_empt; subst.
+        destruct Hprim.
+        exists e1', e2', K.
+        split; try done.
+
+      + iIntros (e2 σ2 efs0).
+        iSpecialize ("Hrest" $! e2 σ2 efs0).
+        iIntros "%Hbase".
+        simpl in *.
+        inversion Hbase; subst. simpl in *.
+
+        pose proof (obs_list_empty _ _ _ _ _ _ Hbase) as Hx_empt; subst.
+
+        assert (K = []).
+        { destruct K; try done. simpl in *.
+          pose proof (fill_not_if K e0 e1' e s1 s2 stk_id). symmetry in H. contradiction. }
+        subst. simpl in *. subst.
+
+        inversion H1; subst.
+
+        1: { rewrite HstkPure in H5. inversion H5; subst.
+             pose proof (expr_step_val_unique _ _ _ _ Hstp H9). discriminate. }
+
+        2: { rewrite HstkPure in H5. inversion H5; subst.
+             pose proof (expr_step_val_unique _ _ _ _ Hstp H9).
+             inversion H; subst. destruct s2; simpl; try (exfalso; done). }
+
+        ++ simpl in *. assert (prim_step s2 σ [] e2' σ2 efs0).
+           { destruct H10 as [e1'' [e2'' [K [Hfill1 [Hfill2 Hrtm]]]]].
+             apply (Ectx_step K e1'' e2''); try done. }
+           iSpecialize ("Hrest" $! H).
+           iExact "Hrest".
+    }
+
+    1: {
+      iApply wp_lift_base_step; first done.
+      iIntros (σ ns κ κs nt) "Hstate".
+      iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+      iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+      iApply fupd_mask_intro. { set_unfold. try done. }
+
+      iSpecialize ("Hwp" with "[Hstk Hp]"); iFrame.
+
+      iIntros "Hfupd".
+      iSplitR.
+      - iPureIntro. unfold base_reducible. exists [], s2, σ, [].
+        destruct s2 eqn:Hs2; simpl in Hs2_val; try discriminate.
+        rewrite <- Hs2.
+        apply (RTIfValStep σ stk_id stk_frm e s1 s2 false); try done.
+        rewrite Hs2. done.
+
+      - iIntros (e2 σ2 efs).
+        iNext. iIntros "%Hbase Hcr".
+        iMod "Hfupd". iModIntro.
+        inversion Hbase; subst.
+        2: {
+          destruct s2 eqn:Hs2; simpl in Hs2_val; try discriminate.
+          destruct H10 as [e1' [e2' [K [Hs1' [Hs2' Hrtm]]]]].
+
+          assert (K = []).
+          { destruct K; try done. simpl in *.
+            pose proof (lang.fill_not_val K e0 e1' v0). symmetry in Hs1'. contradiction. }
+          subst. simpl in *. symmetry in Hs1'. subst.
+          inversion Hrtm.
+        }
+
+        2: { rewrite HstkPure in H8. inversion H8; subst.
+             pose proof (expr_step_val_unique e stk_frm0 _ _ Hstp H9).
+             inversion H; subst. iFrame. simpl in *. iFrame. iFrame (HgdomB Hwf). }
+
+        1: { rewrite HstkPure in H8. inversion H8; subst.
+             pose proof (expr_step_val_unique e stk_frm0 _ _ Hstp H9). inversion H. }
+    }
+  Qed.
+
   Lemma Forall2_list_to_map_zip args arg_vals :
     NoDup args ->
     length args = length arg_vals →
@@ -807,6 +1156,29 @@ Section lifting.
     induction decls as [| [v tp] rest IH]; simpl; constructor; [apply canonical_val_has_typ | exact IH].
   Qed.
 
+  Lemma wp_active_call_nostore callee_stk_id callee_frame value mask p :
+    {{{ stack_own[ callee_stk_id, callee_frame ] ∗ p }}}
+      RTActiveCallNoStore (RTVal value) callee_stk_id @ mask
+    {{{ RET LitUnit; p ∗ £1 }}}.
+  Proof.
+    iIntros (Φ) "[Hcallee Hp] HΦ".
+    iApply wp_lift_atomic_base_step_no_fork; first done.
+    iIntros (σ ns κ κs nt) "Hstate".
+    iDestruct "Hstate" as
+      "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+    iPoseProof (stack_interp_agreement with "Hstack Hcallee") as "%Hcallee".
+    iModIntro. iSplitR.
+    - iPureIntro. unfold base_reducible.
+      exists [], (RTVal LitUnit), σ, [].
+      apply (ActiveCallNoStoreStep σ callee_stk_id value callee_frame).
+      exact Hcallee.
+    - iNext. iIntros (e2 σ2 efs) "%Hstep Hcred".
+      inversion Hstep; subst σ0 κ e2 σ2 efs.
+      iModIntro. iSplitR; first done.
+      iFrame "Hhp Hproc Hstack Hgdom". iFrame (HgdomB Hwf).
+      simpl. iApply "HΦ". iFrame.
+  Qed.
+
   Lemma wp_call stk_id stk_frm args arg_vals proc x proc_entry mask p (q : lang.val -> iProp Σ):
     NoDup (proc_args proc_entry).*1 ->
     NoDup (proc_local_vars proc_entry).*1 ->
@@ -860,6 +1232,30 @@ Section lifting.
 
   - iNext. iIntros (e2 σ2 efs) "%H Hcred".
     inversion H; subst proc0 args0 stk_id0 σ1 κ σ2 e2 efs.
+    have Hprocedure : procedure = proc_entry.
+    { match goal with
+      | Hlookup : procs σ !! proc = Some procedure |- _ =>
+          rewrite HprocPure in Hlookup; by injection Hlookup
+      end. }
+    have Hcaller : stk_frm0 = stk_frm.
+    { match goal with
+      | Hlookup : stack σ !! stk_id = Some stk_frm0 |- _ =>
+          rewrite HstkPure in Hlookup; by injection Hlookup
+      end. }
+    subst procedure stk_frm0.
+    have Hlocal_vals : Forall2
+        (fun decl val => val_has_typ val (snd decl))
+        (proc_local_vars proc_entry) local_vals.
+    { match goal with
+      | Htyped : Forall2 _ (proc_local_vars proc_entry) local_vals |- _ =>
+          exact Htyped
+      end. }
+    have Harg_steps : Forall2
+        (fun expression value => expr_step expression stk_frm (Val value))
+        args arg_vals0.
+    { match goal with
+      | Hsteps : Forall2 _ args arg_vals0 |- _ => exact Hsteps
+      end. }
     iMod "Hfupd".
     (* Freshness: the new stack id (Z.of_nat (Z.to_nat σ.(max_stack_id) + 1))
        must not yet be in the stack map. Follows from state_wf's own
@@ -873,19 +1269,17 @@ Section lifting.
     { have := swf_max_stk_non_neg Hwf. unfold fresh_stk_id. simpl. lia. }
     have Hrv_new : is_Some (new_stk_frame.(locals) !! "#ret_val").
     { simpl.
-      have H5copy := H5.
-      have Hproc_eq : procedure = proc_entry.
-      { rewrite HprocPure in H5copy. injection H5copy. done. }
-      have HNoDupLocalsC : NoDup procedure.(proc_local_vars).*1.
-      { rewrite Hproc_eq. exact HNoDupLocals. }
-      have Hrv_pair : ∃ tp, ("#ret_val", tp) ∈ procedure.(proc_local_vars).
-      { apply elem_of_list_fmap_2 in H13 as [[v0 tp0] [Heq Hin]]. simpl in Heq. subst v0. exists tp0. exact Hin. }
+      have HNoDupLocalsC : NoDup proc_entry.(proc_local_vars).*1 := HNoDupLocals.
+      have Hrv_pair : ∃ tp, ("#ret_val", tp) ∈ proc_entry.(proc_local_vars).
+      { apply elem_of_list_fmap_2 in Hrv_in as [[v0 tp0] [Heq Hin]].
+        simpl in Heq. subst v0. exists tp0. exact Hin. }
       destruct Hrv_pair as [tp Hrv_pair].
-      have Hpresent := proc_locals_present_typed procedure.(proc_local_vars) local_vals HNoDupLocalsC H14 "#ret_val" tp Hrv_pair.
+      have Hpresent := proc_locals_present_typed proc_entry.(proc_local_vars)
+        local_vals HNoDupLocalsC Hlocal_vals "#ret_val" tp Hrv_pair.
       destruct Hpresent as [val [Hlk _]].
       rewrite list_to_map_app.
       destruct (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
-                  (zip (map fst (proc_args procedure)) arg_vals0) !! "#ret_val") as [rv|] eqn:Hm1.
+                  (zip (map fst (proc_args proc_entry)) arg_vals0) !! "#ret_val") as [rv|] eqn:Hm1.
       - rewrite (lookup_union_Some_l _ _ _ _ Hm1). by eexists.
       - rewrite lookup_union_r; [| exact Hm1]. rewrite Hlk. by eexists.
     }
@@ -896,18 +1290,16 @@ Section lifting.
     iApply (wp_bind (fill_item (ActiveCallCtx x (Z.to_nat (max_stack_id σ) + 1) stk_id)) _ _ _ _).
     set stk_id' := (Z.to_nat (max_stack_id σ) + 1).
     iSpecialize ("Hproc_body" $! stk_id' new_stk_frame).
-    rewrite HprocPure in H5. inversion H5. subst procedure. clear H5.
-    rewrite HstkPure in H4. inversion H4. subst stk_frm0. clear H4.
-
     iPoseProof ("Hproc_body" with "[%]") as "Hproc_body'".
     { simpl.
-      assert (arg_vals0 = arg_vals). { apply (Forall2_expr_step_val_unique args stk_frm); try done . }
+      assert (arg_vals0 = arg_vals).
+      { apply (Forall2_expr_step_val_unique args stk_frm); try done. }
       subst arg_vals0.
       have Hargs_len : length (proc_args proc_entry).*1 = length arg_vals.
       { apply Forall2_length in Harg_evals. rewrite map_length. rewrite <- Hlen. exact Harg_evals. }
       have Hargs_len_le : length (proc_args proc_entry).*1 ≤ length arg_vals. { lia. }
       have Hlocals_len_le : length (proc_local_vars proc_entry).*1 ≤ length local_vals.
-      { apply Forall2_length in H14. rewrite map_length. lia. }
+      { apply Forall2_length in Hlocal_vals. rewrite map_length. lia. }
       have Hzip := Forall2_list_to_map_zip (proc_args proc_entry).*1 arg_vals HNoDup Hargs_len.
       have Hm1_none : (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
                   (zip (proc_args proc_entry).*1 arg_vals)) !! "#ret_val" = None.
@@ -918,7 +1310,8 @@ Section lifting.
       - eapply Forall2_impl; [| exact Hzip].
         intros var val Hlookup. by apply lookup_union_Some_l.
       - intros vname tp Hin.
-        have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry) local_vals HNoDupLocals H14 vname tp Hin.
+        have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
+          local_vals HNoDupLocals Hlocal_vals vname tp Hin.
         destruct Hpresent as [val [Hlk Hty]].
         have Hv_not_arg : vname ∉ (proc_args proc_entry).*1.
         { intro Hc. apply (Hdisjoint vname Hc). apply elem_of_list_fmap. exists (vname, tp). done. }
@@ -955,10 +1348,16 @@ Section lifting.
       * iNext. iIntros (e2 σ2 efs H') "Hcred'".
        inversion H'; subst callee_stk_id caller_stk_id σ0 κ e2 σ2 efs.
        assert (callee_stack = stk_frm'') as Hcallee.
-       { rewrite HstkPure3 in H11. injection H11. done. }
+       { match goal with
+         | Hlookup : stack ?state !! ?callee_id = Some callee_stack |- _ =>
+             rewrite HstkPure3 in Hlookup; by injection Hlookup
+         end. }
        subst callee_stack.
        assert (ret_val0 = ret_val) as Hretval.
-       { rewrite Hret in H15. injection H15. done. }
+       { match goal with
+         | Hlookup : locals ?frame !! "#ret_val" = Some ret_val0 |- _ =>
+             rewrite Hret in Hlookup; by injection Hlookup
+         end. }
        subst ret_val0.
        iModIntro. iSplitR; try done.
        change (weakestpre.state_interp σ' (S ns0) κs0 nt0) with (ghost_state.state_interp σ').
@@ -971,6 +1370,348 @@ Section lifting.
        have Hwf_ret : state_wf σ' := state_wf_update_lvar σ1 x stk_id ret_val Hwf1.
        iFrame (HgdomB1 Hwf_ret).
        simpl. iApply "HΦ". iExists ret_val. iFrame.
+  Qed.
+
+  Lemma wp_call_nostore stk_id stk_frm args arg_vals proc proc_entry mask p (q : lang.val -> iProp Σ):
+    NoDup (proc_args proc_entry).*1 ->
+    NoDup (proc_local_vars proc_entry).*1 ->
+    (proc_args proc_entry).*1 ## (proc_local_vars proc_entry).*1 ->
+    "#ret_val" ∈ (proc_local_vars proc_entry).*1 ->
+    length args = length (proc_entry.(proc_args)) ->
+    Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+    ▷ (∀ stk_id' stk_frm',
+      ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val) proc_entry.(proc_args).*1 arg_vals
+       ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
+            ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
+       ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪ list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
+        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
+            to_rtstmt stk_id' proc_entry.(proc_stmt) @ mask
+        {{{ RET (LitUnit); ∃ ret_val stk_frm'', stack_own[ stk_id', stk_frm'' ] ∗ ⌜ (stk_frm''.(locals) !! "#ret_val" = Some ret_val) ⌝ ∗ q ret_val }}} ) -∗
+
+    {{{ stack_own[ stk_id, stk_frm ] ∗ (proc_tbl_chunk proc proc_entry) ∗ p }}}
+        RTCallNoStore proc args stk_id @ mask
+    {{{ RET LitUnit; ∃ ret_val, stack_own[ stk_id, stk_frm ] ∗ q ret_val ∗ £1}}}.
+  Proof.
+    intros HNoDup HNoDupLocals Hdisjoint Hrv_in Hlen Harg_evals.
+
+    iIntros "#Hproc_body".
+    iIntros (Φ). iModIntro. iIntros "[Hstk [Hproc_tbl Hp]] HΦ".
+
+    iApply wp_lift_base_step; first done.
+    iIntros (σ1 ns κ κs nt) "Hstate".
+    iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+    iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+    iPoseProof (proc_tbl_interp_agreement with "Hproc Hproc_tbl") as "%HprocPure".
+    iApply fupd_mask_intro. { set_solver. }
+
+    iIntros "Hfupd". iSplitR.
+
+    - iPureIntro. unfold base_reducible.
+
+    set new_stk_id := (fresh_stk_id σ1).1.
+    set σ' :=  (fresh_stk_id σ1).2.
+    set local_vals0 := map (fun decl => canonical_val (snd decl)) proc_entry.(proc_local_vars).
+    set new_stk_frame := StackFrame
+      (list_to_map (decls_zip_vals proc_entry.(proc_args) arg_vals
+                    ++ decls_zip_vals proc_entry.(proc_local_vars) local_vals0)).
+    set σ'' := update_stack σ' new_stk_id new_stk_frame.
+
+    set new_stmt := to_rtstmt new_stk_id proc_entry.(proc_stmt).
+
+    exists [], (RTActiveCallNoStore new_stmt new_stk_id), σ'', [].
+
+    apply (RTCallNoStoreStep σ1 stk_id stk_frm proc args arg_vals proc_entry local_vals0); try done.
+    apply Forall2_canonical_val_has_typ.
+
+  - iNext. iIntros (e2 σ2 efs) "%H Hcred".
+    inversion H; subst proc0 args0 stk_id0 σ1 κ σ2 e2 efs.
+    have Hprocedure : procedure = proc_entry.
+    { match goal with
+      | Hlookup : procs σ !! proc = Some procedure |- _ =>
+          rewrite HprocPure in Hlookup; by injection Hlookup
+      end. }
+    have Hcaller : stk_frm0 = stk_frm.
+    { match goal with
+      | Hlookup : stack σ !! stk_id = Some stk_frm0 |- _ =>
+          rewrite HstkPure in Hlookup; by injection Hlookup
+      end. }
+    subst procedure stk_frm0.
+    have Hlocal_vals : Forall2
+        (fun decl val => val_has_typ val (snd decl))
+        (proc_local_vars proc_entry) local_vals.
+    { match goal with
+      | Htyped : Forall2 _ (proc_local_vars proc_entry) local_vals |- _ =>
+          exact Htyped
+      end. }
+    have Harg_steps : Forall2
+        (fun expression value => expr_step expression stk_frm (Val value))
+        args arg_vals0.
+    { match goal with
+      | Hsteps : Forall2 _ args arg_vals0 |- _ => exact Hsteps
+      end. }
+    iMod "Hfupd".
+    (* Freshness: the new stack id (Z.of_nat (Z.to_nat σ.(max_stack_id) + 1))
+       must not yet be in the stack map. Follows from state_wf's own
+       invariant that every allocated stack id is ≤ max_stack_id. *)
+    assert (Hfresh_new : stack σ !! Z.of_nat (Z.to_nat σ.(max_stack_id) + 1) = None) by (apply (max_stk_id_fresh _ Hwf)).
+    iPoseProof ((stack_new_stk_frm_upd σ new_stk_frame Hfresh_new) with "Hstack") as ">[Hstack' Hstk']".
+
+    simpl; iFrame.
+    have Hwf_σ' : state_wf (fresh_stk_id σ).2 := state_wf_fresh_stk_id σ Hwf.
+    have Hle_call : (Z.of_nat (Z.to_nat σ.(max_stack_id) + 1) ≤ (fresh_stk_id σ).2.(max_stack_id))%Z.
+    { have := swf_max_stk_non_neg Hwf. unfold fresh_stk_id. simpl. lia. }
+    have Hrv_new : is_Some (new_stk_frame.(locals) !! "#ret_val").
+    { simpl.
+      have HNoDupLocalsC : NoDup proc_entry.(proc_local_vars).*1 := HNoDupLocals.
+      have Hrv_pair : ∃ tp, ("#ret_val", tp) ∈ proc_entry.(proc_local_vars).
+      { apply elem_of_list_fmap_2 in Hrv_in as [[v0 tp0] [Heq Hin]].
+        simpl in Heq. subst v0. exists tp0. exact Hin. }
+      destruct Hrv_pair as [tp Hrv_pair].
+      have Hpresent := proc_locals_present_typed proc_entry.(proc_local_vars)
+        local_vals HNoDupLocalsC Hlocal_vals "#ret_val" tp Hrv_pair.
+      destruct Hpresent as [val [Hlk _]].
+      rewrite list_to_map_app.
+      destruct (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
+                  (zip (map fst (proc_args proc_entry)) arg_vals0) !! "#ret_val") as [rv|] eqn:Hm1.
+      - rewrite (lookup_union_Some_l _ _ _ _ Hm1). by eexists.
+      - rewrite lookup_union_r; [| exact Hm1]. rewrite Hlk. by eexists.
+    }
+    have Hwf_call : state_wf (update_stack (fresh_stk_id σ).2 (Z.to_nat σ.(max_stack_id) + 1) new_stk_frame) :=
+      state_wf_update_stack (fresh_stk_id σ).2 (Z.to_nat σ.(max_stack_id) + 1) new_stk_frame Hle_call Hrv_new Hwf_σ'.
+    iFrame (HgdomB Hwf_call). iModIntro.
+
+    iApply (wp_bind (fill_item (ActiveCallNoStoreCtx (Z.to_nat (max_stack_id σ) + 1))) _ _ _ _).
+    set stk_id' := (Z.to_nat (max_stack_id σ) + 1).
+    iSpecialize ("Hproc_body" $! stk_id' new_stk_frame).
+    iPoseProof ("Hproc_body" with "[%]") as "Hproc_body'".
+    { simpl.
+      assert (arg_vals0 = arg_vals).
+      { apply (Forall2_expr_step_val_unique args stk_frm); try done. }
+      subst arg_vals0.
+      have Hargs_len : length (proc_args proc_entry).*1 = length arg_vals.
+      { apply Forall2_length in Harg_evals. rewrite map_length. rewrite <- Hlen. exact Harg_evals. }
+      have Hargs_len_le : length (proc_args proc_entry).*1 ≤ length arg_vals. { lia. }
+      have Hlocals_len_le : length (proc_local_vars proc_entry).*1 ≤ length local_vals.
+      { apply Forall2_length in Hlocal_vals. rewrite map_length. lia. }
+      have Hzip := Forall2_list_to_map_zip (proc_args proc_entry).*1 arg_vals HNoDup Hargs_len.
+      have Hm1_none : (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
+                  (zip (proc_args proc_entry).*1 arg_vals)) !! "#ret_val" = None.
+      { apply not_elem_of_list_to_map_1. rewrite (fst_zip _ _ Hargs_len_le).
+        intro Hc. apply (Hdisjoint "#ret_val" Hc). exact Hrv_in. }
+      rewrite list_to_map_app.
+      split; [| split].
+      - eapply Forall2_impl; [| exact Hzip].
+        intros var val Hlookup. by apply lookup_union_Some_l.
+      - intros vname tp Hin.
+        have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
+          local_vals HNoDupLocals Hlocal_vals vname tp Hin.
+        destruct Hpresent as [val [Hlk Hty]].
+        have Hv_not_arg : vname ∉ (proc_args proc_entry).*1.
+        { intro Hc. apply (Hdisjoint vname Hc). apply elem_of_list_fmap. exists (vname, tp). done. }
+        have Hm2_none : (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
+                  (zip (proc_args proc_entry).*1 arg_vals)) !! vname = None.
+        { apply not_elem_of_list_to_map_1. rewrite (fst_zip _ _ Hargs_len_le). exact Hv_not_arg. }
+        exists val. split; [| exact Hty].
+        rewrite lookup_union_r; [| exact Hm2_none]. exact Hlk.
+      - rewrite dom_union_L !dom_list_to_map_L (fst_zip _ _ Hargs_len_le) (fst_zip _ _ Hlocals_len_le).
+        reflexivity.
+    }
+    iClear "Hproc_body".
+    iApply ("Hproc_body'" with "[Hstk' Hp]") .
+
+    + iFrame.
+
+    + iNext. simpl. iIntros "[%ret_val [%stk_frm'' [Hstk'' [%Hret Hq]]]]".
+      iApply (wp_active_call_nostore stk_id' stk_frm'' LitUnit mask
+        (stack_own[ stk_id, stk_frm ] ∗ q ret_val) with
+        "[$Hstk'' $Hstk $Hq]").
+      iNext. iIntros "[[Hstk Hq] Hreturn_credit]".
+      iApply "HΦ". iExists ret_val. iFrame.
+  Qed.
+
+  Lemma wp_spawn stk_id stk_frm args arg_vals proc proc_entry mask p :
+    NoDup (proc_args proc_entry).*1 ->
+    NoDup (proc_local_vars proc_entry).*1 ->
+    (proc_args proc_entry).*1 ## (proc_local_vars proc_entry).*1 ->
+    "#ret_val" ∈ (proc_local_vars proc_entry).*1 ->
+    length args = length (proc_entry.(proc_args)) ->
+    Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+    ▷ (∀ stk_id' stk_frm',
+      ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val) proc_entry.(proc_args).*1 arg_vals
+       ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
+            ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
+       ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪ list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
+        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
+            to_rtstmt stk_id' proc_entry.(proc_stmt) @ ⊤
+        {{{ RET LitUnit; True }}}) -∗
+    {{{ stack_own[ stk_id, stk_frm ] ∗ proc_tbl_chunk proc proc_entry ∗ p }}}
+        RTSpawn proc args stk_id @ mask
+    {{{ RET LitUnit; stack_own[ stk_id, stk_frm ] ∗ £1 }}}.
+  Proof.
+    intros HNoDup HNoDupLocals Hdisjoint Hrv_in Hlen Harg_evals.
+    iIntros "#Hproc_body" (Phi). iModIntro.
+    iIntros "[Hstk [Hproc_tbl Hp]] HΦ".
+
+    iApply wp_lift_base_step; first done.
+    iIntros (σ1 ns κ κs nt) "Hstate".
+    iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
+    iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
+    iPoseProof (proc_tbl_interp_agreement with "Hproc Hproc_tbl") as "%HprocPure".
+    iApply fupd_mask_intro. { set_solver. }
+    iIntros "Hfupd". iSplitR.
+    - iPureIntro. unfold base_reducible.
+      set local_vals0 := map (fun decl => canonical_val (snd decl)) proc_entry.(proc_local_vars).
+      set new_stk_frame := StackFrame
+        (list_to_map (decls_zip_vals proc_entry.(proc_args) arg_vals
+                      ++ decls_zip_vals proc_entry.(proc_local_vars) local_vals0)).
+      set new_stk_id := (fresh_stk_id σ1).1.
+      set σ' := update_stack (fresh_stk_id σ1).2 new_stk_id new_stk_frame.
+      exists [], (RTVal LitUnit), σ', [to_rtstmt new_stk_id proc_entry.(proc_stmt)].
+      apply (SpawnStep σ1 stk_id stk_frm proc args arg_vals proc_entry local_vals0); try done.
+      apply Forall2_canonical_val_has_typ.
+    - iNext. iIntros (e2 σ2 efs) "%Hstep Hcred".
+      inversion Hstep; subst proc0 args0 stk_id0 σ1 κ σ2 e2 efs.
+      have Hprocedure : procedure = proc_entry.
+      { match goal with
+        | Hlookup : procs σ !! proc = Some procedure |- _ =>
+            rewrite HprocPure in Hlookup; by injection Hlookup
+        end. }
+      have Hcaller : stk_frm0 = stk_frm.
+      { match goal with
+        | Hlookup : stack σ !! stk_id = Some stk_frm0 |- _ =>
+            rewrite HstkPure in Hlookup; by injection Hlookup
+        end. }
+      subst procedure stk_frm0.
+      have Hlocal_vals : Forall2
+          (fun decl val => val_has_typ val (snd decl))
+          (proc_local_vars proc_entry) local_vals.
+      { match goal with
+        | Htyped : Forall2 _ (proc_local_vars proc_entry) local_vals |- _ => exact Htyped
+        end. }
+      iMod "Hfupd".
+      assert (Hfresh_new : stack σ !! Z.of_nat (Z.to_nat σ.(max_stack_id) + 1) = None)
+        by (apply (max_stk_id_fresh _ Hwf)).
+      iPoseProof ((stack_new_stk_frm_upd σ new_stk_frame Hfresh_new) with "Hstack")
+        as ">[Hstack' Hstk']".
+
+      simpl; iFrame.
+      have Hwf_fresh : state_wf (fresh_stk_id σ).2 := state_wf_fresh_stk_id σ Hwf.
+      have Hle_spawn :
+          (Z.of_nat (Z.to_nat σ.(max_stack_id) + 1) ≤ (fresh_stk_id σ).2.(max_stack_id))%Z.
+      { have := swf_max_stk_non_neg Hwf. unfold fresh_stk_id. simpl. lia. }
+      have Hrv_new : is_Some (new_stk_frame.(locals) !! "#ret_val").
+      { simpl.
+        have Hrv_pair : ∃ tp, ("#ret_val", tp) ∈ proc_entry.(proc_local_vars).
+        { apply elem_of_list_fmap_2 in Hrv_in as [[v0 tp0] [Heq Hin]].
+          simpl in Heq. subst v0. exists tp0. exact Hin. }
+        destruct Hrv_pair as [tp Hrv_pair].
+        have Hpresent := proc_locals_present_typed proc_entry.(proc_local_vars)
+          local_vals HNoDupLocals Hlocal_vals "#ret_val" tp Hrv_pair.
+        destruct Hpresent as [val [Hlk _]].
+        rewrite list_to_map_app.
+        destruct (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
+                    (zip (map fst (proc_args proc_entry)) arg_vals0) !! "#ret_val")
+          as [rv|] eqn:Hm1.
+        - rewrite (lookup_union_Some_l _ _ _ _ Hm1). by eexists.
+        - rewrite lookup_union_r; [| exact Hm1]. rewrite Hlk. by eexists. }
+      have Hwf_spawn :
+          state_wf (update_stack (fresh_stk_id σ).2
+            (Z.to_nat σ.(max_stack_id) + 1) new_stk_frame) :=
+        state_wf_update_stack (fresh_stk_id σ).2
+          (Z.to_nat σ.(max_stack_id) + 1) new_stk_frame Hle_spawn Hrv_new Hwf_fresh.
+      iFrame (HgdomB Hwf_spawn). iModIntro.
+      iSplitL "Hstk Hcred HΦ".
+      + iApply wp_value.
+        * done.
+        * iApply "HΦ". iFrame.
+      + iSpecialize ("Hproc_body" $! (Z.to_nat σ.(max_stack_id) + 1) new_stk_frame).
+        iPoseProof ("Hproc_body" with "[%]") as "Hbody".
+        { simpl.
+          assert (arg_vals0 = arg_vals).
+          { apply (Forall2_expr_step_val_unique args stk_frm); try done. }
+          subst arg_vals0.
+          have Hargs_len : length (proc_args proc_entry).*1 = length arg_vals.
+          { apply Forall2_length in Harg_evals. rewrite map_length.
+            rewrite <- Hlen. exact Harg_evals. }
+          have Hargs_len_le : length (proc_args proc_entry).*1 ≤ length arg_vals by lia.
+          have Hlocals_len_le : length (proc_local_vars proc_entry).*1 ≤ length local_vals.
+          { apply Forall2_length in Hlocal_vals. rewrite map_length. lia. }
+          have Hzip := Forall2_list_to_map_zip
+            (proc_args proc_entry).*1 arg_vals HNoDup Hargs_len.
+          rewrite list_to_map_app.
+          split; [| split].
+          - eapply Forall2_impl; [| exact Hzip].
+            intros var val Hlookup. by apply lookup_union_Some_l.
+          - intros vname tp Hin.
+            have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
+              local_vals HNoDupLocals Hlocal_vals vname tp Hin.
+            destruct Hpresent as [val [Hlk Hty]].
+            have Hv_not_arg : vname ∉ (proc_args proc_entry).*1.
+            { intro Harg. apply (Hdisjoint vname Harg).
+              apply elem_of_list_fmap. exists (vname, tp). done. }
+            have Hm_none : (@list_to_map lang.var lang.val (gmap lang.var lang.val) _ _
+                (zip (proc_args proc_entry).*1 arg_vals)) !! vname = None.
+            { apply not_elem_of_list_to_map_1.
+              rewrite (fst_zip _ _ Hargs_len_le). exact Hv_not_arg. }
+            exists val. split; [| exact Hty].
+            rewrite lookup_union_r; [exact Hlk | exact Hm_none].
+          - rewrite dom_union_L !dom_list_to_map_L
+              (fst_zip _ _ Hargs_len_le) (fst_zip _ _ Hlocals_len_le).
+            reflexivity. }
+        iSpecialize ("Hbody" $! (fun _ => True%I)).
+        iPoseProof ("Hbody" with "[$Hstk' $Hp]") as "Hbodywp".
+        iSpecialize ("Hbodywp" with "[]").
+        { iNext. iIntros "_". done. }
+        iExact "Hbodywp".
+  Qed.
+
+  Lemma wp_call_nostore_no_ret stk_id stk_frm args arg_vals proc proc_entry
+      mask p (q : lang.val -> iProp Σ) :
+    proc_call_layout proc_entry ->
+    length args = length (proc_entry.(proc_args)) ->
+    Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+    ▷ (∀ stk_id' stk_frm',
+      ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val)
+          proc_entry.(proc_args).*1 arg_vals
+       ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
+            ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
+       ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪
+           list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
+        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
+            to_rtstmt stk_id' proc_entry.(proc_stmt) @ mask
+        {{{ RET (LitUnit); ∃ ret_val stk_frm'', stack_own[ stk_id', stk_frm'' ] ∗
+            ⌜ (stk_frm''.(locals) !! "#ret_val" = Some ret_val) ⌝ ∗
+            q ret_val }}} ) -∗
+    {{{ stack_own[ stk_id, stk_frm ] ∗ (proc_tbl_chunk proc proc_entry) ∗ p }}}
+        RTCallNoStore proc args stk_id @ mask
+    {{{ RET LitUnit; ∃ ret_val, stack_own[ stk_id, stk_frm ] ∗ q ret_val ∗ £1}}}.
+  Proof.
+    intros Hlayout Hlen Harg_evals.
+    destruct Hlayout as [HNoDup HNoDupLocals Hdisjoint Hrv_in].
+    eapply wp_call_nostore; eauto.
+  Qed.
+
+  Lemma wp_spawn_no_ret stk_id stk_frm args arg_vals proc proc_entry mask p :
+    proc_call_layout proc_entry ->
+    length args = length (proc_entry.(proc_args)) ->
+    Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
+    ▷ (∀ stk_id' stk_frm',
+      ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val)
+          proc_entry.(proc_args).*1 arg_vals
+       ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
+            ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
+       ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪
+           list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
+        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
+            to_rtstmt stk_id' proc_entry.(proc_stmt) @ ⊤
+        {{{ RET LitUnit; True }}}) -∗
+    {{{ stack_own[ stk_id, stk_frm ] ∗ proc_tbl_chunk proc proc_entry ∗ p }}}
+        RTSpawn proc args stk_id @ mask
+    {{{ RET LitUnit; stack_own[ stk_id, stk_frm ] ∗ £1 }}}.
+  Proof.
+    intros Hlayout Hlen Harg_evals.
+    destruct Hlayout as [HNoDup HNoDupLocals Hdisjoint Hrv_in].
+    eapply wp_spawn; eauto.
   Qed.
 
 End lifting.
