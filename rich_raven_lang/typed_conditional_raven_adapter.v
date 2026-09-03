@@ -787,6 +787,13 @@ Inductive net_tree : option Payload.marker -> list Payload.marker ->
     (then_net : net_tree (Some focused) tail join_stack entry then_exit)
     (else_net : net_tree (Some focused) tail join_stack entry else_exit)
     (rest : net_tree None join_stack stack_out join exit) :
+    net_tree (Some focused) tail stack_out entry exit
+| FocusNetConditionalContinue focused tail stack_out entry then_exit
+    else_exit join exit
+    (test : Payload.conditional entry then_exit else_exit join)
+    (then_net : net_tree (Some focused) tail (focused :: tail) entry then_exit)
+    (else_net : net_tree (Some focused) tail (focused :: tail) entry else_exit)
+    (rest : net_tree (Some focused) tail stack_out join exit) :
     net_tree (Some focused) tail stack_out entry exit.
 
 Definition normalized_net stack_in stack_out entry exit :=
@@ -830,6 +837,10 @@ Module NetDenotation (Semantics : CONDITIONAL_SLICE_SEMANTICS Payload).
         let shared := net_tree_wp rest post in
         conditional_wp _ _ _ _ test
           (net_tree_wp then_net shared) (net_tree_wp else_net shared)
+    | FocusNetConditionalContinue _ _ _ _ _ _ _ _ test then_net else_net rest =>
+        let shared := net_tree_wp rest post in
+        conditional_wp _ _ _ _ test
+          (net_tree_wp then_net shared) (net_tree_wp else_net shared)
     end.
 End NetDenotation.
 
@@ -859,6 +870,8 @@ Module NetMonotonicity
     - apply SliceMonotonicity.focused_outcome_wp_mono. exact Hentails.
     - apply chunk_wp_mono. apply IHtree. exact Hentails.
     - apply chunk_wp_mono. apply IHtree. exact Hentails.
+    - apply conditional_wp_mono; [apply IHtree1|apply IHtree2].
+      all: apply IHtree3; exact Hentails.
     - apply conditional_wp_mono; [apply IHtree1|apply IHtree2].
       all: apply IHtree3; exact Hentails.
   Qed.
@@ -1092,6 +1105,34 @@ Inductive net_trace (cost : Atomicity.cost_model) Γ :
           else_statement then_exit else_exit view then_certificate
           else_certificate open_equal atomic_equal) rest)
       (@FocusNetConditional focused tail join_stack stack_out entry then_exit
+        else_exit (conditional_join then_exit else_exit) exit
+        (Payload.RavenConditional Γ fuel cost entry statement then_statement
+          else_statement then_exit else_exit view then_certificate
+          else_certificate open_equal atomic_equal)
+        then_tree else_tree rest_tree)
+| TraceFocusedConditionalContinue fuel entry statement then_statement
+    else_statement then_exit else_exit exit focused tail stack_out view
+    then_certificate else_certificate open_equal atomic_equal rest
+    (then_tree : net_tree (Some focused) tail (focused :: tail) entry
+      then_exit)
+    (else_tree : net_tree (Some focused) tail (focused :: tail) entry
+      else_exit)
+    (rest_tree : net_tree (Some focused) tail stack_out
+      (conditional_join then_exit else_exit) exit)
+    (Hthen : net_trace cost Γ entry then_exit (Some focused) tail
+      (focused :: tail)
+      (SuffixCons then_certificate (SuffixDone then_exit)) then_tree)
+    (Helse : net_trace cost Γ entry else_exit (Some focused) tail
+      (focused :: tail)
+      (SuffixCons else_certificate (SuffixDone else_exit)) else_tree)
+    (Hrest : net_trace cost Γ (conditional_join then_exit else_exit) exit
+      (Some focused) tail stack_out rest rest_tree) :
+    net_trace cost Γ entry exit (Some focused) tail stack_out
+      (SuffixCons
+        (Atomicity.CertConditional cost Γ fuel entry statement then_statement
+          else_statement then_exit else_exit view then_certificate
+          else_certificate open_equal atomic_equal) rest)
+      (@FocusNetConditionalContinue focused tail stack_out entry then_exit
         else_exit (conditional_join then_exit else_exit) exit
         (Payload.RavenConditional Γ fuel cost entry statement then_statement
           else_statement then_exit else_exit view then_certificate
@@ -4762,6 +4803,13 @@ Module AlignedNormalization
           then_exit else_exit
           (trace_iris_wp Hthen runtime ambient shared)
           (trace_iris_wp Helse runtime ambient shared)
+    | @TraceFocusedConditionalContinue _ _ _ entry statement _ _ then_exit
+        else_exit _ _ _ _ _ _ _ _ _ _ _ _ _ Hthen Helse Hrest =>
+        let shared := trace_iris_wp Hrest runtime ambient post in
+        Validity.Execution.Primitives.branch_wp runtime ambient entry statement
+          then_exit else_exit
+          (trace_iris_wp Hthen runtime ambient shared)
+          (trace_iris_wp Helse runtime ambient shared)
     | @TraceExpansion _ _ _ _ _ _ _ _ _ _ _ Hflat =>
         trace_iris_wp Hflat runtime ambient post
     end.
@@ -4805,6 +4853,9 @@ Module AlignedNormalization
       exact (IHtrace P Q HPQ).
     - apply Validity.Execution.region_wp_mono.
       exact (IHtrace P Q HPQ).
+    - apply Validity.Execution.Primitives.Interface.branch_mono.
+      + apply IHtrace1. apply IHtrace3. exact HPQ.
+      + apply IHtrace2. apply IHtrace3. exact HPQ.
     - apply Validity.Execution.Primitives.Interface.branch_mono.
       + apply IHtrace1. apply IHtrace3. exact HPQ.
       + apply IHtrace2. apply IHtrace3. exact HPQ.
@@ -4855,6 +4906,7 @@ Module AlignedNormalization
     - rewrite IHtrace. reflexivity.
     - rewrite IHtrace. reflexivity.
     - rewrite IHtrace. reflexivity.
+    - rewrite IHtrace1 IHtrace2 IHtrace3. reflexivity.
     - rewrite IHtrace1 IHtrace2 IHtrace3. reflexivity.
     - rewrite IHtrace1 IHtrace2 IHtrace3. reflexivity.
     - rewrite IHtrace. apply suffix_expands_iris_wp. exact expansion.
