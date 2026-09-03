@@ -1909,6 +1909,31 @@ Proof.
     iApply HPQ. iExact "Hpost".
 Qed.
 
+(** Framing for the translated runtime endpoint.  Both cases reduce to
+    ordinary Iris framing: [wp_frame_r] for the physical leaf, and fancy-update
+    framing for the erased case. *)
+Lemma translated_runtime_wp_frame {Γ} (runtime : Model.stack_context Γ)
+    ambient entry exit statement (post frame : iProp) :
+  translated_runtime_wp runtime ambient entry exit statement post ∗ frame ⊢
+    translated_runtime_wp runtime ambient entry exit statement (post ∗ frame).
+Proof.
+  unfold translated_runtime_wp.
+  destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
+    (Model.runtime_stack_id Γ runtime) statement) as [physical|].
+  - unfold Model.runtime_wp. iIntros "[Hwp Hframe]".
+    iPoseProof (@wp_frame_r HasLc LegacyLang.simp_lang Resources.Σ
+      Model.concrete_irisG NotStuck (Model.active_runtime_mask ambient entry) _
+      (fun result =>
+        (⌜result = LegacyLang.LitUnit⌝ ∗
+         |={Model.active_runtime_mask ambient entry,
+            Model.active_runtime_mask ambient exit}=> post)%I)
+      frame with "[$Hwp $Hframe]") as "Hwp".
+    iApply (wp_mono with "Hwp").
+    iIntros (result) "[[%Hresult Hpost] Hframe]". iSplit; first done.
+    iMod "Hpost". iModIntro. iFrame.
+  - iIntros "[Hpost Hframe]". iMod "Hpost". iModIntro. iFrame.
+Qed.
+
 Lemma translated_runtime_wp_active_masks_ext {Γ}
     (runtime : Model.stack_context Γ) ambient entry1 entry2 exit1 exit2
     statement post :

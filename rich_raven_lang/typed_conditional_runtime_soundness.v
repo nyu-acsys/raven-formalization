@@ -2595,142 +2595,6 @@ Module AlignedTraceNormalization.
     rewrite Hmask. rewrite Hopen. exact Hwf.
   Qed.
 
-  (** The conditional certificate itself contains the two guard-indexed
-      branch derivations, but an aligned witness may put any of the four
-      structural Hoare wrappers around that certificate.  In particular the
-      existential wrappers change the logical-binder context, so flattening
-      this information into a same-context record would be unsound.  This
-      small wrapper tree retains the context change explicitly.  The
-      subsequent conditional proof consumes it by induction. *)
-  Inductive aligned_conditional_wrapper (cost : RuntimeAdapter.Atomicity.cost_model)
-      Γ F Δ : Type :=
-  | ConditionalWrapperCore : forall (fuel : nat)
-      (state : RuntimeAdapter.Atomicity.analysis_state)
-      (node : typed_core.TypedCore.node_id)
-      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
-      (frame : Runtime.Translation.Assertions.assertion Γ F Δ)
-      (condition : Runtime.IR.pexpr Γ typed_core.TypedCore.TBool)
-      (then_branch else_branch : Runtime.IR.stmt Γ)
-      (then_exit else_exit : RuntimeAdapter.Atomicity.analysis_state)
-      (post : Runtime.Translation.Assertions.assertion Γ F Δ)
-      (view : Runtime.RegionSyntax.view
-        (Runtime.IR.TIf node condition then_branch else_branch) =
-        typed_analysis_view.TypedAnalysisView.ViewConditional then_branch
-          else_branch)
-      (then_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
-        fuel state then_branch then_exit)
-      (else_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
-        fuel state else_branch else_exit)
-      (open_equal : RuntimeAdapter.Atomicity.analysis_open then_exit =
-        RuntimeAdapter.Atomicity.analysis_open else_exit)
-      (atomic_equal : RuntimeAdapter.Atomicity.analysis_in_atomic then_exit =
-        RuntimeAdapter.Atomicity.analysis_in_atomic else_exit)
-      (then_derivation : Validity.Certified.Rules.RavenHoareTriple
-        (Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store)
-          (Runtime.Translation.Assertions.AAnd frame
-            (Runtime.Translation.Assertions.AExpr
-              (Runtime.Validation.Hoare.symbolize_expr store condition))))
-        then_branch (RuntimeAdapter.Atomicity.analysis_mask state)
-        (RuntimeAdapter.Atomicity.analysis_mask state) post)
-      (else_derivation : Validity.Certified.Rules.RavenHoareTriple
-        (Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store)
-          (Runtime.Translation.Assertions.AAnd frame
-            (Runtime.Translation.Assertions.AExpr
-              (Runtime.Core.EUnOp Runtime.Core.UNot
-                (Runtime.Validation.Hoare.symbolize_expr store condition)))))
-        else_branch (RuntimeAdapter.Atomicity.analysis_mask state)
-        (RuntimeAdapter.Atomicity.analysis_mask state) post)
-      (then_mask : RuntimeAdapter.Atomicity.analysis_mask then_exit =
-        RuntimeAdapter.Atomicity.analysis_mask state)
-      (else_mask : RuntimeAdapter.Atomicity.analysis_mask else_exit =
-        RuntimeAdapter.Atomicity.analysis_mask state),
-      Validity.Certified.certificate_hoare_aligned cost then_certificate
-        (Validity.Certified.hoare_mask_transport then_derivation eq_refl
-          (eq_sym then_mask)) ->
-      Validity.Certified.certificate_hoare_aligned cost else_certificate
-        (Validity.Certified.hoare_mask_transport else_derivation eq_refl
-          (eq_sym else_mask)) ->
-      aligned_conditional_wrapper cost Γ F Δ
-  | ConditionalWrapperFrame : forall
-      (frame : Runtime.Translation.Assertions.assertion Γ F Δ),
-      aligned_conditional_wrapper cost Γ F Δ ->
-      aligned_conditional_wrapper cost Γ F Δ
-  | ConditionalWrapperConsequence : forall
-      (pre pre' post post' : Runtime.Translation.Assertions.assertion Γ F Δ),
-      Runtime.Validation.Hoare.assertion_entails pre' pre ->
-      Runtime.Validation.Hoare.assertion_entails post post' ->
-      aligned_conditional_wrapper cost Γ F Δ ->
-      aligned_conditional_wrapper cost Γ F Δ
-  | ConditionalWrapperExistsElim : forall (t : typed_core.TypedCore.typ),
-      aligned_conditional_wrapper cost Γ F (t :: Δ) ->
-      aligned_conditional_wrapper cost Γ F Δ
-  | ConditionalWrapperExistsPreserve : forall (t : typed_core.TypedCore.typ),
-      aligned_conditional_wrapper cost Γ F (t :: Δ) ->
-      aligned_conditional_wrapper cost Γ F Δ.
-
-  Definition aligned_conditional_decomposition_target
-      {cost Γ fuel entry statement exit}
-      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
-        entry statement exit) :
-      forall (F Δ : typed_core.TypedCore.context)
-        (pre post : Runtime.Translation.Assertions.assertion Γ F Δ),
-        Validity.Certified.Rules.RavenHoareTriple pre statement
-          (RuntimeAdapter.Atomicity.analysis_mask entry)
-          (RuntimeAdapter.Atomicity.analysis_mask exit) post -> Type :=
-    match certificate as certificate' in
-        RuntimeAdapter.Atomicity.analysis_certificate _ Γ' fuel' entry'
-          statement' exit'
-      return forall (F' Δ' : typed_core.TypedCore.context)
-        (pre' post' : Runtime.Translation.Assertions.assertion Γ' F' Δ'),
-        Validity.Certified.Rules.RavenHoareTriple pre' statement'
-          (RuntimeAdapter.Atomicity.analysis_mask entry')
-          (RuntimeAdapter.Atomicity.analysis_mask exit') post' -> Type
-    with
-    | @RuntimeAdapter.Atomicity.CertConditional _ Γ' fuel' state' statement'
-        then_branch else_branch then_exit else_exit view then_certificate
-        else_certificate open_equal atomic_equal =>
-        fun F' Δ' _ _ _ => aligned_conditional_wrapper cost Γ' F' Δ'
-    | _ => fun _ _ _ _ _ => unit
-    end.
-
-  Fixpoint aligned_conditional_decompose_fix
-      {cost Γ F Δ fuel entry statement exit pre post}
-      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
-        entry statement exit}
-      {derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
-        (RuntimeAdapter.Atomicity.analysis_mask entry)
-        (RuntimeAdapter.Atomicity.analysis_mask exit) post}
-      (Haligned : Validity.Certified.certificate_hoare_aligned cost certificate
-        derivation) {struct Haligned} :
-    aligned_conditional_decomposition_target certificate F Δ pre post derivation.
-  Proof.
-    destruct Haligned; simpl; try exact tt.
-    - exact (ConditionalWrapperCore cost Γ F Δ fuel state node store frame
-        condition then_branch else_branch then_exit else_exit post view
-        then_certificate else_certificate open_equal atomic_equal
-        then_derivation else_derivation then_mask else_mask Haligned1
-        Haligned2).
-    - dependent destruction certificate; simpl; try exact tt.
-      refine (ConditionalWrapperFrame cost Γ F Δ frame _).
-      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
-        Haligned).
-    - dependent destruction certificate; simpl; try exact tt.
-      refine (ConditionalWrapperConsequence cost Γ F Δ pre pre' post post'
-        pre_entails post_entails _).
-      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
-        Haligned).
-    - dependent destruction certificate; simpl; try exact tt.
-      refine (ConditionalWrapperExistsElim cost Γ F Δ t _).
-      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
-        Haligned).
-    - dependent destruction certificate; simpl; try exact tt.
-      refine (ConditionalWrapperExistsPreserve cost Γ F Δ t _).
-      exact (@aligned_conditional_decompose_fix cost _ _ _ _ _ _ _ _ _ _ _
-        Haligned).
-  Defined.
-
   (** Assembly point for the core conditional.  Wrapper cases supply the
       three displayed entailments while recursively preserving their binder
       environment.  Keeping those transports explicit prevents the old
@@ -2846,40 +2710,225 @@ Module AlignedTraceNormalization.
          runtime formals binders atoms post ∗
        Validity.World.access_stack_interp atoms ambient stack_out).
 
-  (** The next proof must recurse through [certificate_hoare_aligned], using
-      the interpreted guard at [AlignedConditional] and transporting Frame,
-      Consequence, ExistsElim, and ExistsPreserve without flattening their
-      assertion or binder indices. *)
-  Theorem aligned_conditional_certificate_translated_runtime_refinement
-      {cost} {Γ F Δ : typed_core.TypedCore.context}
-      {fuel state node condition then_branch else_branch
-        then_exit else_exit pre post}
-      (view : Runtime.RegionSyntax.view
-        (Runtime.IR.TIf node condition then_branch else_branch) =
-        typed_analysis_view.TypedAnalysisView.ViewConditional then_branch
-          else_branch)
-      (then_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
-        fuel state then_branch then_exit)
-      (else_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
-        fuel state else_branch else_exit)
-      (open_equal : RuntimeAdapter.Atomicity.analysis_open then_exit =
-        RuntimeAdapter.Atomicity.analysis_open else_exit)
-      (atomic_equal : RuntimeAdapter.Atomicity.analysis_in_atomic then_exit =
-        RuntimeAdapter.Atomicity.analysis_in_atomic else_exit)
-      (derivation : Validity.Certified.Rules.RavenHoareTriple
-        pre
-        (Runtime.IR.TIf node condition then_branch else_branch)
-        (RuntimeAdapter.Atomicity.analysis_mask state)
-        (RuntimeAdapter.Atomicity.analysis_mask
-          (RuntimeAdapter.conditional_join then_exit else_exit)) post) :
+  (** The tempting stronger theorem for *all* aligned certificates cannot be
+      proved by structural composition at [AlignedSequence].  A first child
+      may end in an unmatched unfold and the second child may contain its
+      matching fold.  Erasing the proof-only boundary changes the active Iris
+      mask of the physical continuation, so [translated_runtime_wp_sequence]
+      is applicable only when the intermediate open set is unchanged.  Such
+      sequences are handled by the normalized focused-region induction, not
+      by this certificate-local wrapper layer. *)
+
+  Lemma aligned_certificate_translated_frame
+      {cost Γ F Δ fuel entry statement exit pre post}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post)
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation)
+      (frame : Runtime.Translation.Assertions.assertion Γ F Δ) :
     aligned_certificate_translated_runtime_refinement
       (F := F) (Δ := Δ) (pre := pre) (post := post)
-      (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state
-        (Runtime.IR.TIf node condition then_branch else_branch) then_branch
-        else_branch then_exit else_exit view then_certificate else_certificate
-        open_equal atomic_equal) derivation.
+      certificate derivation ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd pre frame)
+      (post := Runtime.Translation.Assertions.AAnd post frame) certificate
+      (Validity.Certified.Rules.FrameRule pre post frame statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation).
   Proof.
-  Admitted.
+    intros Hinner stack_in stack_out Hcost Hwf Hlifo Haligned runtime formals
+      binders atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre Haccess]]".
+    iDestruct "Hpre" as "[Hpre Hframe]".
+    iPoseProof (Hinner stack_in stack_out Hcost Hwf Hlifo inner_aligned runtime
+      formals binders atoms ambient Hfootprint
+      with "[$Hworld $Hpre $Haccess]") as "Hwp".
+    iPoseProof (Validity.translated_runtime_wp_frame runtime ambient entry exit
+      statement
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms post ∗
+       Validity.World.access_stack_interp atoms ambient stack_out)%I
+      (Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms frame)%I
+      with "[$Hwp $Hframe]") as "Hwp'".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp'").
+    iIntros "[[#Hworld [Hpost Haccess]] Hframe]".
+    iFrame "Hworld Hpost Hframe Haccess".
+  Qed.
+
+  Lemma aligned_certificate_translated_consequence
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit pre pre' post post'}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post)
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation)
+      (pre_entails : Runtime.Validation.Hoare.assertion_entails pre' pre)
+      (post_entails : Runtime.Validation.Hoare.assertion_entails post post') :
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ) (pre := pre) (post := post)
+      certificate derivation ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ) (pre := pre') (post := post') certificate
+      (Validity.Certified.Rules.ConsequenceRule pre pre' post post' statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation pre_entails
+        post_entails).
+  Proof.
+    intros Hinner stack_in stack_out Hcost Hwf Hlifo _ runtime formals binders
+      atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre' Haccess]]".
+    iPoseProof (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) pre' pre pre_entails runtime formals binders atoms
+      with "Hpre'") as "Hpre".
+    iPoseProof (Hinner stack_in stack_out Hcost Hwf Hlifo inner_aligned runtime
+      formals binders atoms ambient Hfootprint
+      with "[$Hworld $Hpre $Haccess]") as "Hwp".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp").
+    iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
+    iApply (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) post post' post_entails runtime formals binders
+      atoms with "Hpost").
+  Qed.
+
+  Lemma aligned_certificate_translated_exists_elim
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {t fuel entry statement exit}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (body : Runtime.Translation.Assertions.assertion Γ F (t :: Δ))
+      (post : Runtime.Translation.Assertions.assertion Γ F Δ)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple body statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit)
+        (Runtime.Translation.Assertions.weaken_assertion post))
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation) :
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := t :: Δ) (pre := body)
+      (post := Runtime.Translation.Assertions.weaken_assertion post)
+      certificate derivation ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AExists t body)
+      (post := post) certificate
+      (Validity.Certified.Rules.ExistsElimRule t body post statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation).
+  Proof.
+    intros Hinner stack_in stack_out Hcost Hwf Hlifo _ runtime formals binders
+      atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre Haccess]]". iDestruct "Hpre" as (value) "Hbody".
+    iPoseProof (Hinner stack_in stack_out Hcost Hwf Hlifo inner_aligned runtime
+      formals (Runtime.Translation.binder_cons value binders) atoms ambient
+      Hfootprint with "[$Hworld $Hbody $Haccess]") as "Hwp".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp").
+    iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
+    rewrite Validity.VSemantics.S.interp_weaken_assertion. iExact "Hpost".
+  Qed.
+
+  Lemma aligned_certificate_translated_exists_preserve
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {t fuel entry statement exit}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (body post : Runtime.Translation.Assertions.assertion Γ F (t :: Δ))
+      (derivation : Validity.Certified.Rules.RavenHoareTriple body statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post)
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation) :
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := t :: Δ) (pre := body) (post := post)
+      certificate derivation ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AExists t body)
+      (post := Runtime.Translation.Assertions.AExists t post) certificate
+      (Validity.Certified.Rules.ExistsPreserveRule t body post statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation).
+  Proof.
+    intros Hinner stack_in stack_out Hcost Hwf Hlifo _ runtime formals binders
+      atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre Haccess]]". iDestruct "Hpre" as (value) "Hbody".
+    iPoseProof (Hinner stack_in stack_out Hcost Hwf Hlifo inner_aligned runtime
+      formals (Runtime.Translation.binder_cons value binders) atoms ambient
+      Hfootprint with "[$Hworld $Hbody $Haccess]") as "Hwp".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp").
+    iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
+    iExists value. iExact "Hpost".
+  Qed.
+
+  (** A wrapper-sensitive eliminator for conditional alignments.  At the
+      unique conditional core it asks for the concrete, trace-aware head
+      refinement that the next constructor proof supplies.  Structural
+      wrappers merely propagate that obligation; every other certificate
+      constructor is impossible for this adapter.  Indexing the obligation by
+      the alignment proof itself retains existential binder changes and the
+      exact pre/post derivations without flattening them into a same-context
+      record. *)
+  Fixpoint aligned_conditional_core_obligation
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit pre post}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit}
+      {derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post}
+      (aligned : Validity.Certified.certificate_hoare_aligned cost certificate
+        derivation) : Prop :=
+    match aligned with
+    | Validity.Certified.AlignedConditional _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        _ _ _ _ _ _ _ _ _ _ _ =>
+        aligned_certificate_translated_runtime_refinement certificate derivation
+    | Validity.Certified.AlignedFrame _ _ _ _ _ _ _ _ _ _ _ _ _ inner =>
+        aligned_conditional_core_obligation inner
+    | Validity.Certified.AlignedConsequence _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        _ inner => aligned_conditional_core_obligation inner
+    | Validity.Certified.AlignedExistsElim _ Γ' F' Δ' t' fuel' entry' exit'
+        statement' body' post' certificate' derivation' inner =>
+        @aligned_conditional_core_obligation cost Γ' F' (t' :: Δ') fuel'
+          entry' statement' exit' body'
+          (Runtime.Translation.Assertions.weaken_assertion post') certificate'
+          derivation' inner
+    | Validity.Certified.AlignedExistsPreserve _ Γ' F' Δ' t' fuel' entry' exit'
+        statement' body' post' certificate' derivation' inner =>
+        @aligned_conditional_core_obligation cost Γ' F' (t' :: Δ') fuel'
+          entry' statement' exit' body' post' certificate' derivation' inner
+    | _ => False
+    end.
+
+  Theorem aligned_conditional_wrapper_translated_runtime_refinement
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit pre post}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit}
+      {derivation : Validity.Certified.Rules.RavenHoareTriple pre statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post}
+      (aligned : Validity.Certified.certificate_hoare_aligned cost certificate
+        derivation) :
+    aligned_conditional_core_obligation aligned ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ) (pre := pre) (post := post)
+      certificate derivation.
+  Proof.
+    induction aligned; simpl; intros Hcore; try contradiction.
+    - exact Hcore.
+    - eapply aligned_certificate_translated_frame; eauto.
+    - eapply aligned_certificate_translated_consequence; eauto.
+    - eapply aligned_certificate_translated_exists_elim; eauto.
+    - eapply aligned_certificate_translated_exists_preserve; eauto.
+  Qed.
 
   Record aligned_sequence_decomposition
       {cost Γ F Δ fuel entry first middle second next pre post}
