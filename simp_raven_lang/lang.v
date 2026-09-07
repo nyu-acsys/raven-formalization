@@ -903,6 +903,39 @@ Proof.
 Qed.
 
 
+Lemma atomic_if e s1 s2 stk_id :
+  Atomic WeaklyAtomic s1 ->
+  Atomic WeaklyAtomic s2 ->
+  Atomic WeaklyAtomic (RTIfS e s1 s2 stk_id).
+Proof.
+  unfold Atomic. intros Hatomic1 Hatomic2 σ result κ σ' efs Hstep.
+  inversion Hstep; subst.
+  destruct K.
+  - simpl in *. subst.
+    match goal with
+    | Hbase : runtime_step (RTIfS _ _ _ _) _ _ _ _ _ |- _ =>
+        inversion Hbase; subst
+    end.
+    all: repeat match goal with
+         | H : exists _, _ |- _ => destruct H as [? H]
+         | H : _ /\ _ |- _ => destruct H
+         end.
+    all: try (destruct b, s1, s2; simpl in *; try contradiction;
+              apply val_irreducible; simpl; done).
+    all: try (apply val_irreducible; simpl; done).
+    all: first
+      [ solve [eapply Hatomic1; eapply Ectx_step; eauto]
+      | solve [eapply Hatomic2; eapply Ectx_step; eauto] ].
+  - simpl in *.
+    exfalso.
+    match goal with
+    | Hfill : fill K (fill_item e0 e1') = RTIfS e s1 s2 stk_id |- _ =>
+        exact (fill_not_if K e0 e1' e s1 s2 stk_id Hfill)
+    | Hfill : RTIfS e s1 s2 stk_id = fill K (fill_item e0 e1') |- _ =>
+        apply (fill_not_if K e0 e1' e s1 s2 stk_id); symmetry; exact Hfill
+    end.
+Qed.
+
 Lemma atomic_assign x e stk_id :
   Atomic WeaklyAtomic (RTAssign x e stk_id).
 Proof.

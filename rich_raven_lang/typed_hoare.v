@@ -372,18 +372,19 @@ Inductive RavenHoareTriple {Γ F Δ} :
     RavenHoareTriple pre first mask1 mask2 middle ->
     RavenHoareTriple middle second mask2 mask3 post ->
     RavenHoareTriple pre (TSeq node first second) mask1 mask3 post
-| ConditionalRule node store frame condition then_branch else_branch post current_mask :
+| ConditionalRule node store frame condition then_branch else_branch post
+    mask_pre mask_post :
     RavenHoareTriple
       (AAnd (AStack store)
         (AAnd frame (AExpr (symbolize_expr store condition))))
-      then_branch current_mask current_mask post ->
+      then_branch mask_pre mask_post post ->
     RavenHoareTriple
       (AAnd (AStack store)
         (AAnd frame (AExpr (EUnOp UNot (symbolize_expr store condition)))))
-      else_branch current_mask current_mask post ->
+      else_branch mask_pre mask_post post ->
     RavenHoareTriple (AAnd (AStack store) frame)
       (TIf node condition then_branch else_branch)
-      current_mask current_mask post
+      mask_pre mask_post post
 | FrameRule pre post frame statement mask_pre mask_post :
     RavenHoareTriple pre statement mask_pre mask_post post ->
     RavenHoareTriple (AAnd pre frame) statement mask_pre mask_post
@@ -476,6 +477,176 @@ Inductive RavenHoareTriple {Γ F Δ} :
       (AAnd (AStack store) contract_pre)
       (TSpawn node procedure arguments) current_mask current_mask
       (AStack store).
+
+(** The compatibility-stage resource relation.  Unlike [RavenHoareTriple],
+    this relation deliberately has no analyzer-owned mask state. *)
+Inductive RavenResourceTriple {Γ F Δ} :
+    assertion Γ F Δ -> stmt Γ -> assertion Γ F Δ -> Prop :=
+| ResourceSkipRule node store frame :
+    RavenResourceTriple
+      (AAnd (AStack store) frame) (TSkip node)
+      (AAnd (AStack store) frame)
+| ResourceAssertRule node store frame condition :
+    RavenResourceTriple
+      (AAnd (AStack store) (AAnd frame (AExpr (symbolize_expr store condition))))
+      (TAssert node condition)
+      (AAnd (AStack store) (AAnd frame (AExpr (symbolize_expr store condition))))
+| ResourceAssignmentRule t node store target value :
+    RavenResourceTriple (AStack store) (TAssign node target value)
+      (AExists t (AAnd (AStack (update_store_with_bound store target))
+        (AExpr (EBinOp (BEq t) (ERef (RefBound MHere))
+          (weaken_expr (symbolize_expr store value))))))
+| ResourceFieldReadRule node store field
+    (target : pvar Γ (Logic.field_type field)) base chunk :
+    RavenResourceTriple
+      (AAnd (AStack store) (AOwn field (symbolize_expr store base) chunk))
+      (TFieldRead node field target base)
+      (AExists (Logic.field_type field)
+        (AAnd (AStack (update_store_with_bound store target))
+        (AAnd
+          (AOwn field (weaken_expr (symbolize_expr store base))
+            (weaken_expr chunk))
+          (AExpr (EBinOp (BEq (Logic.field_type field)) (ERef (RefBound MHere))
+            (weaken_expr chunk))))))
+| ResourceFieldWriteRule node store field base
+    (value : pexpr Γ (Logic.field_type field)) old_chunk :
+    RavenResourceTriple
+      (AAnd (AStack store) (AOwn field (symbolize_expr store base) old_chunk))
+      (TFieldWrite node field base value)
+      (AAnd (AStack store)
+        (AOwn field (symbolize_expr store base) (symbolize_expr store value)))
+| ResourceAllocationRule node store target fields :
+    NoDup (map field_init_id fields) ->
+    RavenResourceTriple
+      (AStack store) (TAlloc node target fields)
+      (AExists TRef
+        (AAnd (AStack (update_store_with_bound store target))
+          (allocated_fields_assertion store fields)))
+| ResourceGhostUpdateRule node store field base old_value new_value :
+    Contracts.valid_ghost_update F Δ field
+      (symbolize_expr store old_value) (symbolize_expr store new_value) ->
+    RavenResourceTriple
+      (AAnd (AStack store)
+        (AOwn field (symbolize_expr store base)
+          (symbolize_expr store old_value)))
+      (TGhostUpdate node field base old_value new_value)
+      (AAnd (AStack store)
+        (AOwn field (symbolize_expr store base)
+          (symbolize_expr store new_value)))
+| ResourceSequenceRule node pre middle post first second :
+    RavenResourceTriple pre first middle ->
+    RavenResourceTriple middle second post ->
+    RavenResourceTriple pre (TSeq node first second) post
+| ResourceConditionalRule node store frame condition then_branch else_branch post :
+    RavenResourceTriple
+      (AAnd (AStack store)
+        (AAnd frame (AExpr (symbolize_expr store condition))))
+      then_branch post ->
+    RavenResourceTriple
+      (AAnd (AStack store)
+        (AAnd frame (AExpr (EUnOp UNot (symbolize_expr store condition)))))
+      else_branch post ->
+    RavenResourceTriple (AAnd (AStack store) frame)
+      (TIf node condition then_branch else_branch) post
+| ResourceFrameRule pre post frame statement :
+    RavenResourceTriple pre statement post ->
+    RavenResourceTriple (AAnd pre frame) statement (AAnd post frame)
+| ResourceConsequenceRule pre pre' post post' statement :
+    RavenResourceTriple pre statement post ->
+    assertion_entails pre' pre -> assertion_entails post post' ->
+    RavenResourceTriple pre' statement post'
+| ResourceExistsElimRule t (body : assertion Γ F (t :: Δ)) post statement :
+    RavenResourceTriple (Δ := t :: Δ) body statement
+      (weaken_assertion post) ->
+    RavenResourceTriple (AExists t body) statement post
+| ResourceExistsPreserveRule t (body post : assertion Γ F (t :: Δ)) statement :
+    RavenResourceTriple (Δ := t :: Δ) body statement post ->
+    RavenResourceTriple (AExists t body) statement (AExists t post)
+| ResourceAtomicBlockRule node pre post body :
+    Contracts.trusted_atomic Γ body ->
+    RavenResourceTriple pre body post ->
+    RavenResourceTriple pre (TAtomic node body) post
+| ResourceCallDiscardRule args t node procedure arguments store contract_pre
+    contract_post :
+    Contracts.instantiated_pre Γ F Δ args procedure
+      (symbolize_expr_list store arguments) contract_pre ->
+    Contracts.instantiated_post_value Γ F (t :: Δ) args t procedure
+      (weaken_expr_list (symbolize_expr_list store arguments))
+      (ERef (RefBound MHere)) contract_post ->
+    RavenResourceTriple
+      (AAnd (AStack store) contract_pre)
+      (TCall node procedure arguments (@CTDiscard Γ t))
+      (AExists t (AAnd (AStack (weaken_store store)) contract_post))
+| ResourceCallStoreRule args t node procedure arguments store target
+    contract_pre contract_post :
+    Contracts.instantiated_pre Γ F Δ args procedure
+      (symbolize_expr_list store arguments) contract_pre ->
+    Contracts.instantiated_post_value Γ F (t :: Δ) args t procedure
+      (weaken_expr_list (symbolize_expr_list store arguments))
+      (ERef (RefBound MHere)) contract_post ->
+    RavenResourceTriple
+      (AAnd (AStack store) contract_pre)
+      (TCall node procedure arguments (CTStore target))
+      (AExists t
+        (AAnd (AStack (update_store_with_bound store target)) contract_post))
+| ResourceUnfoldInvariantRule node invariant arguments store body :
+    Contracts.instantiated_invariant Γ F Δ (Logic.invariant_args invariant) invariant
+      (symbolize_expr_list store arguments) body ->
+    RavenResourceTriple
+      (AAnd (AStack store)
+        (AInvariant invariant (symbolize_expr_list store arguments)))
+      (TUnfold node invariant arguments)
+      (AAnd (AStack store) body)
+| ResourceFoldInvariantRule node invariant arguments store body :
+    Contracts.instantiated_invariant Γ F Δ (Logic.invariant_args invariant) invariant
+      (symbolize_expr_list store arguments) body ->
+    RavenResourceTriple
+      (AAnd (AStack store) body)
+      (TFold node invariant arguments)
+      (AAnd (AStack store)
+        (AInvariant invariant (symbolize_expr_list store arguments)))
+| ResourceUnfoldPredicateRule node predicate arguments store body :
+    Contracts.instantiated_predicate Γ F Δ (Logic.predicate_args predicate)
+      predicate (symbolize_expr_list store arguments) body ->
+    RavenResourceTriple
+      (AAnd (AStack store)
+        (APredicate predicate (symbolize_expr_list store arguments)))
+      (TPredicateUnfold node predicate arguments)
+      (AAnd (AStack store) body)
+| ResourceFoldPredicateRule node predicate arguments store body :
+    Contracts.instantiated_predicate Γ F Δ (Logic.predicate_args predicate)
+      predicate (symbolize_expr_list store arguments) body ->
+    RavenResourceTriple
+      (AAnd (AStack store) body)
+      (TPredicateFold node predicate arguments)
+      (AAnd (AStack store)
+        (APredicate predicate (symbolize_expr_list store arguments)))
+| ResourceSpawnRule args node procedure arguments store contract_pre :
+    Contracts.instantiated_pre Γ F Δ args procedure
+      (symbolize_expr_list store arguments) contract_pre ->
+    RavenResourceTriple
+      (AAnd (AStack store) contract_pre)
+      (TSpawn node procedure arguments) (AStack store).
+
+Theorem RavenHoareTriple_erases_resource {Γ F Δ}
+    (pre : assertion Γ F Δ) statement mask_pre mask_post
+    (post : assertion Γ F Δ) :
+  RavenHoareTriple pre statement mask_pre mask_post post ->
+  RavenResourceTriple pre statement post.
+Proof.
+  intro Htriple. induction Htriple;
+    eauto using ResourceSkipRule, ResourceAssertRule,
+      ResourceAssignmentRule, ResourceFieldReadRule,
+      ResourceFieldWriteRule, ResourceAllocationRule,
+      ResourceGhostUpdateRule, ResourceSequenceRule,
+      ResourceConditionalRule, ResourceFrameRule,
+      ResourceConsequenceRule, ResourceExistsElimRule,
+      ResourceExistsPreserveRule, ResourceAtomicBlockRule,
+      ResourceCallDiscardRule, ResourceCallStoreRule,
+      ResourceUnfoldInvariantRule, ResourceFoldInvariantRule,
+      ResourceUnfoldPredicateRule, ResourceFoldPredicateRule,
+      ResourceSpawnRule.
+Qed.
 
 Theorem RavenHoareTriple_mask_transition {Γ F Δ}
     (pre post : assertion Γ F Δ) statement mask_pre mask_post :

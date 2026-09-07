@@ -5043,6 +5043,130 @@ Module AlignedNormalization
     eapply aligned_suffix_iris_wp_valid; eauto.
   Qed.
 
+  (** Resource-proof erasure for the normalized source.  The executable
+      zipper is unchanged; only the proof payload retained by the caller is
+      resource-indexed. *)
+  Definition resource_certificate_suffix_of_operational_suffix
+      {cost Γ F Δ entry pre stack_in exit post stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ
+        entry pre stack_in exit post stack_out) :
+      certificate_suffix cost Γ entry exit :=
+    Erasure.certificate_suffix_of_operational_suffix
+      (Validity.erase_resource_aligned_operational_suffix suffix).
+
+  Definition resource_aligned_trace_iris_wp
+      {cost Γ F Δ entry pre stack_in exit post_assertion stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
+        pre stack_in exit post_assertion stack_out)
+      (normal : @traced_suffix_net_normalization cost Γ entry exit stack_in
+        stack_out (resource_certificate_suffix_of_operational_suffix suffix))
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (post : iProp) : iProp :=
+    trace_iris_wp (traced_net_source _ normal) runtime ambient post.
+
+  Definition resource_aligned_trace_cps_valid
+      {cost Γ F Δ entry pre stack_in exit post_assertion stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
+        pre stack_in exit post_assertion stack_out)
+      (normal : @traced_suffix_net_normalization cost Γ entry exit stack_in
+        stack_out (resource_certificate_suffix_of_operational_suffix suffix)) :
+      Prop :=
+    Validity.Certified.procedure_cost_model_sound cost ->
+    Atomicity.state_wf entry ->
+    forall (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ) (atoms : Runtime.Core.atom_env)
+      (ambient : coPset),
+      Validity.Model.runtime_mask
+        (suffix_footprint
+          (resource_certificate_suffix_of_operational_suffix suffix)) ⊆
+        ambient ->
+      forall continuation : iProp,
+      ((Validity.global_world_context atoms ∗
+        Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+          runtime formals binders atoms post_assertion ∗
+        Validity.World.access_stack_interp atoms ambient stack_out) ⊢
+        continuation) ->
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms pre ∗
+       Validity.World.access_stack_interp atoms ambient stack_in) ⊢
+      resource_aligned_trace_iris_wp suffix normal runtime ambient continuation.
+
+  Theorem resource_aligned_suffix_iris_wp_valid
+      {cost Γ F Δ entry pre stack_in exit post stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
+        pre stack_in exit post stack_out) :
+    Validity.Certified.procedure_cost_model_sound cost ->
+    Atomicity.state_wf entry ->
+    forall (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ) (atoms : Runtime.Core.atom_env)
+      (ambient : coPset),
+      Validity.Model.runtime_mask
+        (suffix_footprint
+          (resource_certificate_suffix_of_operational_suffix suffix)) ⊆
+        ambient ->
+      forall continuation : iProp,
+      ((Validity.global_world_context atoms ∗
+        Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+          runtime formals binders atoms post ∗
+        Validity.World.access_stack_interp atoms ambient stack_out) ⊢
+        continuation) ->
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms pre ∗
+       Validity.World.access_stack_interp atoms ambient stack_in) ⊢
+      suffix_iris_wp (resource_certificate_suffix_of_operational_suffix suffix)
+        runtime ambient continuation.
+  Proof.
+    induction suffix as [state post stack|fuel entry statement middle pre
+      middle_assertion stack_in stack_middle certificate derivation aligned
+      lifo final post stack_out rest IHrest].
+    - intros _ _ runtime formals binders atoms ambient _ continuation Hpost.
+      simpl. exact Hpost.
+    - intros Hprocedure_cost Hwf runtime formals binders atoms ambient
+        Henvelope continuation Hpost.
+      assert (Hhead_envelope : Validity.Model.runtime_mask
+        (Atomicity.certificate_footprint certificate) ⊆ ambient).
+      { etrans; last exact Henvelope.
+        apply Validity.Model.runtime_mask_mono.
+        apply suffix_footprint_head_subset. }
+      assert (Hrest_envelope : Validity.Model.runtime_mask
+        (suffix_footprint
+          (resource_certificate_suffix_of_operational_suffix rest)) ⊆ ambient).
+      { etrans; last exact Henvelope.
+        apply Validity.Model.runtime_mask_mono.
+        apply suffix_footprint_rest_subset. }
+      assert (Hmiddle_wf : Atomicity.state_wf middle).
+      { eapply Atomicity.certificate_preserves_wf; eauto. }
+      pose proof (Validity.resource_aligned_certificate_valid certificate
+        derivation Hwf lifo Hprocedure_cost aligned) as Hhead.
+      simpl. iIntros "Hresources".
+      iPoseProof (Hhead runtime formals binders atoms ambient Hhead_envelope
+        with "Hresources") as "Hhead".
+      iApply (Validity.Execution.region_wp_mono with "Hhead").
+      iIntros "Hmiddle".
+      iApply (IHrest Hprocedure_cost Hmiddle_wf runtime formals binders atoms
+        ambient Hrest_envelope continuation Hpost).
+      iExact "Hmiddle".
+  Qed.
+
+  Theorem resource_aligned_trace_cps_valid_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
+        pre stack_in exit post stack_out)
+      (normal : @traced_suffix_net_normalization cost Γ entry exit stack_in
+        stack_out (resource_certificate_suffix_of_operational_suffix suffix)) :
+    resource_aligned_trace_cps_valid suffix normal.
+  Proof.
+    intros Hprocedure_cost Hwf runtime formals binders atoms ambient Henvelope
+      continuation Hpost.
+    unfold resource_aligned_trace_iris_wp.
+    rewrite trace_iris_wp_is_suffix_iris_wp.
+    eapply resource_aligned_suffix_iris_wp_valid; eauto.
+  Qed.
+
   (** The atomic [TraceChunk] case is discharged through the existing
       trusted-atomic certificate rule.  Keeping this helper at the primitive
       operation boundary avoids prematurely committing to the still-pending

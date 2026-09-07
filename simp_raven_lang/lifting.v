@@ -499,6 +499,39 @@ Section lifting.
       iFrame. iFrame (HgdomB Hwf).
   Qed.
 
+  (** The inverse of [wp_seq_wp], keeping the residual context intact rather
+      than collapsing it to an immediate [WP s2].  [SeqStep] accepts an
+      arbitrary result value for the first component ([RTSeq (RTVal v) s2]
+      steps to [s2] for any [v], not only [LitUnit]); the unit fact
+      [wp_seq_wp] relies on is an external strengthening from Raven's own
+      statement-translation convention, not something the operational
+      semantics forces, so it cannot be recovered here.  This is exactly
+      [wp_bind_inv] specialized to [SeqCtx]. *)
+  Lemma wp_seq_wp_context_inv s1 s2 (Φ : val -> iProp Σ) mask :
+    WP RTSeq s1 s2 @ mask {{ Φ }} -∗
+    WP s1 @ mask {{ v, WP RTSeq (RTVal v) s2 @ mask {{ Φ }} }}.
+  Proof.
+    iIntros "Hwp".
+    iPoseProof (wp_bind_inv (fill_item (SeqCtx s2)) _ _ _ _ with "Hwp")
+      as "Hwp".
+    iApply (wp_wand with "Hwp"). iIntros (v) "Hwp". iExact "Hwp".
+  Qed.
+
+  (** The forward companion: rewrap a residual sequence around an arbitrary
+      expression [s1], not only one already known to return [LitUnit].  This
+      is exactly [wp_bind] specialized to [SeqCtx]; it is what lets a
+      conditional-context lifting reassemble [RTSeq (RTIfS ...) s2] from a
+      per-arm [WP e {{v, WP RTSeq (RTVal v) s2}}] fact obtained via
+      [wp_seq_wp_context_inv] and [runtime_wp_if_true]/[runtime_wp_if_false],
+      without ever needing [wp_seq_wp]'s unit-specific collapse. *)
+  Lemma wp_seq_wp_context s1 s2 (Φ : val -> iProp Σ) mask :
+    WP s1 @ mask {{ v, WP RTSeq (RTVal v) s2 @ mask {{ Φ }} }} -∗
+    WP RTSeq s1 s2 @ mask {{ Φ }}.
+  Proof.
+    iIntros "Hwp". iApply (wp_bind (fill_item (SeqCtx s2)) _ _ _ _).
+    iApply (wp_wand with "Hwp"). iIntros (v) "Hwp". iExact "Hwp".
+  Qed.
+
   Lemma wp_skip p mask stk_id :
   {{{ p }}} RTSkipS stk_id @ mask {{{ RET lang.LitUnit; p ∗ £1 }}}.
   Proof.

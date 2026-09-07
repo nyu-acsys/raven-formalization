@@ -49,13 +49,20 @@ End ANALYSIS_SYNTAX.
 
 Module Analysis (Syntax : ANALYSIS_SYNTAX).
 
-Inductive step_cost := NoStep | AtomicStep | NonAtomicStep.
+Inductive step_cost :=
+| NoStep
+| AtomicStep
+| NonAtomicStep
+| ProcedureCallStep (required granted : gset inv_id)
+| ProcedureSpawnStep (required : gset inv_id).
 
 Inductive analysis_error :=
 | MissingInvariant (invariant : inv_id)
 | ReentrantInvariant (invariant : inv_id)
 | SecondAtomicStep
 | NonAtomicWhileOpen
+| MissingProcedureMask
+| ProcedureGrantAlreadyOpen
 | AtomicBlockLeaksAccess
 | IncompatibleBranches
 | FuelExhausted.
@@ -72,7 +79,7 @@ Definition state_wf state : Prop :=
 
 Definition cost_model := forall Γ, Syntax.statement Γ -> step_cost.
 
-Definition take_step cost state : analysis_error + analysis_state :=
+Definition take_plain_step cost state : analysis_error + analysis_state :=
   if analysis_in_atomic state || bool_decide (analysis_open state = ∅) then
     inr state
   else match cost with
@@ -82,7 +89,33 @@ Definition take_step cost state : analysis_error + analysis_state :=
       else inr (AnalysisState (analysis_mask state) (analysis_open state)
         true false)
   | NonAtomicStep => inl NonAtomicWhileOpen
+  | ProcedureCallStep _ _ | ProcedureSpawnStep _ => inl NonAtomicWhileOpen
   end.
+
+Definition grant_state (granted : gset inv_id) state : analysis_state :=
+  AnalysisState (analysis_mask state ∪ granted) (analysis_open state)
+    (analysis_step_taken state) (analysis_in_atomic state).
+
+Definition take_step cost state : analysis_error + analysis_state :=
+  match cost with
+  | ProcedureCallStep required granted =>
+      if bool_decide (required ⊆ analysis_mask state) then
+        match take_plain_step NonAtomicStep state with
+        | inl error => inl error
+        | inr stepped =>
+            if bool_decide (granted ## analysis_open stepped)
+            then inr (grant_state granted stepped)
+            else inl ProcedureGrantAlreadyOpen
+        end
+      else inl MissingProcedureMask
+  | ProcedureSpawnStep required =>
+      if bool_decide (required ⊆ analysis_mask state)
+      then take_plain_step NonAtomicStep state
+      else inl MissingProcedureMask
+  | NoStep | AtomicStep | NonAtomicStep => take_plain_step cost state
+  end.
+
+Arguments take_step : simpl never.
 
 Definition open_invariant invariant state : analysis_error + analysis_state :=
   if bool_decide (invariant ∈ analysis_open state) then
@@ -102,17 +135,178 @@ Definition fold_invariant invariant state : analysis_state :=
   else AnalysisState ({[invariant]} ∪ analysis_mask state)
     (analysis_open state) (analysis_step_taken state) (analysis_in_atomic state).
 
-Lemma take_step_preserves_sets cost state exit :
+Lemma take_plain_step_preserves_sets cost state exit :
+  take_plain_step cost state = inr exit ->
+  analysis_mask exit = analysis_mask state /\
+  analysis_open exit = analysis_open state.
+Proof.
+  unfold take_plain_step.
+  destruct (analysis_in_atomic state ||
+    bool_decide (analysis_open state = ∅)); first by intros [= <-].
+  destruct cost; try by intros [= <-]; try discriminate.
+  destruct (analysis_step_taken state); first discriminate.
+  intros Hinr. inversion Hinr. done.
+Qed.
+
+Lemma take_step_preserves_open cost state exit :
   take_step cost state = inr exit ->
+  analysis_open exit = analysis_open state.
+Proof.
+  unfold take_step.
+  destruct cost; try (apply take_plain_step_preserves_sets; assumption).
+  - destruct (bool_decide (_ ⊆ _)); last discriminate.
+    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
+      eqn:Hstep; first discriminate.
+    destruct (bool_decide (_ ## _)); last discriminate.
+    intros [= <-]. simpl.
+    exact (proj2 (take_plain_step_preserves_sets _ _ _ Hstep)).
+  - destruct (bool_decide (_ ⊆ _)); last discriminate.
+    apply take_plain_step_preserves_sets.
+Qed.
+
+Lemma take_plain_step_preserves_in_atomic cost state exit :
+  take_plain_step cost state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  unfold take_plain_step.
+  destruct (analysis_in_atomic state ||
+    bool_decide (analysis_open state = ∅)) eqn:Hallowed;
+    first by intros [= <-].
+  apply orb_false_iff in Hallowed as [Hin_atomic _].
+  destruct cost; try by intros [= <-]; try discriminate.
+  destruct (analysis_step_taken state); first discriminate.
+  intros [= <-]. simpl. symmetry. exact Hin_atomic.
+Qed.
+
+Lemma take_step_preserves_in_atomic cost state exit :
+  take_step cost state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  unfold take_step. destruct cost;
+    try (apply take_plain_step_preserves_in_atomic; assumption).
+  - destruct (bool_decide (_ ⊆ _)); last discriminate.
+    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
+      eqn:Hplain; first discriminate.
+    destruct (bool_decide (_ ## _)); last discriminate.
+    intros [= <-]. simpl.
+    exact (take_plain_step_preserves_in_atomic _ _ _ Hplain).
+  - destruct (bool_decide (_ ⊆ _)); last discriminate.
+    apply take_plain_step_preserves_in_atomic.
+Qed.
+
+Lemma take_step_preserves_wf cost state exit :
+  state_wf state -> take_step cost state = inr exit -> state_wf exit.
+Proof.
+  intros Hwf Hstep. unfold take_step in Hstep.
+  destruct cost; try (apply take_plain_step_preserves_sets in Hstep as
+    [Hmask Hopen]; unfold state_wf in *; now rewrite Hmask, Hopen).
+  - destruct (bool_decide (_ ⊆ _)) eqn:Hrequired; last discriminate.
+    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
+      eqn:Hplain; first discriminate.
+    destruct (bool_decide (_ ## _)) eqn:Hgrant; last discriminate.
+    inversion Hstep; subst exit.
+    apply bool_decide_eq_true in Hgrant.
+    apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
+    assert (state_wf stepped) as Hwf_stepped.
+    { unfold state_wf in Hwf |- *. now rewrite Hmask, Hopen. }
+    unfold state_wf, grant_state in *. simpl in *.
+    rewrite elem_of_disjoint in Hwf_stepped, Hgrant |- *.
+    intros invariant Hinvariant Havailable.
+    rewrite elem_of_union in Havailable. destruct Havailable as [Havailable|Hgranted].
+    + exact (Hwf_stepped invariant Hinvariant Havailable).
+    + exact (Hgrant invariant Hgranted Hinvariant).
+  - destruct (bool_decide (_ ⊆ _)); last discriminate.
+    apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
+    unfold state_wf in Hwf |- *. now rewrite Hmask, Hopen.
+Qed.
+
+Lemma procedure_call_step_success required granted state exit :
+  take_step (ProcedureCallStep required granted) state = inr exit ->
+  required ⊆ analysis_mask state /\
+  granted ## analysis_open state /\
+  analysis_mask exit = analysis_mask state ∪ granted /\
+  analysis_open exit = analysis_open state.
+Proof.
+  unfold take_step.
+  destruct (bool_decide (required ⊆ analysis_mask state)) eqn:Hrequired;
+    last discriminate.
+  apply bool_decide_eq_true in Hrequired.
+  destruct (take_plain_step NonAtomicStep state) as [error|stepped]
+    eqn:Hplain; first discriminate.
+  destruct (bool_decide (granted ## analysis_open stepped)) eqn:Hgrant;
+    last discriminate.
+  apply bool_decide_eq_true in Hgrant. intros [= <-].
+  apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
+  rewrite Hopen in Hgrant. simpl. repeat split; try assumption.
+  - now rewrite Hmask.
+Qed.
+
+Lemma procedure_spawn_step_success required state exit :
+  take_step (ProcedureSpawnStep required) state = inr exit ->
+  required ⊆ analysis_mask state /\
   analysis_mask exit = analysis_mask state /\
   analysis_open exit = analysis_open state.
 Proof.
   unfold take_step.
-  destruct (analysis_in_atomic state ||
-    bool_decide (analysis_open state = ∅)); first by intros [= <-].
-  destruct cost; try by intros [= <-].
-  destruct (analysis_step_taken state); first discriminate.
-  intros Hinr. inversion Hinr. done.
+  destruct (bool_decide (required ⊆ analysis_mask state)) eqn:Hrequired;
+    last discriminate.
+  apply bool_decide_eq_true in Hrequired. intros Hplain.
+  apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
+  tauto.
+Qed.
+
+Lemma atomic_step_preserves_sets state exit :
+  take_step AtomicStep state = inr exit ->
+  analysis_mask exit = analysis_mask state /\
+  analysis_open exit = analysis_open state.
+Proof. apply take_plain_step_preserves_sets. Qed.
+
+Lemma take_step_resources_monotone cost state exit :
+  take_step cost state = inr exit ->
+  analysis_mask state ∪ analysis_open state ⊆
+    analysis_mask exit ∪ analysis_open exit.
+Proof.
+  intros Hstep. destruct cost.
+  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
+    now rewrite Hmask, Hopen.
+  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
+    now rewrite Hmask, Hopen.
+  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
+    now rewrite Hmask, Hopen.
+  - apply procedure_call_step_success in Hstep as
+      (_ & _ & Hmask & Hopen).
+    intros invariant Hmember. rewrite elem_of_union in Hmember |- *.
+    destruct Hmember as [Havailable|Hopened].
+    + left. rewrite Hmask, elem_of_union. now left.
+    + right. now rewrite Hopen.
+  - apply procedure_spawn_step_success in Hstep as (_ & Hmask & Hopen).
+    now rewrite Hmask, Hopen.
+Qed.
+
+Lemma take_plain_non_atomic_rejected state :
+  analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
+  take_plain_step NonAtomicStep state = inl NonAtomicWhileOpen.
+Proof.
+  intros Hopen Hin_atomic. unfold take_plain_step.
+  rewrite Hin_atomic. simpl. rewrite bool_decide_false; [reflexivity|exact Hopen].
+Qed.
+
+Lemma procedure_call_rejected_while_open required granted state exit :
+  analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
+  take_step (ProcedureCallStep required granted) state <> inr exit.
+Proof.
+  intros Hopen Hin_atomic. unfold take_step.
+  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
+  rewrite (take_plain_non_atomic_rejected state Hopen Hin_atomic). discriminate.
+Qed.
+
+Lemma procedure_spawn_rejected_while_open required state exit :
+  analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
+  take_step (ProcedureSpawnStep required) state <> inr exit.
+Proof.
+  intros Hopen Hin_atomic. unfold take_step.
+  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
+  rewrite (take_plain_non_atomic_rejected state Hopen Hin_atomic). discriminate.
 Qed.
 
 Lemma fold_invariant_preserves_wf invariant state :
@@ -337,6 +531,43 @@ Fixpoint lifo_certificate {Γ fuel entry statement exit} {cost : cost_model}
       lifo_certificate body_certificate stack_in stack_in /\
       stack_out = stack_in
   end.
+
+(** [lifo_certificate] is deterministic: for one fixed certificate and input
+    stack, the execution it describes has exactly one output stack, not
+    several -- [unfold] pushes one prescribed marker, [leaf]/[atomic]
+    preserve the stack, [sequence] composes deterministic transitions, and
+    [fold]'s two alternatives are separated by whether the invariant belongs
+    to the fixed entry open set (mutually exclusive, so at most one can
+    hold).  Reconciles independently obtained LIFO witnesses for the same
+    certificate/input (e.g. two [aligned_operational_suffix] normalizations
+    of the same branch) without re-deriving the underlying access-stack
+    discipline from scratch. *)
+Lemma lifo_certificate_functional {Γ fuel entry statement exit}
+    {cost : cost_model}
+    (certificate : analysis_certificate cost Γ fuel entry statement exit)
+    stack_in stack_out1 stack_out2 :
+  lifo_certificate certificate stack_in stack_out1 ->
+  lifo_certificate certificate stack_in stack_out2 ->
+  stack_out1 = stack_out2.
+Proof.
+  revert stack_in stack_out1 stack_out2.
+  induction certificate; simpl; intros stack_in stack_out1 stack_out2 H1 H2.
+  - congruence.
+  - congruence.
+  - destruct H1 as [(o1 & Hin1 & Hmem1 & Hnm1 & Ho1) | (Heq1 & Hnm1)];
+      destruct H2 as [(o2 & Hin2 & Hmem2 & Hnm2 & Ho2) | (Heq2 & Hnm2)].
+    + pose proof (eq_trans (eq_sym Hin1) Hin2) as Heq.
+      injection Heq as _ Heq_out. exact Heq_out.
+    + exfalso. exact (Hnm2 Hmem1).
+    + exfalso. exact (Hnm1 Hmem2).
+    + congruence.
+  - destruct H1 as (mid1 & Hfirst1 & Hsecond1).
+    destruct H2 as (mid2 & Hfirst2 & Hsecond2).
+    assert (mid1 = mid2) as Hmid by eauto.
+    subst mid2. eauto.
+  - destruct H1 as [Hthen1 _]. destruct H2 as [Hthen2 _]. eauto.
+  - destruct H1 as [_ Heq1]. destruct H2 as [_ Heq2]. congruence.
+Qed.
 
 (** The concrete access-stack discipline underlying [lifo_certificate].
     Every marker remembers the complete open set immediately before its
@@ -565,8 +796,7 @@ Theorem certificate_preserves_wf {Γ fuel} (cost : cost_model) state
   state_wf exit.
 Proof.
   intros Hwf certificate. induction certificate.
-  - apply take_step_preserves_sets in e0 as [Hmask Hopen].
-    unfold state_wf in *. rewrite Hmask. rewrite Hopen. exact Hwf.
+  - eapply take_step_preserves_wf; eauto.
   - eapply open_invariant_preserves_wf; eauto.
   - apply fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
@@ -577,8 +807,8 @@ Proof.
     apply (IHcertificate1 invariant Hinvariant).
     apply elem_of_intersection in Hmask as [Hmask _]. exact Hmask.
   - cbn. apply IHcertificate.
-    apply take_step_preserves_sets in e0 as [Hmask Hopen].
-    unfold state_wf in *. cbn. rewrite Hmask. rewrite Hopen. exact Hwf.
+    pose proof (take_step_preserves_wf _ _ _ Hwf e0) as Houter.
+    exact Houter.
 Qed.
 
 Lemma lifo_preserves_access_stack_consistency
@@ -594,7 +824,7 @@ Proof.
   induction certificate; intros stack_in stack_out Hwf Hlifo Hstack;
     simpl in Hlifo.
   - subst stack_out.
-    apply take_step_preserves_sets in e0 as [_ Hopen].
+    apply take_step_preserves_open in e0 as Hopen.
     now rewrite Hopen.
   - subst stack_out.
     apply open_invariant_success in e0 as (Hfresh & _ & _ & Hopen).
@@ -622,10 +852,8 @@ Proof.
   - destruct Hlifo as [Hbody Hsame]. subst stack_out.
     simpl.
     eapply IHcertificate; [|exact Hbody|].
-    + apply take_step_preserves_sets in e0 as [Hmask Hopen].
-      unfold state_wf in *. simpl.
-      rewrite Hmask. rewrite Hopen. exact Hwf.
-    + apply take_step_preserves_sets in e0 as [_ Hopen].
+    + exact (take_step_preserves_wf _ _ _ Hwf e0).
+    + apply take_step_preserves_open in e0 as Hopen.
       simpl. now rewrite Hopen.
 Qed.
 
@@ -692,7 +920,7 @@ Proof.
   intros Hbody. destruct Hbody as [Hbody Hstack].
   constructor.
   - simpl. split; [exact Hbody|reflexivity].
-  - apply take_step_preserves_sets in step as [_ Hopen].
+  - apply take_step_preserves_open in step as Hopen.
     simpl in Hstack. now rewrite Hopen in Hstack.
 Qed.
 

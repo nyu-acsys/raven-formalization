@@ -168,6 +168,17 @@ Parameter certified_procedure_body_cost_sound : forall Γ F
       (certified_procedure_bodies (pack_typed_procedure procedure) Hin
         current_mask Hmask)).
 
+Parameter certified_procedure_body_effect_sound : forall Γ F
+    (procedure : typed_procedure Γ F)
+    (Hin : List.In (pack_typed_procedure procedure)
+      (procedure_entries ProcedureContracts.procedures)) current_mask
+    (Hmask : Contracts.required_mask (procedure_identity _ _ procedure) ⊆
+      current_mask),
+  Certified.procedure_cost_model_sound
+    (ProcedureBodies.body_cost _ _
+      (certified_procedure_bodies (pack_typed_procedure procedure) Hin
+        current_mask Hmask)).
+
 (** The operational call rule constructs a fresh frame from evaluated actual
     arguments and canonical values for the registered locals.  This program
     interface states that the procedure's symbolic entry store denotes that
@@ -462,6 +473,38 @@ Proof.
   iApply LegacyLifting.wp_seq_wp. iExact "Hfirst".
 Qed.
 
+(** The inverse direction, keeping the residual context intact rather than
+    collapsing it to an immediate [Model.runtime_wp E second Phi] -- the
+    first component's result need not be [LitUnit] ([SeqStep] accepts any
+    value), so no such collapse is generally sound. *)
+Lemma runtime_wp_sequence_context_inv
+    (first second : LegacyLang.runtime_stmt) E
+    (Phi : LegacyLang.val -> iProp) :
+  Model.runtime_wp E (LegacyLang.RTSeq first second) Phi ⊢
+  Model.runtime_wp E first
+    (fun result =>
+      Model.runtime_wp E (LegacyLang.RTSeq (LegacyLang.RTVal result) second)
+        Phi).
+Proof.
+  unfold Model.runtime_wp. iIntros "Hwp".
+  iApply LegacyLifting.wp_seq_wp_context_inv. iExact "Hwp".
+Qed.
+
+(** The forward companion, reassembling a residual sequence around an
+    arbitrary [first] (not only one already known to return [LitUnit]). *)
+Lemma runtime_wp_sequence_context
+    (first second : LegacyLang.runtime_stmt) E
+    (Phi : LegacyLang.val -> iProp) :
+  Model.runtime_wp E first
+    (fun result =>
+      Model.runtime_wp E (LegacyLang.RTSeq (LegacyLang.RTVal result) second)
+        Phi) ⊢
+  Model.runtime_wp E (LegacyLang.RTSeq first second) Phi.
+Proof.
+  unfold Model.runtime_wp. iIntros "Hwp".
+  iApply LegacyLifting.wp_seq_wp_context. iExact "Hwp".
+Qed.
+
 (** Lift a translated atomic leaf through an enclosing logical mask change.
     This is the operational shape produced when an erased [TUnfold]/[TFold]
     pair surrounds the leaf: enter the invariant's smaller active mask, run
@@ -591,6 +634,37 @@ Inductive aligned_operational_suffix
 
 Arguments AlignedOperationalDone {_ _ _ _} _ _ _.
 
+(** Resource-facing counterpart of [aligned_operational_suffix].  Keeping it
+    separate from the compatibility zipper makes the resource derivation the
+    proof-facing payload while the analyzer certificate continues to own the
+    mask transition. *)
+Inductive resource_aligned_operational_suffix
+    (cost : GenericRegions.Atomicity.cost_model) Γ F Δ :
+    forall (entry : GenericRegions.Atomicity.analysis_state),
+      assertion Γ F Δ -> list GenericRegions.Atomicity.access_marker ->
+      GenericRegions.Atomicity.analysis_state -> assertion Γ F Δ ->
+      list GenericRegions.Atomicity.access_marker -> Type :=
+| ResourceAlignedOperationalDone state post stack :
+    resource_aligned_operational_suffix cost Γ F Δ
+      state post stack state post stack
+| ResourceAlignedOperationalCons fuel entry statement middle pre middle_assertion
+    stack_in stack_middle
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement middle)
+    (derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre statement middle_assertion)
+    (aligned : Certified.resource_certificate_hoare_aligned
+      cost certificate derivation)
+    (lifo : GenericRegions.Atomicity.lifo_certificate
+      certificate stack_in stack_middle)
+    final post stack_out
+    (rest : resource_aligned_operational_suffix cost Γ F Δ
+      middle middle_assertion stack_middle final post stack_out) :
+    resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in final post stack_out.
+
+Arguments ResourceAlignedOperationalDone {_ _ _ _} _ _ _.
+
 Fixpoint erase_aligned_operational_suffix
     {cost Γ F Δ entry pre stack_in exit post stack_out}
     (suffix : aligned_operational_suffix cost Γ F Δ
@@ -602,6 +676,57 @@ Fixpoint erase_aligned_operational_suffix
       _ _ _ rest =>
       OperationalCons certificate (erase_aligned_operational_suffix rest)
   end.
+
+Fixpoint erase_resource_aligned_operational_suffix
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+    operational_suffix cost Γ entry exit :=
+  match suffix with
+  | ResourceAlignedOperationalDone state _ _ => OperationalDone state
+  | @ResourceAlignedOperationalCons _ _ _ _ _ _ _ _ _ _ _ _ certificate _ _
+      _ _ _ _ rest =>
+      OperationalCons certificate
+        (erase_resource_aligned_operational_suffix rest)
+  end.
+
+(** Compatibility conversion.  The old zipper's mask-indexed derivation is
+    erased one entry at a time, retaining the same certificates and stack
+    transition witnesses. *)
+Fixpoint resource_aligned_operational_suffix_of_aligned
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+    resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out :=
+  match suffix with
+  | AlignedOperationalDone state post stack =>
+      ResourceAlignedOperationalDone state post stack
+  | @AlignedOperationalCons _ _ _ _ fuel entry' statement middle pre'
+      middle_assertion' stack_in' stack_middle' certificate derivation aligned
+      lifo final post' stack_out' rest =>
+      @ResourceAlignedOperationalCons _ _ _ _ fuel entry' statement
+        middle pre' middle_assertion' stack_in' stack_middle' certificate
+        (Certified.Rules.RavenHoareTriple_erases_resource _ _ _ _ _
+          derivation)
+        (Certified.certificate_hoare_aligned_erases_resource certificate
+          derivation aligned)
+        lifo final post' stack_out'
+        (resource_aligned_operational_suffix_of_aligned rest)
+  end.
+
+Lemma erase_resource_aligned_operational_suffix_of_aligned
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+  erase_resource_aligned_operational_suffix
+    (resource_aligned_operational_suffix_of_aligned suffix) =
+  erase_aligned_operational_suffix suffix.
+Proof.
+  induction suffix; simpl.
+  - reflexivity.
+  - rewrite IHsuffix. reflexivity.
+Qed.
 
 (** Reassociate a sequence certificate into two adjacent aligned zipper
     entries.  This is deliberately proof-relevant: the two child Hoare
@@ -680,9 +805,89 @@ Lemma erase_expand_aligned_sequence_suffix
       (erase_aligned_operational_suffix rest)).
 Proof. reflexivity. Qed.
 
+(** Resource-proof version of sequence reassociation. *)
+Definition expand_resource_aligned_sequence_suffix
+    {cost Γ F Δ fuel state statement first middle second next final
+      pre middle_assertion next_assertion post
+      stack_in stack_middle stack_next stack_out}
+    (view : RegionSyntax.view statement =
+      TypedAnalysisView.ViewSequence first second)
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel state first middle)
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel middle second next)
+    (first_derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre first middle_assertion)
+    (second_derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      middle_assertion second next_assertion)
+    (first_aligned : Certified.resource_certificate_hoare_aligned cost
+      first_certificate first_derivation)
+    (second_aligned : Certified.resource_certificate_hoare_aligned cost
+      second_certificate second_derivation)
+    (first_lifo : GenericRegions.Atomicity.lifo_certificate
+      first_certificate stack_in stack_middle)
+    (second_lifo : GenericRegions.Atomicity.lifo_certificate
+      second_certificate stack_middle stack_next)
+    (rest : resource_aligned_operational_suffix cost Γ F Δ next next_assertion
+      stack_next final post stack_out) :
+    resource_aligned_operational_suffix cost Γ F Δ state pre stack_in
+      final post stack_out :=
+  @ResourceAlignedOperationalCons cost Γ F Δ fuel state first middle pre
+    middle_assertion stack_in stack_middle first_certificate first_derivation
+    first_aligned first_lifo final post stack_out
+    (@ResourceAlignedOperationalCons cost Γ F Δ fuel middle second next
+      middle_assertion next_assertion stack_middle stack_next
+      second_certificate second_derivation second_aligned second_lifo
+      final post stack_out rest).
+
+Lemma erase_expand_resource_aligned_sequence_suffix
+    {cost Γ F Δ fuel state statement first middle second next final
+      pre middle_assertion next_assertion post
+      stack_in stack_middle stack_next stack_out}
+    (view : RegionSyntax.view statement =
+      TypedAnalysisView.ViewSequence first second)
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel state first middle)
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel middle second next)
+    (first_derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre first middle_assertion)
+    (second_derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      middle_assertion second next_assertion)
+    (first_aligned : Certified.resource_certificate_hoare_aligned cost
+      first_certificate first_derivation)
+    (second_aligned : Certified.resource_certificate_hoare_aligned cost
+      second_certificate second_derivation)
+    (first_lifo : GenericRegions.Atomicity.lifo_certificate
+      first_certificate stack_in stack_middle)
+    (second_lifo : GenericRegions.Atomicity.lifo_certificate
+      second_certificate stack_middle stack_next)
+    (rest : resource_aligned_operational_suffix cost Γ F Δ next next_assertion
+      stack_next final post stack_out) :
+  erase_resource_aligned_operational_suffix
+    (expand_resource_aligned_sequence_suffix view first_certificate
+      second_certificate first_derivation second_derivation first_aligned
+      second_aligned first_lifo second_lifo rest) =
+  OperationalCons first_certificate
+    (OperationalCons second_certificate
+      (erase_resource_aligned_operational_suffix rest)).
+Proof. reflexivity. Qed.
+
 Lemma aligned_operational_suffix_preserves_wf
     {cost Γ F Δ entry pre stack_in exit post stack_out}
     (suffix : aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+  GenericRegions.Atomicity.state_wf entry ->
+  GenericRegions.Atomicity.state_wf exit.
+Proof.
+  induction suffix; intros Hwf; first exact Hwf.
+  apply IHsuffix.
+  eapply GenericRegions.Atomicity.certificate_preserves_wf; eauto.
+Qed.
+
+Lemma resource_aligned_operational_suffix_preserves_wf
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
       entry pre stack_in exit post stack_out) :
   GenericRegions.Atomicity.state_wf entry ->
   GenericRegions.Atomicity.state_wf exit.
@@ -726,9 +931,38 @@ Proof.
   - eexists. split; [exact lifo|exact IHsuffix].
 Qed.
 
+Lemma erase_resource_aligned_operational_suffix_lifo
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+  operational_suffix_lifo
+    (erase_resource_aligned_operational_suffix suffix) stack_in stack_out.
+Proof.
+  induction suffix; simpl.
+  - reflexivity.
+  - eexists. split; [exact lifo|exact IHsuffix].
+Qed.
+
 Lemma aligned_operational_suffix_preserves_stack_consistency
     {cost Γ F Δ entry pre stack_in exit post stack_out}
     (suffix : aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+  GenericRegions.Atomicity.state_wf entry ->
+  GenericRegions.Atomicity.access_stack_consistent
+    (GenericRegions.Atomicity.analysis_open entry) stack_in ->
+  GenericRegions.Atomicity.access_stack_consistent
+    (GenericRegions.Atomicity.analysis_open exit) stack_out.
+Proof.
+  induction suffix; intros Hwf Hstack; first exact Hstack.
+  apply IHsuffix.
+  - eapply GenericRegions.Atomicity.certificate_preserves_wf; eauto.
+  - eapply GenericRegions.Atomicity.lifo_preserves_access_stack_consistency;
+      eauto.
+Qed.
+
+Lemma resource_aligned_operational_suffix_preserves_stack_consistency
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
       entry pre stack_in exit post stack_out) :
   GenericRegions.Atomicity.state_wf entry ->
   GenericRegions.Atomicity.access_stack_consistent
@@ -773,6 +1007,37 @@ Proof.
   eapply aligned_balanced_suffix_open_equal; eauto.
 Qed.
 
+Lemma resource_aligned_balanced_suffix_open_equal
+    {cost Γ F Δ entry pre stack exit post}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack exit post stack) :
+  GenericRegions.Atomicity.state_wf entry ->
+  GenericRegions.Atomicity.access_stack_consistent
+    (GenericRegions.Atomicity.analysis_open entry) stack ->
+  GenericRegions.Atomicity.analysis_open exit =
+    GenericRegions.Atomicity.analysis_open entry.
+Proof.
+  intros Hwf Hstack.
+  symmetry. eapply GenericRegions.Atomicity.access_stack_consistent_functional.
+  - exact Hstack.
+  - eapply resource_aligned_operational_suffix_preserves_stack_consistency;
+      eauto.
+Qed.
+
+Lemma resource_aligned_balanced_suffix_active_mask_equal
+    {cost Γ F Δ entry pre stack exit post}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack exit post stack) ambient :
+  GenericRegions.Atomicity.state_wf entry ->
+  GenericRegions.Atomicity.access_stack_consistent
+    (GenericRegions.Atomicity.analysis_open entry) stack ->
+  Model.active_runtime_mask ambient exit =
+    Model.active_runtime_mask ambient entry.
+Proof.
+  intros Hwf Hstack. apply Model.active_runtime_mask_same_open.
+  eapply resource_aligned_balanced_suffix_open_equal; eauto.
+Qed.
+
 Definition aligned_singleton_suffix
     {cost Γ F Δ fuel entry statement exit pre post stack_in stack_out}
     (certificate : GenericRegions.Atomicity.analysis_certificate
@@ -789,6 +1054,22 @@ Definition aligned_singleton_suffix
   @AlignedOperationalCons cost Γ F Δ fuel entry statement exit pre post
     stack_in stack_out certificate derivation aligned lifo exit post stack_out
     (AlignedOperationalDone exit post stack_out).
+
+Definition resource_aligned_singleton_suffix
+    {cost Γ F Δ fuel entry statement exit pre post stack_in stack_out}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre statement post)
+    (aligned : Certified.resource_certificate_hoare_aligned
+      cost certificate derivation)
+    (lifo : GenericRegions.Atomicity.lifo_certificate
+      certificate stack_in stack_out) :
+  resource_aligned_operational_suffix cost Γ F Δ
+    entry pre stack_in exit post stack_out :=
+  @ResourceAlignedOperationalCons cost Γ F Δ fuel entry statement exit pre post
+    stack_in stack_out certificate derivation aligned lifo exit post stack_out
+    (ResourceAlignedOperationalDone exit post stack_out).
 
 Definition certificate_runtime_statement
     {cost Γ fuel entry statement exit}
@@ -838,6 +1119,27 @@ Definition aligned_operational_suffix_footprint
       entry pre stack_in exit post stack_out) : gset inv_id :=
   operational_suffix_footprint (erase_aligned_operational_suffix suffix).
 
+Definition resource_aligned_operational_suffix_footprint
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : resource_aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) : gset inv_id :=
+  operational_suffix_footprint
+    (erase_resource_aligned_operational_suffix suffix).
+
+Lemma resource_aligned_operational_suffix_of_aligned_footprint
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : aligned_operational_suffix cost Γ F Δ
+      entry pre stack_in exit post stack_out) :
+  resource_aligned_operational_suffix_footprint
+    (resource_aligned_operational_suffix_of_aligned suffix) =
+  aligned_operational_suffix_footprint suffix.
+Proof.
+  unfold resource_aligned_operational_suffix_footprint,
+    aligned_operational_suffix_footprint.
+  rewrite erase_resource_aligned_operational_suffix_of_aligned.
+  reflexivity.
+Qed.
+
 Lemma operational_suffix_head_footprint_subset
     {cost Γ fuel entry statement middle exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
@@ -855,6 +1157,52 @@ Lemma operational_suffix_rest_footprint_subset
   operational_suffix_footprint rest ⊆
     operational_suffix_footprint (OperationalCons certificate rest).
 Proof. simpl. set_solver. Qed.
+
+Lemma resource_aligned_operational_suffix_head_footprint_subset
+    {cost Γ F Δ fuel entry statement middle pre middle_assertion
+      stack_in stack_middle final post stack_out}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement middle)
+    (derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre statement middle_assertion)
+    (aligned : Certified.resource_certificate_hoare_aligned
+      cost certificate derivation)
+    (lifo : GenericRegions.Atomicity.lifo_certificate
+      certificate stack_in stack_middle)
+    (rest : resource_aligned_operational_suffix cost Γ F Δ
+      middle middle_assertion stack_middle final post stack_out) :
+  GenericRegions.Atomicity.certificate_footprint certificate ⊆
+    resource_aligned_operational_suffix_footprint
+      (@ResourceAlignedOperationalCons cost Γ F Δ fuel entry statement middle
+        pre middle_assertion stack_in stack_middle certificate derivation
+        aligned lifo final post stack_out rest).
+Proof.
+  unfold resource_aligned_operational_suffix_footprint. simpl.
+  apply operational_suffix_head_footprint_subset.
+Qed.
+
+Lemma resource_aligned_operational_suffix_rest_footprint_subset
+    {cost Γ F Δ fuel entry statement middle pre middle_assertion
+      stack_in stack_middle final post stack_out}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement middle)
+    (derivation : @Certified.Rules.RavenResourceTriple Γ F Δ
+      pre statement middle_assertion)
+    (aligned : Certified.resource_certificate_hoare_aligned
+      cost certificate derivation)
+    (lifo : GenericRegions.Atomicity.lifo_certificate
+      certificate stack_in stack_middle)
+    (rest : resource_aligned_operational_suffix cost Γ F Δ
+      middle middle_assertion stack_middle final post stack_out) :
+  resource_aligned_operational_suffix_footprint rest ⊆
+    resource_aligned_operational_suffix_footprint
+      (@ResourceAlignedOperationalCons cost Γ F Δ fuel entry statement middle
+        pre middle_assertion stack_in stack_middle certificate derivation
+        aligned lifo final post stack_out rest).
+Proof.
+  unfold resource_aligned_operational_suffix_footprint. simpl.
+  apply operational_suffix_rest_footprint_subset.
+Qed.
 
 Definition expand_sequence_suffix {cost Γ fuel state statement first middle
     second next final}
@@ -1013,6 +1361,24 @@ Proof.
     try reflexivity; lia.
 Qed.
 
+(** A weaker, purely syntactic sibling: reassociating across a [None] on
+    either the left or the middle needs no bound on the third operand at
+    all (unlike [combine_runtime_statements_assoc_sparse], which bounds all
+    three). This is what item 3's linear-closing split actually needs: the
+    still-open access interval's own two pieces (chunk, remaining prefix)
+    are sparse in this sense, but the post-close continuation is
+    deliberately unconstrained. *)
+Lemma combine_runtime_statements_assoc_left_sparse first second third :
+  first = None \/ second = None ->
+  Model.combine_runtime_statements first
+      (Model.combine_runtime_statements second third) =
+    Model.combine_runtime_statements
+      (Model.combine_runtime_statements first second) third.
+Proof.
+  destruct first, second; simpl; intros [H | H]; try discriminate;
+    destruct third; reflexivity.
+Qed.
+
 Lemma combine_runtime_statements_count_le first second :
   runtime_option_count
       (Model.combine_runtime_statements first second) <=
@@ -1064,6 +1430,23 @@ Proof.
     iMod "Hpost". iModIntro. iApply HPQ. iExact "Hpost".
   - iIntros "Hpost". iMod "Hpost". iModIntro.
     iApply HPQ. iExact "Hpost".
+Qed.
+
+Lemma runtime_option_wp_frame entry_mask exit_mask physical (post frame : iProp) :
+  runtime_option_wp entry_mask exit_mask physical post ∗ frame ⊢
+    runtime_option_wp entry_mask exit_mask physical (post ∗ frame).
+Proof.
+  destruct physical as [statement|]; simpl.
+  - unfold Model.runtime_wp. iIntros "[Hwp Hframe]".
+    iPoseProof (@wp_frame_r HasLc LegacyLang.simp_lang Resources.Σ
+      Model.concrete_irisG NotStuck entry_mask _
+      (fun result =>
+        (⌜result = LegacyLang.LitUnit⌝ ∗ |={entry_mask,exit_mask}=> post)%I)
+      frame with "[$Hwp $Hframe]") as "Hwp".
+    iApply (wp_mono with "Hwp").
+    iIntros (result) "[[%Hresult Hpost] Hframe]". iSplit; first done.
+    iMod "Hpost". iModIntro. iFrame.
+  - iIntros "[Hpost Hframe]". iMod "Hpost". iModIntro. iFrame.
 Qed.
 
 Lemma runtime_option_wp_sequence_same_mask mask first second (post : iProp) :
@@ -1130,6 +1513,73 @@ Proof.
   - iIntros "Hbracket". iMod "Hbracket".
     iMod "Hbracket". iMod "Hbracket". iModIntro.
     iExact "Hbracket".
+Qed.
+
+(** The runtime erasure of a source conditional is atomic whenever each
+    non-erased arm is atomic.  Erased arms are represented by the value
+    [runtime_noop], and the both-erased case has no runtime statement at all.
+    This packages the side condition needed when an analyzed conditional is
+    used as the single physical step of an invariant-access bracket. *)
+Lemma runtime_conditional_statement_atomic {Γ}
+    (names : named_context Γ) stack node condition
+    (then_branch else_branch : stmt Γ) :
+  (forall statement,
+    Model.runtime_stmt names stack then_branch = Some statement ->
+    @Atomic LegacyLang.simp_lang WeaklyAtomic statement) ->
+  (forall statement,
+    Model.runtime_stmt names stack else_branch = Some statement ->
+    @Atomic LegacyLang.simp_lang WeaklyAtomic statement) ->
+  forall statement,
+    Model.runtime_stmt names stack
+      (TIf node condition then_branch else_branch) = Some statement ->
+    @Atomic LegacyLang.simp_lang WeaklyAtomic statement.
+Proof.
+  intros Hthen Helse statement Hstatement.
+  destruct (Model.runtime_stmt names stack then_branch) as [then_runtime|]
+    eqn:Hthen_runtime;
+  destruct (Model.runtime_stmt names stack else_branch) as [else_runtime|]
+    eqn:Helse_runtime;
+    cbn [Model.runtime_stmt] in Hstatement;
+    rewrite Hthen_runtime Helse_runtime in Hstatement; simpl in Hstatement;
+    try discriminate.
+  all: injection Hstatement as <-; apply LegacyLang.atomic_if.
+  - apply Hthen. reflexivity.
+  - apply Helse. reflexivity.
+  - apply Hthen. reflexivity.
+  - unfold Model.runtime_noop, Atomic. intros σ result κ σ' efs Hstep.
+    exfalso. eapply (val_irreducible
+      ((LegacyLang.RTVal LegacyLang.LitUnit) :
+        language.expr LegacyLang.simp_lang) σ).
+    + eexists. reflexivity.
+    + exact Hstep.
+  - unfold Model.runtime_noop, Atomic. intros σ result κ σ' efs Hstep.
+    exfalso. eapply (val_irreducible
+      ((LegacyLang.RTVal LegacyLang.LitUnit) :
+        language.expr LegacyLang.simp_lang) σ).
+    + eexists. reflexivity.
+    + exact Hstep.
+  - apply Helse. reflexivity.
+Qed.
+
+(** Collapse a proof-only round trip before an optional runtime fragment.
+    Unlike [runtime_option_wp_atomic_mask_change], the physical fragment is
+    already back at its own entry mask before it starts, so no [Atomic]
+    premise is needed.  This is the form produced by a ghost [fold] followed
+    by arbitrary post-close code. *)
+Lemma runtime_option_wp_fupd_roundtrip entry_mask inner_mask exit_mask
+    physical (post : iProp) :
+  (|={entry_mask, inner_mask}=>
+    |={inner_mask, entry_mask}=>
+      runtime_option_wp entry_mask exit_mask physical post) ⊢
+  runtime_option_wp entry_mask exit_mask physical post.
+Proof.
+  destruct physical as [statement|]; simpl.
+  - iIntros "Hroundtrip". iApply fupd_wp.
+    iMod "Hroundtrip". iMod "Hroundtrip". iModIntro.
+    iExact "Hroundtrip".
+  - iIntros "Hroundtrip". iMod "Hroundtrip".
+    iMod "Hroundtrip". iMod "Hroundtrip". iModIntro.
+    iExact "Hroundtrip".
 Qed.
 
 Lemma translated_runtime_wp_prepend_suffix
@@ -1555,6 +2005,271 @@ Proof.
   dependent destruction value. destruct b.
   - eapply translated_runtime_wp_if; [exact Hvalue|apply Hthen; exact Hvalue].
   - eapply translated_runtime_wp_if; [exact Hvalue|apply Helse; exact Hvalue].
+Qed.
+
+(** Prepending a [runtime_noop] to an already-erased [option runtime_stmt]
+    program does not change its [runtime_option_wp], one direction of which
+    is all a caller needs: an [option runtime_stmt]-level fact obtained
+    without ever mentioning the physical [RTIfS] wrapper (e.g. a branch that
+    erases to [None]) can still be handed to a lemma whose own conclusion is
+    stated over the [default runtime_noop ...]-normalized arm.  Mirrors
+    [translated_runtime_wp_default_arm]'s own [wp_value] argument, composed
+    with [runtime_wp_sequence] for the [rest = Some _] case. *)
+Lemma runtime_option_wp_noop_prepend E1 E2
+    (rest : option LegacyLang.runtime_stmt) (final : iProp) :
+  runtime_option_wp E1 E2 rest final ⊢
+  runtime_option_wp E1 E2
+    (Model.combine_runtime_statements (Some Model.runtime_noop) rest) final.
+Proof.
+  destruct rest as [r|]; simpl; unfold runtime_option_wp; iIntros "Hrest".
+  - iApply runtime_wp_sequence. unfold Model.runtime_wp, Model.runtime_noop.
+    iApply wp_value.
+    + done.
+    + iSplit; first done. iExact "Hrest".
+  - unfold Model.runtime_wp, Model.runtime_noop. iApply wp_value.
+    + done.
+    + iSplit; first done. iExact "Hrest".
+Qed.
+
+(** The conditional-context lifting lemma: given the selected arm's own
+    program, already sequenced with whatever runs after the conditional
+    ([rest_runtime]), conclude the same for [RTIfS] sequenced with
+    [rest_runtime].  Unlike [translated_runtime_wp_if], this works entirely
+    at the [option runtime_stmt]/[combine_runtime_statements] level and
+    threads [rest_runtime] through -- it is the operational bridge that
+    replaces the abandoned [SuffixCons]-based prepend for the general
+    (ordinary) conditional case.  When [rest_runtime] is erased ([None]),
+    this reduces to a direct instance of [runtime_wp_if_true]/
+    [runtime_wp_if_false].  When it is physical, the argument reassembles
+    the outer [RTSeq] via [runtime_wp_sequence_context], after unwrapping
+    the selected arm's own residual sequence via
+    [runtime_wp_sequence_context_inv] -- never the unit-producing inverse of
+    [runtime_wp_sequence]/[wp_seq_wp], which does not hold in this language
+    ([SeqStep] accepts an arbitrary result value, not only [LitUnit]).  This
+    argument is independent of certificates and Raven invariant-access
+    reasoning entirely. *)
+Lemma runtime_wp_if_context {Γ}
+    (runtime : Model.stack_context Γ)
+    frame (condition : pexpr Γ TBool)
+    (then_runtime else_runtime : LegacyLang.runtime_stmt)
+    (rest_runtime : option LegacyLang.runtime_stmt)
+    E Efinal (P final : iProp) b :
+  LegacyLang.expr_step
+    (Model.runtime_expr (Model.runtime_names _ runtime) condition) frame
+    (LegacyLang.Val (LegacyLang.LitBool b)) ->
+  (LegacyGhost.stack_frame_own (Model.runtime_stack_id _ runtime) frame ∗ P ⊢
+    runtime_option_wp E Efinal
+      (Model.combine_runtime_statements
+        (Some (if b then then_runtime else else_runtime)) rest_runtime)
+      final) ->
+  LegacyGhost.stack_frame_own (Model.runtime_stack_id _ runtime) frame ∗ P ⊢
+    runtime_option_wp E Efinal
+      (Model.combine_runtime_statements
+        (Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names _ runtime) condition)
+          then_runtime else_runtime (Model.runtime_stack_id _ runtime)))
+        rest_runtime)
+      final.
+Proof.
+  intros Hcondition Hselected.
+  destruct rest_runtime as [r|]; simpl in Hselected |- *.
+  - unfold runtime_option_wp in Hselected |- *. simpl in Hselected |- *.
+    etrans; last apply runtime_wp_sequence_context. destruct b.
+    + eapply runtime_wp_if_true; first exact Hcondition.
+      iIntros "Hresources".
+      iPoseProof (Hselected with "Hresources") as "Hwp".
+      iApply (runtime_wp_sequence_context_inv with "Hwp").
+    + eapply runtime_wp_if_false; first exact Hcondition.
+      iIntros "Hresources".
+      iPoseProof (Hselected with "Hresources") as "Hwp".
+      iApply (runtime_wp_sequence_context_inv with "Hwp").
+  - destruct b.
+    + eapply runtime_wp_if_true; [exact Hcondition|exact Hselected].
+    + eapply runtime_wp_if_false; [exact Hcondition|exact Hselected].
+Qed.
+
+(** [interp_expr]-total corollary, mirroring [translated_runtime_wp_if_total]. *)
+Corollary runtime_wp_if_context_total {Γ F Δ}
+    (runtime : Model.stack_context Γ) (formals : formal_env F)
+    (binders : binder_env Δ) (atoms : atom_env)
+    (store : symbolic_store Γ F Δ) condition
+    (then_runtime else_runtime : LegacyLang.runtime_stmt)
+    (rest_runtime : option LegacyLang.runtime_stmt) E Efinal (final P : iProp) :
+  (interp_expr formals binders atoms
+      (Hoare.symbolize_expr store condition) = Some (VBool true) ->
+    Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+      runtime_option_wp E Efinal
+        (Model.combine_runtime_statements (Some then_runtime) rest_runtime)
+        final) ->
+  (interp_expr formals binders atoms
+      (Hoare.symbolize_expr store condition) = Some (VBool false) ->
+    Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+      runtime_option_wp E Efinal
+        (Model.combine_runtime_statements (Some else_runtime) rest_runtime)
+        final) ->
+  Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    runtime_option_wp E Efinal
+      (Model.combine_runtime_statements
+        (Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names _ runtime) condition)
+          then_runtime else_runtime (Model.runtime_stack_id _ runtime)))
+        rest_runtime)
+      final.
+Proof.
+  intros Hthen Helse.
+  destruct (interp_expr_total formals binders atoms
+    (Hoare.symbolize_expr store condition)) as [value Hvalue].
+  dependent destruction value. destruct b.
+  - eapply runtime_wp_if_context;
+      [exact (runtime_condition_step runtime formals binders atoms store
+        condition true Hvalue)|apply Hthen; exact Hvalue].
+  - eapply runtime_wp_if_context;
+      [exact (runtime_condition_step runtime formals binders atoms store
+        condition false Hvalue)|apply Helse; exact Hvalue].
+Qed.
+
+(** [runtime_wp_if_context_total]'s general sibling: handles every
+    combination of erased/physical arms directly at the [option
+    runtime_stmt]/[combine_runtime_statements] level, mirroring
+    [translated_runtime_wp_if]'s own four-way case split rather than
+    assuming at least one arm is physical.  Needed once a shared
+    continuation's own erasure genuinely matters: a conditional whose both
+    arms are proof-only erases the whole [TIf] to [None], so no [RTIfS]
+    wrapper may appear in the combined program at all -- [_total]'s
+    unconditional [Some (RTIfS ...)] conclusion cannot express that case. *)
+Corollary runtime_wp_if_context_full {Γ F Δ}
+    (runtime : Model.stack_context Γ) (formals : formal_env F)
+    (binders : binder_env Δ) (atoms : atom_env)
+    (store : symbolic_store Γ F Δ) node condition
+    (then_branch else_branch : stmt Γ)
+    (rest_runtime : option LegacyLang.runtime_stmt) E Efinal (final P : iProp) :
+  (interp_expr formals binders atoms
+      (Hoare.symbolize_expr store condition) = Some (VBool true) ->
+    Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+      runtime_option_wp E Efinal
+        (Model.combine_runtime_statements
+          (Model.runtime_stmt (Model.runtime_names Γ runtime)
+            (Model.runtime_stack_id Γ runtime) then_branch)
+          rest_runtime) final) ->
+  (interp_expr formals binders atoms
+      (Hoare.symbolize_expr store condition) = Some (VBool false) ->
+    Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+      runtime_option_wp E Efinal
+        (Model.combine_runtime_statements
+          (Model.runtime_stmt (Model.runtime_names Γ runtime)
+            (Model.runtime_stack_id Γ runtime) else_branch)
+          rest_runtime) final) ->
+  Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    runtime_option_wp E Efinal
+      (Model.combine_runtime_statements
+        (Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch))
+        rest_runtime) final.
+Proof.
+  have Hcombine_none_l : forall X : option LegacyLang.runtime_stmt,
+      Model.combine_runtime_statements None X = X.
+  { intros X; destruct X; reflexivity. }
+  intros Hthen Helse.
+  destruct (interp_expr_total formals binders atoms
+    (Hoare.symbolize_expr store condition)) as [value Hvalue].
+  dependent destruction value. destruct b.
+  - specialize (Hthen Hvalue).
+    destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
+      (Model.runtime_stack_id Γ runtime) then_branch) as [then_runtime|]
+      eqn:Hthen_rt;
+    destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
+      (Model.runtime_stack_id Γ runtime) else_branch) as [else_runtime|]
+      eqn:Helse_rt.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          then_runtime else_runtime (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition true Hvalue).
+      * exact Hthen.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          then_runtime Model.runtime_noop (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition true Hvalue).
+      * exact Hthen.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          Model.runtime_noop else_runtime (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition true Hvalue).
+      * rewrite Hcombine_none_l in Hthen.
+        iIntros "Hresources". iApply runtime_option_wp_noop_prepend.
+        iApply Hthen. iExact "Hresources".
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) = None.
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. rewrite Hcombine_none_l. rewrite Hcombine_none_l in Hthen.
+      exact Hthen.
+  - specialize (Helse Hvalue).
+    destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
+      (Model.runtime_stack_id Γ runtime) then_branch) as [then_runtime|]
+      eqn:Hthen_rt;
+    destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
+      (Model.runtime_stack_id Γ runtime) else_branch) as [else_runtime|]
+      eqn:Helse_rt.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          then_runtime else_runtime (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition false Hvalue).
+      * exact Helse.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          then_runtime Model.runtime_noop (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition false Hvalue).
+      * rewrite Hcombine_none_l in Helse.
+        iIntros "Hresources". iApply runtime_option_wp_noop_prepend.
+        iApply Helse. iExact "Hresources".
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) =
+        Some (LegacyLang.RTIfS
+          (Model.runtime_expr (Model.runtime_names Γ runtime) condition)
+          Model.runtime_noop else_runtime (Model.runtime_stack_id Γ runtime)).
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. eapply runtime_wp_if_context.
+      * exact (runtime_condition_step runtime formals binders atoms store
+          condition false Hvalue).
+      * exact Helse.
+    + have Hif : Model.runtime_stmt (Model.runtime_names Γ runtime)
+          (Model.runtime_stack_id Γ runtime)
+          (TIf node condition then_branch else_branch) = None.
+      { simpl. rewrite Hthen_rt Helse_rt. reflexivity. }
+      rewrite Hif. rewrite Hcombine_none_l. rewrite Hcombine_none_l in Helse.
+      exact Helse.
 Qed.
 
 (** Branch-local refinements may end at their actual analyzer exits.  The
@@ -2340,6 +3055,129 @@ Proof.
   Unshelve. all: eauto.
 Qed.
 
+(** Resource derivations have no mask indices.  At procedure leaves the
+    analyzer certificate supplies the missing mask transition, while the
+    resource derivation supplies the contract instantiation. *)
+Lemma ordinary_resource_leaf_rule_valid : forall {Γ F Δ}
+    (cost : GenericRegions.Atomicity.cost_model)
+    (pre post : assertion Γ F Δ) statement entry exit,
+  RegionSyntax.view statement = TypedAnalysisView.ViewLeaf ->
+  GenericRegions.Atomicity.take_step (cost Γ statement) entry = inr exit ->
+  Certified.procedure_cost_model_sound cost ->
+  Certified.Rules.RavenResourceTriple pre statement post ->
+  forall (runtime : Model.stack_context Γ) (formals : formal_env F)
+    (binders : binder_env Δ) (atoms : atom_env) (ambient : coPset),
+    Model.runtime_mask (GenericRegions.Atomicity.analysis_mask exit) ⊆
+      Model.active_runtime_mask ambient entry ->
+    (global_world_context atoms ∗
+     VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms pre) ⊢
+    Execution.Primitives.operation_wp runtime ambient entry statement exit
+      (VSemantics.S.interp_assertion (Leaf.predicates atoms)
+        runtime formals binders atoms post).
+Proof.
+  intros Γ F Δ cost pre post statement entry exit Hview Hstep Hcost Htriple.
+  induction Htriple; intros runtime formals binders atoms ambient Henvelope;
+    simpl in Hview; try discriminate.
+  - iIntros "[_ Hpre]". iApply ambient_skip_rule_valid. iExact "Hpre".
+  - iIntros "[_ Hpre]". iApply ambient_assert_rule_valid. iExact "Hpre".
+  - iIntros "[_ Hpre]". iApply ambient_assignment_rule_valid. iExact "Hpre".
+  - iIntros "[_ Hpre]". iApply ambient_field_read_rule_valid. iExact "Hpre".
+  - iIntros "[_ Hpre]". iApply ambient_field_write_rule_valid. iExact "Hpre".
+  - iIntros "[_ Hpre]". iApply ambient_allocation_rule_valid; [exact H|].
+    iExact "Hpre".
+  - iIntros "[_ Hpre]".
+    iApply (externally_specified_ghost_leaf_valid with "Hpre");
+      [eapply ExternalGhostUpdate|
+       eexists (GenericRegions.Atomicity.analysis_mask entry),
+         (GenericRegions.Atomicity.analysis_mask entry);
+       econstructor; exact H].
+  - iIntros "[#Hglobal [Hpre Hframe]]".
+    iApply (Execution.Primitives.Interface.operation_frame with "[Hpre Hframe]").
+    iFrame "Hframe". iApply IHHtriple;
+      [exact Hview|exact Hstep|exact Henvelope|].
+    iFrame "Hglobal Hpre".
+  - iIntros "[#Hglobal Hpre]".
+    iPoseProof (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      pre' pre H runtime formals binders atoms with "Hpre") as "Hpre".
+    iPoseProof (IHHtriple Hview Hstep runtime formals binders atoms
+      ambient Henvelope with "[$Hglobal $Hpre]") as "Hwp".
+    iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+    apply (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      post post' H0 runtime formals binders atoms).
+  - iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
+    iPoseProof (IHHtriple Hview Hstep runtime formals
+      (binder_cons value binders) atoms ambient Henvelope
+      with "[$Hglobal $Hbody]") as "Hwp".
+    iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+    rewrite VSemantics.S.interp_weaken_assertion. done.
+  - iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
+    iPoseProof (IHHtriple Hview Hstep runtime formals
+      (binder_cons value binders) atoms ambient Henvelope
+      with "[$Hglobal $Hbody]") as "Hwp".
+    iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+    iIntros "Hpost". iExists value. iExact "Hpost".
+  - have Hfacts := Certified.certified_call_step_effect cost Hcost Γ args t
+      node procedure arguments (@CTDiscard Γ t) entry exit Hstep.
+    destruct Hfacts as (Hrequired & _ & Hmask & _).
+    iIntros "[#Hglobal Hpre]".
+    iPoseProof (global_world_procedure_specs with "Hglobal")
+      as "[#Hworld #Hprocedures]".
+    iApply ("Hprocedures" $! Γ F Δ _ _ _
+      (GenericRegions.Atomicity.analysis_mask entry)
+      (GenericRegions.Atomicity.analysis_mask entry ∪
+        Contracts.granted_mask procedure)
+      entry exit runtime formals binders atoms ambient
+      with "[] [] Hworld Hpre").
+    + iPureIntro.
+      eapply (@ProcedureDiscardObligation Γ F Δ args t node procedure arguments
+        store contract_pre contract_post
+        (GenericRegions.Atomicity.analysis_mask entry));
+        eassumption.
+    + iPureIntro. rewrite <- Hmask. exact Henvelope.
+  - have Hfacts := Certified.certified_call_step_effect cost Hcost Γ args t
+      node procedure arguments (CTStore target) entry exit Hstep.
+    destruct Hfacts as (Hrequired & _ & Hmask & _).
+    iIntros "[#Hglobal Hpre]".
+    iPoseProof (global_world_procedure_specs with "Hglobal")
+      as "[#Hworld #Hprocedures]".
+    iApply ("Hprocedures" $! Γ F Δ _ _ _
+      (GenericRegions.Atomicity.analysis_mask entry)
+      (GenericRegions.Atomicity.analysis_mask entry ∪
+        Contracts.granted_mask procedure)
+      entry exit runtime formals binders atoms ambient
+      with "[] [] Hworld Hpre").
+    + iPureIntro.
+      eapply (@ProcedureStoreObligation Γ F Δ args t node procedure arguments
+        store target contract_pre contract_post
+        (GenericRegions.Atomicity.analysis_mask entry));
+        eassumption.
+    + iPureIntro. rewrite <- Hmask. exact Henvelope.
+  - iIntros "[_ Hpre]".
+    iApply ambient_predicate_unfold_rule_valid; [exact H|].
+    iExact "Hpre".
+  - iIntros "[_ Hpre]".
+    iApply ambient_predicate_fold_rule_valid; [exact H|].
+    iExact "Hpre".
+  - have Hfacts := Certified.certified_spawn_step_effect cost Hcost
+      _ _ _ _ _ _ _ Hstep.
+    destruct Hfacts as (Hrequired & Hmask & _).
+    iIntros "[#Hglobal Hpre]".
+    iPoseProof (global_world_procedure_specs with "Hglobal")
+      as "[#Hworld #Hprocedures]".
+    iApply ("Hprocedures" $! Γ F Δ _ _ _
+      (GenericRegions.Atomicity.analysis_mask entry)
+      (GenericRegions.Atomicity.analysis_mask entry)
+      entry exit runtime formals binders atoms ambient
+      with "[] [] Hworld Hpre").
+    + iPureIntro.
+      eapply ProcedureSpawnObligation.
+      * exact H.
+      * exact Hrequired.
+    + iPureIntro. rewrite <- Hmask. exact Henvelope.
+  Unshelve. all: eauto.
+Qed.
+
 (** A successful flat leaf step preserves the active runtime mask.  This is
     the physical half of the leaf refinement: assertion-only leaves,
     including [TSkip], now translate to [None] and are deliberately excluded
@@ -2355,7 +3193,7 @@ Lemma leaf_operation_runtime_refinement {Γ cost entry statement exit}
   Execution.Primitives.operation_wp runtime ambient entry statement exit post ⊢
     translated_runtime_wp runtime ambient entry exit statement post.
 Proof.
-  apply GenericRegions.Atomicity.take_step_preserves_sets in step as [_ Hopen].
+  apply GenericRegions.Atomicity.take_step_preserves_open in step as Hopen.
   have Hactive : Model.active_runtime_mask ambient entry =
       Model.active_runtime_mask ambient exit :=
     Model.active_runtime_mask_same_open ambient entry exit (eq_sym Hopen).
@@ -2382,7 +3220,7 @@ Proof.
   destruct (Model.runtime_stmt (Model.runtime_names _ runtime)
     (Model.runtime_stack_id _ runtime) statement) as [physical|] eqn:Hruntime.
   - eapply leaf_operation_runtime_refinement; eauto.
-  - apply GenericRegions.Atomicity.take_step_preserves_sets in step as [_ Hopen].
+  - apply GenericRegions.Atomicity.take_step_preserves_open in step as Hopen.
     have Hactive : Model.active_runtime_mask ambient entry =
         Model.active_runtime_mask ambient exit :=
       Model.active_runtime_mask_same_open ambient entry exit (eq_sym Hopen).
@@ -2413,8 +3251,14 @@ Proof.
   - contradiction.
   - exact Hcost.
   - unfold GenericRegions.Atomicity.take_step in step.
-    rewrite Hin_atomic in step. simpl in step.
-    rewrite bool_decide_false in step; [discriminate|exact Hopen].
+    rewrite (GenericRegions.Atomicity.take_plain_non_atomic_rejected entry
+      Hopen Hin_atomic) in step. discriminate.
+  - exfalso.
+    eapply (GenericRegions.Atomicity.procedure_call_rejected_while_open
+      _ _ entry exit Hopen Hin_atomic). exact step.
+  - exfalso.
+    eapply (GenericRegions.Atomicity.procedure_spawn_rejected_while_open
+      _ entry exit Hopen Hin_atomic). exact step.
 Qed.
 
 Lemma open_physical_leaf_takes_unique_step {Γ cost entry statement exit}
@@ -2435,15 +3279,23 @@ Proof.
     (Model.runtime_stack_id _ runtime) statement physical view Hruntime).
   destruct (cost Γ statement) eqn:Hstep_cost; simpl in Hcost.
   - contradiction.
-  - unfold GenericRegions.Atomicity.take_step in step.
+  - unfold GenericRegions.Atomicity.take_step,
+      GenericRegions.Atomicity.take_plain_step in step.
     rewrite Hin_atomic in step. simpl in step.
     rewrite bool_decide_false in step; last exact Hopen.
     destruct (GenericRegions.Atomicity.analysis_step_taken entry) eqn:Htaken;
       first discriminate.
     inversion step; subst exit. simpl. auto.
-  - unfold GenericRegions.Atomicity.take_step in step.
+  - unfold GenericRegions.Atomicity.take_step,
+      GenericRegions.Atomicity.take_plain_step in step.
     rewrite Hin_atomic in step. simpl in step.
     rewrite bool_decide_false in step; [discriminate|exact Hopen].
+  - exfalso.
+    eapply (GenericRegions.Atomicity.procedure_call_rejected_while_open
+      _ _ entry exit Hopen Hin_atomic). exact step.
+  - exfalso.
+    eapply (GenericRegions.Atomicity.procedure_spawn_rejected_while_open
+      _ entry exit Hopen Hin_atomic). exact step.
 Qed.
 
 Lemma open_after_step_leaf_is_erased {Γ cost entry statement exit}
@@ -2494,16 +3346,27 @@ Proof.
     unfold analysis_step_bit, runtime_option_count.
     rewrite Hentry Hexit. lia.
   - unfold runtime_option_count, analysis_step_bit.
-    unfold GenericRegions.Atomicity.take_step in step.
-    rewrite Hin_atomic in step. simpl in step.
-    rewrite bool_decide_false in step; last exact Hopen.
-    destruct (cost Γ statement).
-    + inversion step; subst exit.
+    destruct (cost Γ statement) eqn:Hstep_cost.
+    + unfold GenericRegions.Atomicity.take_step,
+        GenericRegions.Atomicity.take_plain_step in step.
+      rewrite Hin_atomic in step. simpl in step.
+      rewrite bool_decide_false in step; last exact Hopen.
+      inversion step; subst exit.
       destruct (GenericRegions.Atomicity.analysis_step_taken entry); simpl; lia.
-    + destruct (GenericRegions.Atomicity.analysis_step_taken entry) eqn:Hentry;
+    + unfold GenericRegions.Atomicity.take_step,
+        GenericRegions.Atomicity.take_plain_step in step.
+      rewrite Hin_atomic in step. simpl in step.
+      rewrite bool_decide_false in step; last exact Hopen.
+      destruct (GenericRegions.Atomicity.analysis_step_taken entry) eqn:Hentry;
         first discriminate.
       inversion step; subst exit. simpl. lia.
-    + discriminate.
+    + unfold GenericRegions.Atomicity.take_step in step.
+      rewrite (GenericRegions.Atomicity.take_plain_non_atomic_rejected entry
+        Hopen Hin_atomic) in step. discriminate.
+    + exfalso. eapply (GenericRegions.Atomicity.procedure_call_rejected_while_open
+        _ _ entry exit Hopen Hin_atomic). exact step.
+    + exfalso. eapply (GenericRegions.Atomicity.procedure_spawn_rejected_while_open
+        _ entry exit Hopen Hin_atomic). exact step.
 Qed.
 
 (** A syntactic sequence contributes at most the sum of the runtime chunks of
@@ -2527,15 +3390,8 @@ Lemma certificate_preserves_nonatomic {Γ cost fuel entry statement exit}
   GenericRegions.Atomicity.analysis_in_atomic exit = false.
 Proof.
   intro Hin_atomic. induction certificate; simpl in *.
-  - unfold GenericRegions.Atomicity.take_step in e0.
-    rewrite Hin_atomic in e0. simpl in e0.
-    destruct (bool_decide (GenericRegions.Atomicity.analysis_open state = ∅));
-      [inversion e0; subst exit; exact Hin_atomic|].
-    destruct (cost Γ statement);
-      try (inversion e0; subst exit; exact Hin_atomic).
-    destruct (GenericRegions.Atomicity.analysis_step_taken state);
-      try discriminate.
-    inversion e0; reflexivity.
+  - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
+      _ _ _ e0). exact Hin_atomic.
   - unfold GenericRegions.Atomicity.open_invariant in e0.
     destruct (bool_decide (invariant ∈
       GenericRegions.Atomicity.analysis_open state)); try discriminate.
@@ -2547,13 +3403,8 @@ Proof.
       GenericRegions.Atomicity.analysis_open state)); exact Hin_atomic.
   - apply IHcertificate2. apply IHcertificate1. exact Hin_atomic.
   - apply IHcertificate1. exact Hin_atomic.
-  - unfold GenericRegions.Atomicity.take_step in e0.
-    rewrite Hin_atomic in e0. simpl in e0.
-    destruct (bool_decide (GenericRegions.Atomicity.analysis_open state = ∅));
-      [inversion e0; subst outer; exact Hin_atomic|].
-    destruct (GenericRegions.Atomicity.analysis_step_taken state) eqn:Htaken.
-    + discriminate e0.
-    + inversion e0; reflexivity.
+  - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
+      _ _ _ e0). exact Hin_atomic.
 Qed.
 
 (** While the same nonempty invariant-access segment remains open, the
@@ -2678,7 +3529,8 @@ Proof.
     destruct statement; simpl in view; try discriminate.
     inversion view; subst.
     unfold certificate_runtime_statement. simpl.
-    unfold GenericRegions.Atomicity.take_step in step.
+    unfold GenericRegions.Atomicity.take_step,
+      GenericRegions.Atomicity.take_plain_step in step.
     rewrite Hin_atomic in step. simpl in step.
     rewrite bool_decide_false in step; last exact Hopen.
     destruct (GenericRegions.Atomicity.analysis_step_taken state) eqn:Htaken;
@@ -2687,6 +3539,92 @@ Proof.
     unfold analysis_step_bit, runtime_option_count.
     destruct (Model.runtime_stmt (Model.runtime_names Γ runtime)
       (Model.runtime_stack_id Γ runtime) body); rewrite Htaken; simpl; lia.
+Qed.
+
+(** Inside an open invariant interval, a trusted certificate's complete
+    erasure is either proof-only or one weakly atomic runtime statement.
+    The sequence case uses the analyzer step bit (rather than merely counting
+    the already-combined result): once the first child is physical, the
+    second child is forced to erase. *)
+Lemma open_certificate_runtime_atomic {Γ cost fuel entry statement exit}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (runtime : Model.stack_context Γ) :
+  Model.runtime_cost_model_sound cost ->
+  certificate_open_continuous certificate ->
+  GenericRegions.Atomicity.analysis_in_atomic entry = false ->
+  certificate_trusted_runtime_atomicity certificate runtime ->
+  forall physical,
+    certificate_runtime_statement certificate runtime = Some physical ->
+    @Atomic LegacyLang.simp_lang WeaklyAtomic physical.
+Proof.
+  intros Hcost Hcontinuous Hin_atomic Htrusted.
+  induction certificate as
+      [Γ fuel state statement exit view step
+      | Γ fuel state statement invariant exit view step
+      | Γ fuel state statement invariant view
+      | Γ fuel state statement first middle second exit view first_certificate
+        IHfirst second_certificate IHsecond
+      | Γ fuel state statement then_branch else_branch then_exit else_exit
+        view then_certificate IHthen else_certificate IHelse
+        open_equal atomic_equal
+      | Γ fuel state statement body outer inner view step body_certificate
+        IHbody open_equal]; simpl in Hcontinuous, Htrusted |- *.
+  - destruct Hcontinuous as [Hopen _].
+    intros physical Hphysical. eapply open_leaf_runtime_atomic; eauto.
+  - intros physical Hphysical. destruct statement;
+      simpl in view, Hphysical; try discriminate; inversion view.
+  - intros physical Hphysical. destruct statement;
+      simpl in view, Hphysical; try discriminate; inversion view.
+  - destruct Hcontinuous as [_ [_ [Hfirst_cont Hsecond_cont]]].
+    destruct Htrusted as [Hfirst_trusted Hsecond_trusted].
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst.
+    have Hmiddle_atomic :
+        GenericRegions.Atomicity.analysis_in_atomic middle = false.
+    { eapply certificate_preserves_nonatomic; eauto. }
+    specialize (IHfirst runtime Hfirst_cont Hin_atomic Hfirst_trusted).
+    specialize (IHsecond runtime Hsecond_cont Hmiddle_atomic
+      Hsecond_trusted).
+    unfold certificate_runtime_statement. simpl.
+    change (forall physical,
+      Model.combine_runtime_statements
+        (certificate_runtime_statement first_certificate runtime)
+        (certificate_runtime_statement second_certificate runtime) =
+          Some physical ->
+      @Atomic LegacyLang.simp_lang WeaklyAtomic physical).
+    remember (certificate_runtime_statement first_certificate runtime) as a.
+    remember (certificate_runtime_statement second_certificate runtime) as b.
+    destruct a as [a|], b as [b|]; simpl; intros physical Hphysical.
+    + exfalso.
+      have Hfirst_budget := certificate_runtime_step_budget first_certificate
+        runtime Hcost Hfirst_cont Hin_atomic.
+      have Hsecond_budget := certificate_runtime_step_budget second_certificate
+        runtime Hcost Hsecond_cont Hmiddle_atomic.
+      rewrite <- Heqa in Hfirst_budget. rewrite <- Heqb in Hsecond_budget.
+      unfold runtime_option_count, analysis_step_bit in *.
+      destruct (GenericRegions.Atomicity.analysis_step_taken state),
+        (GenericRegions.Atomicity.analysis_step_taken middle),
+        (GenericRegions.Atomicity.analysis_step_taken exit); simpl in *; lia.
+    + apply IHfirst. exact Hphysical.
+    + apply IHsecond. exact Hphysical.
+    + discriminate.
+  - destruct Hcontinuous as [_ [_ [Hthen_cont Helse_cont]]].
+    destruct Htrusted as [Hthen_trusted Helse_trusted].
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst.
+    intros physical Hphysical.
+    unfold certificate_runtime_statement in Hphysical. simpl in Hphysical.
+    eapply (runtime_conditional_statement_atomic
+      (Model.runtime_names Γ runtime) (Model.runtime_stack_id Γ runtime)
+      node condition then_branch else_branch); [| |exact Hphysical].
+    + intros arm Harm. eapply IHthen; eauto.
+    + intros arm Harm. eapply IHelse; eauto.
+  - intros physical Hphysical.
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst.
+    unfold certificate_runtime_statement in Hphysical. simpl in Hphysical.
+    exact (Htrusted physical Hphysical).
 Qed.
 
 Fixpoint operational_suffix_open_continuous {cost Γ entry exit}
@@ -2820,7 +3758,8 @@ Lemma open_atomic_step_sets_step_bit entry outer :
   analysis_step_bit entry = 0 /\ analysis_step_bit outer = 1.
 Proof.
   intros Hstep Hopen Hin_atomic.
-  unfold GenericRegions.Atomicity.take_step in Hstep.
+  unfold GenericRegions.Atomicity.take_step,
+    GenericRegions.Atomicity.take_plain_step in Hstep.
   rewrite Hin_atomic in Hstep. simpl in Hstep.
   rewrite bool_decide_false in Hstep; last exact Hopen.
   destruct (GenericRegions.Atomicity.analysis_step_taken entry) eqn:Htaken;
@@ -2856,6 +3795,44 @@ Proof.
     derivation runtime formals binders atoms ambient Hactive
     with "[$Hglobal $Hpre]")
     as "Hwp".
+  iCombine "Hglobal Haccess" as "Hframe".
+  iCombine "Hwp Hframe" as "Hcombined".
+  iPoseProof (Execution.Primitives.Interface.operation_frame
+    with "Hcombined") as "Hwp".
+  iApply leaf_operation_runtime_refinement_total; [exact view|exact step|].
+  iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+  iIntros "[Hpost [#Hglobal Haccess]]". iFrame.
+  Unshelve. all: eauto.
+Qed.
+
+(** Resource counterpart of [aligned_ordinary_leaf_runtime_valid].  This is
+    the concrete one-chunk bridge used by resource trace reification. *)
+Lemma resource_aligned_ordinary_leaf_runtime_valid
+    {Γ F Δ cost entry statement exit}
+    (view : RegionSyntax.view statement = TypedAnalysisView.ViewLeaf)
+    (step : GenericRegions.Atomicity.take_step (cost Γ statement) entry =
+      inr exit)
+    (pre post : assertion Γ F Δ)
+    (derivation : Certified.Rules.RavenResourceTriple pre statement post)
+    (Hprocedure_cost : Certified.procedure_cost_model_sound cost)
+    stack runtime formals binders atoms ambient
+    (Hactive : Model.runtime_mask
+      (GenericRegions.Atomicity.analysis_mask exit) ⊆
+      Model.active_runtime_mask ambient entry) :
+  (global_world_context atoms ∗
+   VSemantics.S.interp_assertion (Leaf.predicates atoms)
+     runtime formals binders atoms pre ∗
+   World.access_stack_interp atoms ambient stack) ⊢
+  translated_runtime_wp runtime ambient entry exit statement
+    (global_world_context atoms ∗
+     VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms post ∗
+     World.access_stack_interp atoms ambient stack).
+Proof.
+  iIntros "[#Hglobal [Hpre Haccess]]".
+  iPoseProof (ordinary_resource_leaf_rule_valid cost pre post statement entry
+    exit view step Hprocedure_cost derivation runtime formals binders atoms
+    ambient Hactive with "[$Hglobal $Hpre]") as "Hwp".
   iCombine "Hglobal Haccess" as "Hframe".
   iCombine "Hwp Hframe" as "Hcombined".
   iPoseProof (Execution.Primitives.Interface.operation_frame
@@ -3099,8 +4076,7 @@ Proof.
       (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
   { etrans; last exact Henvelope. apply Model.runtime_mask_mono.
     apply GenericRegions.Atomicity.certificate_exit_subset_footprint. }
-  have Hsets := GenericRegions.Atomicity.take_step_preserves_sets _ _ _ step.
-  destruct Hsets as [_ Hopen].
+  have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
   have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
   { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf|].
     exact (GenericRegions.Atomicity.CertLeaf cost Γ fuel entry statement exit
@@ -3117,6 +4093,56 @@ Proof.
   iPoseProof (aligned_ordinary_leaf_runtime_valid view step pre post derivation
     stack runtime formals binders atoms ambient Hactive with "Hresources") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp"). exact Htail.
+Qed.
+
+(** Resource-proof entry point for a single concrete ordinary leaf.  The
+    analyzer step supplies the mask transition, while [Hprocedure_cost]
+    supplies the effect soundness needed by resource procedure leaves. *)
+Lemma resource_aligned_runtime_ordinary_leaf_valid
+    {Γ F Δ fuel cost entry statement exit}
+    (view : RegionSyntax.view statement = TypedAnalysisView.ViewLeaf)
+    (step : GenericRegions.Atomicity.take_step (cost Γ statement) entry =
+      inr exit)
+    stack (pre post : assertion Γ F Δ)
+    (derivation : Certified.Rules.RavenResourceTriple pre statement post)
+    (Hwf : GenericRegions.Atomicity.state_wf entry)
+    (Hprocedure_cost : Certified.procedure_cost_model_sound cost) :
+  aligned_runtime_certificate_valid (stack_in := stack) (stack_out := stack)
+    (pre := pre) (post := post)
+    (GenericRegions.Atomicity.CertLeaf cost Γ fuel entry statement exit
+      view step).
+Proof.
+  intros runtime formals binders atoms ambient Henvelope tail Htail.
+  have Hexit_envelope : Model.runtime_mask
+      (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
+  { etrans; last exact Henvelope. apply Model.runtime_mask_mono.
+    apply GenericRegions.Atomicity.certificate_exit_subset_footprint. }
+  have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
+  have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
+  { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf|].
+    exact (GenericRegions.Atomicity.CertLeaf cost Γ fuel entry statement exit
+      view step). }
+  have Hactive_exit := Model.runtime_mask_subset_active ambient exit Hexit_wf
+    Hexit_envelope.
+  have Hactive : Model.runtime_mask
+      (GenericRegions.Atomicity.analysis_mask exit) ⊆
+      Model.active_runtime_mask ambient entry.
+  { rewrite (Model.active_runtime_mask_same_open ambient entry exit
+      (eq_sym Hopen)).
+    exact Hactive_exit. }
+  simpl. iIntros "[#Hworld [Hpre Hstack]]".
+  iPoseProof (ordinary_resource_leaf_rule_valid cost pre post statement entry
+    exit view step Hprocedure_cost derivation runtime formals binders atoms
+    ambient Hactive with "[$Hworld $Hpre]") as "Hwp".
+  iCombine "Hworld Hstack" as "Hframe".
+  iCombine "Hwp Hframe" as "Hcombined".
+  iPoseProof (Execution.Primitives.Interface.operation_frame
+    with "Hcombined") as "Hwp".
+  iApply leaf_operation_runtime_refinement_total; [exact view|exact step|].
+  iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+  iIntros "[Hpost [#Hworld Hstack]]".
+  iApply Htail. iFrame.
+  Unshelve. all: eauto.
 Qed.
 
 Lemma aligned_runtime_unfold_valid {Γ F Δ fuel cost entry node invariant
@@ -3335,6 +4361,19 @@ Definition semantically_valid {Γ F Δ fuel}
   @certificate_semantically_valid Γ F Δ fuel cost stack_in stack_out pre post
     statement entry exit
     (@Certified.certified_analysis cost Γ F Δ fuel stack_in stack_out
+      pre statement entry exit post certified).
+
+Definition resource_semantically_valid {Γ F Δ fuel}
+    {cost : GenericRegions.Atomicity.cost_model}
+    {stack_in stack_out : list GenericRegions.Atomicity.access_marker}
+    {pre post : Translation.Assertions.assertion Γ F Δ}
+    {statement : stmt Γ}
+    {entry exit : GenericRegions.Atomicity.analysis_state}
+    (certified : @Certified.CertifiedRavenResourceTriple cost Γ F Δ fuel
+      stack_in stack_out pre statement entry exit post) : Prop :=
+  @certificate_semantically_valid Γ F Δ fuel cost stack_in stack_out pre post
+    statement entry exit
+    (@Certified.certified_resource_analysis cost Γ F Δ fuel stack_in stack_out
       pre statement entry exit post certified).
 
 Lemma preserve_access_stack_valid {Γ F Δ fuel cost entry statement exit}
@@ -3658,12 +4697,22 @@ Proof.
       apply GenericRegions.Atomicity.certificate_entry_subset_footprint. }
     have Hactive := Model.runtime_mask_subset_active ambient entry Hwf
       Hentry_envelope.
-    have Hmask := proj1
-      (GenericRegions.Atomicity.take_step_preserves_sets _ _ _ step).
+    have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
+    have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
+    { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf|].
+      exact (GenericRegions.Atomicity.CertLeaf cost Γ fuel entry statement exit
+        view step). }
+    have Hexit_envelope : Model.runtime_mask
+        (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
+    { etrans; last exact Henvelope. apply Model.runtime_mask_mono.
+      apply GenericRegions.Atomicity.certificate_exit_subset_footprint. }
+    have Hactive_exit' := Model.runtime_mask_subset_active ambient exit
+      Hexit_wf Hexit_envelope.
     have Hactive_exit : Model.runtime_mask
         (GenericRegions.Atomicity.analysis_mask exit) ⊆
         Model.active_runtime_mask ambient entry.
-    { rewrite Hmask. exact Hactive. }
+    { rewrite (Model.active_runtime_mask_same_open ambient entry exit
+        (eq_sym Hopen)). exact Hactive_exit'. }
     iIntros "[#Hglobal Hpre]".
     iApply ordinary_leaf_rule_valid;
       [exact view|exact derivation|exact Hactive_exit|].
@@ -3727,11 +4776,124 @@ Proof.
       first exact trusted.
     eapply IHHaligned; eauto.
     unfold GenericRegions.Atomicity.state_wf in *; simpl.
-    destruct (GenericRegions.Atomicity.take_step_preserves_sets
-      GenericRegions.Atomicity.AtomicStep state outer step) as [Hmask Hopen].
+    destruct (GenericRegions.Atomicity.atomic_step_preserves_sets
+      state outer step) as [Hmask Hopen].
     rewrite Hmask Hopen. exact Hwf.
   - eapply assertion_frame_valid. eapply IHHaligned; eauto.
   - eapply consequence_valid; [eapply IHHaligned; eauto|exact pre_entails|exact post_entails].
+  - eapply exists_elim_valid. eapply IHHaligned; eauto.
+  - eapply exists_preserve_valid. eapply IHHaligned; eauto.
+Qed.
+
+Theorem resource_aligned_certificate_valid {cost Γ F Δ fuel entry statement exit
+    stack_in stack_out pre post}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (derivation : @Certified.Rules.RavenResourceTriple Γ F Δ pre statement post) :
+  GenericRegions.Atomicity.state_wf entry ->
+  GenericRegions.Atomicity.lifo_certificate certificate stack_in stack_out ->
+  Certified.procedure_cost_model_sound cost ->
+  Certified.resource_certificate_hoare_aligned cost certificate derivation ->
+  certificate_semantically_valid (stack_in := stack_in)
+    (stack_out := stack_out) (pre := pre) (post := post) certificate.
+Proof.
+  intros Hwf Hlifo Hcost Haligned.
+  revert stack_in stack_out Hwf Hlifo.
+  induction Haligned; intros stack_in stack_out Hwf Hlifo.
+  - simpl in Hlifo. subst stack_out.
+    eapply leaf_statement_valid. intros runtime formals binders atoms ambient.
+    intros Henvelope.
+    have Hentry_envelope : Model.runtime_mask
+        (GenericRegions.Atomicity.analysis_mask entry) ⊆ ambient.
+    { etrans; last exact Henvelope. apply Model.runtime_mask_mono.
+      apply GenericRegions.Atomicity.certificate_entry_subset_footprint. }
+    have Hactive := Model.runtime_mask_subset_active ambient entry Hwf
+      Hentry_envelope.
+    have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
+    have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
+    { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf|].
+      exact (GenericRegions.Atomicity.CertLeaf cost Γ fuel entry statement exit
+        view step). }
+    have Hexit_envelope : Model.runtime_mask
+        (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
+    { etrans; last exact Henvelope. apply Model.runtime_mask_mono.
+      apply GenericRegions.Atomicity.certificate_exit_subset_footprint. }
+    have Hactive_exit' := Model.runtime_mask_subset_active ambient exit
+      Hexit_wf Hexit_envelope.
+    have Hactive_exit : Model.runtime_mask
+        (GenericRegions.Atomicity.analysis_mask exit) ⊆
+        Model.active_runtime_mask ambient entry.
+    { rewrite (Model.active_runtime_mask_same_open ambient entry exit
+        (eq_sym Hopen)). exact Hactive_exit'. }
+    iIntros "[#Hglobal Hpre]".
+    iApply ordinary_resource_leaf_rule_valid;
+      [exact view|exact step|exact Hcost|exact derivation|exact Hactive_exit|].
+    iFrame "Hglobal Hpre".
+  - simpl in Hlifo. subst stack_out.
+    unfold certificate_semantically_valid.
+    intros runtime formals binders atoms ambient Henvelope.
+    have Hfacts := step.
+    apply GenericRegions.Atomicity.open_invariant_success in Hfacts as
+      (Hfresh & Havailable & _ & _).
+    have Hfootprint : invariant ∈
+        GenericRegions.Atomicity.certificate_footprint
+          (GenericRegions.Atomicity.CertUnfold cost Γ fuel entry
+            (TUnfold node invariant arguments) invariant exit view step).
+    { apply GenericRegions.Atomicity.certificate_entry_subset_footprint.
+      exact Havailable. }
+    have Hnamespace := invariant_namespace_active_from_footprint
+      (GenericRegions.Atomicity.CertUnfold cost Γ fuel entry
+        (TUnfold node invariant arguments) invariant exit view step)
+      ambient invariant Hfootprint Hfresh Henvelope.
+    eapply invariant_unfold_node_valid; eauto.
+  - simpl in Hlifo. destruct Hlifo as
+      [(outer_open & -> & Hopen & Houter & Hopen_eq)|[-> Hfresh]].
+    + unfold certificate_semantically_valid.
+      intros runtime formals binders atoms ambient Henvelope.
+      eapply invariant_fold_node_valid; eauto.
+    + unfold certificate_semantically_valid.
+      intros runtime formals binders atoms ambient Henvelope.
+      have Hexit_member : invariant ∈
+          GenericRegions.Atomicity.analysis_mask
+            (GenericRegions.Atomicity.fold_invariant invariant entry).
+      { rewrite Certified.fold_analysis_mask. set_solver. }
+      have Hfootprint : invariant ∈
+          GenericRegions.Atomicity.certificate_footprint
+            (GenericRegions.Atomicity.CertFold cost Γ fuel entry
+              (TFold node invariant arguments) invariant view).
+      { apply GenericRegions.Atomicity.certificate_exit_subset_footprint.
+        exact Hexit_member. }
+      have Hnamespace := invariant_namespace_active_from_footprint
+        (GenericRegions.Atomicity.CertFold cost Γ fuel entry
+          (TFold node invariant arguments) invariant view)
+        ambient invariant Hfootprint Hfresh Henvelope.
+      eapply invariant_fresh_fold_node_valid; eauto.
+  - simpl in Hlifo. destruct Hlifo as
+      (stack_middle & Hfirst_lifo & Hsecond_lifo).
+    eapply sequence_valid.
+    + eapply IHHaligned1; eauto.
+    + eapply IHHaligned2; eauto using
+        GenericRegions.Atomicity.certificate_preserves_wf.
+  - simpl in Hlifo. destruct Hlifo as [Hthen_lifo Helse_lifo].
+    eapply (conditional_valid (node := node) (state := state)
+      (store := store) (frame := frame) (condition := condition)
+      (then_branch := then_branch) (else_branch := else_branch)
+      (then_exit := then_exit) (else_exit := else_exit)
+      then_certificate else_certificate open_equal atomic_equal).
+    + eapply IHHaligned1; eauto.
+    + eapply IHHaligned2; eauto.
+  - simpl in Hlifo. destruct Hlifo as [Hbody_lifo ->].
+    eapply (atomic_valid (state := state) (node := node) (body := body)
+      (outer := outer) (inner := inner) step body_certificate open_equal);
+      first exact trusted.
+    eapply IHHaligned; eauto.
+    unfold GenericRegions.Atomicity.state_wf in *; simpl.
+    destruct (GenericRegions.Atomicity.atomic_step_preserves_sets
+      state outer step) as [Hmask Hopen].
+    rewrite Hmask Hopen. exact Hwf.
+  - eapply assertion_frame_valid. eapply IHHaligned; eauto.
+  - eapply consequence_valid;
+      [eapply IHHaligned; eauto|exact pre_entails|exact post_entails].
   - eapply exists_elim_valid. eapply IHHaligned; eauto.
   - eapply exists_preserve_valid. eapply IHHaligned; eauto.
 Qed.
@@ -3744,6 +4906,18 @@ Theorem certified_region_valid {cost Γ F Δ fuel entry statement exit
 Proof.
   intros Hwf. destruct certified as [certificate Hlifo derivation Haligned].
   eapply aligned_certificate_valid; eauto.
+Qed.
+
+Theorem certified_resource_region_valid
+    {cost Γ F Δ fuel entry statement exit stack_in stack_out pre post}
+    (certified : @Certified.CertifiedRavenResourceTriple cost Γ F Δ fuel
+      stack_in stack_out pre statement entry exit post) :
+  GenericRegions.Atomicity.state_wf entry ->
+  resource_semantically_valid certified.
+Proof.
+  intros Hwf.
+  destruct certified as [certificate Hlifo Hcost derivation Haligned].
+  eapply resource_aligned_certificate_valid; eauto.
 Qed.
 
 End CertifiedRegionValidity.

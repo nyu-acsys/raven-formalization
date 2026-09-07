@@ -176,21 +176,21 @@ Module Type STATEMENT_WP.
   Parameter conditional_wp : forall Γ F Δ runtime
       (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
       node (store : symbolic_store Γ F Δ) (frame : iProp) condition
-      then_branch else_branch current_mask (post : iProp),
+      then_branch else_branch mask_pre mask_post (post : iProp),
     (Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
        frame ∗
        ⌜interp_expr formals binders atoms (Hoare.symbolize_expr store condition) =
          Some (VBool true)⌝ ⊢
-       statement_wp Γ runtime then_branch current_mask current_mask post) ->
+       statement_wp Γ runtime then_branch mask_pre mask_post post) ->
     (Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
        frame ∗
        ⌜interp_expr formals binders atoms (Hoare.symbolize_expr store condition) <>
          Some (VBool true)⌝ ⊢
-       statement_wp Γ runtime else_branch current_mask current_mask post) ->
+       statement_wp Γ runtime else_branch mask_pre mask_post post) ->
     Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
       frame ⊢
     statement_wp Γ runtime (TIf node condition then_branch else_branch)
-      current_mask current_mask post.
+      mask_pre mask_post post.
 End STATEMENT_WP.
 
 Module StructuralValidity (Contracts : Hoare.CONTRACT_ENV)
@@ -245,18 +245,18 @@ Qed.
 
 Lemma conditional_rule_valid {Γ F Δ} node (store : symbolic_store Γ F Δ)
     (frame : assertion Γ F Δ) condition (then_branch else_branch : stmt Γ)
-    (post : assertion Γ F Δ) mask :
+    (post : assertion Γ F Δ) mask_pre mask_post :
   semantically_valid
     (AAnd (AStack store)
       (AAnd frame (AExpr (Hoare.symbolize_expr store condition))))
-    then_branch mask mask post ->
+    then_branch mask_pre mask_post post ->
   semantically_valid
     (AAnd (AStack store)
       (AAnd frame (AExpr (EUnOp UNot
         (Hoare.symbolize_expr store condition)))))
-    else_branch mask mask post ->
+    else_branch mask_pre mask_post post ->
   semantically_valid (AAnd (AStack store) frame)
-    (TIf node condition then_branch else_branch) mask mask post.
+    (TIf node condition then_branch else_branch) mask_pre mask_post post.
 Proof.
   intros Hthen Helse runtime formals binders atoms.
   apply Execution.conditional_wp.
@@ -395,10 +395,9 @@ Fixpoint statement_wp {Γ} (runtime : Model.stack_context Γ)
         statement_wp runtime first mask_pre middle
           (statement_wp runtime second middle mask_post post))%I
   | TIf _ condition then_branch else_branch =>
-      (⌜mask_pre = mask_post⌝ ∗
-       Primitives.branch_wp Γ runtime condition mask_pre
+      Primitives.branch_wp Γ runtime condition mask_pre
          (statement_wp runtime then_branch mask_pre mask_post post)
-         (statement_wp runtime else_branch mask_pre mask_post post))%I
+         (statement_wp runtime else_branch mask_pre mask_post post)
   | TAtomic _ body =>
       Primitives.atomic_wp Γ runtime body mask_pre mask_post
         (statement_wp runtime body mask_pre mask_post post)
@@ -413,7 +412,7 @@ Proof.
   revert mask_pre mask_post P Q.
   induction statement; intros mask_pre mask_post P Q HPQ; simpl;
     try (apply Primitives.leaf_mono; exact HPQ).
-  - iIntros "[%Hm Hbranch]". iSplit; first done.
+  - iIntros "Hbranch".
     pose proof (IHstatement1 mask_pre mask_post P Q HPQ) as Hthen.
     pose proof (IHstatement2 mask_pre mask_post P Q HPQ) as Helse.
     iApply (@Primitives.branch_mono Γ runtime condition mask_pre
@@ -436,7 +435,7 @@ Proof.
   revert mask_pre mask_post P R.
   induction statement; intros mask_pre mask_post P R;
     simpl; try apply Primitives.leaf_frame.
-  - iIntros "[[%Hm Hbranch] R]". iSplit; first done.
+  - iIntros "[Hbranch R]".
     iPoseProof (@Primitives.branch_frame Γ runtime condition mask_pre
       (statement_wp runtime statement1 mask_pre mask_post P)
       (statement_wp runtime statement2 mask_pre mask_post P) R
@@ -473,20 +472,20 @@ Module Interface <: STATEMENT_WP.
   Lemma conditional_wp (Γ F Δ : context) (runtime : Model.stack_context Γ)
       (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
       node (store : symbolic_store Γ F Δ) (frame : iProp) condition
-      (then_branch else_branch : stmt Γ) current_mask (post : iProp) :
+      (then_branch else_branch : stmt Γ) mask_pre mask_post (post : iProp) :
     (Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
        frame ∗ ⌜interp_expr formals binders atoms
          (Hoare.symbolize_expr store condition) = Some (VBool true)⌝ ⊢
-       statement_wp Γ runtime then_branch current_mask current_mask post) ->
+       statement_wp Γ runtime then_branch mask_pre mask_post post) ->
     (Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
        frame ∗ ⌜interp_expr formals binders atoms
          (Hoare.symbolize_expr store condition) <> Some (VBool true)⌝ ⊢
-       statement_wp Γ runtime else_branch current_mask current_mask post) ->
+       statement_wp Γ runtime else_branch mask_pre mask_post post) ->
     Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
       frame ⊢ statement_wp Γ runtime
-        (TIf node condition then_branch else_branch) current_mask current_mask post.
+        (TIf node condition then_branch else_branch) mask_pre mask_post post.
   Proof.
-    intros Hthen Helse. simpl. iIntros "H". iSplit; first done.
+    intros Hthen Helse. simpl. iIntros "H".
     iApply (Primitives.branch_select with "H"); assumption.
   Qed.
 End Interface.

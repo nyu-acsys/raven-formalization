@@ -1,4 +1,4 @@
-From Coq Require Import List String ZArith Program.Equality Lia.
+From Coq Require Import List String ZArith Program.Equality Lia Logic.ProofIrrelevance.
 From stdpp Require Import countable gmap namespaces sets.
 
 From iris.algebra Require Import auth gset.
@@ -94,6 +94,60 @@ Module CertifiedRegions (Contracts : Hoare.CONTRACT_ENV).
 Module Rules := Hoare.LogicRules Contracts.
 Module Atomicity := GenericRegions.Atomicity.
 
+(** The analyzer-selected effect of procedure leaves agrees with the contract
+    environment used by the Hoare and runtime layers. *)
+Definition procedure_cost_model_sound (cost : Atomicity.cost_model) : Prop :=
+  forall Γ (statement : stmt Γ),
+  match statement with
+  | TCall _ procedure _ _ =>
+      cost Γ statement = Atomicity.ProcedureCallStep
+        (Contracts.required_mask procedure)
+        (Contracts.granted_mask procedure)
+  | TSpawn _ procedure _ =>
+      cost Γ statement =
+        Atomicity.ProcedureSpawnStep (Contracts.required_mask procedure)
+  | _ =>
+      match cost Γ statement with
+      | Atomicity.ProcedureCallStep _ _
+      | Atomicity.ProcedureSpawnStep _ => False
+      | _ => True
+      end
+  end.
+
+Lemma certified_call_step_effect cost
+    (Hcost : procedure_cost_model_sound cost)
+    Γ args return_type node procedure (arguments : pexpr_list Γ args)
+    (target : call_target Γ return_type) entry exit :
+  Atomicity.take_step
+      (cost Γ (@TCall Γ args return_type node procedure arguments target))
+      entry = inr exit ->
+  Contracts.required_mask procedure ⊆ Atomicity.analysis_mask entry /\
+  Contracts.granted_mask procedure ## Atomicity.analysis_open entry /\
+  Atomicity.analysis_mask exit = Atomicity.analysis_mask entry ∪
+    Contracts.granted_mask procedure /\
+  Atomicity.analysis_open exit = Atomicity.analysis_open entry.
+Proof.
+  intros Hstep. specialize (Hcost Γ
+    (@TCall Γ args return_type node procedure arguments target)).
+  simpl in Hcost. rewrite Hcost in Hstep.
+  exact (Atomicity.procedure_call_step_success _ _ _ _ Hstep).
+Qed.
+
+Lemma certified_spawn_step_effect cost
+    (Hcost : procedure_cost_model_sound cost)
+    Γ args node procedure (arguments : pexpr_list Γ args) entry exit :
+  Atomicity.take_step
+      (cost Γ (@TSpawn Γ args node procedure arguments)) entry = inr exit ->
+  Contracts.required_mask procedure ⊆ Atomicity.analysis_mask entry /\
+  Atomicity.analysis_mask exit = Atomicity.analysis_mask entry /\
+  Atomicity.analysis_open exit = Atomicity.analysis_open entry.
+Proof.
+  intros Hstep. specialize (Hcost Γ
+    (@TSpawn Γ args node procedure arguments)).
+  simpl in Hcost. rewrite Hcost in Hstep.
+  exact (Atomicity.procedure_spawn_step_success _ _ _ Hstep).
+Qed.
+
 (** A small dependent transport API keeps the alignment witness below about
     proof structure rather than about the incidental normal form chosen for
     finite-set unions. *)
@@ -132,21 +186,21 @@ Proof.
     simpl; set_solver.
 Qed.
 
-Lemma step_analysis_mask (cost : Atomicity.step_cost)
-    (entry exit : Atomicity.analysis_state) :
-  Atomicity.take_step cost entry = inr exit ->
+Lemma step_analysis_mask (entry exit : Atomicity.analysis_state) :
+  Atomicity.take_step Atomicity.AtomicStep entry = inr exit ->
   Atomicity.analysis_mask exit = Atomicity.analysis_mask entry.
 Proof.
-  intro Hstep. apply Atomicity.take_step_preserves_sets in Hstep as
+  intro Hstep. apply Atomicity.atomic_step_preserves_sets in Hstep as
     [Hmask _]. exact Hmask.
 Qed.
 
 Lemma conditional_analysis_mask (state then_exit else_exit : Atomicity.analysis_state)
+    branch_mask
     (then_mask : Atomicity.analysis_mask then_exit =
-      Atomicity.analysis_mask state)
+      branch_mask)
     (else_mask : Atomicity.analysis_mask else_exit =
-      Atomicity.analysis_mask state) :
-  Atomicity.analysis_mask state = Atomicity.analysis_mask
+      branch_mask) :
+  branch_mask = Atomicity.analysis_mask
     (Atomicity.AnalysisState
       (Atomicity.analysis_mask then_exit ∩ Atomicity.analysis_mask else_exit)
       (Atomicity.analysis_open then_exit)
@@ -223,24 +277,24 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
         (Atomicity.analysis_mask exit) first_derivation second_derivation)
 | AlignedConditional : forall Γ F Δ fuel state node store frame condition
     then_branch else_branch then_exit else_exit post view then_certificate
-    else_certificate open_equal atomic_equal
+    else_certificate open_equal atomic_equal branch_mask
     (then_derivation : @Rules.RavenHoareTriple Γ F Δ
       (Translation.Assertions.AAnd (Translation.Assertions.AStack store)
         (Translation.Assertions.AAnd frame
           (Translation.Assertions.AExpr (Hoare.symbolize_expr store condition))))
-      then_branch (Atomicity.analysis_mask state) (Atomicity.analysis_mask state)
+      then_branch (Atomicity.analysis_mask state) branch_mask
       post)
     (else_derivation : @Rules.RavenHoareTriple Γ F Δ
       (Translation.Assertions.AAnd (Translation.Assertions.AStack store)
         (Translation.Assertions.AAnd frame
           (Translation.Assertions.AExpr (EUnOp UNot
             (Hoare.symbolize_expr store condition)))))
-      else_branch (Atomicity.analysis_mask state) (Atomicity.analysis_mask state)
+      else_branch (Atomicity.analysis_mask state) branch_mask
       post)
     (then_mask : Atomicity.analysis_mask then_exit =
-      Atomicity.analysis_mask state)
+      branch_mask)
     (else_mask : Atomicity.analysis_mask else_exit =
-      Atomicity.analysis_mask state),
+      branch_mask),
     certificate_hoare_aligned cost then_certificate
       (hoare_mask_transport then_derivation eq_refl (eq_sym then_mask)) ->
     certificate_hoare_aligned cost else_certificate
@@ -252,9 +306,11 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
         open_equal atomic_equal)
       (hoare_mask_transport
         (Rules.ConditionalRule node store frame condition then_branch else_branch
-          post (Atomicity.analysis_mask state) then_derivation else_derivation)
+          post (Atomicity.analysis_mask state) branch_mask then_derivation
+          else_derivation)
         eq_refl
-        (conditional_analysis_mask state then_exit else_exit then_mask else_mask))
+        (conditional_analysis_mask state then_exit else_exit branch_mask
+          then_mask else_mask))
 | AlignedAtomic : forall Γ F Δ fuel state node body outer inner pre post
     (view : RegionSyntax.view (TAtomic node body) =
       TypedAnalysisView.ViewAtomic body)
@@ -269,7 +325,7 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
       (Atomicity.analysis_mask state) (Atomicity.analysis_mask inner) post),
     certificate_hoare_aligned cost body_certificate
       (hoare_mask_transport body_derivation
-        (eq_sym (step_analysis_mask Atomicity.AtomicStep state outer step))
+        (eq_sym (step_analysis_mask state outer step))
         eq_refl) ->
     certificate_hoare_aligned cost
       (Atomicity.CertAtomic cost Γ fuel state (TAtomic node body) body outer inner
@@ -326,6 +382,196 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
         (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
         derivation).
 
+(** Resource-only counterpart to [certificate_hoare_aligned].  The analysis
+    certificate owns all mask bookkeeping; this pairing records just the
+    matching resource proof structure. *)
+Inductive resource_certificate_hoare_aligned (cost : Atomicity.cost_model) :
+    forall {Γ F Δ fuel} {entry : Atomicity.analysis_state}
+      {statement : stmt Γ} {exit : Atomicity.analysis_state}
+      {pre post : Translation.Assertions.assertion Γ F Δ},
+      Atomicity.analysis_certificate cost Γ fuel entry statement exit ->
+      @Rules.RavenResourceTriple Γ F Δ pre statement post ->
+      Type :=
+| ResourceAlignedOrdinaryLeaf : forall Γ F Δ fuel entry statement exit pre post
+    view step
+    (derivation : @Rules.RavenResourceTriple Γ F Δ pre statement post),
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertLeaf cost Γ fuel entry statement exit view step)
+      derivation
+| ResourceAlignedUnfold : forall Γ F Δ fuel entry node invariant arguments exit
+    store body
+    (view : RegionSyntax.view (TUnfold node invariant arguments) =
+      TypedAnalysisView.ViewUnfold invariant)
+    (step : Atomicity.open_invariant invariant entry = inr exit)
+    (instantiated : Contracts.instantiated_invariant Γ F Δ
+      (Logic.invariant_args invariant) invariant
+      (Hoare.symbolize_expr_list store arguments) body),
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertUnfold cost Γ fuel entry
+        (TUnfold node invariant arguments) invariant exit view step)
+      (Rules.ResourceUnfoldInvariantRule node invariant arguments store body
+        instantiated)
+| ResourceAlignedFold : forall Γ F Δ fuel entry node invariant arguments
+    store body
+    (view : RegionSyntax.view (TFold node invariant arguments) =
+      TypedAnalysisView.ViewFold invariant)
+    (instantiated : Contracts.instantiated_invariant Γ F Δ
+      (Logic.invariant_args invariant) invariant
+      (Hoare.symbolize_expr_list store arguments) body),
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertFold cost Γ fuel entry
+        (TFold node invariant arguments) invariant view)
+      (Rules.ResourceFoldInvariantRule node invariant arguments store body
+        instantiated)
+| ResourceAlignedSequence : forall Γ F Δ fuel state node first middle second exit
+    pre middle_assertion post view first_certificate second_certificate
+    (first_derivation : @Rules.RavenResourceTriple Γ F Δ pre first
+      middle_assertion)
+    (second_derivation : @Rules.RavenResourceTriple Γ F Δ middle_assertion second
+      post),
+    resource_certificate_hoare_aligned cost first_certificate first_derivation ->
+    resource_certificate_hoare_aligned cost second_certificate second_derivation ->
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertSequence cost Γ fuel state (TSeq node first second)
+        first middle second exit view first_certificate second_certificate)
+      (Rules.ResourceSequenceRule node pre middle_assertion post first second
+        first_derivation second_derivation)
+| ResourceAlignedConditional : forall Γ F Δ fuel state node store frame condition
+    then_branch else_branch then_exit else_exit post view then_certificate
+    else_certificate open_equal atomic_equal
+    (then_derivation : @Rules.RavenResourceTriple Γ F Δ
+      (Translation.Assertions.AAnd (Translation.Assertions.AStack store)
+        (Translation.Assertions.AAnd frame
+          (Translation.Assertions.AExpr (Hoare.symbolize_expr store condition))))
+      then_branch post)
+    (else_derivation : @Rules.RavenResourceTriple Γ F Δ
+      (Translation.Assertions.AAnd (Translation.Assertions.AStack store)
+        (Translation.Assertions.AAnd frame
+          (Translation.Assertions.AExpr (EUnOp UNot
+            (Hoare.symbolize_expr store condition)))))
+      else_branch post),
+    resource_certificate_hoare_aligned cost then_certificate then_derivation ->
+    resource_certificate_hoare_aligned cost else_certificate else_derivation ->
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertConditional cost Γ fuel state
+        (TIf node condition then_branch else_branch) then_branch else_branch
+        then_exit else_exit view then_certificate else_certificate
+        open_equal atomic_equal)
+      (Rules.ResourceConditionalRule node store frame condition
+        then_branch else_branch post then_derivation else_derivation)
+| ResourceAlignedAtomic : forall Γ F Δ fuel state node body outer inner pre post
+    (view : RegionSyntax.view (TAtomic node body) =
+      TypedAnalysisView.ViewAtomic body)
+    (step : Atomicity.take_step Atomicity.AtomicStep state = inr outer)
+    (body_certificate : Atomicity.analysis_certificate cost Γ fuel
+      (Atomicity.AnalysisState (Atomicity.analysis_mask outer)
+        (Atomicity.analysis_open outer) (Atomicity.analysis_step_taken outer) true)
+      body inner)
+    (open_equal : Atomicity.analysis_open inner = Atomicity.analysis_open outer)
+    (trusted : Contracts.trusted_atomic Γ body)
+    (body_derivation : @Rules.RavenResourceTriple Γ F Δ pre body post),
+    resource_certificate_hoare_aligned cost body_certificate body_derivation ->
+    resource_certificate_hoare_aligned cost
+      (Atomicity.CertAtomic cost Γ fuel state (TAtomic node body) body outer inner
+        view step body_certificate open_equal)
+      (Rules.ResourceAtomicBlockRule node pre post body trusted body_derivation)
+| ResourceAlignedFrame : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (pre post frame : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F Δ pre statement post),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceFrameRule pre post frame statement derivation)
+| ResourceAlignedConsequence : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (pre pre' post post' : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F Δ pre statement post)
+    (pre_entails : Hoare.assertion_entails pre' pre)
+    (post_entails : Hoare.assertion_entails post post'),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceConsequenceRule pre pre' post post' statement
+        derivation pre_entails post_entails)
+| ResourceAlignedExistsElim : forall (Γ F Δ : context) t (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (body : Translation.Assertions.assertion Γ F (t :: Δ))
+    (post : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F (t :: Δ) body statement
+      (Translation.Assertions.weaken_assertion post)),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceExistsElimRule t body post statement derivation)
+| ResourceAlignedExistsPreserve : forall (Γ F Δ : context) t (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (body post : Translation.Assertions.assertion Γ F (t :: Δ))
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F (t :: Δ) body statement post),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceExistsPreserveRule t body post statement derivation).
+
+Lemma resource_alignment_proof_irrelevance
+    {cost Γ F Δ fuel entry statement exit pre post}
+    (certificate : Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (source target : @Rules.RavenResourceTriple Γ F Δ pre statement post) :
+  source = target ->
+  resource_certificate_hoare_aligned cost certificate source ->
+  resource_certificate_hoare_aligned cost certificate target.
+Proof.
+  intros -> Haligned.
+  exact Haligned.
+Qed.
+
+Theorem certificate_hoare_aligned_erases_resource
+    {cost Γ F Δ fuel entry statement exit pre post}
+    (certificate : Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenHoareTriple Γ F Δ pre statement
+      (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit) post) :
+  certificate_hoare_aligned cost certificate derivation ->
+  resource_certificate_hoare_aligned cost certificate
+    (Rules.RavenHoareTriple_erases_resource pre statement
+      (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit) post
+      derivation).
+Proof.
+  intro Haligned.
+  induction Haligned.
+  - apply ResourceAlignedOrdinaryLeaf.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + apply ResourceAlignedUnfold.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + apply ResourceAlignedFold.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedSequence; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedConditional; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedAtomic; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedFrame; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedConsequence; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedExistsElim; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedExistsPreserve; eauto.
+  Unshelve.
+  all: eauto.
+Qed.
+
 (** Hoare alignment rules out branch-local mask declarations which disappear
     at a conditional join.  Consequently every namespace mentioned by an
     aligned analysis certificate is available again either in its final Raven
@@ -344,11 +590,10 @@ Lemma aligned_certificate_footprint_subset_exit_resources
 Proof.
   intro Haligned.
   induction Haligned; simpl.
-  - have Hsets := Atomicity.take_step_preserves_sets _ _ _ step.
-    destruct Hsets as [Hmask Hopen].
-    rewrite Hmask. rewrite Hopen.
+  - have Hstart := Atomicity.take_step_resources_monotone _ _ _ step.
     intros other Hmember.
-    rewrite !elem_of_union in Hmember |- *.
+    specialize (Hstart other).
+    rewrite !elem_of_union in Hmember, Hstart |- *.
     rewrite elem_of_empty in Hmember.
     tauto.
   - apply Atomicity.open_invariant_success in step as
@@ -403,8 +648,7 @@ Proof.
       Hstart |- *.
     tauto.
   - rewrite then_mask. rewrite else_mask.
-    have Hmask_idem : Atomicity.analysis_mask state ∩
-        Atomicity.analysis_mask state = Atomicity.analysis_mask state.
+    have Hmask_idem : branch_mask ∩ branch_mask = branch_mask.
     { apply set_eq. intros invariant.
       rewrite elem_of_intersection. tauto. }
     rewrite Hmask_idem.
@@ -413,7 +657,7 @@ Proof.
     rewrite <- open_equal in IHHaligned2.
     have Hstart : Atomicity.analysis_mask state ∪
         Atomicity.analysis_open state ⊆
-        Atomicity.analysis_mask state ∪ Atomicity.analysis_open then_exit.
+        branch_mask ∪ Atomicity.analysis_open then_exit.
     { etrans.
       - intros invariant Hmember.
         rewrite elem_of_union in Hmember.
@@ -436,7 +680,7 @@ Proof.
     + right. exact Hexit_open.
     + apply IHHaligned1. exact Hthen.
     + apply IHHaligned2. exact Helse.
-  - have Hsets := Atomicity.take_step_preserves_sets _ _ _ step.
+  - have Hsets := Atomicity.atomic_step_preserves_sets _ _ step.
     destruct Hsets as [Hmask Hopen].
     have Hentry : Atomicity.analysis_mask state ∪
       Atomicity.analysis_open state ⊆
@@ -493,6 +737,55 @@ Definition ClosedCertifiedRavenHoareTriple cost {Γ F Δ fuel}
     (post : Translation.Assertions.assertion Γ F Δ) : Type :=
   @CertifiedRavenHoareTriple cost Γ F Δ fuel [] []
     pre statement entry exit post.
+
+(** New proof-facing certified judgment.  Raven resources are proved without
+    exposing analyzer masks; the paired certificate and coherent cost model
+    own all control-state obligations. *)
+Record CertifiedRavenResourceTriple (cost : Atomicity.cost_model)
+    {Γ F Δ fuel}
+    (stack_in stack_out : list GenericRegions.Atomicity.access_marker)
+    (pre : Translation.Assertions.assertion Γ F Δ) (statement : stmt Γ)
+    (entry exit : Atomicity.analysis_state)
+    (post : Translation.Assertions.assertion Γ F Δ) : Type := {
+  certified_resource_analysis :
+    Atomicity.analysis_certificate cost Γ fuel entry statement exit;
+  certified_resource_lifo :
+    Atomicity.lifo_certificate certified_resource_analysis stack_in stack_out;
+  certified_resource_cost_sound : procedure_cost_model_sound cost;
+  certified_resource_hoare :
+    @Rules.RavenResourceTriple Γ F Δ pre statement post;
+  certified_resource_alignment :
+    resource_certificate_hoare_aligned cost certified_resource_analysis
+      certified_resource_hoare;
+}.
+
+Definition ClosedCertifiedRavenResourceTriple cost {Γ F Δ fuel}
+    (pre : Translation.Assertions.assertion Γ F Δ) (statement : stmt Γ)
+    (entry exit : Atomicity.analysis_state)
+    (post : Translation.Assertions.assertion Γ F Δ) : Type :=
+  @CertifiedRavenResourceTriple cost Γ F Δ fuel [] []
+    pre statement entry exit post.
+
+Lemma certified_hoare_erases_resource cost {Γ F Δ fuel}
+    stack_in stack_out pre (statement : stmt Γ) entry exit post :
+  procedure_cost_model_sound cost ->
+  @CertifiedRavenHoareTriple cost Γ F Δ fuel stack_in stack_out
+    pre statement entry exit post ->
+  @CertifiedRavenResourceTriple cost Γ F Δ fuel stack_in stack_out
+    pre statement entry exit post.
+Proof.
+  intros Hcost certified.
+  destruct certified as [certificate lifo derivation alignment].
+  refine {| certified_resource_analysis := certificate;
+    certified_resource_lifo := lifo;
+    certified_resource_cost_sound := Hcost;
+    certified_resource_hoare :=
+      Rules.RavenHoareTriple_erases_resource pre statement
+        (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit) post
+        derivation |}.
+  exact (certificate_hoare_aligned_erases_resource certificate derivation
+    alignment).
+Qed.
 
 Lemma certified_exit_wf cost {Γ F Δ fuel} stack_in stack_out pre
     (statement : stmt Γ) entry exit post :
@@ -1374,7 +1667,9 @@ Definition runtime_cost_model_sound
     | GenericRegions.Atomicity.NoStep => False
     | GenericRegions.Atomicity.AtomicStep =>
         @Atomic LegacyLang.simp_lang WeaklyAtomic physical
-    | GenericRegions.Atomicity.NonAtomicStep => True
+    | GenericRegions.Atomicity.NonAtomicStep
+    | GenericRegions.Atomicity.ProcedureCallStep _ _
+    | GenericRegions.Atomicity.ProcedureSpawnStep _ => True
     end.
 
 (** A typed declaration and a legacy procedure-table entry denote the same
