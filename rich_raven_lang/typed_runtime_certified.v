@@ -1449,6 +1449,19 @@ Proof.
   - iIntros "[Hpost Hframe]". iMod "Hpost". iModIntro. iFrame.
 Qed.
 
+Lemma runtime_option_wp_close_continuation entry_mask exit_mask physical
+    (post final : iProp) :
+  ((|={entry_mask, exit_mask}=> post) ⊢ final) ->
+  runtime_option_wp entry_mask exit_mask physical post ⊢
+    runtime_option_wp entry_mask entry_mask physical final.
+Proof.
+  intros Hcont. destruct physical as [statement|]; simpl.
+  - unfold Model.runtime_wp. iIntros "Hwp".
+    iApply (wp_mono with "Hwp"). iIntros (result) "[%Hresult Hpost]".
+    iSplit; first done. iModIntro. iApply Hcont. iExact "Hpost".
+  - iIntros "Hpost". iModIntro. iApply Hcont. iExact "Hpost".
+Qed.
+
 Lemma runtime_option_wp_sequence_same_mask mask first second (post : iProp) :
   runtime_option_wp mask mask first
       (runtime_option_wp mask mask second post) ⊢
@@ -1513,6 +1526,40 @@ Proof.
   - iIntros "Hbracket". iMod "Hbracket".
     iMod "Hbracket". iMod "Hbracket". iModIntro.
     iExact "Hbracket".
+Qed.
+
+(** Physical specialization of [runtime_option_wp_atomic_mask_change].  By
+    keeping both the premise and conclusion in the optional-runtime view,
+    callers never have to make Iris proof mode unify an unfolded raw [WP]
+    with [runtime_option_wp _ _ (Some physical) _]. *)
+Lemma runtime_option_wp_atomic_mask_change_some
+    (physical : LegacyLang.runtime_stmt) outer inner (post : iProp)
+    `{!@Atomic LegacyLang.simp_lang WeaklyAtomic physical} :
+  (|={outer, inner}=>
+    runtime_option_wp inner inner (Some physical)
+      (|={inner, outer}=> post)) ⊢
+  runtime_option_wp outer outer (Some physical) post.
+Proof.
+  apply runtime_option_wp_atomic_mask_change.
+  intros statement Hstatement. injection Hstatement as <-. apply _.
+Qed.
+
+(** Sequence-facing form of the physical adapter.  Keeping the concrete
+    [combine_runtime_statements] node in the conclusion prevents proof mode
+    from unfolding the [Some] case between mask change and sequencing. *)
+Lemma runtime_option_wp_atomic_prepend_some
+    (physical : LegacyLang.runtime_stmt)
+    (rest : option LegacyLang.runtime_stmt) outer inner (post : iProp)
+    `{!@Atomic LegacyLang.simp_lang WeaklyAtomic physical} :
+  (|={outer, inner}=>
+    runtime_option_wp inner inner (Some physical)
+      (|={inner, outer}=> runtime_option_wp outer outer rest post)) ⊢
+  runtime_option_wp outer outer
+    (Model.combine_runtime_statements (Some physical) rest) post.
+Proof.
+  etrans; first apply runtime_option_wp_atomic_mask_change_some.
+  - apply _.
+  - apply runtime_option_wp_sequence_same_mask.
 Qed.
 
 (** The runtime erasure of a source conditional is atomic whenever each
@@ -2536,6 +2583,7 @@ Proof.
   - apply IHaligned.
   - apply IHaligned.
   - apply IHaligned.
+  - apply IHaligned.
 Qed.
 
 Fixpoint operational_suffix_trusted_runtime_atomicity
@@ -3052,6 +3100,14 @@ Proof.
     iApply ("Hprocedures" with "[] [] Hworld Hpre").
     iPureIntro. eapply ProcedureSpawnObligation; eassumption.
     iPureIntro. exact Henvelope.
+  - iIntros "[#Hglobal [Hstack Hbody']]".
+    iPoseProof (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      body' body H runtime formals binders atoms with "Hbody'") as "Hbody".
+    iPoseProof (IHHtriple Hview runtime formals binders atoms ambient Henvelope
+      with "[$Hglobal $Hstack $Hbody]") as "Hwp".
+    iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+    apply (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      post post' H0 runtime formals binders atoms).
   Unshelve. all: eauto.
 Qed.
 
@@ -3175,6 +3231,14 @@ Proof.
       * exact H.
       * exact Hrequired.
     + iPureIntro. rewrite <- Hmask. exact Henvelope.
+  - iIntros "[#Hglobal [Hstack Hbody']]".
+    iPoseProof (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      body' body H runtime formals binders atoms with "Hbody'") as "Hbody".
+    iPoseProof (IHHtriple Hview Hstep runtime formals binders atoms
+      ambient Henvelope with "[$Hglobal $Hstack $Hbody]") as "Hwp".
+    iApply (Execution.Primitives.Interface.operation_mono with "Hwp").
+    apply (VSemantics.assertion_entails_valid (Leaf.predicates atoms)
+      post post' H0 runtime formals binders atoms).
   Unshelve. all: eauto.
 Qed.
 
@@ -3541,6 +3605,28 @@ Proof.
       (Model.runtime_stack_id Γ runtime) body); rewrite Htaken; simpl; lia.
 Qed.
 
+Lemma open_certificate_runtime_none_after_step
+    {Γ cost fuel entry statement exit}
+    (certificate : GenericRegions.Atomicity.analysis_certificate
+      cost Γ fuel entry statement exit)
+    (runtime : Model.stack_context Γ) :
+  Model.runtime_cost_model_sound cost ->
+  certificate_open_continuous certificate ->
+  GenericRegions.Atomicity.analysis_in_atomic entry = false ->
+  GenericRegions.Atomicity.analysis_step_taken entry = true ->
+  certificate_runtime_statement certificate runtime = None.
+Proof.
+  intros Hcost Hcontinuous Hin_atomic Htaken.
+  have Hbudget := certificate_runtime_step_budget certificate runtime Hcost
+    Hcontinuous Hin_atomic.
+  unfold analysis_step_bit in Hbudget. rewrite Htaken in Hbudget. simpl in Hbudget.
+  destruct (certificate_runtime_statement certificate runtime) as [physical|]
+    eqn:Herasure; last reflexivity.
+  unfold runtime_option_count in Hbudget.
+  destruct (GenericRegions.Atomicity.analysis_step_taken exit); simpl in Hbudget;
+    lia.
+Qed.
+
 (** Inside an open invariant interval, a trusted certificate's complete
     erasure is either proof-only or one weakly atomic runtime statement.
     The sequence case uses the analyzer step bit (rather than merely counting
@@ -3716,6 +3802,7 @@ Proof.
   have Hrest := operational_suffix_runtime_count_le_chunks rest runtime.
   lia.
 Qed.
+
 
 Lemma open_invariant_preserves_step_bit invariant entry exit :
   GenericRegions.Atomicity.open_invariant invariant entry = inr exit ->
@@ -3917,6 +4004,65 @@ Proof.
     (GenericRegions.Atomicity.analysis_open entry) Hnamespace
     with "Hinvariant Htoken") as "[Hbody Hframe]".
   iModIntro. iFrame "Hworld Hstack Haccess Hframe".
+  rewrite Hbody. iExact "Hbody".
+Qed.
+
+(** Stack-exposed form of invariant opening.  The conditional source proof
+    needs the concrete stack resource to select a guard before committing to
+    either arm.  Since opening an invariant does not modify the Raven stack,
+    keep [stack_own] outside the mask-changing update and place only the
+    invariant/world resources underneath it. *)
+Lemma invariant_unfold_node_valid_stack_exposed {Γ F Δ} invariant arguments
+    (store : symbolic_store Γ F Δ) body
+    (entry exit : GenericRegions.Atomicity.analysis_state) ambient rest :
+  GenericRegions.Atomicity.open_invariant invariant entry = inr exit ->
+  ↑(Resources.invariant_namespace invariant) ⊆
+    Model.active_runtime_mask ambient entry ->
+  Contracts.instantiated_invariant Γ F Δ
+    (Logic.invariant_args invariant) invariant
+    (Hoare.symbolize_expr_list store arguments) body ->
+  forall (runtime : Model.stack_context Γ) (formals : formal_env F)
+    (binders : binder_env Δ) (atoms : atom_env),
+  (global_world_context atoms ∗
+   VSemantics.S.interp_assertion (Leaf.predicates atoms)
+     runtime formals binders atoms
+     (AAnd (AStack store)
+       (AInvariant invariant (Hoare.symbolize_expr_list store arguments))) ∗
+   World.access_stack_interp atoms ambient rest) ⊢
+  Model.stack_own Γ runtime (interp_store formals binders atoms store) ∗
+  (|={Model.active_runtime_mask ambient entry,
+       Model.active_runtime_mask ambient exit}=>
+    global_world_context atoms ∗
+    VSemantics.S.interp_assertion (Leaf.predicates atoms)
+      runtime formals binders atoms body ∗
+    World.access_stack_interp atoms ambient
+      ((invariant, GenericRegions.Atomicity.analysis_open entry) :: rest)).
+Proof.
+  intros Htransition Hnamespace Hinst runtime formals binders atoms.
+  have Htransition_facts := Htransition.
+  apply GenericRegions.Atomicity.open_invariant_success in Htransition_facts as
+    (_ & _ & _ & Hexit_open).
+  have Hactive_exit : Model.active_runtime_mask ambient exit =
+      Model.enabled_runtime_mask ambient
+        ({[invariant]} ∪ GenericRegions.Atomicity.analysis_open entry).
+  { unfold Model.active_runtime_mask. now rewrite Hexit_open. }
+  destruct (invariant_definition_compatible runtime formals binders atoms
+    invariant (Hoare.symbolize_expr_list store arguments) body Hinst)
+    as (canonical_values & Hcanonical & Hbody).
+  iIntros "[#Hworld [[Hstack Htoken] Haccess]]".
+  iFrame "Hstack". rewrite Hactive_exit.
+  iEval (unfold global_world_context) in "Hworld".
+  iDestruct "Hworld" as
+    "[#Hinvariant_world [#Hchunks #Hprocedures]]".
+  iDestruct "Htoken" as (actual_values) "[%Hactual #Htoken]".
+  have Hvalues := invariant_values_unique invariant actual_values
+    canonical_values.
+  subst actual_values.
+  iPoseProof ("Hinvariant_world" $! invariant) as "#Hinvariant".
+  iMod (World.open_world_access_frame atoms ambient invariant canonical_values
+    (GenericRegions.Atomicity.analysis_open entry) Hnamespace
+    with "Hinvariant Htoken") as "[Hbody Hframe]".
+  iModIntro. iFrame "Hinvariant_world Hchunks Hprocedures Haccess Hframe".
   rewrite Hbody. iExact "Hbody".
 Qed.
 
@@ -4336,6 +4482,7 @@ Definition closed_certificate_runtime_semantically_valid {Γ F Δ fuel}
   GenericRegions.Atomicity.analysis_open entry = ∅ ->
   GenericRegions.Atomicity.analysis_open exit = ∅ ->
   GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   forall (runtime : Model.stack_context Γ) (formals : formal_env F)
     (binders : binder_env Δ) (atoms : atom_env) (ambient : coPset),
     Model.runtime_mask
@@ -4780,9 +4927,18 @@ Proof.
       state outer step) as [Hmask Hopen].
     rewrite Hmask Hopen. exact Hwf.
   - eapply assertion_frame_valid. eapply IHHaligned; eauto.
-  - eapply consequence_valid; [eapply IHHaligned; eauto|exact pre_entails|exact post_entails].
   - eapply exists_elim_valid. eapply IHHaligned; eauto.
   - eapply exists_preserve_valid. eapply IHHaligned; eauto.
+  - eapply consequence_valid.
+    + eapply IHHaligned; eauto.
+    + apply Hoare.EntailsRefl.
+    + exact post_entails.
+  - eapply consequence_valid.
+    + eapply IHHaligned; eauto.
+    + apply Hoare.EntailsAndMono.
+      * apply Hoare.EntailsRefl.
+      * exact pre_entails.
+    + exact post_entails.
 Qed.
 
 Theorem resource_aligned_certificate_valid {cost Γ F Δ fuel entry statement exit
@@ -4892,10 +5048,16 @@ Proof.
       state outer step) as [Hmask Hopen].
     rewrite Hmask Hopen. exact Hwf.
   - eapply assertion_frame_valid. eapply IHHaligned; eauto.
-  - eapply consequence_valid;
-      [eapply IHHaligned; eauto|exact pre_entails|exact post_entails].
   - eapply exists_elim_valid. eapply IHHaligned; eauto.
   - eapply exists_preserve_valid. eapply IHHaligned; eauto.
+  - eapply consequence_valid.
+    + eapply IHHaligned; eauto.
+    + apply Hoare.EntailsRefl.
+    + exact post_entails.
+  - eapply consequence_valid.
+    + eapply IHHaligned; eauto.
+    + apply Hoare.EntailsAndMono; [apply Hoare.EntailsRefl|exact pre_entails].
+    + exact post_entails.
 Qed.
 
 Theorem certified_region_valid {cost Γ F Δ fuel entry statement exit

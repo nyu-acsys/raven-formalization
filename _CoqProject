@@ -25,6 +25,7 @@ rich_raven_lang/typed_runtime.v
 rich_raven_lang/typed_runtime_certified.v
 rich_raven_lang/typed_conditional_raven_adapter.v
 rich_raven_lang/typed_conditional_runtime_soundness.v
+rich_raven_lang/typed_conditional_runtime_phase7.v
 rich_raven_lang/typed_region.v
 rich_raven_lang/rrl_lang.v
 rich_raven_lang/trnsl.v

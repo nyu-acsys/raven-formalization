@@ -165,6 +165,86 @@ Proof.
   - exact (IHtrace left right Hcontinuation).
 Qed.
 
+Lemma aligned_runtime_region_wp_frame
+    {Γ fuel entry statement exit cost}
+    (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+      entry statement exit)
+    (runtime : Normalized.Validity.Model.stack_context Γ) ambient
+    (P R : iProp Resources.Σ) :
+  Normalized.Validity.aligned_runtime_region_wp certificate runtime ambient P ∗ R ⊢
+    Normalized.Validity.aligned_runtime_region_wp certificate runtime ambient
+      (P ∗ R).
+Proof.
+  revert P R. induction certificate; intros P R; simpl.
+  - apply Normalized.Validity.translated_runtime_wp_frame.
+  - apply Normalized.Validity.Execution.Primitives.Interface.operation_frame.
+  - apply Normalized.Validity.Execution.Primitives.Interface.operation_frame.
+  - iIntros "[H HR]".
+    iPoseProof (IHcertificate1 runtime
+      (Normalized.Validity.aligned_runtime_region_wp certificate2 runtime ambient P)
+      R with "[$H $HR]") as "H".
+    iApply (aligned_runtime_region_wp_mono certificate1 runtime ambient).
+    iApply (IHcertificate2 runtime P R).
+    iExact "H".
+  - apply Normalized.Validity.translated_runtime_wp_frame.
+  - apply Normalized.Validity.translated_runtime_wp_frame.
+Qed.
+
+Lemma trace_runtime_cps_wp_frame
+    {cost Γ entry exit mode tail stack_out source tree}
+    (trace : RuntimeAdapter.net_trace cost Γ entry exit mode tail stack_out
+      source tree)
+    (runtime : Normalized.Validity.Model.stack_context Γ) ambient
+    (continuation : mask_cont) (frame : iProp Resources.Σ) :
+  trace_runtime_cps_wp trace runtime ambient continuation ∗ frame ⊢
+    trace_runtime_cps_wp trace runtime ambient
+      (fun mask => continuation mask ∗ frame).
+Proof.
+  revert continuation frame. induction trace; intros continuation frame; simpl.
+  - iIntros "[H HR]". iFrame.
+  - iIntros "[H HR]". iFrame.
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply aligned_runtime_region_wp_frame.
+    apply aligned_runtime_region_wp_mono. exact (IHtrace continuation frame).
+  - etrans; first apply
+      Normalized.Validity.Execution.Primitives.Interface.branch_frame.
+    apply Normalized.Validity.Execution.Primitives.Interface.branch_mono.
+    + etrans; first apply IHtrace1.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+    + etrans; first apply IHtrace2.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+  - etrans; first apply
+      Normalized.Validity.Execution.Primitives.Interface.branch_frame.
+    apply Normalized.Validity.Execution.Primitives.Interface.branch_mono.
+    + etrans; first apply IHtrace1.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+    + etrans; first apply IHtrace2.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+  - etrans; first apply
+      Normalized.Validity.Execution.Primitives.Interface.branch_frame.
+    apply Normalized.Validity.Execution.Primitives.Interface.branch_mono.
+    + etrans; first apply IHtrace1.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+    + etrans; first apply IHtrace2.
+      apply trace_runtime_cps_wp_mono. intros _. exact (IHtrace3 continuation
+        frame).
+  - exact (IHtrace continuation frame).
+Qed.
+
 Lemma trace_runtime_cps_wp_terminal_mono
     {cost Γ entry exit mode tail stack_out source tree}
     (trace : RuntimeAdapter.net_trace cost Γ entry exit mode tail stack_out
@@ -422,6 +502,36 @@ Proof.
   intros Haligned. induction Haligned; simpl; auto.
 Qed.
 
+(** Resource alignment retains the operational trusted-atomic witness, not
+    merely its proposition-level provenance.  This is the runtime-indexed
+    form consumed by [open_certificate_runtime_atomic]. *)
+Lemma resource_aligned_certificate_trusted_runtime_atomicity
+    {cost Γ F Δ fuel entry statement exit}
+    {pre post : Runtime.Translation.Assertions.assertion Γ F Δ}
+    (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+      entry statement exit)
+    (derivation : Normalized.Validity.Certified.Rules.RavenResourceTriple
+      pre statement post)
+    (aligned : Normalized.Validity.Certified.resource_certificate_hoare_aligned
+      cost certificate derivation)
+    (runtime : Normalized.Validity.Model.stack_context Γ) :
+  Normalized.Validity.certificate_trusted_runtime_atomicity certificate runtime.
+Proof.
+  induction aligned; simpl.
+  - exact I.
+  - exact I.
+  - exact I.
+  - split; [apply IHaligned1|apply IHaligned2].
+  - split; [apply IHaligned1|apply IHaligned2].
+  - intros physical Hphysical.
+    eapply Normalized.Validity.trusted_atomic_runtime_atomic; eauto.
+  - apply IHaligned.
+  - apply IHaligned.
+  - apply IHaligned.
+  - apply IHaligned.
+  - apply IHaligned.
+Qed.
+
 Lemma resource_aligned_suffix_runtime_trusted
     {cost Γ F Δ entry pre stack_in exit post stack_out}
     (suffix : Normalized.Validity.resource_aligned_operational_suffix
@@ -433,6 +543,89 @@ Proof.
   split; last exact IHsuffix.
   exact (resource_aligned_certificate_runtime_trusted
     (derivation := derivation) aligned).
+Qed.
+
+(** The continuous part of a resource-aligned open interval has at most one
+    physical erasure, and that erasure is weakly atomic.  This is deliberately
+    proved by propagating the analyzer's step bit, not by applying a top-level
+    chunk-count bound: a physical head forces the intermediate bit to [true],
+    whereas a physical tail requires that same bit to be [false]. *)
+Lemma resource_open_suffix_runtime_atomic_step
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : Normalized.Validity.resource_aligned_operational_suffix
+      cost Γ F Δ entry pre stack_in exit post stack_out)
+    (runtime : Normalized.Validity.Model.stack_context Γ) :
+  Normalized.Validity.Model.runtime_cost_model_sound cost ->
+  Normalized.Validity.operational_suffix_open_continuous
+    (Normalized.Validity.erase_resource_aligned_operational_suffix suffix) ->
+  RuntimeAdapter.Atomicity.analysis_in_atomic entry = false ->
+  forall physical,
+    Normalized.Validity.operational_suffix_runtime
+      (Normalized.Validity.erase_resource_aligned_operational_suffix suffix)
+      runtime = Some physical ->
+    @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical /\
+    RuntimeAdapter.Atomicity.analysis_step_taken entry = false.
+Proof.
+  intros Hcost Hcontinuous Hin_atomic.
+  induction suffix as
+      [state assertion stack
+      |fuel entry statement middle pre middle_assertion stack_in stack_middle
+       certificate derivation aligned lifo final post stack_out rest IHrest]
+      in Hcontinuous, Hin_atomic |- *.
+  - simpl. discriminate.
+  - simpl in Hcontinuous.
+    destruct Hcontinuous as [Hcertificate_continuous Hrest_continuous].
+    have Htrusted :=
+      resource_aligned_certificate_trusted_runtime_atomicity certificate
+        derivation aligned runtime.
+    have Hmiddle_nonatomic :
+        RuntimeAdapter.Atomicity.analysis_in_atomic middle = false.
+    { eapply Normalized.Validity.certificate_preserves_nonatomic; eauto. }
+    specialize (IHrest Hrest_continuous Hmiddle_nonatomic).
+    simpl.
+    remember (Normalized.Validity.certificate_runtime_statement certificate
+      runtime) as head eqn:Hhead.
+    remember (Normalized.Validity.operational_suffix_runtime
+      (Normalized.Validity.erase_resource_aligned_operational_suffix rest)
+      runtime) as tail eqn:Htail.
+    destruct head as [head|], tail as [tail|]; simpl; intros physical Hphysical.
+    + exfalso.
+      have Hhead_budget := Normalized.Validity.certificate_runtime_step_budget
+        certificate runtime Hcost Hcertificate_continuous Hin_atomic.
+      have Htail_atomic := IHrest tail eq_refl.
+      rewrite <- Hhead in Hhead_budget.
+      destruct Htail_atomic as [_ Htail_entry].
+      unfold Normalized.Validity.analysis_step_bit,
+        Normalized.Validity.runtime_option_count in Hhead_budget.
+      rewrite Htail_entry in Hhead_budget.
+      destruct (RuntimeAdapter.Atomicity.analysis_step_taken entry),
+        (RuntimeAdapter.Atomicity.analysis_step_taken middle);
+        simpl in Hhead_budget; lia.
+    + have Hhead_atomic := Normalized.Validity.open_certificate_runtime_atomic
+        certificate runtime Hcost Hcertificate_continuous Hin_atomic Htrusted
+        head (eq_sym Hhead).
+      inversion Hphysical; subst physical.
+      split; [exact Hhead_atomic|].
+      have Hhead_budget := Normalized.Validity.certificate_runtime_step_budget
+        certificate runtime Hcost Hcertificate_continuous Hin_atomic.
+      rewrite <- Hhead in Hhead_budget.
+      unfold Normalized.Validity.analysis_step_bit,
+        Normalized.Validity.runtime_option_count in Hhead_budget.
+      destruct (RuntimeAdapter.Atomicity.analysis_step_taken entry),
+        (RuntimeAdapter.Atomicity.analysis_step_taken middle);
+        simpl in Hhead_budget; lia.
+    + inversion Hphysical; subst physical.
+      destruct (IHrest tail eq_refl) as [Htail_atomic Hmiddle_entry].
+      split; [exact Htail_atomic|].
+      have Hhead_budget := Normalized.Validity.certificate_runtime_step_budget
+        certificate runtime Hcost Hcertificate_continuous Hin_atomic.
+      rewrite <- Hhead in Hhead_budget.
+      unfold Normalized.Validity.analysis_step_bit,
+        Normalized.Validity.runtime_option_count in Hhead_budget.
+      rewrite Hmiddle_entry in Hhead_budget.
+      destruct (RuntimeAdapter.Atomicity.analysis_step_taken entry);
+        simpl in Hhead_budget; lia.
+    + discriminate.
 Qed.
 
 Lemma resource_singleton_normalization_source
@@ -1076,6 +1269,41 @@ Module ConcreteAccessNodes.
     exact (Validity.invariant_unfold_node_valid node invariant arguments store
       body entry exit ambient rest step Hnamespace instantiated runtime
       formals binders atoms).
+  Qed.
+
+  Lemma unfold_node_runtime_refinement_stack_exposed
+      {Γ F Δ invariant arguments}
+      (store : Runtime.IR.Core.symbolic_store Γ F Δ) body entry exit ambient
+      rest
+      (step : RuntimeAdapter.Atomicity.open_invariant invariant entry =
+        inr exit)
+      (Hnamespace :
+        ↑(Resources.invariant_namespace invariant) ⊆
+          Validity.Model.active_runtime_mask ambient entry)
+      (instantiated : Contracts.instantiated_invariant Γ F Δ
+        (Logic.invariant_args invariant) invariant
+        (Runtime.Validation.Hoare.symbolize_expr_list store arguments) body)
+      runtime formals binders atoms :
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms
+       (AAnd (AStack store)
+         (AInvariant invariant
+           (Runtime.Validation.Hoare.symbolize_expr_list store arguments))) ∗
+     Validity.World.access_stack_interp atoms ambient rest) ⊢
+    Validity.Model.stack_own Γ runtime
+      (Runtime.Translation.interp_store formals binders atoms store) ∗
+    (|={Validity.Model.active_runtime_mask ambient entry,
+         Validity.Model.active_runtime_mask ambient exit}=>
+      Validity.global_world_context atoms ∗
+      Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+        runtime formals binders atoms body ∗
+      Validity.World.access_stack_interp atoms ambient
+        ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: rest)).
+  Proof.
+    exact (Validity.invariant_unfold_node_valid_stack_exposed invariant
+      arguments store body entry exit ambient rest step Hnamespace instantiated
+      runtime formals binders atoms).
   Qed.
 
   Lemma matched_fold_node_runtime_refinement
@@ -1756,6 +1984,145 @@ Module ConcreteOrdinaryTrace.
     iExact "Hruntime".
   Qed.
 End ConcreteOrdinaryTrace.
+
+Fixpoint certificate_suffix_runtime_count
+    {cost Γ entry exit}
+    (suffix : RuntimeAdapter.certificate_suffix cost Γ entry exit)
+    (runtime : Normalized.Validity.Model.stack_context Γ) : nat :=
+  match suffix with
+  | RuntimeAdapter.SuffixDone _ => 0
+  | RuntimeAdapter.SuffixCons certificate rest =>
+      Normalized.Validity.runtime_option_count
+        (Normalized.Validity.certificate_runtime_statement certificate runtime)
+      + certificate_suffix_runtime_count rest runtime
+  end.
+
+Fixpoint certificate_suffix_open_continuous
+    {cost Γ entry exit}
+    (suffix : RuntimeAdapter.certificate_suffix cost Γ entry exit) : Prop :=
+  match suffix with
+  | RuntimeAdapter.SuffixDone _ => True
+  | RuntimeAdapter.SuffixCons certificate rest =>
+      Normalized.Validity.certificate_open_continuous certificate /\
+      certificate_suffix_open_continuous rest
+  end.
+
+Lemma certificate_open_continuous_entry
+    {cost Γ fuel entry statement exit}
+    (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+      entry statement exit) :
+  Normalized.Validity.certificate_open_continuous certificate ->
+  RuntimeAdapter.Atomicity.analysis_open entry ≠ ∅.
+Proof. destruct certificate; simpl; tauto. Qed.
+
+Lemma certificate_open_continuous_exit
+    {cost Γ fuel entry statement exit}
+    (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+      entry statement exit) :
+  Normalized.Validity.certificate_open_continuous certificate ->
+  RuntimeAdapter.Atomicity.analysis_open exit ≠ ∅.
+Proof. destruct certificate; simpl; tauto. Qed.
+
+Lemma resource_suffix_open_continuous_certificate
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : Normalized.Validity.resource_aligned_operational_suffix cost Γ
+      F Δ entry pre stack_in exit post stack_out) :
+  Normalized.Validity.operational_suffix_open_continuous
+      (Normalized.Validity.erase_resource_aligned_operational_suffix suffix) ->
+  certificate_suffix_open_continuous
+    (resource_certificate_suffix_of_operational_suffix suffix).
+Proof.
+  induction suffix; simpl; first done.
+  intros [Hhead Hrest]. split; [exact Hhead|exact (IHsuffix Hrest)].
+Qed.
+
+Lemma resource_suffix_runtime_count_certificate
+    {cost Γ F Δ entry pre stack_in exit post stack_out}
+    (suffix : Normalized.Validity.resource_aligned_operational_suffix cost Γ
+      F Δ entry pre stack_in exit post stack_out)
+    (runtime : Normalized.Validity.Model.stack_context Γ) :
+  certificate_suffix_runtime_count
+      (resource_certificate_suffix_of_operational_suffix suffix) runtime =
+  Normalized.Validity.operational_suffix_chunk_count
+    (Normalized.Validity.erase_resource_aligned_operational_suffix suffix)
+    runtime.
+Proof.
+  induction suffix; simpl; first reflexivity.
+  now rewrite IHsuffix.
+Qed.
+
+Lemma suffix_expands_runtime_count_mono {cost Γ entry exit}
+    {flat source : RuntimeAdapter.certificate_suffix cost Γ entry exit}
+    (expansion : RuntimeAdapter.suffix_expands cost Γ entry exit flat source)
+    (runtime : Normalized.Validity.Model.stack_context Γ) :
+  certificate_suffix_runtime_count source runtime <=
+  certificate_suffix_runtime_count flat runtime.
+Proof.
+  induction expansion; simpl.
+  - lia.
+  - unfold Normalized.Validity.certificate_runtime_statement.
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. simpl.
+    have Hcombine := Normalized.Validity.combine_runtime_statements_count_le
+      (Normalized.Validity.Model.runtime_stmt
+        (Normalized.Validity.Model.runtime_names Γ runtime)
+        (Normalized.Validity.Model.runtime_stack_id Γ runtime) first)
+      (Normalized.Validity.Model.runtime_stmt
+        (Normalized.Validity.Model.runtime_names Γ runtime)
+        (Normalized.Validity.Model.runtime_stack_id Γ runtime) second).
+    lia.
+  - lia.
+  - lia.
+Qed.
+
+Lemma suffix_expands_open_continuous {cost Γ entry exit}
+    {flat source : RuntimeAdapter.certificate_suffix cost Γ entry exit}
+    (expansion : RuntimeAdapter.suffix_expands cost Γ entry exit flat source) :
+  certificate_suffix_open_continuous flat ->
+  certificate_suffix_open_continuous source.
+Proof.
+  induction expansion; simpl; intros Hcontinuous.
+  - exact Hcontinuous.
+  - destruct Hcontinuous as [Hfirst [Hsecond Hrest]].
+    split; [|exact Hrest].
+    repeat split.
+    + exact (certificate_open_continuous_entry first_certificate Hfirst).
+    + exact (certificate_open_continuous_exit second_certificate Hsecond).
+    + exact Hfirst.
+    + exact Hsecond.
+  - destruct Hcontinuous as [Hhead Hrest].
+    split; [exact Hhead|exact (IHexpansion Hrest)].
+  - apply IHexpansion2, IHexpansion1. exact Hcontinuous.
+Qed.
+
+Lemma suffix_expands_source_runtime_sparse {cost Γ entry exit}
+    {flat source : RuntimeAdapter.certificate_suffix cost Γ entry exit}
+    (expansion : RuntimeAdapter.suffix_expands cost Γ entry exit flat source)
+    (runtime : Normalized.Validity.Model.stack_context Γ) :
+  certificate_suffix_runtime_count flat runtime <= 1 ->
+  ConcreteOrdinaryTrace.source_runtime flat runtime =
+  ConcreteOrdinaryTrace.source_runtime source runtime.
+Proof.
+  induction expansion; intros Hsparse; simpl in *.
+  - reflexivity.
+  - unfold Normalized.Validity.certificate_runtime_statement in *.
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. simpl in *.
+    destruct (Normalized.Validity.Model.runtime_stmt
+      (Normalized.Validity.Model.runtime_names Γ runtime)
+      (Normalized.Validity.Model.runtime_stack_id Γ runtime) first),
+      (Normalized.Validity.Model.runtime_stmt
+        (Normalized.Validity.Model.runtime_names Γ runtime)
+        (Normalized.Validity.Model.runtime_stack_id Γ runtime) second),
+      (ConcreteOrdinaryTrace.source_runtime rest runtime); simpl in *;
+      try lia; reflexivity.
+  - rewrite IHexpansion; first reflexivity. lia.
+  - rewrite IHexpansion1; first apply IHexpansion2.
+    + etransitivity; first exact
+        (suffix_expands_runtime_count_mono expansion1 runtime).
+      exact Hsparse.
+    + exact Hsparse.
+Qed.
 
 (** Proof-relevant aligned normalization.  The following base constructor is
     the first lockstep reconstruction case, exposing a matching fold at the
@@ -2577,24 +2944,6 @@ Module AlignedTraceNormalization.
           (RuntimeAdapter.conditional_join then_exit else_exit) statement pre post
           frame _ derivation aligned)
         stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse
-  | ResourceConditionalBranchConsequence fuel entry statement then_statement
-      else_statement then_exit else_exit pre pre' post post' view then_certificate
-      else_certificate open_equal atomic_equal derivation pre_entails post_entails
-      aligned stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse
-      (inner : resource_conditional_branch_data cost Γ F Δ fuel entry
-        statement then_statement else_statement then_exit else_exit pre post
-        view then_certificate else_certificate open_equal atomic_equal
-        derivation aligned stack_in join_stack mode tail then_tree else_tree
-        lifo Hthen Helse) :
-      resource_conditional_branch_data cost Γ F Δ fuel entry statement
-        then_statement else_statement then_exit else_exit pre' post' view
-        then_certificate else_certificate open_equal atomic_equal
-        (Validity.Certified.Rules.ResourceConsequenceRule pre pre' post post'
-          statement derivation pre_entails post_entails)
-        (Validity.Certified.ResourceAlignedConsequence cost Γ F Δ (S fuel) entry
-          (RuntimeAdapter.conditional_join then_exit else_exit) statement pre pre'
-          post post' _ derivation pre_entails post_entails aligned)
-        stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse
   | ResourceConditionalBranchExistsElim (t : typed_core.TypedCore.typ) fuel
       entry statement then_statement else_statement then_exit else_exit body
       post view then_certificate else_certificate open_equal atomic_equal
@@ -2636,6 +2985,50 @@ Module AlignedTraceNormalization.
         (Validity.Certified.ResourceAlignedExistsPreserve cost Γ F Δ t
           (S fuel) entry (RuntimeAdapter.conditional_join then_exit else_exit)
           statement body post _ derivation aligned)
+        stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse
+  | ResourceConditionalBranchPostConsequence fuel entry statement
+      then_statement else_statement then_exit else_exit pre post post' view
+      then_certificate else_certificate open_equal atomic_equal derivation
+      post_entails aligned stack_in join_stack mode tail then_tree else_tree lifo
+      Hthen Helse
+      (inner : resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre post
+        view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned stack_in join_stack mode tail then_tree else_tree
+        lifo Hthen Helse) :
+      resource_conditional_branch_data cost Γ F Δ fuel entry statement
+        then_statement else_statement then_exit else_exit pre post' view
+        then_certificate else_certificate open_equal atomic_equal
+        (Validity.Certified.Rules.ResourceConsequenceRule pre pre post post'
+          statement derivation (Runtime.Validation.Hoare.EntailsRefl pre)
+          post_entails)
+        (Validity.Certified.ResourceAlignedPostConsequence cost Γ F Δ (S fuel)
+          entry (RuntimeAdapter.conditional_join then_exit else_exit) statement
+          pre post post' _ derivation post_entails aligned)
+        stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse
+  | ResourceConditionalBranchStackConsequence fuel entry statement
+      then_statement else_statement then_exit else_exit store body body' post
+      post' view then_certificate else_certificate open_equal atomic_equal
+      derivation pre_entails post_entails aligned stack_in join_stack mode tail
+      then_tree else_tree lifo Hthen Helse
+      (inner : resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body)
+        post view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned stack_in join_stack mode tail then_tree else_tree
+        lifo Hthen Helse) :
+      resource_conditional_branch_data cost Γ F Δ fuel entry statement
+        then_statement else_statement then_exit else_exit
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body')
+        post' view then_certificate else_certificate open_equal atomic_equal
+        (Validity.Certified.Rules.ResourceStackConsequenceRule store body body'
+          post post' statement derivation pre_entails post_entails)
+        (Validity.Certified.ResourceAlignedStackConsequence cost Γ F Δ (S fuel)
+          entry (RuntimeAdapter.conditional_join then_exit else_exit) statement
+          store body body' post post' _ derivation pre_entails post_entails
+          aligned)
         stack_in join_stack mode tail then_tree else_tree lifo Hthen Helse.
 
   Scheme resource_aligned_net_trace_mutind := Induction for
@@ -2747,19 +3140,9 @@ Module AlignedTraceNormalization.
       constructor. exact data.
     - dependent destruction certificate; simpl; try exact tt.
       intros stack_in join_stack mode tail lifo build_then build_else.
-      destruct (@resource_aligned_conditional_branch_data_fix cost Γ F Δ (S fuel)
-        state statement (RuntimeAdapter.conditional_join then_exit else_exit) pre post
-        (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state statement
-          then_branch else_branch then_exit else_exit e certificate1
-          certificate2 e0 e1) derivation aligned stack_in join_stack mode tail
-          lifo build_then build_else) as [then_tree [else_tree [Hthen [Helse data]]]].
-      exists then_tree, else_tree, Hthen, Helse.
-      constructor. exact data.
-    - dependent destruction certificate; simpl; try exact tt.
-      intros stack_in join_stack mode tail lifo build_then build_else.
       destruct (@resource_aligned_conditional_branch_data_fix cost Γ F (t :: Δ)
-        (S fuel) state statement (RuntimeAdapter.conditional_join then_exit else_exit) body
-        (Runtime.Translation.Assertions.weaken_assertion post)
+        (S fuel) state statement (RuntimeAdapter.conditional_join then_exit else_exit)
+        body (Runtime.Translation.Assertions.weaken_assertion post)
         (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state statement
           then_branch else_branch then_exit else_exit e certificate1
           certificate2 e0 e1) derivation aligned stack_in join_stack mode tail
@@ -2776,7 +3159,209 @@ Module AlignedTraceNormalization.
           lifo build_then build_else) as [then_tree [else_tree [Hthen [Helse data]]]].
       exists then_tree, else_tree, Hthen, Helse.
       constructor. exact data.
+    - dependent destruction certificate; simpl; try exact tt.
+      intros stack_in join_stack mode tail lifo build_then build_else.
+      destruct (@resource_aligned_conditional_branch_data_fix cost Γ F Δ (S fuel)
+        state statement (RuntimeAdapter.conditional_join then_exit else_exit) pre post
+        (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state statement
+          then_branch else_branch then_exit else_exit e certificate1
+          certificate2 e0 e1) derivation aligned stack_in join_stack mode tail
+          lifo build_then build_else) as [then_tree [else_tree [Hthen [Helse data]]]].
+      exists then_tree, else_tree, Hthen, Helse.
+      constructor. exact data.
+    - dependent destruction certificate; simpl; try exact tt.
+      intros stack_in join_stack mode tail lifo build_then build_else.
+      destruct (@resource_aligned_conditional_branch_data_fix cost Γ F Δ (S fuel)
+        state statement (RuntimeAdapter.conditional_join then_exit else_exit)
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) post
+        (RuntimeAdapter.Atomicity.CertConditional cost Γ fuel state statement
+          then_branch else_branch then_exit else_exit e certificate1
+          certificate2 e0 e1) derivation aligned stack_in join_stack mode tail
+          lifo build_then build_else) as [then_tree [else_tree [Hthen [Helse data]]]].
+      exists then_tree, else_tree, Hthen, Helse.
+      constructor. exact data.
   Defined.
+
+  (** The executable shape of a first-close bracket.  It is deliberately
+      runtime dependent: a proof-only chunk is [None], while a conditional
+      is retained as a node until its two first-close arms have been erased.
+      This prevents a shared preserving prefix from being duplicated into
+      both conditional arms. *)
+  Inductive resource_exact_close_bracket : Type :=
+  | ResourceExactCloseLeaf
+      (statement : option Runtime.LegacyLang.runtime_stmt)
+  | ResourceExactCloseSeq
+      (statement : option Runtime.LegacyLang.runtime_stmt)
+      (rest : resource_exact_close_bracket)
+  | ResourceExactCloseIf
+      (condition : Runtime.LegacyLang.expr)
+      (stack : Runtime.LegacyLang.stack_id)
+      (then_bracket else_bracket : resource_exact_close_bracket).
+
+  Fixpoint resource_exact_close_bracket_runtime
+      (bracket : resource_exact_close_bracket) :
+    option Runtime.LegacyLang.runtime_stmt :=
+    match bracket with
+    | ResourceExactCloseLeaf statement => statement
+    | ResourceExactCloseSeq statement rest =>
+        Validity.Model.combine_runtime_statements statement
+          (resource_exact_close_bracket_runtime rest)
+    | ResourceExactCloseIf condition stack then_bracket else_bracket =>
+        match resource_exact_close_bracket_runtime then_bracket,
+          resource_exact_close_bracket_runtime else_bracket with
+        | None, None => None
+        | then_statement, else_statement =>
+            Some (Runtime.LegacyLang.RTIfS condition
+              (default Validity.Model.runtime_noop then_statement)
+              (default Validity.Model.runtime_noop else_statement) stack)
+        end
+    end.
+
+  Definition resource_exact_close_bracket_prepend
+      (statement : option Runtime.LegacyLang.runtime_stmt)
+      (bracket : resource_exact_close_bracket) :
+    resource_exact_close_bracket :=
+    ResourceExactCloseSeq statement bracket.
+
+  Lemma resource_exact_close_leaf_atomic
+      {cost Γ F Δ entry pre stack_in exit post stack_out}
+      (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
+        pre stack_in exit post stack_out)
+      (runtime : Validity.Model.stack_context Γ) physical :
+    Validity.Model.runtime_cost_model_sound cost ->
+    Validity.operational_suffix_open_continuous
+      (Validity.erase_resource_aligned_operational_suffix suffix) ->
+    RuntimeAdapter.Atomicity.analysis_in_atomic entry = false ->
+    resource_exact_close_bracket_runtime
+      (ResourceExactCloseLeaf
+        (Validity.operational_suffix_runtime
+          (Validity.erase_resource_aligned_operational_suffix suffix)
+          runtime)) = Some physical ->
+    @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical /\
+    RuntimeAdapter.Atomicity.analysis_step_taken entry = false.
+  Proof.
+    intros Hcost Hcontinuous Hinatomic Herasure.
+    simpl in Herasure.
+    eapply resource_open_suffix_runtime_atomic_step; eauto.
+  Qed.
+
+  Lemma resource_exact_close_bracket_seq_atomic
+      (head : option Runtime.LegacyLang.runtime_stmt)
+      (rest : resource_exact_close_bracket) physical :
+    (head = None \/ resource_exact_close_bracket_runtime rest = None) ->
+    (forall statement, head = Some statement ->
+      @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic statement) ->
+    (forall statement, resource_exact_close_bracket_runtime rest = Some statement ->
+      @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic statement) ->
+    resource_exact_close_bracket_runtime
+      (ResourceExactCloseSeq head rest) = Some physical ->
+    @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical.
+  Proof.
+    intros Hsparse Hhead Hrest Herasure.
+    destruct head as [head|],
+      (resource_exact_close_bracket_runtime rest) as [rest_statement|]
+      eqn:Hrest_runtime; simpl in Herasure; try discriminate.
+    - destruct Hsparse as [Hnone | Hnone]; discriminate Hnone ||
+        discriminate Hnone.
+    - rewrite Hrest_runtime in Herasure. injection Herasure as <-.
+      exact (Hhead _ eq_refl).
+    - rewrite Hrest_runtime in Herasure. injection Herasure as <-.
+      exact (Hrest _ eq_refl).
+    - rewrite Hrest_runtime in Herasure. discriminate.
+  Qed.
+
+  Lemma resource_exact_close_bracket_if_atomic
+      condition stack then_bracket else_bracket physical :
+    (forall statement,
+      resource_exact_close_bracket_runtime then_bracket = Some statement ->
+      @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic statement) ->
+    (forall statement,
+      resource_exact_close_bracket_runtime else_bracket = Some statement ->
+      @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic statement) ->
+    resource_exact_close_bracket_runtime
+      (ResourceExactCloseIf condition stack then_bracket else_bracket) =
+      Some physical ->
+    @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical.
+  Proof.
+    intros Hthen Helse Herasure.
+    destruct (resource_exact_close_bracket_runtime then_bracket)
+      as [then_statement|] eqn:Hthen_runtime,
+      (resource_exact_close_bracket_runtime else_bracket)
+      as [else_statement|] eqn:Helse_runtime;
+      simpl in Herasure; try discriminate.
+    - rewrite Hthen_runtime Helse_runtime in Herasure.
+      injection Herasure as <-. apply Runtime.LegacyLang.atomic_if.
+      + exact (Hthen _ eq_refl).
+      + exact (Helse _ eq_refl).
+    - rewrite Hthen_runtime Helse_runtime in Herasure.
+      injection Herasure as <-. apply Runtime.LegacyLang.atomic_if.
+      + exact (Hthen _ eq_refl).
+      + unfold Validity.Model.runtime_noop, Atomic.
+        intros σ result κ σ' efs Hstep. exfalso.
+        eapply (val_irreducible
+          ((Runtime.LegacyLang.RTVal Runtime.LegacyLang.LitUnit) :
+            language.expr Runtime.LegacyLang.simp_lang) σ).
+        * eexists. reflexivity.
+        * exact Hstep.
+    - rewrite Hthen_runtime Helse_runtime in Herasure.
+      injection Herasure as <-. apply Runtime.LegacyLang.atomic_if.
+      + unfold Validity.Model.runtime_noop, Atomic.
+        intros σ result κ σ' efs Hstep. exfalso.
+        eapply (val_irreducible
+          ((Runtime.LegacyLang.RTVal Runtime.LegacyLang.LitUnit) :
+            language.expr Runtime.LegacyLang.simp_lang) σ).
+        * eexists. reflexivity.
+        * exact Hstep.
+      + exact (Helse _ eq_refl).
+    - rewrite Hthen_runtime Helse_runtime in Herasure. discriminate.
+  Qed.
+
+  (** A local, executable atomicity certificate for a bracket.  Sequencing is
+      sparse by construction: at most one side may retain physical code.
+      This is the precise condition needed by the runtime erasure, and avoids
+      relying on an invalid associativity law for optional statements. *)
+  Fixpoint resource_exact_close_bracket_atomic_witness
+      (bracket : resource_exact_close_bracket) : Prop :=
+    match bracket with
+    | ResourceExactCloseLeaf statement =>
+        forall physical, statement = Some physical ->
+          @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical
+    | ResourceExactCloseSeq head rest =>
+        (head = None \/ resource_exact_close_bracket_runtime rest = None) /\
+        (forall physical, head = Some physical ->
+          @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical) /\
+        resource_exact_close_bracket_atomic_witness rest
+    | ResourceExactCloseIf _ _ then_bracket else_bracket =>
+        resource_exact_close_bracket_atomic_witness then_bracket /\
+        resource_exact_close_bracket_atomic_witness else_bracket
+    end.
+
+  Theorem resource_exact_close_bracket_atomicity
+      (bracket : resource_exact_close_bracket) :
+    resource_exact_close_bracket_atomic_witness bracket ->
+    forall physical,
+      resource_exact_close_bracket_runtime bracket = Some physical ->
+      @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical.
+  Proof.
+    induction bracket as
+      [statement
+      |head rest IHrest
+      |condition stack then_bracket IHthen else_bracket IHelse];
+      simpl; intros Hatoms physical Herasure.
+    - exact (Hatoms physical Herasure).
+    - destruct Hatoms as [Hsparse [Hhead Hrest]].
+      eapply resource_exact_close_bracket_seq_atomic.
+      + exact Hsparse.
+      + exact Hhead.
+      + intros statement Hstatement. eapply IHrest; eauto.
+      + exact Herasure.
+    - destruct Hatoms as [Hthen Helse].
+      eapply resource_exact_close_bracket_if_atomic.
+      + intros statement Hstatement. eapply IHthen; eauto.
+      + intros statement Hstatement. eapply IHelse; eauto.
+      + exact Herasure.
+  Qed.
 
   Lemma resource_aligned_net_trace_source_eq
       {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
@@ -3954,6 +4539,285 @@ Module AlignedTraceNormalization.
     - apply RuntimeAdapter.ExpandsCons. exact expansion.
   Defined.
 
+  (** The focused exact-stop grammar is deliberately no larger than the
+      four canonical focused split builders.  In particular, [Direct] is
+      syntactically a [FocusedClose] whose head certificate is a fold; it
+      cannot be fabricated from an arbitrary split record. *)
+  Inductive resource_focused_exact_close_stop
+      : forall {cost Γ F Δ invariant outer tail entry pre exit post stack_out
+          source tree suffix trace},
+        @resource_aligned_net_trace cost Γ F Δ entry pre
+          ((invariant, outer) :: tail) exit post stack_out
+          (Some (invariant, outer)) tail source tree suffix trace -> Type :=
+  | ResourceFocusedExactStopDirect
+      {cost Γ F Δ fuel entry exit pre closed_assertion post invariant outer
+       tail stack_out fold_node fold_arguments fold_view derivation aligned
+       lifo rest closing rest_tree Hrest aligned_rest}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ (S fuel) entry
+        (Runtime.IR.TFold fold_node invariant fold_arguments)
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry)
+        ((invariant, outer) :: tail) tail
+        (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+          fold_view) closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry) closing) :
+      resource_focused_exact_close_stop
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ (S fuel) entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments)
+          (RuntimeAdapter.Atomicity.fold_invariant invariant entry) exit pre
+          closed_assertion post (invariant, outer) tail stack_out
+          (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+            (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+            fold_view)
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree
+          Hrest aligned_rest)
+  | ResourceFocusedExactStopPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       invariant outer tail stack_out certificate derivation aligned lifo rest
+       chunk Hchunk head_ok rest_tree Hrest aligned_rest}
+      (child : resource_focused_exact_close_stop aligned_rest) :
+      resource_focused_exact_close_stop
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post (invariant, outer) tail
+          stack_out certificate derivation aligned lifo rest chunk Hchunk
+          head_ok rest_tree Hrest aligned_rest)
+  | ResourceFocusedExactStopConditionalHere
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit exit pre join_assertion post invariant outer tail
+       stack_out view then_certificate else_certificate open_equal atomic_equal
+       derivation aligned lifo rest then_tree else_tree rest_tree Hthen Helse
+       Hrest branch_data aligned_rest}
+      (arms : resource_conditional_exact_close_arms branch_data) :
+      resource_focused_exact_close_stop
+        (@ResourceAlignedTraceFocusedConditional cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit exit pre
+          join_assertion post (invariant, outer) tail tail stack_out view
+          then_certificate else_certificate open_equal atomic_equal derivation
+          aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+          branch_data aligned_rest)
+  | ResourceFocusedExactStopExpansion
+      {cost Γ F Δ entry pre exit post invariant outer tail stack_out source
+       tree suffix flat flat_suffix expansion Hsource Hflat_source flat_trace
+       aligned_flat}
+      (child : resource_focused_exact_close_stop aligned_flat) :
+      resource_focused_exact_close_stop
+        (@ResourceAlignedTraceExpansion cost Γ F Δ entry pre
+          ((invariant, outer) :: tail) exit post stack_out
+          (Some (invariant, outer)) tail source tree suffix flat flat_suffix
+          expansion Hsource Hflat_source flat_trace aligned_flat)
+  with resource_conditional_exact_close_arms :
+      forall {cost Γ F Δ fuel entry statement then_statement else_statement
+        then_exit else_exit pre join_assertion invariant outer tail view
+        then_certificate else_certificate open_equal atomic_equal derivation
+        aligned then_tree else_tree lifo Hthen Helse}
+        (branch_data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit pre
+          join_assertion view then_certificate else_certificate open_equal
+          atomic_equal derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse),
+      Type :=
+  | ResourceConditionalExactCloseArmsCore
+      {cost Γ F Δ fuel entry invariant outer tail node store frame condition
+       then_statement else_statement then_exit else_exit post view
+       then_certificate else_certificate open_equal atomic_equal
+       then_derivation else_derivation then_aligned else_aligned then_tree
+       else_tree then_lifo else_lifo Hthen Helse}
+      (then_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Validation.Hoare.symbolize_expr store condition))))
+        ((invariant, outer) :: tail) then_exit post tail
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix then_certificate) then_tree
+        (Validity.resource_aligned_singleton_suffix then_certificate
+          then_derivation then_aligned then_lifo) Hthen)
+      (else_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Core.EUnOp Runtime.Core.UNot
+                (Runtime.Validation.Hoare.symbolize_expr store condition)))))
+        ((invariant, outer) :: tail) else_exit post tail
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix else_certificate) else_tree
+        (Validity.resource_aligned_singleton_suffix else_certificate
+          else_derivation else_aligned else_lifo) Helse)
+      (then_stop : resource_focused_exact_close_stop then_lockstep)
+      (else_stop : resource_focused_exact_close_stop else_lockstep) :
+      resource_conditional_exact_close_arms
+        (@ResourceConditionalBranchCore cost Γ F Δ fuel entry node store frame
+          condition then_statement else_statement then_exit else_exit post
+          view then_certificate else_certificate open_equal atomic_equal
+          then_derivation else_derivation then_aligned else_aligned
+          ((invariant, outer) :: tail) tail (Some (invariant, outer)) tail
+          then_tree else_tree then_lifo else_lifo Hthen Helse then_lockstep
+          else_lockstep)
+  | ResourceConditionalExactCloseArmsFrame
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit pre post frame view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms inner) :
+      resource_conditional_exact_close_arms
+        (@ResourceConditionalBranchFrame cost Γ F Δ fuel entry statement
+          then_statement else_statement then_exit else_exit pre post frame
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner)
+  | ResourceConditionalExactCloseArmsStackPreservingConsequence
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit store body body' post post' view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       pre_entails post_entails aligned then_tree else_tree lifo Hthen Helse
+       inner}
+      (arms : resource_conditional_exact_close_arms inner) :
+      resource_conditional_exact_close_arms
+        (@ResourceConditionalBranchStackConsequence cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit store
+          body body' post post' view then_certificate else_certificate
+          open_equal atomic_equal derivation pre_entails post_entails aligned
+          ((invariant, outer) :: tail) tail (Some (invariant, outer)) tail
+          then_tree else_tree lifo Hthen Helse inner)
+  | ResourceConditionalExactCloseArmsExistsElim
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms inner) :
+      resource_conditional_exact_close_arms
+        (@ResourceConditionalBranchExistsElim cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner)
+  | ResourceConditionalExactCloseArmsExistsPreserve
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms inner) :
+      resource_conditional_exact_close_arms
+        (@ResourceConditionalBranchExistsPreserve cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner).
+
+  Definition resource_focused_exact_close_stop_linear_split
+      {cost Γ F Δ invariant outer tail entry pre exit post stack_out source
+        tree suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post stack_out
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (stop : resource_focused_exact_close_stop aligned_trace) :
+    option (resource_aligned_focused_close_split aligned_trace).
+  Proof.
+    induction stop.
+    - exact (Some (resource_aligned_focused_close_split_here Hclosing close_ok
+        aligned_rest)).
+    - destruct IHstop as [split|].
+      + exact (Some (resource_aligned_focused_close_split_later Hchunk head_ok
+          aligned_rest split)).
+      + exact None.
+    - exact None.
+    - destruct IHstop as [split|].
+      + exact (Some (resource_focused_split_of_close_stack
+          (resource_aligned_close_stack_split_expansion aligned_flat
+            (resource_close_stack_split_of_focused split)))).
+      + exact None.
+  Defined.
+
+  Fixpoint resource_focused_exact_close_bracket
+      {cost Γ F Δ invariant outer tail entry pre exit post stack_out source
+        tree suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post stack_out
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (stop : resource_focused_exact_close_stop aligned_trace) :
+    Validity.Model.stack_context Γ -> resource_exact_close_bracket :=
+    match stop with
+    | @ResourceFocusedExactStopDirect _ _ _ _ fuel entry exit pre
+        closed_assertion post invariant outer tail stack_out fold_node
+        fold_arguments fold_view derivation aligned lifo rest closing rest_tree
+        Hrest aligned_rest Hclosing close_ok =>
+        fun _ => ResourceExactCloseLeaf None
+    | @ResourceFocusedExactStopPrefix _ _ _ _ fuel entry statement middle
+        exit pre middle_assertion post invariant outer tail stack_out
+        certificate derivation aligned lifo rest chunk Hchunk head_ok rest_tree
+        Hrest aligned_rest child => fun runtime =>
+        resource_exact_close_bracket_prepend
+          (Validity.certificate_runtime_statement certificate runtime)
+          (resource_focused_exact_close_bracket child runtime)
+    | @ResourceFocusedExactStopConditionalHere _ _ _ _ fuel entry statement
+        then_statement else_statement then_exit else_exit exit pre
+        join_assertion post invariant outer tail stack_out view then_certificate
+        else_certificate open_equal atomic_equal derivation aligned lifo rest
+        then_tree else_tree rest_tree Hthen Helse Hrest branch_data
+        aligned_rest arms => fun runtime =>
+        resource_conditional_exact_close_arms_bracket arms runtime
+    | @ResourceFocusedExactStopExpansion _ _ _ _ entry pre exit post invariant
+        outer tail stack_out source tree suffix flat flat_suffix expansion
+        Hsource Hflat_source flat_trace aligned_flat child => fun runtime =>
+        resource_focused_exact_close_bracket child runtime
+    end
+  with resource_conditional_exact_close_arms_bracket
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+        then_exit else_exit pre join_assertion invariant outer tail view
+        then_certificate else_certificate open_equal atomic_equal derivation
+        aligned then_tree else_tree lifo Hthen Helse}
+      {branch_data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre
+        join_assertion view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned ((invariant, outer) :: tail) tail
+        (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse}
+      (arms : resource_conditional_exact_close_arms branch_data) :
+    Validity.Model.stack_context Γ -> resource_exact_close_bracket :=
+    match arms with
+    | @ResourceConditionalExactCloseArmsCore cost0 Γ0 F0 Δ0 fuel entry invariant
+        outer tail node store frame condition then_statement else_statement
+        then_exit else_exit post view then_certificate else_certificate
+        open_equal atomic_equal then_derivation else_derivation then_aligned
+        else_aligned then_tree else_tree then_lifo else_lifo Hthen Helse
+        then_lockstep else_lockstep then_stop else_stop =>
+        fun (runtime : Validity.Model.stack_context Γ0) =>
+        ResourceExactCloseIf
+          (Validity.Model.runtime_expr (Validity.Model.runtime_names Γ0 runtime)
+            condition)
+          (Validity.Model.runtime_stack_id Γ0 runtime)
+          (resource_focused_exact_close_bracket then_stop runtime)
+          (resource_focused_exact_close_bracket else_stop runtime)
+    | @ResourceConditionalExactCloseArmsFrame _ _ _ _ fuel entry invariant
+        outer tail statement then_statement else_statement then_exit else_exit
+        pre post frame view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned then_tree else_tree lifo Hthen Helse
+        inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_bracket inner_arms runtime
+    | ResourceConditionalExactCloseArmsStackPreservingConsequence inner_arms =>
+        fun runtime =>
+        resource_conditional_exact_close_arms_bracket inner_arms runtime
+    | @ResourceConditionalExactCloseArmsExistsElim t _ _ _ _ fuel entry
+        invariant outer tail statement then_statement else_statement then_exit
+        else_exit body post view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned then_tree else_tree lifo Hthen Helse
+        inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_bracket inner_arms runtime
+    | @ResourceConditionalExactCloseArmsExistsPreserve t _ _ _ _ fuel entry
+        invariant outer tail statement then_statement else_statement then_exit
+        else_exit body post view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned then_tree else_tree lifo Hthen Helse
+        inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_bracket inner_arms runtime
+    end.
+
   Definition has_resource_aligned_focused_closing_normalization
       {cost Γ F Δ invariant outer tail entry pre exit post stack_out}
       (suffix : Validity.resource_aligned_operational_suffix cost Γ F Δ entry
@@ -3969,6 +4833,2900 @@ Module AlignedTraceNormalization.
             (resource_certificate_suffix_of_operational_suffix suffix) tree
             suffix trace &
           resource_aligned_focused_close_split aligned_trace } } }.
+
+  (** A position of a target access marker above a fixed stack suffix.  The
+      first-close handoff carries this evidence separately from its trace
+      provenance, so traversing a prefix preserves the concrete target. *)
+  Inductive resource_target_position
+      (target : RuntimeAdapter.Atomicity.access_marker)
+      (below : list RuntimeAdapter.Atomicity.access_marker)
+      : list RuntimeAdapter.Atomicity.access_marker -> Type :=
+  | ResourceTargetHere :
+      resource_target_position target below (target :: below)
+  | ResourceTargetUnder top stack :
+      resource_target_position target below stack ->
+      resource_target_position target below (top :: stack).
+
+  Fixpoint resource_target_position_dec
+      (target : RuntimeAdapter.Atomicity.access_marker)
+      (below stack : list RuntimeAdapter.Atomicity.access_marker) :
+      resource_target_position target below stack +
+      (resource_target_position target below stack -> False).
+  Proof.
+    destruct stack as [|top stack].
+    - right. intros position. inversion position.
+    - destruct (decide (top = target /\ stack = below)) as
+          [[-> ->]|Hnot_here].
+      + left. exact (@ResourceTargetHere target below).
+      + destruct (resource_target_position_dec target below stack) as
+          [position|Hnot_under].
+        * left. exact (@ResourceTargetUnder target below top stack position).
+        * right. intros position. dependent destruction position.
+          -- apply Hnot_here. split; reflexivity.
+          -- apply Hnot_under. assumption.
+  Defined.
+
+  Lemma resource_target_position_outer_consistent target below stack
+      (position : resource_target_position target below stack) open :
+    RuntimeAdapter.Atomicity.access_stack_consistent open stack ->
+    RuntimeAdapter.Atomicity.access_stack_consistent target.2 below.
+  Proof.
+    revert open. induction position; intros open Hconsistent.
+    - destruct target as [invariant outer]. simpl in *.
+      exact (proj2 (proj2 Hconsistent)).
+    - destruct top as [invariant outer]. simpl in Hconsistent.
+      exact (IHposition outer (proj2 (proj2 Hconsistent))).
+  Qed.
+
+  Lemma resource_target_position_open_nonempty target below stack
+      (position : resource_target_position target below stack) open :
+    RuntimeAdapter.Atomicity.access_stack_consistent open stack -> open <> ∅.
+  Proof.
+    intros Hconsistent Hempty.
+    destruct stack as [|[invariant outer] stack]; first inversion position.
+    simpl in Hconsistent.
+    have Hin : invariant ∈ open.
+    { rewrite (proj1 (proj2 Hconsistent)).
+      apply elem_of_union_l. apply elem_of_singleton. reflexivity. }
+    rewrite Hempty in Hin. exact (not_elem_of_empty invariant Hin).
+  Qed.
+
+  (** A path-sensitive handoff stops exactly when [target] is removed from
+      the access stack.  In particular, the close constructors have no child
+      when the focused marker is [target].  Thus an arbitrary post-close
+      continuation (including any number of reopen/close pairs) cannot become
+      part of the pre-close fragment by construction.  The ordinary
+      constructors below are the missing support needed after an inner marker
+      has been closed while [target] remains further down the stack. *)
+  Inductive resource_target_close_handoff
+      : forall {cost Γ F Δ entry pre stack_in exit post stack_out mode tail
+          source tree suffix trace}
+          (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+            stack_in exit post stack_out mode tail source tree suffix trace)
+          (target : RuntimeAdapter.Atomicity.access_marker)
+          (below : list RuntimeAdapter.Atomicity.access_marker),
+        resource_target_position target below stack_in -> Type :=
+  | ResourceTargetCloseFocusedHere
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       target below stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest} :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+          closed exit pre closed_assertion post target below stack_out
+          certificate derivation aligned lifo rest closing Hclosing close_ok
+          rest_tree Hrest aligned_rest) target below
+        (@ResourceTargetHere target below)
+  | ResourceTargetCloseOrdinaryHere
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       target below stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest} :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+          pre closed_assertion post target below stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+          aligned_rest) target below (@ResourceTargetHere target below)
+  | ResourceTargetCloseChunk
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       stack stack_out certificate derivation aligned lifo rest chunk Hchunk
+       rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below stack}
+      (child : resource_target_close_handoff aligned_rest target below position) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle exit
+          pre middle_assertion post stack stack_out certificate derivation
+          aligned lifo rest chunk Hchunk rest_tree Hrest aligned_rest)
+        target below position
+  | ResourceTargetCloseAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody aligned_body target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_close_handoff aligned_body target below
+        (@ResourceTargetUnder target below focused tail position)) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened exit
+          pre opened_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest opening Hopening open_ok body Hbody
+          aligned_body) target below position
+  | ResourceTargetCloseFocusedPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (child : resource_target_close_handoff aligned_rest target below position) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest chunk Hchunk head_ok
+          rest_tree Hrest aligned_rest) target below position
+  | ResourceTargetCloseNestedAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody aligned_body target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (child : resource_target_close_handoff aligned_body target below
+        (@ResourceTargetUnder target below nested (focused :: tail) position)) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+          opened exit pre opened_assertion post focused tail nested stack_out
+          certificate derivation aligned lifo rest opening Hopening open_ok body
+          Hbody aligned_body) target below position
+  | ResourceTargetClosePastFocusedClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_close_handoff aligned_rest target below position) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+          closed exit pre closed_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest closing Hclosing close_ok
+          rest_tree Hrest aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position)
+  | ResourceTargetClosePastOrdinaryClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_close_handoff aligned_rest target below position) :
+      resource_target_close_handoff
+        (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+          pre closed_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+          aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position).
+
+  (** The complementary path witness: [target] is never removed.  Merely
+      observing it in the exit stack is insufficient, since a trace may close
+      and reopen it.  There is consequently no close-at-target constructor. *)
+  Inductive resource_target_continuous
+      : forall {cost Γ F Δ entry pre stack_in exit post stack_out mode tail
+          source tree suffix trace}
+          (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+            stack_in exit post stack_out mode tail source tree suffix trace)
+          (target : RuntimeAdapter.Atomicity.access_marker)
+          (below : list RuntimeAdapter.Atomicity.access_marker),
+        resource_target_position target below stack_in ->
+        resource_target_position target below stack_out -> Type :=
+  | ResourceTargetContinuousDone
+      {cost Γ F Δ state assertion stack target below}
+      (position : resource_target_position target below stack) :
+      resource_target_continuous
+        (@ResourceAlignedTraceDone cost Γ F Δ state assertion stack)
+        target below position position
+  | ResourceTargetContinuousDoneFocused
+      {cost Γ F Δ state assertion focused tail target below}
+      (position : resource_target_position target below (focused :: tail)) :
+      resource_target_continuous
+        (@ResourceAlignedTraceDoneFocused cost Γ F Δ state assertion focused
+          tail) target below position position
+  | ResourceTargetContinuousChunk
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       stack stack_out certificate derivation aligned lifo rest chunk Hchunk
+       rest_tree Hrest aligned_rest target below}
+      {position_in : resource_target_position target below stack}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_rest target below position_in
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle exit
+          pre middle_assertion post stack stack_out certificate derivation
+          aligned lifo rest chunk Hchunk rest_tree Hrest aligned_rest)
+        target below position_in position_out
+  | ResourceTargetContinuousAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody aligned_body target below}
+      {position_in : resource_target_position target below tail}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_body target below
+        (@ResourceTargetUnder target below focused tail position_in)
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened exit
+          pre opened_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest opening Hopening open_ok body Hbody
+          aligned_body) target below position_in position_out
+  | ResourceTargetContinuousFocusedPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest aligned_rest target below}
+      {position_in : resource_target_position target below (focused :: tail)}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_rest target below position_in
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest chunk Hchunk head_ok
+          rest_tree Hrest aligned_rest) target below position_in position_out
+  | ResourceTargetContinuousNestedAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody aligned_body target below}
+      {position_in : resource_target_position target below (focused :: tail)}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_body target below
+        (@ResourceTargetUnder target below nested (focused :: tail) position_in)
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+          opened exit pre opened_assertion post focused tail nested stack_out
+          certificate derivation aligned lifo rest opening Hopening open_ok body
+          Hbody aligned_body) target below position_in position_out
+  | ResourceTargetContinuousPastFocusedClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position_in : resource_target_position target below tail}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_rest target below position_in
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+          closed exit pre closed_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest closing Hclosing close_ok
+          rest_tree Hrest aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position_in) position_out
+  | ResourceTargetContinuousPastOrdinaryClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position_in : resource_target_position target below tail}
+      {position_out : resource_target_position target below stack_out}
+      (child : resource_target_continuous aligned_rest target below position_in
+        position_out) :
+      resource_target_continuous
+        (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+          pre closed_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+          aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position_in) position_out.
+
+  (** Assertion wrappers around a conditional do not alter either normalized
+      arm.  This view exposes those two resource locksteps without fixing their
+      intermediate assertions, which do change under Frame/Consequence and
+      the existential rules. *)
+  Record resource_conditional_core_traces
+      {cost : RuntimeAdapter.Atomicity.cost_model}
+      {Γ : typed_core.TypedCore.context} {fuel : nat}
+      {entry then_exit else_exit : RuntimeAdapter.Atomicity.analysis_state}
+      {then_statement else_statement : Runtime.IR.stmt Γ}
+      {then_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel entry then_statement then_exit}
+      {else_certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ
+        fuel entry else_statement else_exit}
+      {stack_in join_stack : list RuntimeAdapter.Atomicity.access_marker}
+      {mode : option RuntimeAdapter.Payload.marker}
+      {tail : list RuntimeAdapter.Payload.marker}
+      {then_tree : RuntimeAdapter.net_tree mode tail join_stack entry then_exit}
+      {else_tree : RuntimeAdapter.net_tree mode tail join_stack entry else_exit}
+      {Hthen : RuntimeAdapter.net_trace cost Γ entry then_exit mode tail join_stack
+        (RuntimeAdapter.singleton_suffix then_certificate) then_tree}
+      {Helse : RuntimeAdapter.net_trace cost Γ entry else_exit mode tail join_stack
+        (RuntimeAdapter.singleton_suffix else_certificate) else_tree} : Type := {
+    resource_conditional_core_F : typed_core.TypedCore.context;
+    resource_conditional_core_Delta : typed_core.TypedCore.context;
+    resource_conditional_then_pre :
+      Runtime.Translation.Assertions.assertion Γ resource_conditional_core_F
+        resource_conditional_core_Delta;
+    resource_conditional_then_post :
+      Runtime.Translation.Assertions.assertion Γ resource_conditional_core_F
+        resource_conditional_core_Delta;
+    resource_conditional_then_suffix :
+      Validity.resource_aligned_operational_suffix cost Γ
+        resource_conditional_core_F resource_conditional_core_Delta entry
+        resource_conditional_then_pre stack_in then_exit
+        resource_conditional_then_post join_stack;
+    resource_conditional_then_lockstep : resource_aligned_net_trace cost Γ
+      resource_conditional_core_F resource_conditional_core_Delta entry
+      resource_conditional_then_pre stack_in then_exit resource_conditional_then_post
+      join_stack mode tail
+      (RuntimeAdapter.singleton_suffix then_certificate) then_tree
+      resource_conditional_then_suffix Hthen;
+    resource_conditional_else_pre :
+      Runtime.Translation.Assertions.assertion Γ resource_conditional_core_F
+        resource_conditional_core_Delta;
+    resource_conditional_else_post :
+      Runtime.Translation.Assertions.assertion Γ resource_conditional_core_F
+        resource_conditional_core_Delta;
+    resource_conditional_else_suffix :
+      Validity.resource_aligned_operational_suffix cost Γ
+        resource_conditional_core_F resource_conditional_core_Delta entry
+        resource_conditional_else_pre stack_in else_exit
+        resource_conditional_else_post join_stack;
+    resource_conditional_else_lockstep : resource_aligned_net_trace cost Γ
+      resource_conditional_core_F resource_conditional_core_Delta entry
+      resource_conditional_else_pre stack_in else_exit resource_conditional_else_post
+      join_stack mode tail
+      (RuntimeAdapter.singleton_suffix else_certificate) else_tree
+      resource_conditional_else_suffix Helse;
+  }.
+
+  Definition resource_conditional_core_traces_complete
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit pre post view then_certificate else_certificate
+       open_equal atomic_equal derivation aligned stack_in join_stack mode
+       tail then_tree else_tree lifo Hthen Helse}
+      (data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre post
+        view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned stack_in join_stack mode tail then_tree else_tree
+        lifo Hthen Helse) :
+      @resource_conditional_core_traces cost Γ fuel entry then_exit else_exit
+        then_statement else_statement then_certificate else_certificate
+        stack_in join_stack mode tail then_tree else_tree Hthen Helse.
+  Proof.
+    induction data.
+    - refine {| resource_conditional_then_lockstep := then_lockstep;
+                resource_conditional_else_lockstep := else_lockstep |}.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+  Defined.
+
+  (** First-order path-sensitive outcome tree.  Its semantic eliminator is
+      continuation-parametric: it ignores the external continuation at a
+      [Close] leaf, consumes it at a [Continuous] leaf, and recursively gives
+      it to the shared-rest outcome of a conditional.  Keeping the
+      continuation out of this recursive [Type] avoids a spurious universe
+      lift while retaining the required CPS discipline. *)
+  Inductive resource_target_trace_outcome
+      : forall {cost Γ F Δ entry pre stack_in exit post stack_out mode tail
+          source tree suffix trace}
+          (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+            stack_in exit post stack_out mode tail source tree suffix trace)
+          (target : RuntimeAdapter.Atomicity.access_marker)
+          (below : list RuntimeAdapter.Atomicity.access_marker),
+        resource_target_position target below stack_in -> Type :=
+  | ResourceTargetOutcomeClose
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre stack_in
+        exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position) :
+      resource_target_trace_outcome aligned_trace target below position
+  | ResourceTargetOutcomeContinuous
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position_in position_out}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre stack_in
+        exit post stack_out mode tail source tree suffix trace}
+      (continuous : resource_target_continuous aligned_trace target below
+        position_in position_out) :
+      resource_target_trace_outcome aligned_trace target below position_in
+  | ResourceTargetOutcomeChunk
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       stack stack_out certificate derivation aligned lifo rest chunk Hchunk
+       rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below stack}
+      (child : resource_target_trace_outcome aligned_rest target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle exit
+          pre middle_assertion post stack stack_out certificate derivation
+          aligned lifo rest chunk Hchunk rest_tree Hrest aligned_rest)
+        target below position
+  | ResourceTargetOutcomeAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody aligned_body target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_trace_outcome aligned_body target below
+        (@ResourceTargetUnder target below focused tail position)) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened exit
+          pre opened_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest opening Hopening open_ok body Hbody
+          aligned_body) target below position
+  | ResourceTargetOutcomeFocusedPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (child : resource_target_trace_outcome aligned_rest target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest chunk Hchunk head_ok
+          rest_tree Hrest aligned_rest) target below position
+  | ResourceTargetOutcomeNestedAccess
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody aligned_body target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (child : resource_target_trace_outcome aligned_body target below
+        (@ResourceTargetUnder target below nested (focused :: tail) position)) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+          opened exit pre opened_assertion post focused tail nested stack_out
+          certificate derivation aligned lifo rest opening Hopening open_ok body
+          Hbody aligned_body) target below position
+  | ResourceTargetOutcomePastFocusedClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_trace_outcome aligned_rest target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+          closed exit pre closed_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest closing Hclosing close_ok
+          rest_tree Hrest aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position)
+  | ResourceTargetOutcomePastOrdinaryClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest aligned_rest target below}
+      {position : resource_target_position target below tail}
+      (child : resource_target_trace_outcome aligned_rest target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+          pre closed_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+          aligned_rest) target below
+        (@ResourceTargetUnder target below focused tail position)
+  | ResourceTargetOutcomeExpansion
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix flat flat_suffix expansion Hsource Hflat_source flat_trace
+       aligned_flat target below}
+      {position : resource_target_position target below stack_in}
+      (child : resource_target_trace_outcome aligned_flat target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceExpansion cost Γ F Δ entry pre stack_in exit post
+          stack_out mode tail source tree suffix flat flat_suffix expansion
+          Hsource Hflat_source flat_trace aligned_flat)
+        target below position
+  | ResourceTargetOutcomeSequenceExpansion
+      {cost Γ F Δ fuel entry statement first middle second next exit pre
+       middle_assertion next_assertion post stack_in stack_middle stack_next
+       stack_out view first_certificate second_certificate first_derivation
+       second_derivation first_aligned second_aligned head_derivation
+       head_aligned head_lifo first_lifo second_lifo rest mode tail tree Hflat
+       aligned_flat target below}
+      {position : resource_target_position target below stack_in}
+      (child : resource_target_trace_outcome aligned_flat target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceSequenceExpansion cost Γ F Δ fuel entry statement
+          first middle second next exit pre middle_assertion next_assertion post
+          stack_in stack_middle stack_next stack_out view first_certificate
+          second_certificate first_derivation second_derivation first_aligned
+          second_aligned head_derivation head_aligned head_lifo first_lifo
+          second_lifo rest mode tail tree Hflat aligned_flat)
+        target below position
+  | ResourceTargetOutcomeFocusedConditionalClose
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit exit pre join_assertion post focused tail join_stack stack_out
+       view then_certificate else_certificate open_equal atomic_equal
+       derivation aligned lifo rest then_tree else_tree rest_tree Hthen Helse
+       Hrest branch_data aligned_rest target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (closed_at_join : resource_target_position target below join_stack ->
+        False)
+      (then_outcome : resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position)
+      (else_outcome : resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceFocusedConditional cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit exit pre
+          join_assertion post focused tail join_stack stack_out view
+          then_certificate else_certificate open_equal atomic_equal derivation
+          aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+          branch_data aligned_rest)
+        target below position
+  | ResourceTargetOutcomeFocusedConditionalRest
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit exit pre join_assertion post focused tail join_stack stack_out
+       view then_certificate else_certificate open_equal atomic_equal
+       derivation aligned lifo rest then_tree else_tree rest_tree Hthen Helse
+       Hrest branch_data aligned_rest target below}
+      {position_in :
+        resource_target_position target below (focused :: tail)}
+      {position_join : resource_target_position target below join_stack}
+      (then_outcome : resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position_in)
+      (else_outcome : resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position_in)
+      (rest_outcome : resource_target_trace_outcome aligned_rest target below
+        position_join) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceFocusedConditional cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit exit pre
+          join_assertion post focused tail join_stack stack_out view
+          then_certificate else_certificate open_equal atomic_equal derivation
+          aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+          branch_data aligned_rest) target below position_in
+  | ResourceTargetOutcomeOrdinaryConditionalContinue
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit exit pre join_assertion post stack_in join_stack stack_out view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+       branch_data aligned_rest target below}
+      {position_in : resource_target_position target below stack_in}
+      {position_join : resource_target_position target below join_stack}
+      (then_outcome : resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position_in)
+      (else_outcome : resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position_in)
+      (rest_outcome : resource_target_trace_outcome aligned_rest target below
+        position_join) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceConditional cost Γ F Δ fuel entry statement
+          then_statement else_statement then_exit else_exit exit pre
+          join_assertion post stack_in join_stack stack_out view then_certificate
+          else_certificate open_equal atomic_equal derivation aligned lifo rest
+          then_tree else_tree rest_tree Hthen Helse Hrest branch_data
+          aligned_rest) target below position_in
+  | ResourceTargetOutcomeOrdinaryConditionalClose
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit exit pre join_assertion post stack_in join_stack stack_out view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+       branch_data aligned_rest target below}
+      {position : resource_target_position target below stack_in}
+      (closed_at_join : resource_target_position target below join_stack ->
+        False)
+      (then_outcome : resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position)
+      (else_outcome : resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceConditional cost Γ F Δ fuel entry statement
+          then_statement else_statement then_exit else_exit exit pre
+          join_assertion post stack_in join_stack stack_out view
+          then_certificate else_certificate open_equal atomic_equal derivation
+          aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+          branch_data aligned_rest) target below position
+  | ResourceTargetOutcomeFocusedConditionalContinue
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit exit pre join_assertion post focused tail stack_out view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+       branch_data aligned_rest target below}
+      {position : resource_target_position target below (focused :: tail)}
+      (then_outcome : resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position)
+      (else_outcome : resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete branch_data))
+        target below position)
+      (rest_outcome : resource_target_trace_outcome aligned_rest target below
+        position) :
+      resource_target_trace_outcome
+        (@ResourceAlignedTraceFocusedConditionalContinue cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit exit pre
+          join_assertion post focused tail stack_out view then_certificate
+          else_certificate open_equal atomic_equal derivation aligned lifo rest
+          then_tree else_tree rest_tree Hthen Helse Hrest branch_data
+          aligned_rest) target below position.
+
+  Scheme resource_aligned_net_trace_rect_type := Induction for
+    resource_aligned_net_trace Sort Type
+  with resource_conditional_branch_data_rect_type := Induction for
+    resource_conditional_branch_data Sort Type.
+
+  Combined Scheme resource_aligned_trace_and_branch_data_rect_type
+    from resource_aligned_net_trace_rect_type,
+      resource_conditional_branch_data_rect_type.
+
+  Fixpoint resource_target_trace_outcome_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace}
+      (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace)
+      {struct aligned_trace} :
+      forall target below
+        (position : resource_target_position target below stack_in),
+        resource_target_trace_outcome aligned_trace target below position
+  with resource_conditional_target_outcomes_complete
+      {cost Γ F Δ fuel entry statement then_statement else_statement then_exit
+       else_exit pre post view then_certificate else_certificate open_equal
+       atomic_equal derivation aligned stack_in join_stack mode tail then_tree
+       else_tree lifo Hthen Helse}
+      (data : @resource_conditional_branch_data cost Γ F Δ fuel entry statement
+        then_statement else_statement then_exit else_exit pre post view
+        then_certificate else_certificate open_equal atomic_equal derivation
+        aligned stack_in join_stack mode tail then_tree else_tree lifo Hthen
+        Helse) {struct data} :
+      forall target below
+        (position : resource_target_position target below stack_in),
+      (resource_target_trace_outcome
+        (resource_conditional_then_lockstep
+          (resource_conditional_core_traces_complete data))
+        target below position *
+       resource_target_trace_outcome
+        (resource_conditional_else_lockstep
+          (resource_conditional_core_traces_complete data))
+        target below position)%type.
+  Proof.
+    - destruct aligned_trace; intros target below position.
+      + exact (ResourceTargetOutcomeContinuous
+          (ResourceTargetContinuousDone position)).
+      + exact (ResourceTargetOutcomeContinuous
+          (ResourceTargetContinuousDoneFocused position)).
+      + exact (ResourceTargetOutcomeChunk
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _
+            _ _ _ _ aligned_trace target below position)).
+      + exact (ResourceTargetOutcomeAccess
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            (@ResourceTargetUnder target below focused tail position))).
+      + exact (ResourceTargetOutcomeNestedAccess
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            (@ResourceTargetUnder target below nested (focused :: tail)
+              position))).
+      + exact (ResourceTargetOutcomeFocusedPrefix
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            position)).
+      + dependent destruction position.
+        * exact (ResourceTargetOutcomeClose
+            ResourceTargetCloseOrdinaryHere).
+        * exact (ResourceTargetOutcomePastOrdinaryClose
+            (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+              position)).
+      + dependent destruction position.
+        * exact (ResourceTargetOutcomeClose
+            ResourceTargetCloseFocusedHere).
+        * exact (ResourceTargetOutcomePastFocusedClose
+            (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+              position)).
+      + destruct (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ branch_data
+          target below position) as [Hthen_outcome Helse_outcome].
+        destruct (resource_target_position_dec target below join_stack) as
+          [join_position|Hclosed].
+        * exact (ResourceTargetOutcomeOrdinaryConditionalContinue Hthen_outcome
+            Helse_outcome
+            (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+              join_position)).
+        * exact (ResourceTargetOutcomeOrdinaryConditionalClose Hclosed
+            Hthen_outcome Helse_outcome).
+      + destruct (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ branch_data
+          target below position) as [Hthen_outcome Helse_outcome].
+        destruct (resource_target_position_dec target below join_stack) as
+          [join_position|Hclosed].
+        * exact (ResourceTargetOutcomeFocusedConditionalRest Hthen_outcome
+            Helse_outcome
+            (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+              join_position)).
+        * exact (ResourceTargetOutcomeFocusedConditionalClose Hclosed
+            Hthen_outcome Helse_outcome).
+      + destruct (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ branch_data
+          target below position) as [Hthen_outcome Helse_outcome].
+        exact (ResourceTargetOutcomeFocusedConditionalContinue Hthen_outcome
+          Helse_outcome
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            position)).
+      + exact (ResourceTargetOutcomeSequenceExpansion
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            position)).
+      + exact (ResourceTargetOutcomeExpansion
+          (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ aligned_trace target below
+            position)).
+    - destruct data; intros target below position; simpl.
+      + split.
+        * exact (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ then_lockstep target
+            below position).
+        * exact (@resource_target_trace_outcome_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ else_lockstep target
+            below position).
+      + exact (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ data target below
+          position).
+      + exact (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ data target below
+          position).
+      + exact (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ data target below
+          position).
+      + exact (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ data target below
+          position).
+      + exact (@resource_conditional_target_outcomes_complete _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ data target below
+          position).
+  Defined.
+
+  (** The CPS control skeleton of an outcome.  A conditional that retains the
+      target at its join delegates closing to its shared rest; a conditional
+      that has already removed the target requires both selected arms to
+      close.  Continuous branch outcomes are intentionally left unconstrained
+      in the former case: after branch selection they continue into the one
+      shared-rest outcome. *)
+  Fixpoint resource_target_outcome_closes
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      {target below position}
+      (outcome : resource_target_trace_outcome aligned_trace target below
+        position) : Prop :=
+    match outcome with
+    | ResourceTargetOutcomeClose _ => True
+    | ResourceTargetOutcomeContinuous _ => False
+    | ResourceTargetOutcomeChunk child => resource_target_outcome_closes child
+    | ResourceTargetOutcomeAccess child => resource_target_outcome_closes child
+    | ResourceTargetOutcomeFocusedPrefix child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomeNestedAccess child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomePastFocusedClose child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomePastOrdinaryClose child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomeExpansion child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomeSequenceExpansion child =>
+        resource_target_outcome_closes child
+    | ResourceTargetOutcomeFocusedConditionalClose _ then_outcome else_outcome =>
+        resource_target_outcome_closes then_outcome /\
+        resource_target_outcome_closes else_outcome
+    | ResourceTargetOutcomeFocusedConditionalRest _ _ rest_outcome =>
+        resource_target_outcome_closes rest_outcome
+    | ResourceTargetOutcomeOrdinaryConditionalContinue _ _ rest_outcome =>
+        resource_target_outcome_closes rest_outcome
+    | ResourceTargetOutcomeOrdinaryConditionalClose _ then_outcome else_outcome =>
+        resource_target_outcome_closes then_outcome /\
+        resource_target_outcome_closes else_outcome
+    | ResourceTargetOutcomeFocusedConditionalContinue _ _ rest_outcome =>
+        resource_target_outcome_closes rest_outcome
+    end.
+
+  Theorem resource_target_outcome_closes_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      {target below position}
+      (outcome : resource_target_trace_outcome aligned_trace target below
+        position) :
+    (resource_target_position target below stack_out -> False) ->
+    resource_target_outcome_closes outcome.
+  Proof.
+    induction outcome; intros Habsent; simpl.
+    - exact I.
+    - exact (Habsent position_out).
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - apply IHoutcome. exact Habsent.
+    - split.
+      + apply IHoutcome1. assumption.
+      + apply IHoutcome2. assumption.
+    - apply IHoutcome3. exact Habsent.
+    - apply IHoutcome3. exact Habsent.
+    - split.
+      + apply IHoutcome1. assumption.
+      + apply IHoutcome2. assumption.
+    - apply IHoutcome3. exact Habsent.
+  Qed.
+
+  (** Canonical first-close provenance, generalized to an arbitrary target
+      stack.  This is the only close-search carrier used by the new producer:
+      unlike the historical split records, every constructor follows an
+      actual normalized-tree constructor. *)
+  Inductive resource_exact_close_stop
+      : forall {cost Γ F Δ entry pre stack_in exit post stack_out mode tail
+          source tree suffix trace},
+        @resource_aligned_net_trace cost Γ F Δ entry pre stack_in exit post
+          stack_out mode tail source tree suffix trace ->
+        list RuntimeAdapter.Atomicity.access_marker -> Type :=
+  | ResourceExactStopDirect
+      {cost Γ F Δ fuel entry exit pre closed_assertion post invariant outer
+       tail stack_out fold_node fold_arguments fold_view derivation aligned
+       lifo rest closing rest_tree Hrest aligned_rest}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ (S fuel) entry
+        (Runtime.IR.TFold fold_node invariant fold_arguments)
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry)
+        ((invariant, outer) :: tail) tail
+        (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+          fold_view) closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry) closing) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ (S fuel) entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments)
+          (RuntimeAdapter.Atomicity.fold_invariant invariant entry) exit pre
+          closed_assertion post (invariant, outer) tail stack_out
+          (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+            (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+            fold_view)
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree
+          Hrest aligned_rest) tail
+  | ResourceExactStopPastInnerClose
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post focused tail
+       stack_out certificate derivation aligned lifo rest closing Hclosing
+       close_ok rest_tree Hrest aligned_rest close_stack}
+      (Hother : close_stack <> tail)
+      (child : resource_exact_close_stop aligned_rest close_stack) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry
+          statement closed exit pre closed_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree
+          Hrest aligned_rest) close_stack
+  | ResourceExactStopPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest
+       chunk Hchunk head_ok rest_tree Hrest aligned_rest close_stack}
+      (child : resource_exact_close_stop aligned_rest close_stack) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest chunk Hchunk head_ok rest_tree
+          Hrest aligned_rest) close_stack
+  | ResourceExactStopNested
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody aligned_body close_stack}
+      (child : resource_exact_close_stop aligned_body close_stack) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+          opened exit pre opened_assertion post focused tail nested stack_out
+          certificate derivation aligned lifo rest opening Hopening open_ok
+          body Hbody aligned_body) close_stack
+  | ResourceExactStopConditionalHere
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit exit pre join_assertion post invariant outer tail
+       stack_out view then_certificate else_certificate open_equal atomic_equal
+       derivation aligned lifo rest then_tree else_tree rest_tree Hthen Helse
+       Hrest branch_data aligned_rest}
+      (arms : resource_conditional_exact_close_arms_stack branch_data) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceFocusedConditional cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit exit pre
+          join_assertion post (invariant, outer) tail tail stack_out view
+          then_certificate else_certificate open_equal atomic_equal derivation
+          aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+          branch_data aligned_rest) tail
+  | ResourceExactStopExpansion
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix flat flat_suffix expansion Hsource Hflat_source flat_trace
+       aligned_flat close_stack}
+      (child : resource_exact_close_stop aligned_flat close_stack) :
+      resource_exact_close_stop
+        (@ResourceAlignedTraceExpansion cost Γ F Δ entry pre stack_in exit
+          post stack_out mode tail source tree suffix flat flat_suffix
+          expansion Hsource Hflat_source flat_trace aligned_flat) close_stack
+  with resource_conditional_exact_close_arms_stack :
+      forall {cost Γ F Δ fuel entry statement then_statement else_statement
+        then_exit else_exit pre join_assertion invariant outer tail view
+        then_certificate else_certificate open_equal atomic_equal derivation
+        aligned then_tree else_tree lifo Hthen Helse}
+        (branch_data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit pre
+          join_assertion view then_certificate else_certificate open_equal
+          atomic_equal derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse),
+      Type :=
+  | ResourceConditionalExactCloseArmsStackCore
+      {cost Γ F Δ fuel entry invariant outer tail node store frame condition
+       then_statement else_statement then_exit else_exit post view
+       then_certificate else_certificate open_equal atomic_equal
+       then_derivation else_derivation then_aligned else_aligned then_tree
+       else_tree then_lifo else_lifo Hthen Helse}
+      (then_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Validation.Hoare.symbolize_expr store condition))))
+        ((invariant, outer) :: tail) then_exit post tail
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix then_certificate) then_tree
+        (Validity.resource_aligned_singleton_suffix then_certificate
+          then_derivation then_aligned then_lifo) Hthen)
+      (else_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Core.EUnOp Runtime.Core.UNot
+                (Runtime.Validation.Hoare.symbolize_expr store condition)))))
+        ((invariant, outer) :: tail) else_exit post tail
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix else_certificate) else_tree
+        (Validity.resource_aligned_singleton_suffix else_certificate
+          else_derivation else_aligned else_lifo) Helse)
+      (then_stop : resource_exact_close_stop then_lockstep tail)
+      (else_stop : resource_exact_close_stop else_lockstep tail) :
+      resource_conditional_exact_close_arms_stack
+        (@ResourceConditionalBranchCore cost Γ F Δ fuel entry node store frame
+          condition then_statement else_statement then_exit else_exit post
+          view then_certificate else_certificate open_equal atomic_equal
+          then_derivation else_derivation then_aligned else_aligned
+          ((invariant, outer) :: tail) tail (Some (invariant, outer)) tail
+          then_tree else_tree then_lifo else_lifo Hthen Helse then_lockstep
+          else_lockstep)
+  | ResourceConditionalExactCloseArmsStackFrame
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit pre post frame view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms_stack inner) :
+      resource_conditional_exact_close_arms_stack
+        (@ResourceConditionalBranchFrame cost Γ F Δ fuel entry statement
+          then_statement else_statement then_exit else_exit pre post frame
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner)
+  | ResourceConditionalExactCloseArmsStackStackConsequence
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit store body body' post post' view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       pre_entails post_entails aligned then_tree else_tree lifo Hthen Helse
+       inner}
+      (arms : resource_conditional_exact_close_arms_stack inner) :
+      resource_conditional_exact_close_arms_stack
+        (@ResourceConditionalBranchStackConsequence cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit store
+          body body' post post' view then_certificate else_certificate
+          open_equal atomic_equal derivation pre_entails post_entails aligned
+          ((invariant, outer) :: tail) tail (Some (invariant, outer)) tail
+          then_tree else_tree lifo Hthen Helse inner)
+  | ResourceConditionalExactCloseArmsStackExistsElim
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms_stack inner) :
+      resource_conditional_exact_close_arms_stack
+        (@ResourceConditionalBranchExistsElim cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner)
+  | ResourceConditionalExactCloseArmsStackExistsPreserve
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (arms : resource_conditional_exact_close_arms_stack inner) :
+      resource_conditional_exact_close_arms_stack
+        (@ResourceConditionalBranchExistsPreserve cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail) tail
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner).
+
+  Definition resource_aligned_close_stack_split_focused_prefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) rest_tree
+        rest Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+        middle exit pre middle_assertion post focused tail stack_out certificate
+        derivation aligned lifo rest chunk Hchunk head_ok rest_tree Hrest
+        aligned_rest) close_stack.
+  Proof.
+    destruct split as [target target_assertion prefix suffix prefix_tree
+      suffix_tree prefix_trace suffix_trace aligned_prefix aligned_suffix
+      expansion].
+    refine {| resource_close_stack_state := target;
+              resource_close_stack_assertion := target_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement middle pre middle_assertion
+                  (focused :: tail) (focused :: tail) certificate derivation
+                  aligned lifo target target_assertion close_stack prefix;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.FocusNetPrefix focused tail close_stack entry
+                  middle target chunk head_ok prefix_tree;
+              resource_close_stack_rest_tree := suffix_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceFocusedPrefix cost Γ fuel entry statement
+                  middle target focused tail close_stack certificate
+                  (resource_certificate_suffix_of_operational_suffix prefix)
+                  chunk Hchunk head_ok prefix_tree prefix_trace;
+              resource_close_stack_rest_trace := suffix_trace |}.
+    - eapply ResourceAlignedTraceFocusedPrefix. exact aligned_prefix.
+    - exact aligned_suffix.
+    - apply RuntimeAdapter.ExpandsCons. exact expansion.
+  Defined.
+
+  (** The degenerate splice at the entry of an ordinary trace.  It is useful
+      for turning a direct close into the same prefix/rest interface as a
+      close found below a nonempty prefix. *)
+  Definition resource_aligned_close_stack_split_at_entry
+      {cost Γ F Δ entry pre stack exit post stack_out source tree suffix trace}
+      (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre stack
+        exit post stack_out None stack source tree suffix trace) :
+    resource_aligned_close_stack_split aligned_trace stack.
+  Proof.
+    pose proof (resource_aligned_net_trace_source_eq aligned_trace) as Hsource.
+    subst source.
+    refine {| resource_close_stack_state := entry;
+              resource_close_stack_assertion := pre;
+              resource_close_stack_prefix :=
+                Validity.ResourceAlignedOperationalDone entry pre stack;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.NetOrdinary stack stack entry entry
+                  (RuntimeAdapter.Slice.ExecDone entry stack);
+              resource_close_stack_rest_tree := tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceDoneNet cost Γ entry stack;
+              resource_close_stack_rest_trace := trace;
+              resource_close_stack_prefix_lockstep :=
+                @ResourceAlignedTraceDone cost Γ F Δ entry pre stack;
+              resource_close_stack_rest_lockstep := aligned_trace |}.
+    apply RuntimeAdapter.ExpandsRefl.
+  Defined.
+
+  Definition resource_aligned_close_stack_split_ordinary_here
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       target below stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion below exit post stack_out None below
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+        pre closed_assertion post target below stack_out certificate derivation
+        aligned lifo rest closing Hclosing close_ok rest_tree Hrest aligned_rest)
+      below.
+  Proof.
+    refine {| resource_close_stack_state := closed;
+              resource_close_stack_assertion := closed_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement closed pre closed_assertion (target :: below)
+                  below certificate derivation aligned lifo closed
+                  closed_assertion below
+                  (Validity.ResourceAlignedOperationalDone closed
+                    closed_assertion below);
+              resource_close_stack_rest := rest;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.NetClose target below below entry closed closed
+                  closing close_ok
+                  (@RuntimeAdapter.NetOrdinary below below closed closed
+                    (RuntimeAdapter.Slice.ExecDone closed below));
+              resource_close_stack_rest_tree := rest_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceClose cost Γ fuel entry statement closed
+                  closed target below below certificate
+                  (RuntimeAdapter.SuffixDone closed) closing Hclosing close_ok
+                  (@RuntimeAdapter.NetOrdinary below below closed closed
+                    (RuntimeAdapter.Slice.ExecDone closed below))
+                  (@RuntimeAdapter.TraceDoneNet cost Γ closed below);
+              resource_close_stack_rest_trace := Hrest |}.
+    - eapply ResourceAlignedTraceClose. apply ResourceAlignedTraceDone.
+    - exact aligned_rest.
+    - apply RuntimeAdapter.ExpandsRefl.
+  Defined.
+
+  Definition resource_aligned_close_stack_split_chunk
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       stack stack_out certificate derivation aligned lifo rest chunk Hchunk
+       rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion stack exit post stack_out None stack
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle exit
+        pre middle_assertion post stack stack_out certificate derivation aligned
+        lifo rest chunk Hchunk rest_tree Hrest aligned_rest) close_stack.
+  Proof.
+    destruct split as [closed close_assertion prefix suffix prefix_tree
+      suffix_tree prefix_trace suffix_trace aligned_prefix aligned_suffix
+      expansion].
+    refine {| resource_close_stack_state := closed;
+              resource_close_stack_assertion := close_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement middle pre middle_assertion stack stack
+                  certificate derivation aligned lifo closed close_assertion
+                  close_stack prefix;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.NetChunk stack middle close_stack entry closed
+                  chunk prefix_tree;
+              resource_close_stack_rest_tree := suffix_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceChunk cost Γ fuel entry statement middle
+                  closed stack close_stack certificate
+                  (resource_certificate_suffix_of_operational_suffix prefix)
+                  chunk Hchunk prefix_tree prefix_trace;
+              resource_close_stack_rest_trace := suffix_trace |}.
+    - eapply ResourceAlignedTraceChunk. exact aligned_prefix.
+    - exact aligned_suffix.
+    - apply RuntimeAdapter.ExpandsCons. exact expansion.
+  Defined.
+
+  Definition resource_aligned_close_stack_split_access
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) body rest
+        Hbody)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_body close_stack) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened exit
+        pre opened_assertion post focused tail stack_out certificate derivation
+        aligned lifo rest opening Hopening open_ok body Hbody aligned_body)
+      close_stack.
+  Proof.
+    destruct split as [closed close_assertion prefix suffix prefix_tree
+      suffix_tree prefix_trace suffix_trace aligned_prefix aligned_suffix
+      expansion].
+    refine {| resource_close_stack_state := closed;
+              resource_close_stack_assertion := close_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement opened pre opened_assertion tail
+                  (focused :: tail) certificate derivation aligned lifo closed
+                  close_assertion close_stack prefix;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.NetAccess tail close_stack focused entry opened
+                  closed opening open_ok prefix_tree;
+              resource_close_stack_rest_tree := suffix_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceAccess cost Γ fuel entry statement opened
+                  closed focused tail close_stack certificate
+                  (resource_certificate_suffix_of_operational_suffix prefix)
+                  opening Hopening open_ok prefix_tree prefix_trace;
+              resource_close_stack_rest_trace := suffix_trace |}.
+    - eapply ResourceAlignedTraceAccess. exact aligned_prefix.
+    - exact aligned_suffix.
+    - apply RuntimeAdapter.ExpandsCons. exact expansion.
+  Defined.
+
+
+  Definition resource_aligned_close_stack_split_past_inner_close
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement closed
+        exit pre closed_assertion post focused tail stack_out certificate
+        derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+        aligned_rest) close_stack.
+  Proof.
+    destruct split as [target target_assertion prefix suffix prefix_tree
+      suffix_tree prefix_trace suffix_trace aligned_prefix aligned_suffix
+      expansion].
+    refine {| resource_close_stack_state := target;
+              resource_close_stack_assertion := target_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement closed pre closed_assertion (focused :: tail)
+                  tail certificate derivation aligned lifo target
+                  target_assertion close_stack prefix;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.FocusNetClose focused tail close_stack entry
+                  closed target
+                  (RuntimeAdapter.Slice.FocusedClose focused tail entry closed
+                    closing close_ok) prefix_tree;
+              resource_close_stack_rest_tree := suffix_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceFocusedClose cost Γ fuel entry statement
+                  closed target focused tail close_stack certificate
+                  (resource_certificate_suffix_of_operational_suffix prefix)
+                  closing Hclosing close_ok prefix_tree prefix_trace;
+              resource_close_stack_rest_trace := suffix_trace |}.
+    - eapply ResourceAlignedTraceFocusedClose. exact aligned_prefix.
+    - exact aligned_suffix.
+    - apply RuntimeAdapter.ExpandsCons. exact expansion.
+  Defined.
+
+  Definition resource_aligned_close_stack_split_past_ordinary_close
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack) :
+    resource_aligned_close_stack_split
+      (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+        pre closed_assertion post focused tail stack_out certificate derivation
+        aligned lifo rest closing Hclosing close_ok rest_tree Hrest aligned_rest)
+      close_stack.
+  Proof.
+    destruct split as [target target_assertion prefix suffix prefix_tree
+      suffix_tree prefix_trace suffix_trace aligned_prefix aligned_suffix
+      expansion].
+    refine {| resource_close_stack_state := target;
+              resource_close_stack_assertion := target_assertion;
+              resource_close_stack_prefix :=
+                @Validity.ResourceAlignedOperationalCons cost Γ F Δ fuel
+                  entry statement closed pre closed_assertion
+                  (focused :: tail) tail certificate derivation aligned lifo
+                  target target_assertion close_stack prefix;
+              resource_close_stack_rest := suffix;
+              resource_close_stack_prefix_tree :=
+                @RuntimeAdapter.NetClose focused tail close_stack entry closed
+                  target closing close_ok prefix_tree;
+              resource_close_stack_rest_tree := suffix_tree;
+              resource_close_stack_prefix_trace :=
+                @RuntimeAdapter.TraceClose cost Γ fuel entry statement closed
+                  target focused tail close_stack certificate
+                  (resource_certificate_suffix_of_operational_suffix prefix)
+                  closing Hclosing close_ok prefix_tree prefix_trace;
+              resource_close_stack_rest_trace := suffix_trace |}.
+    - eapply ResourceAlignedTraceClose. exact aligned_prefix.
+    - exact aligned_suffix.
+    - apply RuntimeAdapter.ExpandsCons. exact expansion.
+  Defined.
+
+  (** Structural projection used by the target-handoff semantic induction.
+      Stating it outside that dependent induction prevents reduction of the
+      entire [resource_target_close_handoff_rect] term merely to recover the
+      elementary fact that a prepended chunk contains its child's prefix. *)
+  Lemma resource_close_stack_split_chunk_child_prefix_footprint_subseteq
+      {cost} {Γ F Δ : typed_core.TypedCore.context} {fuel : nat}
+      {entry middle exit : RuntimeAdapter.Atomicity.analysis_state}
+      {statement : Runtime.RegionSyntax.statement Γ}
+      {pre middle_assertion post :
+        Runtime.Translation.Assertions.assertion Γ F Δ}
+      {stack stack_out : list RuntimeAdapter.Atomicity.access_marker}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement middle}
+      {derivation : Validity.Certified.Rules.RavenResourceTriple pre statement
+        middle_assertion}
+      {aligned : Validity.Certified.resource_certificate_hoare_aligned cost
+        certificate derivation}
+      {lifo : RuntimeAdapter.Atomicity.lifo_certificate certificate stack stack}
+      {rest : Validity.resource_aligned_operational_suffix cost Γ F Δ middle
+        middle_assertion stack exit post stack_out}
+      {chunk : RuntimeAdapter.Payload.chunk entry stack middle stack}
+      {Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk}
+      {rest_tree : RuntimeAdapter.net_tree None stack stack_out middle exit}
+      {Hrest : RuntimeAdapter.net_trace cost Γ middle exit None stack stack_out
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion stack exit post stack_out None stack
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack) :
+    @Normalized.suffix_footprint cost Γ middle _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest close_stack split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle
+            exit pre middle_assertion post stack stack_out certificate
+            derivation aligned lifo rest chunk Hchunk rest_tree Hrest
+            aligned_rest) close_stack
+          (resource_aligned_close_stack_split_chunk aligned_rest split))).
+  Proof.
+    destruct split. simpl.
+    intros invariant Hinvariant. apply elem_of_union_r. exact Hinvariant.
+  Qed.
+
+  Lemma resource_close_stack_split_chunk_source_runtime
+      {cost} {Γ F Δ : typed_core.TypedCore.context} {fuel : nat}
+      {entry middle exit : RuntimeAdapter.Atomicity.analysis_state}
+      {statement : Runtime.RegionSyntax.statement Γ}
+      {pre middle_assertion post :
+        Runtime.Translation.Assertions.assertion Γ F Δ}
+      {stack stack_out : list RuntimeAdapter.Atomicity.access_marker}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement middle}
+      {derivation : Validity.Certified.Rules.RavenResourceTriple pre statement
+        middle_assertion}
+      {aligned : Validity.Certified.resource_certificate_hoare_aligned cost
+        certificate derivation}
+      {lifo : RuntimeAdapter.Atomicity.lifo_certificate certificate stack stack}
+      {rest : Validity.resource_aligned_operational_suffix cost Γ F Δ middle
+        middle_assertion stack exit post stack_out}
+      {chunk : RuntimeAdapter.Payload.chunk entry stack middle stack}
+      {Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk}
+      {rest_tree : RuntimeAdapter.net_tree None stack stack_out middle exit}
+      {Hrest : RuntimeAdapter.net_trace cost Γ middle exit None stack stack_out
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion stack exit post stack_out None stack
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle
+            exit pre middle_assertion post stack stack_out certificate
+            derivation aligned lifo rest chunk Hchunk rest_tree Hrest
+            aligned_rest) close_stack
+          (resource_aligned_close_stack_split_chunk aligned_rest split))) runtime
+    = Validity.Model.combine_runtime_statements
+        (Validity.certificate_runtime_statement certificate runtime)
+        (ConcreteOrdinaryTrace.source_runtime
+          (resource_certificate_suffix_of_operational_suffix
+            (resource_close_stack_prefix aligned_rest close_stack split))
+          runtime).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_chunk_prefix_cps
+      {cost} {Γ F Δ : typed_core.TypedCore.context} {fuel : nat}
+      {entry middle exit : RuntimeAdapter.Atomicity.analysis_state}
+      {statement : Runtime.RegionSyntax.statement Γ}
+      {pre middle_assertion post :
+        Runtime.Translation.Assertions.assertion Γ F Δ}
+      {stack stack_out : list RuntimeAdapter.Atomicity.access_marker}
+      {certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement middle}
+      {derivation : Validity.Certified.Rules.RavenResourceTriple pre statement
+        middle_assertion}
+      {aligned : Validity.Certified.resource_certificate_hoare_aligned cost
+        certificate derivation}
+      {lifo : RuntimeAdapter.Atomicity.lifo_certificate certificate stack stack}
+      {rest : Validity.resource_aligned_operational_suffix cost Γ F Δ middle
+        middle_assertion stack exit post stack_out}
+      {chunk : RuntimeAdapter.Payload.chunk entry stack middle stack}
+      {Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk}
+      {rest_tree : RuntimeAdapter.net_tree None stack stack_out middle exit}
+      {Hrest : RuntimeAdapter.net_trace cost Γ middle exit None stack stack_out
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion stack exit post stack_out None stack
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {close_stack}
+      (split : resource_aligned_close_stack_split aligned_rest close_stack)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceChunk cost Γ F Δ fuel entry statement middle
+          exit pre middle_assertion post stack stack_out certificate derivation
+          aligned lifo rest chunk Hchunk rest_tree Hrest aligned_rest)
+        close_stack
+        (resource_aligned_close_stack_split_chunk aligned_rest split))
+      runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_rest close_stack split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_focused_prefix_source_runtime
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) rest_tree
+        rest Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+            middle exit pre middle_assertion post focused tail stack_out
+            certificate derivation aligned lifo rest chunk Hchunk head_ok
+            rest_tree Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_focused_prefix aligned_rest
+            split))) runtime =
+    Validity.Model.combine_runtime_statements
+      (Validity.certificate_runtime_statement certificate runtime)
+      (ConcreteOrdinaryTrace.source_runtime
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_prefix aligned_rest below split)) runtime).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_focused_prefix_cps
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) rest_tree
+        rest Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest chunk Hchunk head_ok
+          rest_tree Hrest aligned_rest) below
+        (resource_aligned_close_stack_split_focused_prefix aligned_rest split))
+      runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_rest below split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_focused_prefix_child_footprint_subseteq
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) rest_tree
+        rest Hrest) {below}
+      (split : resource_aligned_close_stack_split aligned_rest below) :
+    @Normalized.suffix_footprint cost Γ middle _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest below split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+            middle exit pre middle_assertion post focused tail stack_out
+            certificate derivation aligned lifo rest chunk Hchunk head_ok
+            rest_tree Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_focused_prefix aligned_rest
+            split))).
+  Proof. destruct split; simpl; intros i Hi; apply elem_of_union_r; exact Hi. Qed.
+
+  (** Every target handoff determines a concrete first-close splice.  The
+      result stops exactly after [target] has been removed, and leaves all
+      later execution in the ordinary rest lockstep. *)
+  Definition resource_target_close_splice
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (_ : resource_target_close_handoff aligned_trace target below position) :
+    Type := resource_aligned_close_stack_split aligned_trace below.
+
+  Definition resource_close_stack_split_of_target_handoff
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position) :
+    resource_target_close_splice handoff.
+  Proof.
+    induction handoff.
+    - destruct target as [invariant outer].
+      exact (resource_close_stack_split_of_focused
+        (resource_aligned_focused_close_split_here Hclosing close_ok
+          aligned_rest)).
+    - exact (resource_aligned_close_stack_split_ordinary_here aligned_rest).
+    - exact (resource_aligned_close_stack_split_chunk aligned_rest IHhandoff).
+    - exact (resource_aligned_close_stack_split_access aligned_body IHhandoff).
+    - exact (resource_aligned_close_stack_split_focused_prefix aligned_rest
+        IHhandoff).
+    - exact (resource_aligned_close_stack_split_nested aligned_body IHhandoff).
+    - exact (resource_aligned_close_stack_split_past_inner_close aligned_rest
+        IHhandoff).
+    - exact (resource_aligned_close_stack_split_past_ordinary_close aligned_rest
+        IHhandoff).
+  Defined.
+
+  Lemma resource_target_close_splice_close_open
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position) :
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
+    RuntimeAdapter.Atomicity.analysis_open
+      (resource_close_stack_state _ _
+        (resource_close_stack_split_of_target_handoff handoff)) = target.2.
+  Proof.
+    intros Hwf Hstack.
+    apply RuntimeAdapter.Atomicity.access_stack_consistent_functional with
+      (stack := below).
+    - eapply (Validity.resource_aligned_operational_suffix_preserves_stack_consistency
+        (resource_close_stack_prefix _ _
+          (resource_close_stack_split_of_target_handoff handoff))).
+      + exact Hwf.
+      + exact Hstack.
+    - exact (resource_target_position_outer_consistent target below stack_in
+        position _ Hstack).
+  Qed.
+
+  Lemma resource_preserving_chunk_open_continuous
+      {cost Γ fuel entry statement middle stack certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk)
+      (Hopen : RuntimeAdapter.Atomicity.analysis_open entry <> ∅) :
+    Validity.certificate_open_continuous certificate.
+  Proof.
+    dependent destruction Hchunk; simpl.
+    - split; first exact Hopen. split; last exact I.
+      apply RuntimeAdapter.Atomicity.take_step_preserves_open in step as Heq.
+      rewrite Heq. exact Hopen.
+    - exfalso. apply (f_equal (@List.length _)) in x0. simpl in x0. lia.
+    - exfalso. apply (f_equal (@List.length _)) in x0. simpl in x0. lia.
+    - split; first exact Hopen. split; last exact I.
+      unfold RuntimeAdapter.Atomicity.fold_invariant.
+      rewrite bool_decide_eq_false_2; eauto.
+    - split; first exact Hopen. split; last exact I.
+      rewrite open_equal.
+      apply RuntimeAdapter.Atomicity.take_step_preserves_open in step as Heq.
+      rewrite Heq. exact Hopen.
+  Qed.
+
+  Lemma resource_preserving_chunk_sparse
+      {cost Γ fuel entry statement middle stack certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack stack certificate chunk)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hopen : RuntimeAdapter.Atomicity.analysis_open entry <> ∅)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (runtime : Validity.Model.stack_context Γ) :
+    RuntimeAdapter.Atomicity.analysis_in_atomic middle = false /\
+    ((Validity.certificate_runtime_statement certificate runtime = None /\
+      (RuntimeAdapter.Atomicity.analysis_step_taken entry = true ->
+       RuntimeAdapter.Atomicity.analysis_step_taken middle = true)) \/
+     (RuntimeAdapter.Atomicity.analysis_step_taken entry = false /\
+      RuntimeAdapter.Atomicity.analysis_step_taken middle = true)).
+  Proof.
+    split.
+    - eapply Validity.certificate_preserves_nonatomic; eauto.
+    - have Hcontinuous := resource_preserving_chunk_open_continuous Hchunk
+        Hopen.
+      have Hbudget := Validity.certificate_runtime_step_budget certificate
+        runtime Hcost Hcontinuous Hnotatomic.
+      destruct (Validity.certificate_runtime_statement certificate runtime)
+        as [physical|] eqn:Herasure.
+      + right.
+        unfold Validity.analysis_step_bit, Validity.runtime_option_count in
+          Hbudget.
+        destruct (RuntimeAdapter.Atomicity.analysis_step_taken entry)
+            eqn:Hentry,
+          (RuntimeAdapter.Atomicity.analysis_step_taken middle) eqn:Hmiddle;
+          simpl in Hbudget; try lia; auto.
+      + left. split; first reflexivity.
+        intros Hentry.
+        unfold Validity.analysis_step_bit, Validity.runtime_option_count in
+          Hbudget.
+        rewrite Hentry in Hbudget.
+        destruct (RuntimeAdapter.Atomicity.analysis_step_taken middle)
+          eqn:Hmiddle; simpl in Hbudget; [reflexivity|lia].
+  Qed.
+
+  Lemma resource_chunk_open_continuous
+      {cost Γ fuel entry statement middle stack_in stack_out certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack_in stack_out certificate chunk)
+      (Hentry : RuntimeAdapter.Atomicity.analysis_open entry <> ∅)
+      (Hmiddle : RuntimeAdapter.Atomicity.analysis_open middle <> ∅) :
+    Validity.certificate_open_continuous certificate.
+  Proof.
+    dependent destruction Hchunk; simpl; intuition.
+  Qed.
+
+  Lemma resource_chunk_runtime_none_after_step
+      {cost Γ fuel entry statement middle stack_in stack_out certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack_in stack_out certificate chunk)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hentry : RuntimeAdapter.Atomicity.analysis_open entry <> ∅)
+      (Hmiddle : RuntimeAdapter.Atomicity.analysis_open middle <> ∅)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (Hstep : RuntimeAdapter.Atomicity.analysis_step_taken entry = true)
+      (runtime : Validity.Model.stack_context Γ) :
+    Validity.certificate_runtime_statement certificate runtime = None.
+  Proof.
+    eapply Validity.open_certificate_runtime_none_after_step; eauto.
+    exact (resource_chunk_open_continuous Hchunk Hentry Hmiddle).
+  Qed.
+
+  Lemma resource_chunk_step_taken_after_none
+      {cost Γ fuel entry statement middle stack_in stack_out certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        middle stack_in stack_out certificate chunk)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hentry : RuntimeAdapter.Atomicity.analysis_open entry <> ∅)
+      (Hmiddle : RuntimeAdapter.Atomicity.analysis_open middle <> ∅)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (Hstep : RuntimeAdapter.Atomicity.analysis_step_taken entry = true)
+      (runtime : Validity.Model.stack_context Γ)
+      (Hnone : Validity.certificate_runtime_statement certificate runtime =
+        None) :
+    RuntimeAdapter.Atomicity.analysis_step_taken middle = true.
+  Proof.
+    have Hbudget := Validity.certificate_runtime_step_budget certificate
+      runtime Hcost (resource_chunk_open_continuous Hchunk Hentry Hmiddle)
+      Hnotatomic.
+    unfold Validity.analysis_step_bit, Validity.runtime_option_count in Hbudget.
+    rewrite Hstep Hnone in Hbudget.
+    destruct (RuntimeAdapter.Atomicity.analysis_step_taken middle); simpl in *;
+      [reflexivity|lia].
+  Qed.
+
+  Lemma resource_opening_chunk_runtime_none
+      {cost Γ fuel entry statement opened focused tail certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        opened tail (focused :: tail) certificate chunk)
+      (Hopens : RuntimeAdapter.Payload.opens focused tail entry opened
+        chunk)
+      (runtime : Validity.Model.stack_context Γ) :
+    Validity.certificate_runtime_statement certificate runtime = None.
+  Proof.
+    dependent destruction Hchunk. inversion Hopens; subst; simpl.
+    all: try (exfalso; apply (f_equal (@List.length _)) in x0;
+      simpl in x0; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view. reflexivity.
+  Qed.
+
+  Lemma resource_closing_chunk_runtime_none
+      {cost Γ fuel entry statement closed target below certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        closed (target :: below) below certificate chunk)
+      (Hcloses : RuntimeAdapter.Payload.closes target below entry closed chunk)
+      (runtime : Validity.Model.stack_context Γ) :
+    Validity.certificate_runtime_statement certificate runtime = None.
+  Proof.
+    dependent destruction Hchunk. inversion Hcloses; subst; simpl.
+    all: try (exfalso;
+      repeat match goal with
+      | H : @eq (list _) _ _ |- _ =>
+          pose proof (f_equal (@List.length _) H); clear H
+      end; simpl in *; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view. reflexivity.
+  Qed.
+
+  Lemma resource_close_stack_split_access_source_runtime
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) body rest
+        Hbody)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_body below)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened
+            exit pre opened_assertion post focused tail stack_out certificate
+            derivation aligned lifo rest opening Hopening open_ok body Hbody
+            aligned_body) below
+          (resource_aligned_close_stack_split_access aligned_body split)))
+      runtime =
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_body below split)) runtime.
+  Proof.
+    have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+    destruct split. simpl. rewrite Hnone. simpl.
+    unfold resource_certificate_suffix_of_operational_suffix.
+    destruct (ConcreteOrdinaryTrace.source_runtime
+      (Normalized.Erasure.certificate_suffix_of_operational_suffix
+        (Normalized.Validity.erase_resource_aligned_operational_suffix
+          resource_close_stack_prefix0)) runtime); reflexivity.
+  Qed.
+
+  Lemma resource_close_stack_split_access_prefix_cps
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) body rest
+        Hbody)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_body below)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened
+          exit pre opened_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest opening Hopening open_ok body Hbody
+          aligned_body) below
+        (resource_aligned_close_stack_split_access aligned_body split))
+      runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_body below split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_access_child_prefix_footprint_subseteq
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest opening
+       Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix rest) body rest
+        Hbody)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_body below) :
+    @Normalized.suffix_footprint cost Γ opened _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_body below split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceAccess cost Γ F Δ fuel entry statement opened
+            exit pre opened_assertion post focused tail stack_out certificate
+            derivation aligned lifo rest opening Hopening open_ok body Hbody
+            aligned_body) below
+          (resource_aligned_close_stack_split_access aligned_body split))).
+  Proof.
+    destruct split. simpl.
+    intros invariant Hinvariant. apply elem_of_union_r. exact Hinvariant.
+  Qed.
+
+  Lemma resource_close_stack_split_nested_source_runtime
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (nested :: focused :: tail) exit post stack_out
+        (Some nested) (focused :: tail)
+        (resource_certificate_suffix_of_operational_suffix rest) body rest Hbody)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_body below)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+            opened exit pre opened_assertion post focused tail nested stack_out
+            certificate derivation aligned lifo rest opening Hopening open_ok
+            body Hbody aligned_body) below
+          (resource_aligned_close_stack_split_nested aligned_body split)))
+      runtime =
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_body below split)) runtime.
+  Proof.
+    have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+    destruct split. simpl. rewrite Hnone. simpl.
+    unfold resource_certificate_suffix_of_operational_suffix.
+    destruct (ConcreteOrdinaryTrace.source_runtime
+      (Normalized.Erasure.certificate_suffix_of_operational_suffix
+        (Normalized.Validity.erase_resource_aligned_operational_suffix
+          resource_close_stack_prefix0)) runtime); reflexivity.
+  Qed.
+
+  Lemma resource_close_stack_split_nested_prefix_cps
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (nested :: focused :: tail) exit post stack_out
+        (Some nested) (focused :: tail)
+        (resource_certificate_suffix_of_operational_suffix rest) body rest Hbody)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_body below)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+          opened exit pre opened_assertion post focused tail nested stack_out
+          certificate derivation aligned lifo rest opening Hopening open_ok body
+          Hbody aligned_body) below
+        (resource_aligned_close_stack_split_nested aligned_body split))
+      runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_body below split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_nested_child_footprint_subseteq
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       focused tail nested stack_out certificate derivation aligned lifo rest
+       opening Hopening open_ok body Hbody}
+      (aligned_body : resource_aligned_net_trace cost Γ F Δ opened
+        opened_assertion (nested :: focused :: tail) exit post stack_out
+        (Some nested) (focused :: tail)
+        (resource_certificate_suffix_of_operational_suffix rest) body rest Hbody)
+      {below} (split : resource_aligned_close_stack_split aligned_body below) :
+    @Normalized.suffix_footprint cost Γ opened _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_body below split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+            opened exit pre opened_assertion post focused tail nested stack_out
+            certificate derivation aligned lifo rest opening Hopening open_ok
+            body Hbody aligned_body) below
+          (resource_aligned_close_stack_split_nested aligned_body split))).
+  Proof. destruct split; simpl; intros i Hi; apply elem_of_union_r; exact Hi. Qed.
+
+  Lemma resource_close_stack_split_past_focused_close_source_runtime
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+            closed exit pre closed_assertion post focused tail stack_out
+            certificate derivation aligned lifo rest closing Hclosing close_ok
+            rest_tree Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_past_inner_close aligned_rest
+            split))) runtime =
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest below split)) runtime.
+  Proof.
+    have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+    destruct split. simpl. rewrite Hnone. simpl.
+    unfold resource_certificate_suffix_of_operational_suffix.
+    destruct (ConcreteOrdinaryTrace.source_runtime
+      (Normalized.Erasure.certificate_suffix_of_operational_suffix
+        (Normalized.Validity.erase_resource_aligned_operational_suffix
+          resource_close_stack_prefix0)) runtime); reflexivity.
+  Qed.
+
+  Lemma resource_close_stack_split_past_focused_close_prefix_cps
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+          closed exit pre closed_assertion post focused tail stack_out
+          certificate derivation aligned lifo rest closing Hclosing close_ok
+          rest_tree Hrest aligned_rest) below
+        (resource_aligned_close_stack_split_past_inner_close aligned_rest split))
+      runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_rest below split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_past_focused_close_child_footprint_subseteq
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest) {below}
+      (split : resource_aligned_close_stack_split aligned_rest below) :
+    @Normalized.suffix_footprint cost Γ closed _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest below split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+            closed exit pre closed_assertion post focused tail stack_out
+            certificate derivation aligned lifo rest closing Hclosing close_ok
+            rest_tree Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_past_inner_close aligned_rest
+            split))).
+  Proof. destruct split; simpl; intros i Hi; apply elem_of_union_r; exact Hi. Qed.
+
+  Lemma resource_close_stack_split_past_ordinary_close_source_runtime
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed
+            exit pre closed_assertion post focused tail stack_out certificate
+            derivation aligned lifo rest closing Hclosing close_ok rest_tree
+            Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_past_ordinary_close aligned_rest
+            split))) runtime =
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest below split)) runtime.
+  Proof.
+    have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+    destruct split. simpl. rewrite Hnone. simpl.
+    unfold resource_certificate_suffix_of_operational_suffix.
+    destruct (ConcreteOrdinaryTrace.source_runtime
+      (Normalized.Erasure.certificate_suffix_of_operational_suffix
+        (Normalized.Validity.erase_resource_aligned_operational_suffix
+          resource_close_stack_prefix0)) runtime); reflexivity.
+  Qed.
+
+  Lemma resource_close_stack_split_past_ordinary_close_prefix_cps
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      {below}
+      (split : resource_aligned_close_stack_split aligned_rest below)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (continuation : mask_cont) :
+    trace_runtime_cps_wp
+      (resource_close_stack_prefix_trace
+        (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed exit
+          pre closed_assertion post focused tail stack_out certificate
+          derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+          aligned_rest) below
+        (resource_aligned_close_stack_split_past_ordinary_close aligned_rest
+          split)) runtime ambient continuation =
+    Validity.aligned_runtime_region_wp certificate runtime ambient
+      (trace_runtime_cps_wp
+        (resource_close_stack_prefix_trace aligned_rest below split)
+        runtime ambient continuation).
+  Proof. destruct split. reflexivity. Qed.
+
+  Lemma resource_close_stack_split_past_ordinary_close_child_footprint_subseteq
+      {cost Γ F Δ fuel entry statement closed exit pre closed_assertion post
+       focused tail stack_out certificate derivation aligned lifo rest closing
+       Hclosing close_ok rest_tree Hrest}
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest) {below}
+      (split : resource_aligned_close_stack_split aligned_rest below) :
+    @Normalized.suffix_footprint cost Γ closed _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix aligned_rest below split)) ⊆
+    @Normalized.suffix_footprint cost Γ entry _
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix
+          (@ResourceAlignedTraceClose cost Γ F Δ fuel entry statement closed
+            exit pre closed_assertion post focused tail stack_out certificate
+            derivation aligned lifo rest closing Hclosing close_ok rest_tree
+            Hrest aligned_rest) below
+          (resource_aligned_close_stack_split_past_ordinary_close aligned_rest
+            split))).
+  Proof. destruct split; simpl; intros i Hi; apply elem_of_union_r; exact Hi. Qed.
+
+  Lemma resource_target_close_splice_prefix_none_when_step_taken
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open entry) stack_in)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (Hstep : RuntimeAdapter.Atomicity.analysis_step_taken entry = true)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix _ _
+          (resource_close_stack_split_of_target_handoff handoff))) runtime =
+    None.
+  Proof.
+    induction handoff in Hcost, Hwf, Hstack, Hnotatomic, Hstep, runtime |- *;
+      simpl.
+    - destruct target as [invariant outer]. simpl.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      reflexivity.
+    - destruct target as [invariant outer]. simpl.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      reflexivity.
+    - unfold resource_aligned_close_stack_split_chunk.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
+        RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry statement
+          middle Hwf certificate.
+      have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
+          (RuntimeAdapter.Atomicity.analysis_open middle) stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate stack stack Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below stack
+        position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone Htaken] | [Hentry_false Hmiddle_taken]]].
+      + rewrite Hnone. simpl.
+        rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          (Htaken Hstep) runtime). reflexivity.
+      + rewrite Hentry_false in Hstep. discriminate.
+    - unfold resource_aligned_close_stack_split_access.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate tail (focused :: tail) Hwf lifo Hstack.
+      have Hentry_open := resource_target_position_open_nonempty target below
+        tail position _ Hstack.
+      have Hopened_open := resource_target_position_open_nonempty target below
+        (focused :: tail) (@ResourceTargetUnder target below focused tail
+          position) _ Hopened_stack.
+      have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+      have Hopened_step := resource_chunk_step_taken_after_none Hopening Hcost
+        Hentry_open Hopened_open Hnotatomic Hstep runtime Hnone.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hopened_wf Hopened_stack Hopened_notatomic
+        Hopened_step runtime). reflexivity.
+    - unfold resource_aligned_close_stack_split_focused_prefix.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
+        RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry statement
+          middle Hwf certificate.
+      have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
+          (RuntimeAdapter.Atomicity.analysis_open middle) (focused :: tail) :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (focused :: tail) Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below
+        (focused :: tail) position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone Htaken] | [Hentry_false Hmiddle_taken]]].
+      + rewrite Hnone. simpl.
+        rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          (Htaken Hstep) runtime). reflexivity.
+      + rewrite Hentry_false in Hstep. discriminate.
+    - unfold resource_aligned_close_stack_split_nested.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (nested :: focused :: tail) Hwf lifo
+          Hstack.
+      have Hentry_open := resource_target_position_open_nonempty target below
+        (focused :: tail) position _ Hstack.
+      have Hopened_open := resource_target_position_open_nonempty target below
+        (nested :: focused :: tail)
+        (@ResourceTargetUnder target below nested (focused :: tail) position)
+        _ Hopened_stack.
+      have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+      have Hopened_step := resource_chunk_step_taken_after_none Hopening Hcost
+        Hentry_open Hopened_open Hnotatomic Hstep runtime Hnone.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hopened_wf Hopened_stack Hopened_notatomic
+        Hopened_step runtime). reflexivity.
+    - unfold resource_aligned_close_stack_split_past_inner_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hentry_open := resource_target_position_open_nonempty target below
+        (focused :: tail)
+        (@ResourceTargetUnder target below focused tail position) _ Hstack.
+      have Hclosed_open := resource_target_position_open_nonempty target below
+        tail position _ Hclosed_stack.
+      have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+      have Hclosed_step := resource_chunk_step_taken_after_none Hclosing Hcost
+        Hentry_open Hclosed_open Hnotatomic Hstep runtime Hnone.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hclosed_wf Hclosed_stack Hclosed_notatomic
+        Hclosed_step runtime). reflexivity.
+    - unfold resource_aligned_close_stack_split_past_ordinary_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hentry_open := resource_target_position_open_nonempty target below
+        (focused :: tail)
+        (@ResourceTargetUnder target below focused tail position) _ Hstack.
+      have Hclosed_open := resource_target_position_open_nonempty target below
+        tail position _ Hclosed_stack.
+      have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+      have Hclosed_step := resource_chunk_step_taken_after_none Hclosing Hcost
+        Hentry_open Hclosed_open Hnotatomic Hstep runtime Hnone.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hclosed_wf Hclosed_stack Hclosed_notatomic
+        Hclosed_step runtime). reflexivity.
+  Qed.
+
+  Lemma resource_target_close_splice_source_runtime
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open entry) stack_in)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (runtime : Validity.Model.stack_context Γ) :
+    ConcreteOrdinaryTrace.source_runtime source runtime =
+    Validity.Model.combine_runtime_statements
+      (ConcreteOrdinaryTrace.source_runtime
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_prefix _ _
+            (resource_close_stack_split_of_target_handoff handoff))) runtime)
+      (ConcreteOrdinaryTrace.source_runtime
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_rest _ _
+            (resource_close_stack_split_of_target_handoff handoff))) runtime).
+  Proof.
+    have Hid : forall X : option Runtime.LegacyLang.runtime_stmt,
+        match X with Some statement => Some statement | None => None end = X.
+    { intros [statement|]; reflexivity. }
+    induction handoff in Hcost, Hwf, Hstack, Hnotatomic, runtime |- *; simpl.
+    - destruct target as [invariant outer].
+      unfold resource_close_stack_split_of_focused,
+        resource_aligned_focused_close_split_here. simpl.
+      destruct (Validity.certificate_runtime_statement certificate runtime);
+        reflexivity.
+    - destruct target as [invariant outer].
+      unfold resource_aligned_close_stack_split_ordinary_here. simpl.
+      destruct (Validity.certificate_runtime_statement certificate runtime);
+        reflexivity.
+    - unfold resource_aligned_close_stack_split_chunk.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hmiddle_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement middle Hwf certificate.
+      have Hmiddle_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate stack stack Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below stack
+        position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone Htaken] | [Hentry_false Hmiddle_taken]]].
+      + rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack
+          Hmiddle_notatomic runtime).
+        apply Validity.combine_runtime_statements_assoc_left_sparse.
+        left. exact Hnone.
+      + rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack
+          Hmiddle_notatomic runtime).
+        apply Validity.combine_runtime_statements_assoc_left_sparse.
+        right.
+        have Hprefix := resource_target_close_splice_prefix_none_when_step_taken
+          handoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          Hmiddle_taken runtime.
+        rewrite Hsplit in Hprefix. exact Hprefix.
+    - unfold resource_aligned_close_stack_split_access.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate tail (focused :: tail) Hwf lifo Hstack.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hopened_wf Hopened_stack Hopened_notatomic
+        runtime).
+      repeat rewrite Hid. reflexivity.
+    - unfold resource_aligned_close_stack_split_focused_prefix.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hmiddle_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement middle Hwf certificate.
+      have Hmiddle_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (focused :: tail) Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below
+        (focused :: tail) position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone Htaken] | [Hentry_false Hmiddle_taken]]].
+      + rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack
+          Hmiddle_notatomic runtime).
+        apply Validity.combine_runtime_statements_assoc_left_sparse.
+        left. exact Hnone.
+      + rewrite (IHhandoff Hcost Hmiddle_wf Hmiddle_stack
+          Hmiddle_notatomic runtime).
+        apply Validity.combine_runtime_statements_assoc_left_sparse.
+        right.
+        have Hprefix := resource_target_close_splice_prefix_none_when_step_taken
+          handoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          Hmiddle_taken runtime.
+        rewrite Hsplit in Hprefix. exact Hprefix.
+    - unfold resource_aligned_close_stack_split_nested.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (nested :: focused :: tail) Hwf lifo
+          Hstack.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      have Hnone := resource_opening_chunk_runtime_none Hopening open_ok runtime.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hopened_wf Hopened_stack Hopened_notatomic
+        runtime).
+      repeat rewrite Hid. reflexivity.
+    - unfold resource_aligned_close_stack_split_past_inner_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hclosed_wf Hclosed_stack Hclosed_notatomic
+        runtime).
+      repeat rewrite Hid. reflexivity.
+    - unfold resource_aligned_close_stack_split_past_ordinary_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit.
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      have Hnone := resource_closing_chunk_runtime_none Hclosing close_ok runtime.
+      rewrite Hnone. simpl.
+      rewrite (IHhandoff Hcost Hclosed_wf Hclosed_stack Hclosed_notatomic
+        runtime).
+      repeat rewrite Hid. reflexivity.
+  Qed.
+
+  Lemma resource_target_close_splice_prefix_runtime_atomic
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open entry) stack_in)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (runtime : Validity.Model.stack_context Γ) physical :
+    ConcreteOrdinaryTrace.source_runtime
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix _ _
+          (resource_close_stack_split_of_target_handoff handoff))) runtime =
+      Some physical ->
+    @Atomic Runtime.LegacyLang.simp_lang WeaklyAtomic physical.
+  Proof.
+    have Hid : forall X : option Runtime.LegacyLang.runtime_stmt,
+        match X with Some statement => Some statement | None => None end = X.
+    { intros [statement|]; reflexivity. }
+    induction handoff in Hcost, Hwf, Hstack, Hnotatomic, runtime, physical |- *;
+      simpl.
+    - destruct target as [invariant outer]. simpl.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      discriminate.
+    - destruct target as [invariant outer]. simpl.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      discriminate.
+    - unfold resource_aligned_close_stack_split_chunk.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit. simpl in IHhandoff |- *.
+      have Hmiddle_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement middle Hwf certificate.
+      have Hmiddle_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate stack stack Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below stack
+        position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone _] | [Hentry_false Hmiddle_taken]]].
+      + rewrite Hnone. simpl. rewrite Hid. apply IHhandoff; assumption.
+      + have Hprefix := resource_target_close_splice_prefix_none_when_step_taken
+          handoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          Hmiddle_taken runtime.
+        rewrite Hsplit in Hprefix. rewrite Hprefix. simpl.
+        intros Hphysical.
+        destruct (Validity.certificate_runtime_statement certificate runtime)
+          as [head|] eqn:Hhead; simpl in Hphysical; try discriminate.
+        inversion Hphysical; subst physical.
+        exact (Validity.open_certificate_runtime_atomic certificate runtime
+          Hcost (resource_preserving_chunk_open_continuous Hchunk Hopen)
+          Hnotatomic
+          (resource_aligned_certificate_trusted_runtime_atomicity certificate
+            derivation aligned runtime) head Hhead).
+    - unfold resource_aligned_close_stack_split_access.
+      destruct (resource_close_stack_split_of_target_handoff handoff).
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate tail (focused :: tail) Hwf lifo Hstack.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite (resource_opening_chunk_runtime_none Hopening open_ok runtime).
+      simpl. rewrite Hid. apply IHhandoff; assumption.
+    - unfold resource_aligned_close_stack_split_focused_prefix.
+      destruct (resource_close_stack_split_of_target_handoff handoff)
+        eqn:Hsplit. simpl in IHhandoff |- *.
+      have Hmiddle_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement middle Hwf certificate.
+      have Hmiddle_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (focused :: tail) Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty target below
+        (focused :: tail) position _ Hstack.
+      destruct (resource_preserving_chunk_sparse Hchunk Hcost Hopen
+        Hnotatomic runtime) as
+        [Hmiddle_notatomic [[Hnone _] | [Hentry_false Hmiddle_taken]]].
+      + rewrite Hnone. simpl. rewrite Hid. apply IHhandoff; assumption.
+      + have Hprefix := resource_target_close_splice_prefix_none_when_step_taken
+          handoff Hcost Hmiddle_wf Hmiddle_stack Hmiddle_notatomic
+          Hmiddle_taken runtime.
+        rewrite Hsplit in Hprefix. rewrite Hprefix. simpl.
+        intros Hphysical.
+        destruct (Validity.certificate_runtime_statement certificate runtime)
+          as [head|] eqn:Hhead; simpl in Hphysical; try discriminate.
+        inversion Hphysical; subst physical.
+        exact (Validity.open_certificate_runtime_atomic certificate runtime
+          Hcost (resource_preserving_chunk_open_continuous Hchunk Hopen)
+          Hnotatomic
+          (resource_aligned_certificate_trusted_runtime_atomicity certificate
+            derivation aligned runtime) head Hhead).
+    - unfold resource_aligned_close_stack_split_nested.
+      destruct (resource_close_stack_split_of_target_handoff handoff).
+      simpl in IHhandoff |- *.
+      have Hopened_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement opened Hwf certificate.
+      have Hopened_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) (nested :: focused :: tail) Hwf lifo
+          Hstack.
+      have Hopened_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite (resource_opening_chunk_runtime_none Hopening open_ok runtime).
+      simpl. rewrite Hid. apply IHhandoff; assumption.
+    - unfold resource_aligned_close_stack_split_past_inner_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff).
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      simpl. rewrite Hid. apply IHhandoff; assumption.
+    - unfold resource_aligned_close_stack_split_past_ordinary_close.
+      destruct (resource_close_stack_split_of_target_handoff handoff).
+      simpl in IHhandoff |- *.
+      have Hclosed_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement closed Hwf certificate.
+      have Hclosed_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate (focused :: tail) tail Hwf lifo Hstack.
+      have Hclosed_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      rewrite (resource_closing_chunk_runtime_none Hclosing close_ok runtime).
+      simpl. rewrite Hid. apply IHhandoff; assumption.
+  Qed.
+
+  Fixpoint resource_close_stack_split_of_exact_stop
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace close_stack}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (stop : resource_exact_close_stop aligned_trace close_stack) :
+    resource_aligned_close_stack_split aligned_trace close_stack :=
+    match stop with
+    | ResourceExactStopDirect Hclosing close_ok =>
+        resource_close_stack_split_of_focused
+          (resource_aligned_focused_close_split_here Hclosing close_ok _)
+    | ResourceExactStopPastInnerClose _ child =>
+        resource_aligned_close_stack_split_past_inner_close _
+          (resource_close_stack_split_of_exact_stop child)
+    | ResourceExactStopPrefix child =>
+        resource_aligned_close_stack_split_focused_prefix _
+          (resource_close_stack_split_of_exact_stop child)
+    | ResourceExactStopNested child =>
+        resource_aligned_close_stack_split_nested _
+          (resource_close_stack_split_of_exact_stop child)
+    | ResourceExactStopConditionalHere _ =>
+        resource_close_stack_split_of_focused
+          (resource_aligned_focused_close_split_conditional_here _ _ _ _ _)
+    | ResourceExactStopExpansion child =>
+        resource_aligned_close_stack_split_expansion _
+          (resource_close_stack_split_of_exact_stop child)
+    end.
+
+  Fixpoint resource_exact_close_stop_bracket
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace close_stack}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (stop : resource_exact_close_stop aligned_trace close_stack) :
+    Validity.Model.stack_context Γ -> resource_exact_close_bracket :=
+    match stop with
+    | @ResourceExactStopDirect _ _ _ _ fuel entry exit pre closed_assertion
+        post invariant outer tail stack_out fold_node fold_arguments fold_view
+        derivation aligned lifo rest closing rest_tree Hrest aligned_rest
+        Hclosing close_ok => fun _ => ResourceExactCloseLeaf None
+    | @ResourceExactStopPastInnerClose _ _ _ _ fuel entry statement closed exit pre
+        closed_assertion post focused tail stack_out certificate derivation
+        aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+        aligned_rest close_stack Hother child => fun runtime =>
+        resource_exact_close_bracket_prepend
+          (Validity.certificate_runtime_statement certificate runtime)
+          (resource_exact_close_stop_bracket child runtime)
+    | @ResourceExactStopPrefix _ _ _ _ fuel entry statement middle exit pre
+        middle_assertion post focused tail stack_out certificate derivation
+        aligned lifo rest chunk Hchunk head_ok rest_tree Hrest aligned_rest
+        close_stack child => fun runtime =>
+        resource_exact_close_bracket_prepend
+          (Validity.certificate_runtime_statement certificate runtime)
+          (resource_exact_close_stop_bracket child runtime)
+    | @ResourceExactStopNested _ _ _ _ fuel entry statement opened exit pre
+        opened_assertion post focused tail nested stack_out certificate
+        derivation aligned lifo rest opening Hopening open_ok body Hbody
+        aligned_body close_stack child => fun runtime =>
+        resource_exact_close_bracket_prepend
+          (Validity.certificate_runtime_statement certificate runtime)
+          (resource_exact_close_stop_bracket child runtime)
+    | @ResourceExactStopConditionalHere _ _ _ _ fuel entry statement
+        then_statement else_statement then_exit else_exit exit pre
+        join_assertion post invariant outer tail stack_out view then_certificate
+        else_certificate open_equal atomic_equal derivation aligned lifo rest
+        then_tree else_tree rest_tree Hthen Helse Hrest branch_data aligned_rest
+        arms => fun runtime =>
+        resource_conditional_exact_close_arms_stack_bracket arms runtime
+    | @ResourceExactStopExpansion _ _ _ _ entry pre stack_in exit post
+        stack_out mode tail source tree suffix flat flat_suffix expansion
+        Hsource Hflat_source flat_trace aligned_flat close_stack child =>
+        fun runtime => resource_exact_close_stop_bracket child runtime
+    end
+  with resource_conditional_exact_close_arms_stack_bracket
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit pre join_assertion invariant outer tail view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       aligned then_tree else_tree lifo Hthen Helse}
+      {branch_data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre
+        join_assertion view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned ((invariant, outer) :: tail) tail
+        (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse}
+      (arms : resource_conditional_exact_close_arms_stack branch_data) :
+    Validity.Model.stack_context Γ -> resource_exact_close_bracket :=
+    match arms with
+    | @ResourceConditionalExactCloseArmsStackCore cost0 Γ0 F0 Δ0 fuel entry
+        invariant outer tail node store frame condition then_statement
+        else_statement then_exit else_exit post view then_certificate
+        else_certificate open_equal atomic_equal then_derivation else_derivation
+        then_aligned else_aligned then_tree else_tree then_lifo else_lifo
+        Hthen Helse then_lockstep else_lockstep then_stop else_stop =>
+        fun runtime => ResourceExactCloseIf
+          (Validity.Model.runtime_expr (Validity.Model.runtime_names Γ0 runtime)
+            condition)
+          (Validity.Model.runtime_stack_id Γ0 runtime)
+          (resource_exact_close_stop_bracket then_stop runtime)
+          (resource_exact_close_stop_bracket else_stop runtime)
+    | @ResourceConditionalExactCloseArmsStackFrame _ _ _ _ fuel entry
+        invariant outer tail statement then_statement else_statement then_exit
+        else_exit pre post frame view then_certificate else_certificate
+        open_equal atomic_equal derivation aligned then_tree else_tree lifo
+        Hthen Helse inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_stack_bracket inner_arms runtime
+    | ResourceConditionalExactCloseArmsStackStackConsequence inner_arms =>
+        fun runtime =>
+        resource_conditional_exact_close_arms_stack_bracket inner_arms runtime
+    | @ResourceConditionalExactCloseArmsStackExistsElim t _ _ _ _ fuel entry
+        invariant outer tail statement then_statement else_statement then_exit
+        else_exit body post view then_certificate else_certificate open_equal
+        atomic_equal derivation aligned then_tree else_tree lifo Hthen Helse
+        inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_stack_bracket inner_arms runtime
+    | @ResourceConditionalExactCloseArmsStackExistsPreserve t _ _ _ _ fuel
+        entry invariant outer tail statement then_statement else_statement
+        then_exit else_exit body post view then_certificate else_certificate
+        open_equal atomic_equal derivation aligned then_tree else_tree lifo
+        Hthen Helse inner inner_arms => fun runtime =>
+        resource_conditional_exact_close_arms_stack_bracket inner_arms runtime
+    end.
+
+  (** Structural evidence that the distinguished focused marker has remained
+      open throughout the actual normalized tree.  This is deliberately
+      indexed by the lockstep trace, rather than by its final stack: an end
+      stack of [focused :: tail] alone also admits a close/reopen path. *)
+  Inductive resource_focused_continuous
+      : forall {cost Γ F Δ invariant outer tail entry pre exit post source
+          tree suffix trace},
+        @resource_aligned_net_trace cost Γ F Δ entry pre
+          ((invariant, outer) :: tail) exit post
+          ((invariant, outer) :: tail)
+          (Some (invariant, outer)) tail source tree suffix trace -> Type :=
+  | ResourceFocusedContinuousDone
+      {cost Γ F Δ state assertion invariant outer tail} :
+      resource_focused_continuous
+        (@ResourceAlignedTraceDoneFocused cost Γ F Δ state assertion
+          (invariant, outer) tail)
+  | ResourceFocusedContinuousPrefix
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       invariant outer tail certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest aligned_rest}
+      (continuous : resource_focused_continuous aligned_rest) :
+      resource_focused_continuous
+        (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+          middle exit pre middle_assertion post (invariant, outer) tail
+          ((invariant, outer) :: tail) certificate derivation aligned lifo
+          rest chunk Hchunk head_ok rest_tree Hrest aligned_rest)
+  | ResourceFocusedContinuousExpansion
+      {cost Γ F Δ entry pre exit post invariant outer tail source tree suffix
+       flat flat_suffix expansion Hsource Hflat_source flat_trace aligned_flat}
+      (continuous : resource_focused_continuous aligned_flat) :
+      resource_focused_continuous
+        (@ResourceAlignedTraceExpansion cost Γ F Δ entry pre
+          ((invariant, outer) :: tail) exit post ((invariant, outer) :: tail)
+          (Some (invariant, outer)) tail source tree suffix flat flat_suffix
+          expansion Hsource Hflat_source flat_trace aligned_flat).
+
+  (** A focused normalization exposes its semantic exit at construction time.
+      A closing result retains the syntax-directed first-close stop.  Its
+      linear zipper factorization, when one exists, is recovered only through
+      [resource_focused_exact_close_stop_linear_split]; conditional-close
+      arms deliberately have no fabricated shared split.
+
+      The [StillOpen] alternative carries the trace-indexed continuous
+      witness above, rather than merely observing that the final stack again
+      has the same head.  Thus a close/reopen path cannot be confused with a
+      continuously-open execution. *)
+  Inductive resource_focused_normalization_outcome
+      : forall {cost Γ F Δ invariant outer tail entry pre exit post stack_out
+          source tree suffix trace},
+        @resource_aligned_net_trace cost Γ F Δ entry pre
+          ((invariant, outer) :: tail) exit post stack_out
+          (Some (invariant, outer)) tail source tree suffix trace -> Type :=
+  | ResourceFocusedOutcomeExactClose
+      {cost Γ F Δ invariant outer tail entry pre exit post stack_out source
+       tree suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post stack_out
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (stop : resource_exact_close_stop aligned_trace tail) :
+      resource_focused_normalization_outcome aligned_trace
+  | ResourceFocusedOutcomeStillOpen
+      {cost Γ F Δ invariant outer tail entry pre exit post source tree suffix
+       trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (continuous : resource_focused_continuous aligned_trace) :
+      resource_focused_normalization_outcome aligned_trace.
+
+  (** Conditional arms whose focused accessor is present at both the arm
+      entry and the conditional join.  The branch-indexed payload is kept
+      separate from the outcome witnesses so that each arm retains the
+      analyzer's actual first-close result. *)
+  Inductive resource_conditional_focused_outcomes :
+      forall {cost Γ F Δ fuel entry statement then_statement else_statement
+        then_exit else_exit pre join_assertion view then_certificate
+        else_certificate open_equal atomic_equal derivation aligned
+        invariant outer tail then_tree else_tree lifo Hthen Helse},
+      @resource_conditional_branch_data cost Γ F Δ fuel entry statement
+        then_statement else_statement then_exit else_exit pre join_assertion
+        view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned ((invariant, outer) :: tail)
+        ((invariant, outer) :: tail) (Some (invariant, outer)) tail
+        then_tree else_tree lifo Hthen Helse -> Type :=
+  | ResourceConditionalFocusedOutcomesCore
+      {cost Γ F Δ fuel entry invariant outer tail node store frame condition
+       then_statement else_statement then_exit else_exit post view
+       then_certificate else_certificate open_equal atomic_equal
+       then_derivation else_derivation then_aligned else_aligned then_tree
+       else_tree then_lifo else_lifo Hthen Helse}
+      (then_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Validation.Hoare.symbolize_expr store condition))))
+        ((invariant, outer) :: tail) then_exit post
+        ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix then_certificate) then_tree
+        (Validity.resource_aligned_singleton_suffix then_certificate
+          then_derivation then_aligned then_lifo) Hthen)
+      (else_lockstep : resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store)
+          (Runtime.Translation.Assertions.AAnd frame
+            (Runtime.Translation.Assertions.AExpr
+              (Runtime.Core.EUnOp Runtime.Core.UNot
+                (Runtime.Validation.Hoare.symbolize_expr store condition)))))
+        ((invariant, outer) :: tail) else_exit post
+        ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail
+        (RuntimeAdapter.singleton_suffix else_certificate) else_tree
+        (Validity.resource_aligned_singleton_suffix else_certificate
+          else_derivation else_aligned else_lifo) Helse)
+      (then_outcome : resource_focused_normalization_outcome then_lockstep)
+      (else_outcome : resource_focused_normalization_outcome else_lockstep) :
+      resource_conditional_focused_outcomes
+        (@ResourceConditionalBranchCore cost Γ F Δ fuel entry node store frame
+          condition then_statement else_statement then_exit else_exit post
+          view then_certificate else_certificate open_equal atomic_equal
+          then_derivation else_derivation then_aligned else_aligned
+          ((invariant, outer) :: tail) ((invariant, outer) :: tail)
+          (Some (invariant, outer)) tail then_tree else_tree then_lifo
+          else_lifo Hthen Helse then_lockstep else_lockstep)
+  | ResourceConditionalFocusedOutcomesFrame
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit pre post frame view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (outcomes : resource_conditional_focused_outcomes inner) :
+      resource_conditional_focused_outcomes
+        (@ResourceConditionalBranchFrame cost Γ F Δ fuel entry statement
+          then_statement else_statement then_exit else_exit pre post frame
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail)
+          ((invariant, outer) :: tail) (Some (invariant, outer)) tail
+          then_tree else_tree lifo Hthen Helse inner)
+  | ResourceConditionalFocusedOutcomesStackConsequence
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit store body body' post post' view
+       then_certificate else_certificate open_equal atomic_equal derivation
+       pre_entails post_entails aligned then_tree else_tree lifo Hthen Helse
+       inner}
+      (outcomes : resource_conditional_focused_outcomes inner) :
+      resource_conditional_focused_outcomes
+        (@ResourceConditionalBranchStackConsequence cost Γ F Δ fuel entry
+          statement then_statement else_statement then_exit else_exit store
+          body body' post post' view then_certificate else_certificate
+          open_equal atomic_equal derivation pre_entails post_entails aligned
+          ((invariant, outer) :: tail) ((invariant, outer) :: tail)
+          (Some (invariant, outer)) tail then_tree else_tree lifo Hthen Helse
+          inner)
+  | ResourceConditionalFocusedOutcomesExistsElim
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (outcomes : resource_conditional_focused_outcomes inner) :
+      resource_conditional_focused_outcomes
+        (@ResourceConditionalBranchExistsElim cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail)
+          ((invariant, outer) :: tail) (Some (invariant, outer)) tail
+          then_tree else_tree lifo Hthen Helse inner)
+  | ResourceConditionalFocusedOutcomesExistsPreserve
+      (t : typed_core.TypedCore.typ)
+      {cost Γ F Δ fuel entry invariant outer tail statement then_statement
+       else_statement then_exit else_exit body post view then_certificate
+       else_certificate open_equal atomic_equal derivation aligned then_tree
+       else_tree lifo Hthen Helse inner}
+      (outcomes : resource_conditional_focused_outcomes inner) :
+      resource_conditional_focused_outcomes
+        (@ResourceConditionalBranchExistsPreserve cost Γ F Δ t fuel entry
+          statement then_statement else_statement then_exit else_exit body post
+          view then_certificate else_certificate open_equal atomic_equal
+          derivation aligned ((invariant, outer) :: tail)
+          ((invariant, outer) :: tail) (Some (invariant, outer)) tail
+          then_tree else_tree lifo Hthen Helse inner).
+
+  (** The matched resource fold is the base case of the canonical producer.
+      Its stop is not obtained by inspecting a generic split record: it is
+      the [FocusedClose]/[CertFold] constructor itself. *)
+  Definition resource_focused_outcome_direct_fold
+      {cost Γ F Δ fuel entry exit pre closed_assertion post invariant outer
+       tail stack_out fold_node fold_arguments fold_view derivation aligned
+       lifo rest closing rest_tree Hrest aligned_rest}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ (S fuel) entry
+        (Runtime.IR.TFold fold_node invariant fold_arguments)
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry)
+        ((invariant, outer) :: tail) tail
+        (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+          fold_view) closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry) closing) :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceFocusedClose cost Γ F Δ (S fuel) entry
+        (Runtime.IR.TFold fold_node invariant fold_arguments)
+        (RuntimeAdapter.Atomicity.fold_invariant invariant entry) exit pre
+        closed_assertion post (invariant, outer) tail stack_out
+        (RuntimeAdapter.Atomicity.CertFold cost Γ fuel entry
+          (Runtime.IR.TFold fold_node invariant fold_arguments) invariant
+          fold_view)
+        derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+        aligned_rest).
+  Proof.
+    exact (ResourceFocusedOutcomeExactClose
+      (ResourceExactStopDirect Hclosing close_ok)).
+  Defined.
+
+  (** A preserving head does not alter the first-close provenance.  In the
+      closing branch of the carrier it is therefore retained by the exact
+      stop grammar itself, rather than by a post-hoc split search. *)
+  Definition resource_focused_outcome_prefix_exact
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       invariant outer tail stack_out certificate derivation aligned lifo rest
+       chunk Hchunk head_ok rest_tree Hrest aligned_rest}
+      (child : resource_exact_close_stop aligned_rest tail) :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+        middle exit pre middle_assertion post (invariant, outer) tail stack_out
+        certificate derivation aligned lifo rest chunk Hchunk head_ok rest_tree
+        Hrest aligned_rest).
+  Proof.
+    exact (ResourceFocusedOutcomeExactClose
+      (ResourceExactStopPrefix child)).
+  Defined.
+
+  Definition resource_focused_outcome_nested_exact
+      {cost Γ F Δ fuel entry statement opened exit pre opened_assertion post
+       invariant outer tail nested stack_out certificate derivation aligned
+       lifo rest opening Hopening open_ok body Hbody aligned_body}
+      (child : resource_exact_close_stop aligned_body tail) :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceNestedAccess cost Γ F Δ fuel entry statement
+        opened exit pre opened_assertion post (invariant, outer) tail nested
+        stack_out certificate derivation aligned lifo rest opening Hopening
+        open_ok body Hbody aligned_body).
+  Proof.
+    exact (ResourceFocusedOutcomeExactClose
+      (ResourceExactStopNested child)).
+  Defined.
+
+  Definition resource_focused_outcome_done
+      {cost Γ F Δ state assertion invariant outer tail} :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceDoneFocused cost Γ F Δ state assertion
+        (invariant, outer) tail).
+  Proof.
+    exact (ResourceFocusedOutcomeStillOpen
+      ResourceFocusedContinuousDone).
+  Defined.
+
+  Definition resource_focused_outcome_prefix_continuous
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+       invariant outer tail certificate derivation aligned lifo rest chunk
+       Hchunk head_ok rest_tree Hrest aligned_rest}
+      (continuous : resource_focused_continuous aligned_rest) :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+        middle exit pre middle_assertion post (invariant, outer) tail
+        ((invariant, outer) :: tail) certificate derivation aligned lifo rest
+        chunk Hchunk head_ok rest_tree Hrest aligned_rest).
+  Proof.
+    exact (ResourceFocusedOutcomeStillOpen
+      (ResourceFocusedContinuousPrefix continuous)).
+  Defined.
+
+  Definition resource_focused_outcome_conditional_here_exact
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit exit pre join_assertion post invariant outer tail
+       stack_out view then_certificate else_certificate open_equal atomic_equal
+       derivation aligned lifo rest then_tree else_tree rest_tree Hthen Helse
+       Hrest branch_data aligned_rest}
+      (arms : resource_conditional_exact_close_arms_stack branch_data) :
+    resource_focused_normalization_outcome
+      (@ResourceAlignedTraceFocusedConditional cost Γ F Δ fuel entry statement
+        then_statement else_statement then_exit else_exit exit pre
+        join_assertion post (invariant, outer) tail tail stack_out view
+        then_certificate else_certificate open_equal atomic_equal derivation
+        aligned lifo rest then_tree else_tree rest_tree Hthen Helse Hrest
+        branch_data aligned_rest).
+  Proof.
+    exact (ResourceFocusedOutcomeExactClose
+      (ResourceExactStopConditionalHere arms)).
+  Defined.
 
   (** Resource seam carrier.  Its branch and continuation retain resource
       operational suffixes; the continuation additionally carries its
@@ -4902,30 +8660,6 @@ Module AlignedTraceNormalization.
         inner body pre post frame certificate Hbody).
       exact Haligned_body.
     - dependent destruction certificate; simpl; try exact tt.
-      destruct (@aligned_atomic_decompose_fix cost Γ F Δ (S fuel) state
-        statement _ pre post
-        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body
-          outer inner e e0 certificate e1) derivation Haligned) as
-        [atomic_node Hstatement Htrusted Hbody Haligned_body].
-      pose (Hbody' := Validity.Certified.Rules.ConsequenceRule
-        pre pre' post post' body
-        (RuntimeAdapter.Atomicity.analysis_mask outer)
-        (RuntimeAdapter.Atomicity.analysis_mask inner) Hbody pre_entails
-        post_entails).
-      refine {| atomic_source_node := atomic_node;
-        atomic_source_statement := Hstatement;
-        atomic_source_trusted := Htrusted;
-        atomic_body_derivation := Hbody';
-        atomic_body_aligned := _ |}.
-      eapply (@Validity.Certified.AlignedConsequence cost Γ F Δ fuel
-        (RuntimeAdapter.Atomicity.AnalysisState
-          (RuntimeAdapter.Atomicity.analysis_mask outer)
-          (RuntimeAdapter.Atomicity.analysis_open outer)
-          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
-        inner body pre pre' post post' certificate Hbody pre_entails
-        post_entails).
-      exact Haligned_body.
-    - dependent destruction certificate; simpl; try exact tt.
       destruct (@aligned_atomic_decompose_fix cost Γ F (t :: Δ) (S fuel)
         state statement _ body
         (Runtime.Translation.Assertions.weaken_assertion post)
@@ -4967,6 +8701,55 @@ Module AlignedTraceNormalization.
           (RuntimeAdapter.Atomicity.analysis_open outer)
           (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
         inner body0 body post certificate Hbody).
+      exact Haligned_body.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@aligned_atomic_decompose_fix cost Γ F Δ (S fuel) state
+        statement _ pre post
+        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body
+          outer inner e e0 certificate e1) derivation Haligned) as
+        [atomic_node Hstatement Htrusted Hbody Haligned_body].
+      pose (Hbody' := Validity.Certified.Rules.ConsequenceRule
+        pre pre post post' body
+        (RuntimeAdapter.Atomicity.analysis_mask outer)
+        (RuntimeAdapter.Atomicity.analysis_mask inner) Hbody
+        (Runtime.Validation.Hoare.EntailsRefl pre) post_entails).
+      refine {| atomic_source_node := atomic_node;
+        atomic_source_statement := Hstatement;
+        atomic_source_trusted := Htrusted;
+        atomic_body_derivation := Hbody';
+        atomic_body_aligned := _ |}.
+      eapply (@Validity.Certified.AlignedPostConsequence cost Γ F Δ fuel
+        (RuntimeAdapter.Atomicity.AnalysisState
+          (RuntimeAdapter.Atomicity.analysis_mask outer)
+          (RuntimeAdapter.Atomicity.analysis_open outer)
+          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
+        inner body pre post post' certificate Hbody post_entails).
+      exact Haligned_body.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@aligned_atomic_decompose_fix cost Γ F Δ (S fuel) state
+        statement _
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) post
+        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body0
+          outer inner e e0 certificate e1) derivation Haligned) as
+        [atomic_node Hstatement Htrusted Hbody Haligned_body].
+      pose (Hbody' := Validity.Certified.Rules.StackConsequenceRule
+        store body body' post post' body0
+        (RuntimeAdapter.Atomicity.analysis_mask outer)
+        (RuntimeAdapter.Atomicity.analysis_mask inner) Hbody pre_entails
+        post_entails).
+      refine {| atomic_source_node := atomic_node;
+        atomic_source_statement := Hstatement;
+        atomic_source_trusted := Htrusted;
+        atomic_body_derivation := Hbody';
+        atomic_body_aligned := _ |}.
+      eapply (@Validity.Certified.AlignedStackConsequence cost Γ F Δ fuel
+        (RuntimeAdapter.Atomicity.AnalysisState
+          (RuntimeAdapter.Atomicity.analysis_mask outer)
+          (RuntimeAdapter.Atomicity.analysis_open outer)
+          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
+        inner body0 store body body' post post' certificate Hbody pre_entails
+        post_entails).
       exact Haligned_body.
   Defined.
 
@@ -5051,27 +8834,6 @@ Module AlignedTraceNormalization.
         inner body pre post frame certificate Hbody).
       exact Haligned_body.
     - dependent destruction certificate; simpl; try exact tt.
-      destruct (@resource_aligned_atomic_decompose_fix cost Γ F Δ (S fuel)
-        state statement _ pre post
-        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body
-          outer inner e e0 certificate e1) derivation Haligned) as
-        [atomic_node Hstatement Htrusted Hbody Haligned_body].
-      pose (Hbody' := Validity.Certified.Rules.ResourceConsequenceRule
-        pre pre' post post' body Hbody pre_entails post_entails).
-      refine {| resource_atomic_source_node := atomic_node;
-        resource_atomic_source_statement := Hstatement;
-        resource_atomic_source_trusted := Htrusted;
-        resource_atomic_body_derivation := Hbody';
-        resource_atomic_body_aligned := _ |}.
-      eapply (@Validity.Certified.ResourceAlignedConsequence cost Γ F Δ fuel
-        (RuntimeAdapter.Atomicity.AnalysisState
-          (RuntimeAdapter.Atomicity.analysis_mask outer)
-          (RuntimeAdapter.Atomicity.analysis_open outer)
-          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
-        inner body pre pre' post post' certificate Hbody pre_entails
-        post_entails).
-      exact Haligned_body.
-    - dependent destruction certificate; simpl; try exact tt.
       destruct (@resource_aligned_atomic_decompose_fix cost Γ F (t :: Δ)
         (S fuel) state statement _ body
         (Runtime.Translation.Assertions.weaken_assertion post)
@@ -5112,6 +8874,52 @@ Module AlignedTraceNormalization.
           (RuntimeAdapter.Atomicity.analysis_open outer)
           (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
         inner body0 body post certificate Hbody).
+      exact Haligned_body.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@resource_aligned_atomic_decompose_fix cost Γ F Δ (S fuel)
+        state statement _ pre post
+        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body
+          outer inner e e0 certificate e1) derivation Haligned) as
+        [atomic_node Hstatement Htrusted Hbody Haligned_body].
+      pose (Hbody' := Validity.Certified.Rules.ResourceConsequenceRule
+        pre pre post post' body Hbody
+        (Runtime.Validation.Hoare.EntailsRefl pre) post_entails).
+      refine {| resource_atomic_source_node := atomic_node;
+        resource_atomic_source_statement := Hstatement;
+        resource_atomic_source_trusted := Htrusted;
+        resource_atomic_body_derivation := Hbody';
+        resource_atomic_body_aligned := _ |}.
+      eapply (@Validity.Certified.ResourceAlignedPostConsequence cost Γ F Δ
+        fuel
+        (RuntimeAdapter.Atomicity.AnalysisState
+          (RuntimeAdapter.Atomicity.analysis_mask outer)
+          (RuntimeAdapter.Atomicity.analysis_open outer)
+          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
+        inner body pre post post' certificate Hbody post_entails).
+      exact Haligned_body.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@resource_aligned_atomic_decompose_fix cost Γ F Δ (S fuel)
+        state statement _
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) post
+        (RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel state statement body0
+          outer inner e e0 certificate e1) derivation Haligned) as
+        [atomic_node Hstatement Htrusted Hbody Haligned_body].
+      pose (Hbody' := Validity.Certified.Rules.ResourceStackConsequenceRule
+        store body body' post post' body0 Hbody pre_entails post_entails).
+      refine {| resource_atomic_source_node := atomic_node;
+        resource_atomic_source_statement := Hstatement;
+        resource_atomic_source_trusted := Htrusted;
+        resource_atomic_body_derivation := Hbody';
+        resource_atomic_body_aligned := _ |}.
+      eapply (@Validity.Certified.ResourceAlignedStackConsequence
+        cost Γ F Δ fuel
+        (RuntimeAdapter.Atomicity.AnalysisState
+          (RuntimeAdapter.Atomicity.analysis_mask outer)
+          (RuntimeAdapter.Atomicity.analysis_open outer)
+          (RuntimeAdapter.Atomicity.analysis_step_taken outer) true)
+        inner body0 store body body' post post' certificate Hbody pre_entails
+        post_entails).
       exact Haligned_body.
   Defined.
 
@@ -5470,6 +9278,52 @@ Module AlignedTraceNormalization.
       atoms with "Hpost").
   Qed.
 
+  Lemma aligned_certificate_translated_stack_consequence
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit store body body' post post'}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post)
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation)
+      (pre_entails : Runtime.Validation.Hoare.assertion_entails body' body)
+      (post_entails : Runtime.Validation.Hoare.assertion_entails post post') :
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body)
+      (post := post) certificate derivation ->
+    aligned_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body')
+      (post := post') certificate
+      (Validity.Certified.Rules.StackConsequenceRule store body body' post post'
+        statement (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation pre_entails
+        post_entails).
+  Proof.
+    intros Hinner stack_in stack_out Hcost Hwf Hlifo Hstack _ runtime formals
+      binders atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre' Haccess]]".
+    iDestruct "Hpre'" as "[Hstackown Hbody']".
+    iPoseProof (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) body' body pre_entails runtime formals binders
+      atoms with "Hbody'") as "Hbody".
+    iPoseProof (Hinner stack_in stack_out Hcost Hwf Hlifo Hstack inner_aligned
+      runtime formals binders atoms ambient Hfootprint
+      with "[$Hworld $Hstackown $Hbody $Haccess]") as "Hwp".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp").
+    iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
+    iApply (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) post post' post_entails runtime formals binders
+      atoms with "Hpost").
+  Qed.
+
   Lemma aligned_certificate_translated_exists_elim
       {cost} {Γ F Δ : typed_core.TypedCore.context}
       {t fuel entry statement exit}
@@ -5567,6 +9421,49 @@ Module AlignedTraceNormalization.
     iPoseProof (Hinner stack_in stack_out Hruntime_cost Hprocedure_cost Hwf
       Hlifo Hstack inner_aligned runtime formals binders atoms ambient
       Hfootprint with "[$Hworld $Hpre $Haccess]") as "Hwp".
+    iApply (Validity.translated_runtime_wp_mono with "Hwp").
+    iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
+    iApply (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) post post' post_entails runtime formals binders
+      atoms with "Hpost").
+  Qed.
+
+  Lemma resource_certificate_translated_stack_consequence
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit store body body' post post'}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenResourceTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) statement post)
+      (inner_aligned :
+        Validity.Certified.resource_certificate_hoare_aligned cost certificate
+          derivation)
+      (pre_entails : Runtime.Validation.Hoare.assertion_entails body' body)
+      (post_entails : Runtime.Validation.Hoare.assertion_entails post post') :
+    resource_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body)
+      (post := post) certificate derivation ->
+    resource_certificate_translated_runtime_refinement
+      (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body')
+      (post := post') certificate
+      (Validity.Certified.Rules.ResourceStackConsequenceRule store body body'
+        post post' statement derivation pre_entails post_entails).
+  Proof.
+    intros Hinner stack_in stack_out Hruntime_cost Hprocedure_cost Hwf Hlifo
+      Hstack _ runtime formals binders atoms ambient Hfootprint.
+    iIntros "[#Hworld [Hpre' Haccess]]".
+    iDestruct "Hpre'" as "[Hstackown Hbody']".
+    iPoseProof (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) body' body pre_entails runtime formals binders
+      atoms with "Hbody'") as "Hbody".
+    iPoseProof (Hinner stack_in stack_out Hruntime_cost Hprocedure_cost Hwf
+      Hlifo Hstack inner_aligned runtime formals binders atoms ambient
+      Hfootprint with "[$Hworld $Hstackown $Hbody $Haccess]") as "Hwp".
     iApply (Validity.translated_runtime_wp_mono with "Hwp").
     iIntros "[#Hworld [Hpost Haccess]]". iFrame "Hworld Haccess".
     iApply (Validity.VSemantics.assertion_entails_valid
@@ -5677,6 +9574,7 @@ Module AlignedTraceNormalization.
     - exact IHaligned.
     - exact IHaligned.
     - exact IHaligned.
+    - exact IHaligned.
   Defined.
 
   (** Semantic motive carried by the wrapper-sensitive branch payload.  At
@@ -5703,6 +9601,7 @@ Module AlignedTraceNormalization.
     - exact IHdata.
     - exact IHdata.
     - exact IHdata.
+    - exact IHdata.
   Defined.
 
   Theorem resource_aligned_conditional_wrapper_translated_runtime_refinement
@@ -5722,9 +9621,10 @@ Module AlignedTraceNormalization.
     induction aligned; simpl; intros Hcore; try contradiction.
     - exact Hcore.
     - eapply resource_certificate_translated_frame; eauto.
-    - eapply resource_certificate_translated_consequence; eauto.
     - eapply resource_certificate_translated_exists_elim; eauto.
     - eapply resource_certificate_translated_exists_preserve; eauto.
+    - eapply resource_certificate_translated_consequence; eauto.
+    - eapply resource_certificate_translated_stack_consequence; eauto.
   Qed.
 
   (** A wrapper-sensitive eliminator for conditional alignments.  At the
@@ -5752,7 +9652,9 @@ Module AlignedTraceNormalization.
         aligned_certificate_translated_runtime_refinement certificate derivation
     | Validity.Certified.AlignedFrame _ _ _ _ _ _ _ _ _ _ _ _ _ inner =>
         aligned_conditional_core_obligation inner
-    | Validity.Certified.AlignedConsequence _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+    | Validity.Certified.AlignedPostConsequence _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        inner => aligned_conditional_core_obligation inner
+    | Validity.Certified.AlignedStackConsequence _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
         _ inner => aligned_conditional_core_obligation inner
     | Validity.Certified.AlignedExistsElim _ Γ' F' Δ' t' fuel' entry' exit'
         statement' body' post' certificate' derivation' inner =>
@@ -5785,9 +9687,10 @@ Module AlignedTraceNormalization.
     induction aligned; simpl; intros Hcore; try contradiction.
     - exact Hcore.
     - eapply aligned_certificate_translated_frame; eauto.
-    - eapply aligned_certificate_translated_consequence; eauto.
     - eapply aligned_certificate_translated_exists_elim; eauto.
     - eapply aligned_certificate_translated_exists_preserve; eauto.
+    - eapply aligned_certificate_translated_consequence; eauto.
+    - eapply aligned_certificate_translated_stack_consequence; eauto.
   Qed.
 
   (** The closed seam target, CPS-style, specialized to one concrete LIFO
@@ -6032,6 +9935,53 @@ Module AlignedTraceNormalization.
     - iFrame "Hworld Hpre Hrest".
   Qed.
 
+  Lemma resource_aligned_certificate_seam_stack_consequence
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit store body body' post post'}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenResourceTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) statement post)
+      (inner_aligned : Validity.Certified.resource_certificate_hoare_aligned
+        cost certificate derivation)
+      {stack_in mid_stack}
+      (lifo : RuntimeAdapter.Atomicity.lifo_certificate certificate stack_in
+        mid_stack)
+      {final_exit}
+      (rest_source : RuntimeAdapter.certificate_suffix cost Γ exit final_exit)
+      (ambient : coPset)
+      (pre_entails : Runtime.Validation.Hoare.assertion_entails body' body)
+      (post_entails : Runtime.Validation.Hoare.assertion_entails post post') :
+    resource_aligned_certificate_seam_refinement (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body)
+      (post := post) certificate derivation stack_in mid_stack lifo rest_source
+      ambient ->
+    resource_aligned_certificate_seam_refinement (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body')
+      (post := post') certificate
+      (Validity.Certified.Rules.ResourceStackConsequenceRule store body body'
+        post post' statement derivation pre_entails post_entails)
+      stack_in mid_stack lifo rest_source ambient.
+  Proof.
+    intros Hinner Hruntime_cost Hprocedure_cost Hwf Hstack _ runtime formals
+      binders atoms Hfootprint final_mask carried final Hcont.
+    iIntros "[#Hworld [[Hstackown Hbody'] Hrest]]".
+    iPoseProof (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) body' body pre_entails runtime formals binders
+      atoms with "Hbody'") as "Hbody".
+    iApply (Hinner Hruntime_cost Hprocedure_cost Hwf Hstack inner_aligned
+      runtime formals binders atoms Hfootprint final_mask carried final).
+    - iIntros "[#Hworld' [Hpost Hcarried]]". iApply Hcont. iFrame "Hworld'".
+      iPoseProof (Validity.VSemantics.assertion_entails_valid
+        (Leaf.predicates atoms) post post' post_entails runtime formals binders
+        atoms with "Hpost") as "Hpost'".
+      iFrame "Hpost' Hcarried".
+    - iFrame "Hworld Hstackown Hbody Hrest".
+  Qed.
+
   Lemma resource_aligned_certificate_seam_exists_elim
       {cost} {Γ F Δ : typed_core.TypedCore.context} {t fuel entry statement exit}
       (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel entry statement exit)
@@ -6110,6 +10060,7 @@ Module AlignedTraceNormalization.
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source ambient).
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source ambient).
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source ambient).
+    - exact (IHaligned stack_in mid_stack lifo final_exit rest_source ambient).
   Defined.
 
   Theorem resource_aligned_conditional_wrapper_seam_runtime_refinement
@@ -6138,9 +10089,10 @@ Module AlignedTraceNormalization.
       rest_source ambient Hcore; try contradiction.
     - exact Hcore.
     - eapply resource_aligned_certificate_seam_frame; eauto.
-    - eapply resource_aligned_certificate_seam_consequence; eauto.
     - eapply resource_aligned_certificate_seam_exists_elim; eauto.
     - eapply resource_aligned_certificate_seam_exists_preserve; eauto.
+    - eapply resource_aligned_certificate_seam_consequence; eauto.
+    - eapply resource_aligned_certificate_seam_stack_consequence; eauto.
   Qed.
 
   Lemma aligned_certificate_seam_consequence
@@ -6187,6 +10139,57 @@ Module AlignedTraceNormalization.
         atoms with "Hpost") as "Hpost'".
       iFrame "Hpost' Hcarried".
     - iFrame "Hworld Hpre Hrest".
+  Qed.
+
+  Lemma aligned_certificate_seam_stack_consequence
+      {cost} {Γ F Δ : typed_core.TypedCore.context}
+      {fuel entry statement exit store body body' post post'}
+      (certificate : RuntimeAdapter.Atomicity.analysis_certificate cost Γ fuel
+        entry statement exit)
+      (derivation : Validity.Certified.Rules.RavenHoareTriple
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) statement
+        (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) post)
+      (inner_aligned : Validity.Certified.certificate_hoare_aligned cost
+        certificate derivation)
+      {stack_in mid_stack}
+      (lifo : RuntimeAdapter.Atomicity.lifo_certificate certificate stack_in
+        mid_stack)
+      {final_exit}
+      (rest_source : RuntimeAdapter.certificate_suffix cost Γ exit final_exit)
+      (ambient : coPset)
+      (pre_entails : Runtime.Validation.Hoare.assertion_entails body' body)
+      (post_entails : Runtime.Validation.Hoare.assertion_entails post post') :
+    aligned_certificate_seam_refinement (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body)
+      (post := post) certificate derivation stack_in mid_stack lifo rest_source
+      ambient ->
+    aligned_certificate_seam_refinement (F := F) (Δ := Δ)
+      (pre := Runtime.Translation.Assertions.AAnd
+        (Runtime.Translation.Assertions.AStack store) body')
+      (post := post') certificate
+      (Validity.Certified.Rules.StackConsequenceRule store body body' post post'
+        statement (RuntimeAdapter.Atomicity.analysis_mask entry)
+        (RuntimeAdapter.Atomicity.analysis_mask exit) derivation pre_entails
+        post_entails)
+      stack_in mid_stack lifo rest_source ambient.
+  Proof.
+    intros Hinner Hcost Hwf Hstack _ runtime formals binders atoms Hfootprint
+      final_mask carried final Hcont.
+    iIntros "[#Hworld [[Hstackown Hbody'] Hrest]]".
+    iPoseProof (Validity.VSemantics.assertion_entails_valid
+      (Leaf.predicates atoms) body' body pre_entails runtime formals binders
+      atoms with "Hbody'") as "Hbody".
+    iApply (Hinner Hcost Hwf Hstack inner_aligned runtime formals binders atoms
+      Hfootprint final_mask carried final).
+    - iIntros "[#Hworld' [Hpost Hcarried]]". iApply Hcont. iFrame "Hworld'".
+      iPoseProof (Validity.VSemantics.assertion_entails_valid
+        (Leaf.predicates atoms) post post' post_entails runtime formals binders
+        atoms with "Hpost") as "Hpost'".
+      iFrame "Hpost' Hcarried".
+    - iFrame "Hworld Hstackown Hbody Hrest".
   Qed.
 
   Lemma aligned_certificate_seam_exists_elim
@@ -6354,11 +10357,13 @@ Module AlignedTraceNormalization.
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
         ambient). (* AlignedFrame *)
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
-        ambient). (* AlignedConsequence *)
-    - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
         ambient). (* AlignedExistsElim *)
     - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
         ambient). (* AlignedExistsPreserve *)
+    - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
+        ambient). (* AlignedPostConsequence *)
+    - exact (IHaligned stack_in mid_stack lifo final_exit rest_source
+        ambient). (* AlignedStackConsequence *)
   Defined.
 
   (** Seam analogue of [aligned_conditional_wrapper_translated_runtime_refinement]:
@@ -6401,9 +10406,10 @@ Module AlignedTraceNormalization.
       rest_source ambient Hcore; try contradiction.
     - exact Hcore.
     - eapply aligned_certificate_seam_frame; eauto.
-    - eapply aligned_certificate_seam_consequence; eauto.
     - eapply aligned_certificate_seam_exists_elim; eauto.
     - eapply aligned_certificate_seam_exists_preserve; eauto.
+    - eapply aligned_certificate_seam_consequence; eauto.
+    - eapply aligned_certificate_seam_stack_consequence; eauto.
   Qed.
 
   (** The [AlignedConditional]-leaf recipe: builds the seam-CPS leaf
@@ -6493,25 +10499,6 @@ Module AlignedTraceNormalization.
       + eapply Validity.Certified.AlignedFrame. exact HAfirst.
       + eapply Validity.Certified.AlignedFrame. exact HAsecond.
     - dependent destruction certificate; simpl; try exact tt.
-      destruct (@aligned_sequence_decompose_fix cost Γ F Δ (S fuel) state
-        statement exit pre post
-        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
-          first middle second exit e certificate1 certificate2)
-        derivation Haligned) as
-        [mid Hfirst Hsecond HAfirst HAsecond].
-      unshelve econstructor.
-      + exact mid.
-      + eapply Validity.Certified.Rules.ConsequenceRule.
-        * exact Hfirst.
-        * exact pre_entails.
-        * apply Runtime.Validation.Hoare.EntailsRefl.
-      + eapply Validity.Certified.Rules.ConsequenceRule.
-        * exact Hsecond.
-        * apply Runtime.Validation.Hoare.EntailsRefl.
-        * exact post_entails.
-      + eapply Validity.Certified.AlignedConsequence. exact HAfirst.
-      + eapply Validity.Certified.AlignedConsequence. exact HAsecond.
-    - dependent destruction certificate; simpl; try exact tt.
       destruct (@aligned_sequence_decompose_fix cost Γ F (t :: Δ) (S fuel)
         state statement exit body
         (Runtime.Translation.Assertions.weaken_assertion post)
@@ -6538,6 +10525,43 @@ Module AlignedTraceNormalization.
       + exact (Validity.Certified.Rules.ExistsPreserveRule _ _ _ _ _ _ Hsecond).
       + eapply Validity.Certified.AlignedExistsPreserve. exact HAfirst.
       + eapply Validity.Certified.AlignedExistsPreserve. exact HAsecond.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@aligned_sequence_decompose_fix cost Γ F Δ (S fuel) state
+        statement exit pre post
+        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
+          first middle second exit e certificate1 certificate2)
+        derivation Haligned) as
+        [mid Hfirst Hsecond HAfirst HAsecond].
+      unshelve econstructor.
+      + exact mid.
+      + exact Hfirst.
+      + eapply Validity.Certified.Rules.ConsequenceRule.
+        * exact Hsecond.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+        * exact post_entails.
+      + exact HAfirst.
+      + eapply Validity.Certified.AlignedPostConsequence. exact HAsecond.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@aligned_sequence_decompose_fix cost Γ F Δ (S fuel) state
+        statement exit
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) post
+        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
+          first middle second exit e certificate1 certificate2)
+        derivation Haligned) as
+        [mid Hfirst Hsecond HAfirst HAsecond].
+      unshelve econstructor.
+      + exact mid.
+      + eapply Validity.Certified.Rules.StackConsequenceRule.
+        * exact Hfirst.
+        * exact pre_entails.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+      + eapply Validity.Certified.Rules.ConsequenceRule.
+        * exact Hsecond.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+        * exact post_entails.
+      + eapply Validity.Certified.AlignedStackConsequence. exact HAfirst.
+      + eapply Validity.Certified.AlignedPostConsequence. exact HAsecond.
   Defined.
 
   Record resource_aligned_sequence_decomposition
@@ -6609,25 +10633,6 @@ Module AlignedTraceNormalization.
       + eapply Validity.Certified.ResourceAlignedFrame. exact HAfirst.
       + eapply Validity.Certified.ResourceAlignedFrame. exact HAsecond.
     - dependent destruction certificate; simpl; try exact tt.
-      destruct (@resource_aligned_sequence_decompose_fix cost Γ F Δ (S fuel) state
-        statement exit pre post
-        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
-          first middle second exit e certificate1 certificate2)
-        derivation Haligned) as
-        [mid Hfirst Hsecond HAfirst HAsecond].
-      unshelve econstructor.
-      + exact mid.
-      + eapply Validity.Certified.Rules.ResourceConsequenceRule.
-        * exact Hfirst.
-        * exact pre_entails.
-        * apply Runtime.Validation.Hoare.EntailsRefl.
-      + eapply Validity.Certified.Rules.ResourceConsequenceRule.
-        * exact Hsecond.
-        * apply Runtime.Validation.Hoare.EntailsRefl.
-        * exact post_entails.
-      + eapply Validity.Certified.ResourceAlignedConsequence. exact HAfirst.
-      + eapply Validity.Certified.ResourceAlignedConsequence. exact HAsecond.
-    - dependent destruction certificate; simpl; try exact tt.
       destruct (@resource_aligned_sequence_decompose_fix cost Γ F (t :: Δ) (S fuel)
         state statement exit body
         (Runtime.Translation.Assertions.weaken_assertion post)
@@ -6654,6 +10659,46 @@ Module AlignedTraceNormalization.
       + exact (Validity.Certified.Rules.ResourceExistsPreserveRule _ _ _ _ Hsecond).
       + eapply Validity.Certified.ResourceAlignedExistsPreserve. exact HAfirst.
       + eapply Validity.Certified.ResourceAlignedExistsPreserve. exact HAsecond.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@resource_aligned_sequence_decompose_fix cost Γ F Δ (S fuel)
+        state statement exit pre post
+        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
+          first middle second exit e certificate1 certificate2)
+        derivation Haligned) as
+        [mid Hfirst Hsecond HAfirst HAsecond].
+      unshelve econstructor.
+      + exact mid.
+      + exact Hfirst.
+      + eapply Validity.Certified.Rules.ResourceConsequenceRule.
+        * exact Hsecond.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+        * exact post_entails.
+      + exact HAfirst.
+      + eapply Validity.Certified.ResourceAlignedPostConsequence.
+        exact HAsecond.
+    - dependent destruction certificate; simpl; try exact tt.
+      destruct (@resource_aligned_sequence_decompose_fix cost Γ F Δ (S fuel)
+        state statement exit
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body) post
+        (RuntimeAdapter.Atomicity.CertSequence cost Γ fuel state statement
+          first middle second exit e certificate1 certificate2)
+        derivation Haligned) as
+        [mid Hfirst Hsecond HAfirst HAsecond].
+      unshelve econstructor.
+      + exact mid.
+      + eapply Validity.Certified.Rules.ResourceStackConsequenceRule.
+        * exact Hfirst.
+        * exact pre_entails.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+      + eapply Validity.Certified.Rules.ResourceConsequenceRule.
+        * exact Hsecond.
+        * apply Runtime.Validation.Hoare.EntailsRefl.
+        * exact post_entails.
+      + eapply Validity.Certified.ResourceAlignedStackConsequence.
+        exact HAfirst.
+      + eapply Validity.Certified.ResourceAlignedPostConsequence.
+        exact HAsecond.
   Defined.
 
   Definition normalize_resource_aligned_conditional
@@ -7664,6 +11709,7 @@ Module AlignedTraceNormalization.
     Validity.Model.runtime_cost_model_sound cost ->
     Validity.Certified.procedure_cost_model_sound cost ->
     RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.analysis_in_atomic entry = false ->
     RuntimeAdapter.Atomicity.access_stack_consistent
       (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
     forall (runtime : Validity.Model.stack_context Γ)
@@ -7686,7 +11732,7 @@ Module AlignedTraceNormalization.
     resource_aligned_trace_runtime_refinement
       (@ResourceAlignedTraceDone cost Γ F Δ state assertion stack).
   Proof.
-    intros _ _ _ _ runtime formals binders atoms ambient _.
+    intros _ _ _ _ _ runtime formals binders atoms ambient _.
     unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
     iIntros "Hresources". iModIntro. iExact "Hresources".
   Qed.
@@ -7697,7 +11743,7 @@ Module AlignedTraceNormalization.
       (@ResourceAlignedTraceDoneFocused cost Γ F Δ state assertion focused
         tail).
   Proof.
-    intros _ _ _ _ runtime formals binders atoms ambient _.
+    intros _ _ _ _ _ runtime formals binders atoms ambient _.
     unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
     iIntros "Hresources". iModIntro. iExact "Hresources".
   Qed.
@@ -7737,7 +11783,7 @@ Module AlignedTraceNormalization.
       indexed only by [aligned].  The semantic eliminator built on top of
       this recognizer instead takes the two branches' seam refinements as
       explicit, separate hypotheses. *)
-  Fixpoint aligned_conditional_seam_obligation
+  Definition aligned_conditional_seam_obligation
       {cost} {Γ F Δ : typed_core.TypedCore.context}
       {fuel entry statement exit}
       {pre post : Runtime.Translation.Assertions.assertion Γ F Δ}
@@ -7747,26 +11793,21 @@ Module AlignedTraceNormalization.
         (RuntimeAdapter.Atomicity.analysis_mask entry)
         (RuntimeAdapter.Atomicity.analysis_mask exit) post}
       (aligned : Validity.Certified.certificate_hoare_aligned cost certificate
-        derivation) : Prop :=
-    match aligned with
-    | Validity.Certified.AlignedConditional _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-        _ _ _ _ _ _ _ _ _ _ _ _ => True
-    | Validity.Certified.AlignedFrame _ _ _ _ _ _ _ _ _ _ _ _ _ inner =>
-        aligned_conditional_seam_obligation inner
-    | Validity.Certified.AlignedConsequence _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-        _ inner => aligned_conditional_seam_obligation inner
-    | Validity.Certified.AlignedExistsElim _ Γ' F' Δ' t' fuel' entry' exit'
-        statement' body' post' certificate' derivation' inner =>
-        @aligned_conditional_seam_obligation cost Γ' F' (t' :: Δ') fuel'
-          entry' statement' exit' body'
-          (Runtime.Translation.Assertions.weaken_assertion post') certificate'
-          derivation' inner
-    | Validity.Certified.AlignedExistsPreserve _ Γ' F' Δ' t' fuel' entry' exit'
-        statement' body' post' certificate' derivation' inner =>
-        @aligned_conditional_seam_obligation cost Γ' F' (t' :: Δ') fuel'
-          entry' statement' exit' body' post' certificate' derivation' inner
-    | _ => False
-    end.
+        derivation) : Prop.
+  Proof.
+    induction aligned.
+    - exact False. (* AlignedOrdinaryLeaf *)
+    - exact False. (* AlignedUnfold *)
+    - exact False. (* AlignedFold *)
+    - exact False. (* AlignedSequence *)
+    - exact True. (* AlignedConditional *)
+    - exact False. (* AlignedAtomic *)
+    - exact IHaligned. (* AlignedFrame *)
+    - exact IHaligned. (* AlignedExistsElim *)
+    - exact IHaligned. (* AlignedExistsPreserve *)
+    - exact IHaligned. (* AlignedPostConsequence *)
+    - exact IHaligned. (* AlignedStackConsequence *)
+  Defined.
 
   (** Step 6: the unfold-only seam case, for an arbitrary continuation whose
       own erasure is [None] -- i.e. a seam where *nothing physical* runs
@@ -7862,433 +11903,6 @@ Module AlignedTraceNormalization.
   Qed.
   *)
 
-  (** Step 7's litmus case: [unfold I; atomic { ... }; fold I], with the
-      atomic step and the fold both living in the continuation
-      ([rest_suffix]).  This exercises every part of the retargeted
-      [aligned_seam_runtime_refinement]: the split lands exactly at the
-      fold (so [aligned_split_prefix] is "atomic step, then fold" and
-      [aligned_split_rest] is trivially empty), and the atomic step's own
-      Hoare content is generic -- an arbitrary [atomic_body_certificate]
-      trusted via [Contracts.trusted_atomic], mirroring
-      [atomic_chunk_runtime_refinement]'s own genericity -- so this is a
-      real regression case, not a hand-picked concrete program. The atomic
-      step's pre/post are deliberately both [AAnd (AStack store) body]: the
-      step need not be a logical no-op physically, but it must hand the
-      invariant's own assertion back unchanged, which is exactly what lets
-      the same [store]/[body]/[instantiated] serve both the unfold and the
-      matching fold. *)
-  Section LitmusUnfoldAtomicFold.
-    Context {cost} {Γ F Δ : typed_core.TypedCore.context}
-      {fuel node invariant arguments entry exit}
-      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
-      (body : Runtime.Translation.Assertions.assertion Γ F Δ)
-      (view : Runtime.RegionSyntax.view
-        (Runtime.IR.TUnfold node invariant arguments) =
-        typed_analysis_view.TypedAnalysisView.ViewUnfold invariant)
-      (step : RuntimeAdapter.Atomicity.open_invariant invariant entry = inr exit)
-      (available : invariant ∈ RuntimeAdapter.Atomicity.analysis_mask entry)
-      (instantiated : Contracts.instantiated_invariant Γ F Δ
-        (Logic.invariant_args invariant) invariant
-        (Runtime.Validation.Hoare.symbolize_expr_list store arguments) body)
-      {tail : list RuntimeAdapter.Atomicity.access_marker}
-      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
-      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
-        (RuntimeAdapter.Atomicity.analysis_open entry) tail)
-      {atomic_node : typed_core.TypedCore.node_id}
-      {atomic_program : Runtime.IR.stmt Γ}
-      {atomic_outer atomic_inner : RuntimeAdapter.Atomicity.analysis_state}
-      (atomic_view : Runtime.RegionSyntax.view
-        (Runtime.IR.TAtomic atomic_node atomic_program) =
-        typed_analysis_view.TypedAnalysisView.ViewAtomic atomic_program)
-      (atomic_step : RuntimeAdapter.Atomicity.take_step
-        RuntimeAdapter.Atomicity.AtomicStep exit = inr atomic_outer)
-      (atomic_body_certificate : RuntimeAdapter.Atomicity.analysis_certificate
-        cost Γ fuel
-        (RuntimeAdapter.Atomicity.AnalysisState
-          (RuntimeAdapter.Atomicity.analysis_mask atomic_outer)
-          (RuntimeAdapter.Atomicity.analysis_open atomic_outer)
-          (RuntimeAdapter.Atomicity.analysis_step_taken atomic_outer) true)
-        atomic_program atomic_inner)
-      (atomic_open_equal : RuntimeAdapter.Atomicity.analysis_open atomic_inner =
-        RuntimeAdapter.Atomicity.analysis_open atomic_outer)
-      (atomic_trusted : Contracts.trusted_atomic Γ atomic_program)
-      (atomic_body_derivation : Validity.Certified.Rules.RavenHoareTriple
-        (Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store) body)
-        atomic_program
-        (RuntimeAdapter.Atomicity.analysis_mask exit)
-        (RuntimeAdapter.Atomicity.analysis_mask atomic_inner)
-        (Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store) body))
-      (atomic_body_aligned : Validity.Certified.certificate_hoare_aligned cost
-        atomic_body_certificate
-        (Validity.Certified.hoare_mask_transport atomic_body_derivation
-          (eq_sym (Validity.Certified.step_analysis_mask
-            exit atomic_outer atomic_step))
-          eq_refl))
-      (atomic_body_valid : Validity.certificate_semantically_valid
-        (stack_in := (invariant, RuntimeAdapter.Atomicity.analysis_open entry)
-          :: tail)
-        (stack_out := (invariant, RuntimeAdapter.Atomicity.analysis_open entry)
-          :: tail)
-        (pre := Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store) body)
-        (post := Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store) body)
-        atomic_body_certificate)
-      (atomic_body_lifo : RuntimeAdapter.Atomicity.lifo_certificate
-        atomic_body_certificate
-        ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-        ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail))
-      {fold_node : typed_core.TypedCore.node_id}
-      (fold_view : Runtime.RegionSyntax.view
-        (Runtime.IR.TFold fold_node invariant arguments) =
-        typed_analysis_view.TypedAnalysisView.ViewFold invariant)
-      (fold_Hwf : RuntimeAdapter.Atomicity.state_wf
-        (RuntimeAdapter.Atomicity.AnalysisState
-          (RuntimeAdapter.Atomicity.analysis_mask atomic_inner)
-          (RuntimeAdapter.Atomicity.analysis_open atomic_inner)
-          (RuntimeAdapter.Atomicity.analysis_step_taken atomic_outer ||
-            RuntimeAdapter.Atomicity.analysis_step_taken atomic_inner)
-          (RuntimeAdapter.Atomicity.analysis_in_atomic atomic_outer)))
-      {ambient : coPset}
-      (Hnamespace : ↑(Resources.invariant_namespace invariant) ⊆
-        Validity.Model.active_runtime_mask ambient entry).
-
-    Let branch_suffix := Validity.aligned_singleton_suffix
-      (RuntimeAdapter.Atomicity.CertUnfold cost Γ fuel entry
-        (Runtime.IR.TUnfold node invariant arguments) invariant exit view step)
-      (Validity.Certified.hoare_mask_transport
-        (Validity.Certified.Rules.UnfoldInvariantRule node invariant arguments
-          store body (RuntimeAdapter.Atomicity.analysis_mask entry) available
-          instantiated) eq_refl
-        (eq_sym (Validity.Certified.unfold_analysis_mask view step)))
-      (Validity.Certified.AlignedUnfold cost Γ F Δ fuel entry node invariant
-        arguments exit store body view step available instantiated)
-      (eq_refl :
-        RuntimeAdapter.Atomicity.lifo_certificate
-          (RuntimeAdapter.Atomicity.CertUnfold cost Γ fuel entry
-            (Runtime.IR.TUnfold node invariant arguments) invariant exit view
-            step)
-          tail
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)).
-
-    Let atomic_certificate := RuntimeAdapter.Atomicity.CertAtomic cost Γ fuel
-      exit (Runtime.IR.TAtomic atomic_node atomic_program) atomic_program
-      atomic_outer atomic_inner atomic_view atomic_step atomic_body_certificate
-      atomic_open_equal.
-
-    Let atomic_derivation := Validity.Certified.Rules.AtomicBlockRule
-      atomic_node
-      (Runtime.Translation.Assertions.AAnd
-        (Runtime.Translation.Assertions.AStack store) body)
-      (Runtime.Translation.Assertions.AAnd
-        (Runtime.Translation.Assertions.AStack store) body)
-      atomic_program (RuntimeAdapter.Atomicity.analysis_mask exit)
-      (RuntimeAdapter.Atomicity.analysis_mask atomic_inner) atomic_trusted
-      atomic_body_derivation.
-
-    Let atomic_aligned := Validity.Certified.AlignedAtomic cost Γ F Δ fuel exit
-      atomic_node atomic_program atomic_outer atomic_inner
-      (Runtime.Translation.Assertions.AAnd
-        (Runtime.Translation.Assertions.AStack store) body)
-      (Runtime.Translation.Assertions.AAnd
-        (Runtime.Translation.Assertions.AStack store) body)
-      atomic_view atomic_step atomic_body_certificate atomic_open_equal
-      atomic_trusted atomic_body_derivation atomic_body_aligned.
-
-    Let atomic_lifo :
-        RuntimeAdapter.Atomicity.lifo_certificate atomic_certificate
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail) :=
-      conj atomic_body_lifo eq_refl.
-
-    Let atomic_cert_exit := RuntimeAdapter.Atomicity.AnalysisState
-      (RuntimeAdapter.Atomicity.analysis_mask atomic_inner)
-      (RuntimeAdapter.Atomicity.analysis_open atomic_inner)
-      (RuntimeAdapter.Atomicity.analysis_step_taken atomic_outer ||
-        RuntimeAdapter.Atomicity.analysis_step_taken atomic_inner)
-      (RuntimeAdapter.Atomicity.analysis_in_atomic atomic_outer).
-
-    Let fold_certificate := RuntimeAdapter.Atomicity.CertFold cost Γ fuel
-      atomic_cert_exit (Runtime.IR.TFold fold_node invariant arguments)
-      invariant fold_view.
-
-    Let fold_derivation := Validity.Certified.hoare_mask_transport
-      (Validity.Certified.Rules.FoldInvariantRule fold_node invariant
-        arguments store body
-        (RuntimeAdapter.Atomicity.analysis_mask atomic_cert_exit) instantiated)
-      eq_refl (eq_sym (Validity.Certified.fold_analysis_mask invariant atomic_cert_exit)).
-
-    Let fold_aligned := Validity.Certified.AlignedFold cost Γ F Δ fuel
-      atomic_cert_exit fold_node invariant arguments store body fold_view
-      instantiated.
-
-    Lemma litmus_open_fresh :
-      invariant ∉ RuntimeAdapter.Atomicity.analysis_open entry /\
-      RuntimeAdapter.Atomicity.analysis_open exit =
-        {[invariant]} ∪ RuntimeAdapter.Atomicity.analysis_open entry.
-    Proof.
-      pose proof (RuntimeAdapter.Atomicity.open_invariant_success invariant
-        entry exit step) as (Hfresh & _ & _ & Hopen).
-      exact (conj Hfresh Hopen).
-    Qed.
-
-    Lemma litmus_atomic_cert_exit_open :
-      RuntimeAdapter.Atomicity.analysis_open atomic_cert_exit =
-        {[invariant]} ∪ RuntimeAdapter.Atomicity.analysis_open entry.
-    Proof.
-      unfold atomic_cert_exit. simpl.
-      rewrite atomic_open_equal.
-      pose proof (RuntimeAdapter.Atomicity.atomic_step_preserves_sets
-        exit atomic_outer atomic_step) as
-        [_ Hopen].
-      rewrite Hopen. exact (proj2 litmus_open_fresh).
-    Qed.
-
-    Lemma litmus_fold_member :
-      invariant ∈ RuntimeAdapter.Atomicity.analysis_open atomic_cert_exit.
-    Proof.
-      rewrite litmus_atomic_cert_exit_open.
-      apply elem_of_union_l, elem_of_singleton. reflexivity.
-    Qed.
-
-    Let fold_lifo :
-        RuntimeAdapter.Atomicity.lifo_certificate fold_certificate
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-          tail :=
-      or_introl (ex_intro _ (RuntimeAdapter.Atomicity.analysis_open entry)
-        (conj eq_refl (conj litmus_fold_member (conj
-          (proj1 litmus_open_fresh) litmus_atomic_cert_exit_open)))).
-
-    Let fold_suffix := @Validity.AlignedOperationalCons cost Γ F Δ
-      _ _ _ _ _ _ _ _
-      fold_certificate fold_derivation fold_aligned fold_lifo
-      _ _ _
-      (Validity.AlignedOperationalDone
-        (RuntimeAdapter.Atomicity.fold_invariant invariant atomic_cert_exit)
-        (Runtime.Translation.Assertions.AAnd
-          (Runtime.Translation.Assertions.AStack store)
-          (Runtime.Translation.Assertions.AInvariant invariant
-            (Runtime.Validation.Hoare.symbolize_expr_list store arguments)))
-        tail).
-
-    Let atomic_chunk_certificate := @RuntimeAdapter.ChunkCertificateAtomic
-      cost Γ
-      fuel exit (Runtime.IR.TAtomic atomic_node atomic_program) atomic_program
-      atomic_outer atomic_inner
-      ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-      atomic_view atomic_step atomic_body_certificate atomic_open_equal.
-
-    Let fold_closing := @RuntimeAdapter.ChunkCertificateFold cost Γ fuel
-      atomic_cert_exit (Runtime.IR.TFold fold_node invariant arguments)
-      invariant (RuntimeAdapter.Atomicity.analysis_open entry) tail fold_view
-      litmus_fold_member (proj1 litmus_open_fresh) litmus_atomic_cert_exit_open.
-
-    Let fold_split :=
-      aligned_focused_close_split_here
-        (certificate := fold_certificate) (derivation := fold_derivation)
-        (aligned := fold_aligned) (lifo := fold_lifo)
-        (rest := Validity.AlignedOperationalDone
-          (RuntimeAdapter.Atomicity.fold_invariant invariant atomic_cert_exit)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store)
-            (Runtime.Translation.Assertions.AInvariant invariant
-              (Runtime.Validation.Hoare.symbolize_expr_list store arguments)))
-          tail)
-        fold_closing I
-        (@AlignedTraceDone cost Γ F Δ
-          (RuntimeAdapter.Atomicity.fold_invariant invariant atomic_cert_exit)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store)
-            (Runtime.Translation.Assertions.AInvariant invariant
-              (Runtime.Validation.Hoare.symbolize_expr_list store arguments)))
-          tail).
-
-    Let atomic_fold_split :=
-      aligned_focused_close_split_later
-        (certificate := atomic_certificate) (derivation := atomic_derivation)
-        (aligned := atomic_aligned) (lifo := atomic_lifo) (rest := fold_suffix)
-        atomic_chunk_certificate I _ fold_split.
-
-    Let rest_suffix := @Validity.AlignedOperationalCons cost Γ F Δ
-      _ _ _ _ _ _ _ _
-      atomic_certificate atomic_derivation atomic_aligned atomic_lifo
-      _ _ _ fold_suffix.
-
-    Let litmus_rest_normal :
-        has_aligned_focused_closing_normalization rest_suffix.
-    Proof.
-      refine (existT _ (existT _ (existT _ atomic_fold_split))).
-    Defined.
-
-    Let litmus_seam : aligned_seam_trace branch_suffix rest_suffix ambient := {|
-      aligned_seam_branch := aligned_total_ordinary _
-        (aligned_singleton_total_normalization
-          (Validity.Certified.AlignedUnfold cost Γ F Δ fuel entry node
-            invariant arguments exit store body view step available
-            instantiated)
-          (eq_refl :
-            RuntimeAdapter.Atomicity.lifo_certificate
-              (RuntimeAdapter.Atomicity.CertUnfold cost Γ fuel entry
-                (Runtime.IR.TUnfold node invariant arguments) invariant exit
-                view step)
-              tail
-              ((invariant, RuntimeAdapter.Atomicity.analysis_open entry)
-                :: tail))
-          Hwf Hstack);
-      aligned_seam_mask_eq := eq_refl;
-      aligned_seam_rest := litmus_rest_normal;
-    |}.
-
-    Lemma aligned_seam_runtime_refinement_unfold_atomic_fold :
-      aligned_seam_runtime_refinement litmus_seam.
-    Proof.
-      unfold aligned_seam_runtime_refinement.
-      intros Hcost Hwf' Hstack' runtime formals binders atoms Hfootprint
-        final_mask carried final Hcont.
-      unfold selected_conditional_continuation in *.
-      simpl in Hfootprint, Hcont |- *.
-      have Hcombine_none_r : forall X : option Runtime.LegacyLang.runtime_stmt,
-          Validity.Model.combine_runtime_statements X None = X.
-      { intros X. destruct X; reflexivity. }
-      have Hatomic_footprint : Validity.Model.runtime_mask
-          (RuntimeAdapter.Atomicity.certificate_footprint atomic_certificate)
-          ⊆ ambient.
-      { etrans; last exact Hfootprint. apply Validity.Model.runtime_mask_mono.
-        etrans; first apply
-          (Normalized.suffix_footprint_head_subset atomic_certificate
-            (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
-              fold_suffix)).
-        etrans; first apply union_subseteq_r. apply union_subseteq_l. }
-      have Hfold_active : Validity.Model.active_runtime_mask ambient
-          (RuntimeAdapter.Atomicity.fold_invariant invariant atomic_cert_exit) =
-          Validity.Model.enabled_runtime_mask ambient
-            (RuntimeAdapter.Atomicity.analysis_open entry).
-      { have Hmember : invariant ∈
-            {[invariant]} ∪ RuntimeAdapter.Atomicity.analysis_open entry.
-        { apply elem_of_union_l, elem_of_singleton. reflexivity. }
-        apply Validity.Model.active_runtime_mask_same_open.
-        unfold RuntimeAdapter.Atomicity.fold_invariant.
-        rewrite litmus_atomic_cert_exit_open.
-        rewrite (bool_decide_eq_true_2 _ Hmember).
-        simpl.
-        apply set_eq. intros y.
-        rewrite elem_of_difference.
-        rewrite elem_of_union.
-        rewrite elem_of_singleton.
-        split.
-        - intros [[Heq | Hy] Hneq].
-          + exfalso. exact (Hneq Heq).
-          + exact Hy.
-        - intros Hy. split.
-          + right. exact Hy.
-          + intros Heq. subst y. exact (proj1 litmus_open_fresh Hy). }
-      have Hweaken : ((Validity.global_world_context atoms ∗
-          Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
-            runtime formals binders atoms
-            (Runtime.Translation.Assertions.AAnd
-              (Runtime.Translation.Assertions.AStack store) body) ∗
-          Validity.World.access_stack_interp atoms ambient
-            ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail))
-            ∗ carried) ⊢
-        |={Validity.Model.active_runtime_mask ambient atomic_cert_exit,
-           Validity.Model.enabled_runtime_mask ambient
-             (RuntimeAdapter.Atomicity.analysis_open entry)}=>
-        |={Validity.Model.enabled_runtime_mask ambient
-             (RuntimeAdapter.Atomicity.analysis_open entry), final_mask}=>
-          final.
-      { iIntros "[[Hworld [Hpost Haccess]] Hcarried]".
-        iPoseProof (ConcreteAccessNodes.matched_fold_node_runtime_refinement
-          (node := fold_node) store body atomic_cert_exit ambient
-          (RuntimeAdapter.Atomicity.analysis_open entry) tail fold_Hwf
-          litmus_fold_member (proj1 litmus_open_fresh)
-          litmus_atomic_cert_exit_open instantiated runtime formals binders
-          atoms with "[$Hworld $Hpost $Haccess]") as "Hfold".
-        iEval (unfold Validity.translated_runtime_wp; simpl) in "Hfold".
-        rewrite Hfold_active.
-        iMod "Hfold" as "[Hworld' [Hpost' Haccess']]".
-        iModIntro. iApply Hcont. iFrame "Hworld' Hpost' Haccess' Hcarried". }
-      destruct (Validity.certificate_runtime_statement atomic_certificate
-        runtime) as [physical|] eqn:Hphysical.
-      - have Hphysical' : Validity.Model.runtime_stmt
-            (Validity.Model.runtime_names Γ runtime)
-            (Validity.Model.runtime_stack_id Γ runtime) atomic_program =
-            Some physical := Hphysical.
-        have Hatomic_instance : @Atomic Runtime.LegacyLang.simp_lang
-            WeaklyAtomic physical.
-        { exact (Validity.trusted_atomic_runtime_atomic atomic_program runtime
-            physical atomic_trusted Hphysical'). }
-        iIntros "[Hworld [Hpre [Haccess Hcarried]]]".
-        iApply (Validity.translated_atomic_leaf_mask_change runtime ambient
-          exit atomic_cert_exit (Runtime.IR.TAtomic atomic_node atomic_program)
-          physical
-          (Validity.Model.enabled_runtime_mask ambient
-            (RuntimeAdapter.Atomicity.analysis_open entry))
-          (|={Validity.Model.enabled_runtime_mask ambient
-               (RuntimeAdapter.Atomicity.analysis_open entry), final_mask}=>
-            final)%I Hphysical').
-        iPoseProof (ConcreteAccessNodes.unfold_node_runtime_refinement
-          (node := node) store body entry exit ambient tail step Hnamespace
-          instantiated runtime formals binders atoms
-          with "[$Hworld $Hpre $Haccess]") as "Hopen".
-        iEval (unfold Validity.translated_runtime_wp; simpl) in "Hopen".
-        iMod "Hopen" as "[Hworld' [Hpost Haccess']]".
-        iPoseProof (ConcreteChunks.atomic_chunk_runtime_refinement atomic_step
-          atomic_body_certificate atomic_open_equal
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store) body)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store) body) atomic_trusted
-          atomic_body_valid runtime formals binders atoms ambient
-          Hatomic_footprint with "[$Hworld' $Hpost $Haccess']") as "Hatomic_wp".
-        iPoseProof (Validity.translated_runtime_wp_frame runtime ambient exit
-          atomic_cert_exit (Runtime.IR.TAtomic atomic_node atomic_program) _
-          carried with "[$Hatomic_wp $Hcarried]") as "Hatomic_wp_framed".
-        iApply (Validity.translated_runtime_wp_mono runtime ambient exit
-          atomic_cert_exit (Runtime.IR.TAtomic atomic_node atomic_program) _ _
-          Hweaken).
-        iExact "Hatomic_wp_framed".
-      - iIntros "[Hworld [Hpre [Haccess Hcarried]]]".
-        iPoseProof (ConcreteAccessNodes.unfold_node_runtime_refinement
-          (node := node) store body entry exit ambient tail step Hnamespace
-          instantiated runtime formals binders atoms
-          with "[$Hworld $Hpre $Haccess]") as "Hopen".
-        iEval (unfold Validity.translated_runtime_wp; simpl) in "Hopen".
-        iMod "Hopen" as "[Hworld' [Hpost Haccess']]".
-        have Hphysical' : Validity.Model.runtime_stmt
-            (Validity.Model.runtime_names Γ runtime)
-            (Validity.Model.runtime_stack_id Γ runtime) atomic_program =
-            None := Hphysical.
-        pose proof (@ConcreteChunks.atomic_chunk_runtime_refinement Γ F Δ fuel
-          cost exit atomic_node atomic_program atomic_outer atomic_inner
-          atomic_step atomic_body_certificate atomic_open_equal
-          ((invariant, RuntimeAdapter.Atomicity.analysis_open entry) :: tail)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store) body)
-          (Runtime.Translation.Assertions.AAnd
-            (Runtime.Translation.Assertions.AStack store) body) atomic_trusted
-          atomic_body_valid runtime formals binders atoms ambient
-          Hatomic_footprint) as Hatomic_wp.
-        unfold Validity.translated_runtime_wp in Hatomic_wp.
-        simpl in Hatomic_wp.
-        rewrite Hphysical' in Hatomic_wp.
-        iPoseProof (Hatomic_wp with "[$Hworld' $Hpost $Haccess']") as "Hfin".
-        iMod "Hfin" as "[Hworld'' [Hpost'' Haccess'']]".
-        iPoseProof (ConcreteAccessNodes.matched_fold_node_runtime_refinement
-          (node := fold_node) store body atomic_cert_exit ambient
-          (RuntimeAdapter.Atomicity.analysis_open entry) tail fold_Hwf
-          litmus_fold_member (proj1 litmus_open_fresh)
-          litmus_atomic_cert_exit_open instantiated runtime formals binders
-          atoms with "[$Hworld'' $Hpost'' $Haccess'']") as "Hfold".
-        iEval (unfold Validity.translated_runtime_wp; simpl) in "Hfold".
-        rewrite Hfold_active.
-        iMod "Hfold" as "[Hworld3 [Hpost3 Haccess3]]".
-        iApply Hcont. iFrame "Hworld3 Hpost3 Haccess3 Hcarried".
-    Qed.
-
-  End LitmusUnfoldAtomicFold.
 
   Lemma aligned_conditional_core_from_ordinary_branch_traces
       {cost} {Γ F Δ : typed_core.TypedCore.context}
@@ -8453,6 +12067,7 @@ Module AlignedTraceNormalization.
     - destruct Hsemantic as [Hthen_refinement Helse_refinement].
       apply resource_aligned_conditional_core_from_resource_branch_refinements;
         assumption.
+    - exact (IHdata Hsemantic).
     - exact (IHdata Hsemantic).
     - exact (IHdata Hsemantic).
     - exact (IHdata Hsemantic).
@@ -8696,20 +12311,6 @@ Module AlignedTraceNormalization.
     - reflexivity.
   Qed.
 
-  (** Final Phase 7 reification induction.  Its proof is intentionally left
-      as one visible obligation while the constructor lemmas are assembled:
-      ordinary conditionals use the preceding translated-certificate
-      boundary and a shared continuation; focused conditionals split into
-      preserving and branch-local-close cases. *)
-  Theorem aligned_trace_runtime_refinement_complete
-      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
-        suffix trace}
-      (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre stack_in exit
-        post stack_out mode tail source tree suffix trace) :
-    aligned_trace_runtime_refinement aligned_trace.
-  Proof.
-  Admitted.
-
   (** Closed adequacy consumes the empty-stack, ordinary-mode specialization
       of the assertion-aware relation.  Keeping the certificate [source]
       explicit avoids imposing syntactic associativity on translated
@@ -8819,6 +12420,429 @@ Module AlignedTraceNormalization.
       with "Hlogical") as "Hruntime".
     iApply (trace_runtime_cps_wp_terminal_mono with "Hruntime").
     reflexivity.
+  Qed.
+
+  (** Assertion-aware CPS meaning of a target-close splice.  The prefix is
+      interpreted by its resource lockstep, while the post-close ordinary
+      suffix remains an explicit continuation premise.  In particular this
+      statement neither flattens the splice nor moves a mask-changing update
+      across the arbitrary ordinary rest. *)
+  Definition resource_target_close_splice_cps_handoff
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position) : Prop :=
+    let split := resource_close_stack_split_of_target_handoff handoff in
+    forall (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env) (carried final : iProp Resources.Σ),
+    Validity.Model.runtime_cost_model_sound cost ->
+    Validity.Certified.procedure_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry) stack_in ->
+    Validity.Model.runtime_mask
+      (Normalized.suffix_footprint
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_prefix _ _ split))) ⊆ ambient ->
+    ((Validity.global_world_context atoms ∗
+      Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+        runtime formals binders atoms
+        (resource_close_stack_assertion _ _ split) ∗
+      Validity.World.access_stack_interp atoms ambient below ∗ carried) ⊢
+      ConcreteOrdinaryTrace.source_translated_wp
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_rest _ _ split)) runtime ambient final) ->
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms pre ∗
+     Validity.World.access_stack_interp atoms ambient stack_in ∗ carried) ⊢
+    trace_runtime_cps_wp (resource_close_stack_prefix_trace _ _ split)
+      runtime ambient (fun _ =>
+        ConcreteOrdinaryTrace.source_translated_wp
+          (resource_certificate_suffix_of_operational_suffix
+            (resource_close_stack_rest _ _ split)) runtime ambient final).
+
+  Lemma resource_target_close_splice_cps_handoff_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace target below position}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (handoff : resource_target_close_handoff aligned_trace target below
+        position) :
+    resource_target_close_splice_cps_handoff handoff.
+  Proof.
+    unfold resource_target_close_splice_cps_handoff. cbv zeta.
+    intros runtime ambient formals binders atoms carried final Hruntime_cost
+      Hprocedure_cost Hwf Hstack Henvelope Hcont.
+    pose proof (resource_pending_open_trace_refinement_complete
+      (resource_close_stack_prefix_lockstep _ _
+        (resource_close_stack_split_of_target_handoff handoff)) runtime
+      ambient formals binders atoms
+      (fun _ => carried -∗ ConcreteOrdinaryTrace.source_translated_wp
+        (resource_certificate_suffix_of_operational_suffix
+          (resource_close_stack_rest _ _
+            (resource_close_stack_split_of_target_handoff handoff))) runtime
+        ambient final)%I Hruntime_cost Hprocedure_cost Hwf Hstack Henvelope)
+      as Hprefix.
+    have Hterminal :
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms) runtime
+         formals binders atoms
+         (resource_close_stack_assertion _ _
+           (resource_close_stack_split_of_target_handoff handoff)) ∗
+       Validity.World.access_stack_interp atoms ambient below ⊢
+       carried -∗ ConcreteOrdinaryTrace.source_translated_wp
+         (resource_certificate_suffix_of_operational_suffix
+           (resource_close_stack_rest _ _
+             (resource_close_stack_split_of_target_handoff handoff))) runtime
+         ambient final)%I.
+    { iIntros "[Hworld [Hpost Haccess]] Hcarried".
+      iApply Hcont. iFrame. }
+    specialize (Hprefix Hterminal).
+    iIntros "[Hworld [Hpre [Haccess Hcarried]]]".
+    iPoseProof (Hprefix with "[$Hworld $Hpre $Haccess]") as "Hprefix".
+    iPoseProof (trace_runtime_cps_wp_frame _ runtime ambient _ carried
+      with "[$Hprefix $Hcarried]") as "Hprefix".
+    iApply (trace_runtime_cps_wp_terminal_mono with "Hprefix").
+    iIntros "[Hcontinuation Hcarried]".
+    iApply ("Hcontinuation" with "Hcarried").
+  Qed.
+
+  (** Outcome-level CPS interpretation.  This is deliberately an algebra of
+      semantic leaves rather than a flattened source-WP claim.  A close leaf
+      exposes its first-close splice handoff; a continuous leaf remains
+      parametric in its eventual continuation.  Conditional nodes retain both
+      arm interpretations and, when the target survives the join, the one
+      shared-rest interpretation that those arms must receive. *)
+  Fixpoint resource_target_outcome_cps_interpretation
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      {target below position}
+      (outcome : resource_target_trace_outcome aligned_trace target below
+        position) : Prop :=
+    match outcome with
+    | ResourceTargetOutcomeClose handoff =>
+        resource_target_close_splice_cps_handoff handoff
+    | @ResourceTargetOutcomeContinuous cost0 Γ0 F0 Δ0 entry0 pre0 stack_in0
+        exit0 post0 stack_out0 mode0 tail0 source0 tree0 suffix0 trace0 target0
+        below0 position_in0 position_out0 aligned0 continuous0 =>
+        resource_pending_open_trace_refinement aligned0
+    | ResourceTargetOutcomeChunk child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeAccess child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeFocusedPrefix child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeNestedAccess child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomePastFocusedClose child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomePastOrdinaryClose child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeExpansion child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeSequenceExpansion child =>
+        resource_target_outcome_cps_interpretation child
+    | ResourceTargetOutcomeFocusedConditionalClose _ then_outcome else_outcome
+        => resource_target_outcome_cps_interpretation then_outcome /\
+           resource_target_outcome_cps_interpretation else_outcome
+    | ResourceTargetOutcomeFocusedConditionalRest then_outcome else_outcome
+        rest_outcome =>
+        resource_target_outcome_cps_interpretation then_outcome /\
+        resource_target_outcome_cps_interpretation else_outcome /\
+        resource_target_outcome_cps_interpretation rest_outcome
+    | ResourceTargetOutcomeOrdinaryConditionalContinue then_outcome
+        else_outcome rest_outcome =>
+        resource_target_outcome_cps_interpretation then_outcome /\
+        resource_target_outcome_cps_interpretation else_outcome /\
+        resource_target_outcome_cps_interpretation rest_outcome
+    | ResourceTargetOutcomeOrdinaryConditionalClose _ then_outcome else_outcome
+        => resource_target_outcome_cps_interpretation then_outcome /\
+           resource_target_outcome_cps_interpretation else_outcome
+    | ResourceTargetOutcomeFocusedConditionalContinue then_outcome else_outcome
+        rest_outcome =>
+        resource_target_outcome_cps_interpretation then_outcome /\
+        resource_target_outcome_cps_interpretation else_outcome /\
+        resource_target_outcome_cps_interpretation rest_outcome
+    end.
+
+  Theorem resource_target_outcome_cps_interpretation_complete
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      {target below position}
+      (outcome : resource_target_trace_outcome aligned_trace target below
+        position) :
+    resource_target_outcome_cps_interpretation outcome.
+  Proof.
+    induction outcome; simpl.
+    - apply resource_target_close_splice_cps_handoff_complete.
+    - apply resource_pending_open_trace_refinement_complete.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - exact IHoutcome.
+    - split; assumption.
+    - repeat split; assumption.
+    - repeat split; assumption.
+    - split; assumption.
+    - repeat split; assumption.
+  Qed.
+
+  (** Stack-exposed producer for the logical/runtime CPS layer.  It does not
+      flatten the focused trace to a source WP: the opening update remains
+      outside [trace_runtime_cps_wp] until the first-close proof applies
+      atomicity to the complete selected path prefix.  This is therefore
+      stable under preserving prefixes, unlike the flat selected-arm WP. *)
+  Lemma resource_pending_open_trace_refinement_stack_exposed
+      {cost Γ F Δ entry store body stack_in exit post stack_out mode tail
+        source tree suffix trace}
+      (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body)
+        stack_in exit post stack_out mode tail source tree suffix trace)
+      (runtime : Validity.Model.stack_context Γ) (ambient Eouter : coPset)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ) (atoms : Runtime.Core.atom_env)
+      (continuation : mask_cont)
+      (Hruntime_cost : Validity.Model.runtime_cost_model_sound cost)
+      (Hprocedure_cost :
+        Validity.Certified.procedure_cost_model_sound cost)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open entry) stack_in)
+      (Henvelope : Validity.Model.runtime_mask
+        (Normalized.suffix_footprint source) ⊆ ambient)
+      (Hcont :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms post ∗
+         Validity.World.access_stack_interp atoms ambient stack_out) ⊢
+        continuation (Validity.Model.active_runtime_mask ambient exit)) :
+    (Validity.Model.stack_own Γ runtime
+       (Runtime.Translation.interp_store formals binders atoms store) ∗
+     (|={Eouter, Validity.Model.active_runtime_mask ambient entry}=>
+       Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms body ∗
+       Validity.World.access_stack_interp atoms ambient stack_in)) ⊢
+    (|={Eouter, Validity.Model.active_runtime_mask ambient entry}=>
+       trace_runtime_cps_wp trace runtime ambient continuation).
+  Proof.
+    iIntros "[Hstack Hopened]". iMod "Hopened" as
+      "[Hworld [Hbody Haccess]]". iModIntro.
+    iApply (resource_pending_open_trace_refinement_complete aligned_trace
+      runtime ambient formals binders atoms continuation Hruntime_cost
+      Hprocedure_cost Hwf Hstack Henvelope Hcont).
+    simpl. iFrame "Hworld Hstack Hbody Haccess".
+  Qed.
+
+  (** Branch-local CPS provenance for a resource conditional.  The existing
+      [net_trace] is already the total path-sensitive control-flow carrier:
+      this small dependent family merely exposes its two core arm traces
+      through the proof wrappers retained by
+      [resource_conditional_branch_data].  In particular, it makes no
+      binary claim that an arm either closes exactly once or stays open --
+      each arm receives the total CPS refinement of its actual trace, so
+      nested conditionals and close/reopen paths remain represented by the
+      trace itself. *)
+  Definition resource_conditional_branch_data_cps_provenance
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit pre post view then_certificate else_certificate
+       open_equal atomic_equal derivation aligned stack_in join_stack mode
+       tail then_tree else_tree lifo Hthen Helse}
+      (data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre post
+        view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned stack_in join_stack mode tail then_tree else_tree
+        lifo Hthen Helse) : Type.
+  Proof.
+    induction data.
+    - exact (resource_pending_open_trace_refinement then_lockstep *
+        resource_pending_open_trace_refinement else_lockstep)%type.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+  Defined.
+
+  (** Total producer for the branch provenance above.  At the conditional
+      core, [resource_pending_open_trace_refinement_complete] follows the
+      exact [Hthen]/[Helse] normalized traces; the four resource-proof
+      wrappers are definitionally transparent for this control-flow fact. *)
+  Definition resource_conditional_branch_data_cps_provenance_complete
+      {cost Γ F Δ fuel entry statement then_statement else_statement
+       then_exit else_exit pre post view then_certificate else_certificate
+       open_equal atomic_equal derivation aligned stack_in join_stack mode
+       tail then_tree else_tree lifo Hthen Helse}
+      (data : @resource_conditional_branch_data cost Γ F Δ fuel entry
+        statement then_statement else_statement then_exit else_exit pre post
+        view then_certificate else_certificate open_equal atomic_equal
+        derivation aligned stack_in join_stack mode tail then_tree else_tree
+        lifo Hthen Helse) :
+      resource_conditional_branch_data_cps_provenance data.
+  Proof.
+    induction data.
+    - split.
+      + apply resource_pending_open_trace_refinement_complete.
+      + apply resource_pending_open_trace_refinement_complete.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+    - exact IHdata.
+  Defined.
+
+  (** Assertion-aware assembly boundary for a focused conditional.  Guard
+      selection deliberately happens while the caller still owns the
+      ordinary outer-mask resources.  Each selected-arm premise may then
+      open the focused invariant, use atomic mask-changing reasoning only
+      for its actual pre-first-close fragment, close back to [Eouter], and
+      run an unrestricted post-close remainder.  Consequently this lemma
+      requires no [Atomic] instance for either complete arm or for the
+      enclosing [RTIfS]. *)
+  Lemma resource_focused_conditional_selected_bracket
+      {Γ F Δ node}
+      (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env)
+      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
+      (frame : Runtime.Translation.Assertions.assertion Γ F Δ)
+      (condition : Runtime.IR.pexpr Γ typed_core.TypedCore.TBool)
+      (then_branch else_branch : Runtime.IR.stmt Γ)
+      (rest_runtime : option Runtime.LegacyLang.runtime_stmt)
+      (Eouter final_mask : coPset) (access final : iProp Resources.Σ)
+      (Hthen :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store)
+             (Runtime.Translation.Assertions.AAnd frame
+               (Runtime.Translation.Assertions.AExpr
+                 (Runtime.Validation.Hoare.symbolize_expr store
+                   condition)))) ∗ access) ⊢
+        Validity.runtime_option_wp Eouter final_mask
+          (Validity.Model.combine_runtime_statements
+            (Validity.Model.runtime_stmt
+              (Validity.Model.runtime_names Γ runtime)
+              (Validity.Model.runtime_stack_id Γ runtime) then_branch)
+            rest_runtime) final)
+      (Helse :
+        (Validity.global_world_context atoms ∗
+         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+           runtime formals binders atoms
+           (Runtime.Translation.Assertions.AAnd
+             (Runtime.Translation.Assertions.AStack store)
+             (Runtime.Translation.Assertions.AAnd frame
+               (Runtime.Translation.Assertions.AExpr
+                 (Runtime.IR.Core.EUnOp Runtime.IR.Core.UNot
+                   (Runtime.Validation.Hoare.symbolize_expr store
+                     condition))))) ∗ access) ⊢
+        Validity.runtime_option_wp Eouter final_mask
+          (Validity.Model.combine_runtime_statements
+            (Validity.Model.runtime_stmt
+              (Validity.Model.runtime_names Γ runtime)
+              (Validity.Model.runtime_stack_id Γ runtime) else_branch)
+            rest_runtime) final) :
+    (Validity.global_world_context atoms ∗
+     Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+       runtime formals binders atoms
+       (Runtime.Translation.Assertions.AAnd
+         (Runtime.Translation.Assertions.AStack store) frame) ∗ access) ⊢
+    Validity.runtime_option_wp Eouter final_mask
+      (Validity.Model.combine_runtime_statements
+        (Validity.Model.runtime_stmt
+          (Validity.Model.runtime_names Γ runtime)
+          (Validity.Model.runtime_stack_id Γ runtime)
+          (Runtime.IR.TIf node condition then_branch else_branch))
+        rest_runtime) final.
+  Proof.
+    etrans; last eapply (Validity.runtime_wp_if_context_full runtime formals
+      binders atoms store node condition then_branch else_branch rest_runtime
+      Eouter final_mask final
+      (Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms frame ∗ access)%I).
+    - iIntros "[#Hworld [[Hstack Hframe] Haccess]]".
+      simpl. iFrame "Hstack Hworld Hframe Haccess".
+    - intros Hcondition.
+      iIntros "[Hstack [#Hworld [Hframe Haccess]]]".
+      iApply Hthen. simpl. iFrame.
+      iSplit; [iFrame "#"|]. iPureIntro. exact Hcondition.
+    - intros Hcondition.
+      iIntros "[Hstack [#Hworld [Hframe Haccess]]]".
+      iApply Helse. simpl. iFrame.
+      iSplit; [iFrame "#"|]. iPureIntro.
+      rewrite Hcondition. reflexivity.
+  Qed.
+
+  (** Focused counterpart of the outer-resource bracket above.  The stack is
+      intentionally outside [Hopened]: it justifies the pure guard step at
+      [Eouter], while only the selected arm receives the resources opened at
+      [Einner]. *)
+  Lemma resource_focused_conditional_stack_exposed_bracket
+      {Γ F Δ node}
+      (runtime : Validity.Model.stack_context Γ)
+      (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ)
+      (atoms : Runtime.Core.atom_env)
+      (store : Runtime.IR.Core.symbolic_store Γ F Δ)
+      (condition : Runtime.IR.pexpr Γ typed_core.TypedCore.TBool)
+      (then_branch else_branch : Runtime.IR.stmt Γ)
+      (rest_runtime : option Runtime.LegacyLang.runtime_stmt)
+      (Eouter Einner final_mask : coPset) (opened final : iProp Resources.Σ)
+      (Hthen : Runtime.IR.Core.interp_expr formals binders atoms
+          (Runtime.Validation.Hoare.symbolize_expr store condition) =
+          Some (Runtime.IR.Core.VBool true) ->
+        (Validity.Model.stack_own Γ runtime
+           (Runtime.Translation.interp_store formals binders atoms store) ∗
+         (|={Eouter, Einner}=> opened)) ⊢
+        Validity.runtime_option_wp Eouter final_mask
+          (Validity.Model.combine_runtime_statements
+            (Validity.Model.runtime_stmt
+              (Validity.Model.runtime_names Γ runtime)
+              (Validity.Model.runtime_stack_id Γ runtime) then_branch)
+            rest_runtime) final)
+      (Helse : Runtime.IR.Core.interp_expr formals binders atoms
+          (Runtime.Validation.Hoare.symbolize_expr store condition) =
+          Some (Runtime.IR.Core.VBool false) ->
+        (Validity.Model.stack_own Γ runtime
+           (Runtime.Translation.interp_store formals binders atoms store) ∗
+         (|={Eouter, Einner}=> opened)) ⊢
+        Validity.runtime_option_wp Eouter final_mask
+          (Validity.Model.combine_runtime_statements
+            (Validity.Model.runtime_stmt
+              (Validity.Model.runtime_names Γ runtime)
+              (Validity.Model.runtime_stack_id Γ runtime) else_branch)
+            rest_runtime) final) :
+    (Validity.Model.stack_own Γ runtime
+       (Runtime.Translation.interp_store formals binders atoms store) ∗
+     (|={Eouter, Einner}=> opened)) ⊢
+    Validity.runtime_option_wp Eouter final_mask
+      (Validity.Model.combine_runtime_statements
+        (Validity.Model.runtime_stmt
+          (Validity.Model.runtime_names Γ runtime)
+          (Validity.Model.runtime_stack_id Γ runtime)
+          (Runtime.IR.TIf node condition then_branch else_branch))
+        rest_runtime) final.
+  Proof.
+    eapply (Validity.runtime_wp_if_context_full runtime formals binders atoms
+      store node condition then_branch else_branch rest_runtime Eouter
+      final_mask final (|={Eouter, Einner}=> opened)%I); assumption.
   Qed.
 
   Definition resource_focused_close_trace_cps_source_refinement
@@ -8982,7 +13006,69 @@ Module AlignedTraceNormalization.
        (Validity.global_world_context atoms ∗
         Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
           runtime formals binders atoms post ∗
+       Validity.World.access_stack_interp atoms ambient stack_out))%I.
+
+  (** Selected-arm form of the closing judgment for assertions whose stack
+      component is syntactically exposed.  Unlike the bundled judgment, the
+      stack can be used by an enclosing conditional before [opened] is
+      eliminated. *)
+  Definition resource_assertion_focused_closing_stack_exposed
+      {cost Γ F Δ invariant outer tail entry store body exit post stack_out
+        source tree suffix trace}
+      (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body)
+        ((invariant, outer) :: tail) exit post stack_out
+        (Some (invariant, outer)) tail source tree suffix trace)
+      (_ : resource_aligned_focused_close_split aligned_trace) : Prop :=
+    forall (runtime : Validity.Model.stack_context Γ) (ambient : coPset),
+    Validity.Model.runtime_cost_model_sound cost ->
+    Validity.Certified.procedure_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry)
+      ((invariant, outer) :: tail) ->
+    Validity.Model.runtime_mask (Normalized.suffix_footprint source) ⊆
+      ambient ->
+    forall (formals : Runtime.Core.formal_env F)
+      (binders : Runtime.Core.binder_env Δ) (atoms : Runtime.Core.atom_env),
+    let outer_mask := Validity.Model.enabled_runtime_mask ambient outer in
+    (Validity.Model.stack_own Γ runtime
+       (Runtime.Translation.interp_store formals binders atoms store) ∗
+     (|={outer_mask, Validity.Model.active_runtime_mask ambient entry}=>
+       Validity.global_world_context atoms ∗
+       Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+         runtime formals binders atoms body ∗
+       Validity.World.access_stack_interp atoms ambient
+         ((invariant, outer) :: tail)) ⊢
+     Validity.runtime_option_wp outer_mask
+       (Validity.Model.active_runtime_mask ambient exit)
+       (ConcreteOrdinaryTrace.source_runtime source runtime)
+       (Validity.global_world_context atoms ∗
+        Validity.VSemantics.S.interp_assertion (Leaf.predicates atoms)
+          runtime formals binders atoms post ∗
         Validity.World.access_stack_interp atoms ambient stack_out))%I.
+
+  Lemma resource_assertion_focused_closing_stack_exposed_from_bundled
+      {cost Γ F Δ invariant outer tail entry store body exit post stack_out
+        source tree suffix trace}
+      (aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body)
+        ((invariant, outer) :: tail) exit post stack_out
+        (Some (invariant, outer)) tail source tree suffix trace)
+      (split : resource_aligned_focused_close_split aligned_trace) :
+    resource_assertion_focused_closing_refinement aligned_trace split ->
+    resource_assertion_focused_closing_stack_exposed aligned_trace split.
+  Proof.
+    intros Hclosing runtime ambient Hruntime_cost Hprocedure_cost Hwf Hstack
+      Henvelope formals binders atoms. simpl.
+    pose proof (Hclosing runtime ambient Hruntime_cost Hprocedure_cost Hwf
+      Hstack Henvelope formals binders atoms) as Hclose.
+    iIntros "[Hstack Hopened]". iApply Hclose.
+    iMod "Hopened" as "[Hworld [Hbody Haccess]]". iModIntro.
+    simpl. iFrame "Hworld Hstack Hbody Haccess".
+  Qed.
 
   Lemma resource_assertion_focused_closing_from_runtime
       {cost Γ F Δ invariant outer tail entry pre exit post stack_out source
@@ -9037,7 +13123,7 @@ Module AlignedTraceNormalization.
     resource_ordinary_trace_cps_source_refinement aligned_trace ->
     resource_aligned_trace_runtime_refinement aligned_trace.
   Proof.
-    intros Hsource Hruntime_cost Hprocedure_cost Hwf Hstack runtime formals
+    intros Hsource Hruntime_cost Hprocedure_cost Hwf Hnotatomic Hstack runtime formals
       binders atoms ambient Henvelope.
     iIntros "Hresources".
     iApply (Hsource runtime ambient _ Hruntime_cost Hprocedure_cost Hwf Hstack
@@ -9257,6 +13343,35 @@ Module AlignedTraceNormalization.
   Proof.
     apply resource_assertion_focused_closing_from_runtime.
     exact (resource_focused_closing_direct_close_cps_source Hclosing close_ok
+      aligned_rest IHrest).
+  Qed.
+
+  Lemma resource_assertion_focused_closing_direct_close_stack_exposed
+      {cost Γ F Δ fuel entry statement closed exit store body
+        closed_assertion post invariant outer tail stack_out certificate
+        derivation aligned lifo rest closing rest_tree Hrest}
+      (Hclosing : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        closed ((invariant, outer) :: tail) tail certificate closing)
+      (close_ok : RuntimeAdapter.Payload.closes (invariant, outer) tail entry
+        closed closing)
+      (aligned_rest : resource_aligned_net_trace cost Γ F Δ closed
+        closed_assertion tail exit post stack_out None tail
+        (resource_certificate_suffix_of_operational_suffix rest) rest_tree rest
+        Hrest)
+      (IHrest : resource_ordinary_trace_cps_source_refinement aligned_rest) :
+    resource_assertion_focused_closing_stack_exposed
+      (@ResourceAlignedTraceFocusedClose cost Γ F Δ fuel entry statement
+        closed exit
+        (Runtime.Translation.Assertions.AAnd
+          (Runtime.Translation.Assertions.AStack store) body)
+        closed_assertion post (invariant, outer) tail stack_out certificate
+        derivation aligned lifo rest closing Hclosing close_ok rest_tree Hrest
+        aligned_rest)
+      (resource_aligned_focused_close_split_here Hclosing close_ok
+        aligned_rest).
+  Proof.
+    apply resource_assertion_focused_closing_stack_exposed_from_bundled.
+    exact (resource_assertion_focused_closing_direct_close Hclosing close_ok
       aligned_rest IHrest).
   Qed.
 
@@ -9577,6 +13692,45 @@ Module AlignedTraceNormalization.
     - reflexivity.
   Qed.
 
+  Lemma opening_chunk_region_runtime_refinement
+      {cost Γ fuel entry statement opened focused tail certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        opened tail (focused :: tail) certificate chunk)
+      (Hopens : RuntimeAdapter.Payload.opens focused tail entry opened chunk)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (post : iProp Resources.Σ) :
+    Validity.aligned_runtime_region_wp certificate runtime ambient post ⊢
+      (|={Validity.Model.active_runtime_mask ambient entry,
+           Validity.Model.active_runtime_mask ambient opened}=> post)%I.
+  Proof.
+    dependent destruction Hchunk; inversion Hopens; subst; simpl.
+    all: try (exfalso; apply (f_equal (@List.length _)) in x0;
+      simpl in x0; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. reflexivity.
+  Qed.
+
+  Lemma closing_chunk_region_runtime_refinement
+      {cost Γ fuel entry statement closed focused tail certificate chunk}
+      (Hchunk : RuntimeAdapter.chunk_certificate cost Γ fuel entry statement
+        closed (focused :: tail) tail certificate chunk)
+      (Hcloses : RuntimeAdapter.Payload.closes focused tail entry closed chunk)
+      (runtime : Validity.Model.stack_context Γ) (ambient : coPset)
+      (post : iProp Resources.Σ) :
+    Validity.aligned_runtime_region_wp certificate runtime ambient post ⊢
+      (|={Validity.Model.active_runtime_mask ambient entry,
+           Validity.Model.active_runtime_mask ambient closed}=> post)%I.
+  Proof.
+    dependent destruction Hchunk; inversion Hcloses; subst; simpl.
+    all: try (exfalso;
+      repeat match goal with
+      | H : @eq (list _) _ _ |- _ =>
+          pose proof (f_equal (@List.length _) H); clear H
+      end; simpl in *; lia).
+    destruct statement; simpl in view; try discriminate.
+    inversion view; subst. reflexivity.
+  Qed.
+
   Lemma focused_inner_prepend_preserving
       {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
         invariant outer tail certificate derivation aligned lifo rest chunk
@@ -9721,123 +13875,6 @@ Module AlignedTraceNormalization.
     - reflexivity.
     - iExact "Hresources".
   Qed.
-
-  Module Phase7EndToEndSpike.
-    (** Constructor-complete dependent-type spike for the candidate uniform
-        CPS judgment.  Each remaining [admit] corresponds, in declaration
-        order, to one constructor of [aligned_net_trace].  This exposes all
-        dependent induction hypotheses and indices, but an admitted skeleton
-        is not a semantic go/no-go check: the [AlignedTraceClose] case below
-        demonstrated that the candidate conclusion itself is too strong. *)
-    Theorem aligned_trace_cps_source_refinement_spike
-        {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source
-          tree suffix trace}
-        (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre stack_in exit
-          post stack_out mode tail source tree suffix trace) :
-      aligned_trace_cps_source_refinement aligned_trace.
-    Proof.
-      induction aligned_trace.
-      - (* AlignedTraceDone *)
-        intros runtime ambient final _ _ _ _. simpl.
-        unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
-        iIntros "Hfinal". iModIntro. iExact "Hfinal".
-      - (* AlignedTraceDoneFocused *)
-        intros runtime ambient final _ _ _ _. simpl.
-        unfold ConcreteOrdinaryTrace.source_translated_wp. simpl.
-        iIntros "Hfinal". iModIntro. iExact "Hfinal".
-      - (* AlignedTraceChunk *)
-        intros runtime ambient final Hcost Hwf Hstack Henvelope. simpl.
-        have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
-          RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry
-            statement middle Hwf certificate.
-        have Hmiddle_stack :
-            RuntimeAdapter.Atomicity.access_stack_consistent
-              (RuntimeAdapter.Atomicity.analysis_open middle) stack :=
-          RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
-            certificate stack stack Hwf lifo Hstack.
-        have Hrest_envelope : Validity.Model.runtime_mask
-            (Normalized.suffix_footprint
-              (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
-                rest)) ⊆ ambient.
-        { etrans; last exact Henvelope.
-          apply Validity.Model.runtime_mask_mono.
-          apply Normalized.suffix_footprint_rest_subset. }
-        have Hopen : RuntimeAdapter.Atomicity.analysis_open entry =
-            RuntimeAdapter.Atomicity.analysis_open middle.
-        { eapply RuntimeAdapter.Atomicity.access_stack_consistent_functional;
-            eauto. }
-        pose proof (IHaligned_trace runtime ambient final Hcost Hmiddle_wf
-          Hmiddle_stack Hrest_envelope) as IHsource.
-        etrans; [apply aligned_runtime_region_wp_mono; exact IHsource|].
-        etrans; [exact (balanced_chunk_region_runtime_refinement Hchunk runtime
-          ambient _)|].
-        apply ConcreteOrdinaryTrace.translated_runtime_wp_prepend_source.
-        exact Hopen.
-      - admit. (* AlignedTraceAccess *)
-      - admit. (* AlignedTraceNestedAccess *)
-      - (* AlignedTraceFocusedPrefix *)
-        intros runtime ambient final Hcost Hwf Hstack Henvelope. simpl.
-        have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
-          RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry
-            statement middle Hwf certificate.
-        have Hmiddle_stack :
-            RuntimeAdapter.Atomicity.access_stack_consistent
-              (RuntimeAdapter.Atomicity.analysis_open middle)
-              (focused :: tail) :=
-          RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
-            certificate (focused :: tail) (focused :: tail) Hwf lifo Hstack.
-        have Hrest_envelope : Validity.Model.runtime_mask
-            (Normalized.suffix_footprint
-              (Normalized.Erasure.certificate_suffix_of_aligned_operational_suffix
-                rest)) ⊆ ambient.
-        { etrans; last exact Henvelope.
-          apply Validity.Model.runtime_mask_mono.
-          apply Normalized.suffix_footprint_rest_subset. }
-        have Hopen : RuntimeAdapter.Atomicity.analysis_open entry =
-            RuntimeAdapter.Atomicity.analysis_open middle.
-        { eapply RuntimeAdapter.Atomicity.access_stack_consistent_functional;
-            eauto. }
-        pose proof (IHaligned_trace runtime ambient final Hcost Hmiddle_wf
-          Hmiddle_stack Hrest_envelope) as IHsource.
-        etrans; [apply aligned_runtime_region_wp_mono; exact IHsource|].
-        etrans; [exact (balanced_chunk_region_runtime_refinement Hchunk runtime
-          ambient _)|].
-        apply ConcreteOrdinaryTrace.translated_runtime_wp_prepend_source.
-        exact Hopen.
-      - admit. (* AlignedTraceClose *)
-      - admit. (* AlignedTraceFocusedClose *)
-      - admit. (* AlignedTraceConditional *)
-      - admit. (* AlignedTraceFocusedConditional *)
-      - admit. (* AlignedTraceFocusedConditionalContinue *)
-      - admit. (* AlignedTraceSequenceExpansion *)
-      - admit. (* AlignedTraceExpansion *)
-    Admitted.
-
-    Lemma ordinary_trace_cps_source_refinement_from_spike
-        {cost Γ F Δ entry pre stack_in exit post stack_out source tree suffix
-          trace}
-        (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre stack_in exit
-          post stack_out None stack_in source tree suffix trace) :
-      aligned_trace_cps_source_refinement aligned_trace ->
-      ordinary_trace_cps_source_refinement aligned_trace.
-    Proof.
-      intros Hspike runtime ambient final Hcost Hwf Hstack Henvelope.
-      exact (Hspike runtime ambient final Hcost Hwf Hstack Henvelope).
-    Qed.
-
-    (** The spike reaches the actual closed assertion-level theorem consumed
-        by adequacy, rather than stopping at the conditional constructor. *)
-    Theorem closed_aligned_trace_runtime_refinement_spike
-        {cost Γ F Δ entry pre exit post source tree suffix trace}
-        (aligned_trace : @aligned_net_trace cost Γ F Δ entry pre [] exit post
-          [] None [] source tree suffix trace) :
-      closed_aligned_trace_runtime_refinement aligned_trace.
-    Proof.
-      apply closed_aligned_trace_runtime_refinement_from_cps.
-      apply ordinary_trace_cps_source_refinement_from_spike.
-      apply aligned_trace_cps_source_refinement_spike.
-    Qed.
-  End Phase7EndToEndSpike.
 
   Lemma closed_trace_cps_source_done
       {cost Γ F Δ state assertion} :
@@ -10468,7 +14505,7 @@ Module AlignedTraceNormalization.
         pre middle_assertion post stack stack_out certificate derivation aligned
         lifo suffix chunk Hchunk rest_tree Hrest aligned_rest).
   Proof.
-    intros Hruntime_cost Hprocedure_cost Hwf Hstack runtime formals binders
+    intros Hruntime_cost Hprocedure_cost Hwf Hnotatomic Hstack runtime formals binders
       atoms ambient Henvelope.
     have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
       RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry statement
@@ -10477,13 +14514,56 @@ Module AlignedTraceNormalization.
         (RuntimeAdapter.Atomicity.analysis_open middle) stack :=
       RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
         certificate _ _ Hwf lifo Hstack.
+    have Hmiddle_notatomic := Validity.certificate_preserves_nonatomic
+      certificate Hnotatomic.
     have Hrest_envelope : Validity.Model.runtime_mask
         (Normalized.suffix_footprint
           (resource_certificate_suffix_of_operational_suffix suffix)) ⊆ ambient.
     { etrans; last exact Henvelope. apply Validity.Model.runtime_mask_mono.
       apply Normalized.suffix_footprint_rest_subset. }
-    pose proof (IHrest Hruntime_cost Hprocedure_cost Hmiddle_wf Hmiddle_stack
+    pose proof (IHrest Hruntime_cost Hprocedure_cost Hmiddle_wf
+      Hmiddle_notatomic Hmiddle_stack
       runtime formals binders atoms ambient Hrest_envelope) as Hrest_refinement.
+    eapply resource_aligned_preserving_chunk_prepend_source_runtime_refinement;
+      eauto.
+  Qed.
+
+  Lemma resource_aligned_trace_focused_prefix_runtime_refinement
+      {cost Γ F Δ fuel entry statement middle exit pre middle_assertion post
+        focused tail stack_out certificate derivation aligned lifo suffix
+        chunk Hchunk head_ok rest_tree Hrest}
+      (aligned_rest : @resource_aligned_net_trace cost Γ F Δ middle
+        middle_assertion (focused :: tail) exit post stack_out (Some focused)
+        tail (resource_certificate_suffix_of_operational_suffix suffix)
+        rest_tree suffix Hrest)
+      (IHrest : resource_aligned_trace_runtime_refinement aligned_rest) :
+    resource_aligned_trace_runtime_refinement
+      (@ResourceAlignedTraceFocusedPrefix cost Γ F Δ fuel entry statement
+        middle exit pre middle_assertion post focused tail stack_out certificate
+        derivation aligned lifo suffix chunk Hchunk head_ok rest_tree Hrest
+        aligned_rest).
+  Proof.
+    intros Hruntime_cost Hprocedure_cost Hwf Hnotatomic Hstack runtime formals
+      binders atoms ambient Henvelope.
+    have Hmiddle_wf : RuntimeAdapter.Atomicity.state_wf middle :=
+      RuntimeAdapter.Atomicity.certificate_preserves_wf cost entry statement
+        middle Hwf certificate.
+    have Hmiddle_stack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open middle) (focused :: tail) :=
+      RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+        certificate _ _ Hwf lifo Hstack.
+    have Hmiddle_notatomic := Validity.certificate_preserves_nonatomic
+      certificate Hnotatomic.
+    have Hrest_envelope : Validity.Model.runtime_mask
+        (Normalized.suffix_footprint
+          (resource_certificate_suffix_of_operational_suffix suffix)) ⊆
+        ambient.
+    { etransitivity; last exact Henvelope.
+      apply Validity.Model.runtime_mask_mono.
+      apply Normalized.suffix_footprint_rest_subset. }
+    have Hrest_refinement := IHrest Hruntime_cost Hprocedure_cost Hmiddle_wf
+      Hmiddle_notatomic Hmiddle_stack runtime formals binders atoms ambient
+      Hrest_envelope.
     eapply resource_aligned_preserving_chunk_prepend_source_runtime_refinement;
       eauto.
   Qed.
@@ -11975,6 +16055,112 @@ Module AlignedTraceNormalization.
     - etransitivity; eauto.
   Qed.
 
+  (** A continuously-open focused trace obeys the analyzer's one-step
+      budget even across normalization expansions.  The stronger statement
+      retains the entry/exit step bits, so the prefix case composes the head
+      certificate's budget with the induction hypothesis without losing the
+      information that a physical head rules out a physical tail. *)
+  Lemma resource_focused_continuous_step_budget
+      {cost Γ F Δ invariant outer tail entry pre exit post source tree suffix
+        trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (continuous : resource_focused_continuous aligned_trace)
+      (runtime : Validity.Model.stack_context Γ) :
+    Validity.Model.runtime_cost_model_sound cost ->
+    RuntimeAdapter.Atomicity.state_wf entry ->
+    RuntimeAdapter.Atomicity.analysis_in_atomic entry = false ->
+    RuntimeAdapter.Atomicity.access_stack_consistent
+      (RuntimeAdapter.Atomicity.analysis_open entry)
+      ((invariant, outer) :: tail) ->
+    Validity.analysis_step_bit entry +
+      certificate_suffix_runtime_count source runtime <=
+    Validity.analysis_step_bit exit.
+  Proof.
+    induction continuous; intros Hcost Hwf Hnotatomic Hstack; simpl.
+    - lia.
+    - have Hmiddle_wf := RuntimeAdapter.Atomicity.certificate_preserves_wf
+        cost entry statement middle Hwf certificate.
+      have Hmiddle_notatomic := Validity.certificate_preserves_nonatomic
+        certificate Hnotatomic.
+      have Hmiddle_stack :=
+        RuntimeAdapter.Atomicity.lifo_preserves_access_stack_consistency
+          certificate _ _ Hwf lifo Hstack.
+      have Hopen := resource_target_position_open_nonempty
+        (invariant, outer) tail ((invariant, outer) :: tail)
+        (@ResourceTargetHere (invariant, outer) tail) _ Hstack.
+      have Hhead := Validity.certificate_runtime_step_budget certificate
+        runtime Hcost (resource_preserving_chunk_open_continuous Hchunk Hopen)
+        Hnotatomic.
+      have Htail := IHcontinuous runtime Hcost Hmiddle_wf Hmiddle_notatomic
+        Hmiddle_stack.
+      lia.
+    - have Hflat := IHcontinuous runtime Hcost Hwf Hnotatomic Hstack.
+      have Hmono := suffix_expands_runtime_count_mono expansion runtime.
+      lia.
+  Qed.
+
+  Corollary resource_focused_continuous_runtime_count_le_one
+      {cost Γ F Δ invariant outer tail entry pre exit post source tree suffix
+        trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (continuous : resource_focused_continuous aligned_trace)
+      (runtime : Validity.Model.stack_context Γ)
+      (Hcost : Validity.Model.runtime_cost_model_sound cost)
+      (Hwf : RuntimeAdapter.Atomicity.state_wf entry)
+      (Hnotatomic : RuntimeAdapter.Atomicity.analysis_in_atomic entry = false)
+      (Hstack : RuntimeAdapter.Atomicity.access_stack_consistent
+        (RuntimeAdapter.Atomicity.analysis_open entry)
+        ((invariant, outer) :: tail)) :
+    certificate_suffix_runtime_count source runtime <= 1.
+  Proof.
+    have Hbudget := resource_focused_continuous_step_budget continuous runtime
+      Hcost Hwf Hnotatomic Hstack.
+    unfold Validity.analysis_step_bit in Hbudget.
+    destruct (RuntimeAdapter.Atomicity.analysis_step_taken entry),
+      (RuntimeAdapter.Atomicity.analysis_step_taken exit); simpl in *; lia.
+  Qed.
+
+  (** Semantic reification of the continuously-open outcome.  Prefixes use
+      the ordinary resource rule.  An expansion is not rewritten by an
+      invalid syntactic associativity equation: the analyzer budget first
+      proves that the flat source contains at most one physical statement,
+      under which [suffix_expands_source_runtime_sparse] gives the required
+      concrete-program equality. *)
+  Lemma resource_focused_continuous_runtime_refinement
+      {cost Γ F Δ invariant outer tail entry pre exit post source tree suffix
+        trace}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        ((invariant, outer) :: tail) exit post ((invariant, outer) :: tail)
+        (Some (invariant, outer)) tail source tree suffix trace}
+      (continuous : resource_focused_continuous aligned_trace) :
+    resource_aligned_trace_runtime_refinement aligned_trace.
+  Proof.
+    induction continuous.
+    - exact resource_aligned_trace_done_focused_runtime_refinement.
+    - eapply resource_aligned_trace_focused_prefix_runtime_refinement.
+      exact IHcontinuous.
+    - intros Hcost Hprocedure_cost Hwf Hnotatomic Hstack runtime formals
+        binders atoms ambient Henvelope.
+      have Hflat_envelope : Validity.Model.runtime_mask
+          (Normalized.suffix_footprint flat) ⊆ ambient.
+      { etransitivity; last exact Henvelope.
+        apply Validity.Model.runtime_mask_mono.
+        exact (suffix_footprint_expands_subseteq expansion). }
+      have Hflat_refinement := IHcontinuous Hcost Hprocedure_cost Hwf
+        Hnotatomic Hstack runtime formals binders atoms ambient Hflat_envelope.
+      have Hsparse := resource_focused_continuous_runtime_count_le_one
+        continuous runtime Hcost Hwf Hnotatomic Hstack.
+      have Herasure := suffix_expands_source_runtime_sparse expansion runtime
+        Hsparse.
+      unfold ConcreteOrdinaryTrace.source_translated_wp in *.
+      rewrite <- Herasure.
+      exact Hflat_refinement.
+  Qed.
+
   (** An [aligned_focused_close_split]'s own prefix footprint is bounded by
       the original suffix's, composing the two facts above: the prefix's
       footprint sits inside [append_suffix prefix rest]'s (via
@@ -12017,6 +16203,40 @@ Module AlignedTraceNormalization.
     etransitivity;
       last exact (suffix_footprint_expands_subseteq
         (aligned_split_source_expansion _ split)).
+    rewrite suffix_footprint_append_eq. apply union_subseteq_r.
+  Qed.
+
+  Lemma resource_close_stack_split_prefix_footprint_subseteq
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace close_stack}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (split : resource_aligned_close_stack_split aligned_trace close_stack) :
+    Normalized.suffix_footprint
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_prefix _ _ split)) ⊆
+    Normalized.suffix_footprint source.
+  Proof.
+    etransitivity;
+      last exact (suffix_footprint_expands_subseteq
+        (resource_close_stack_source_expansion _ _ split)).
+    rewrite suffix_footprint_append_eq. apply union_subseteq_l.
+  Qed.
+
+  Lemma resource_close_stack_split_rest_footprint_subseteq
+      {cost Γ F Δ entry pre stack_in exit post stack_out mode tail source tree
+       suffix trace close_stack}
+      {aligned_trace : @resource_aligned_net_trace cost Γ F Δ entry pre
+        stack_in exit post stack_out mode tail source tree suffix trace}
+      (split : resource_aligned_close_stack_split aligned_trace close_stack) :
+    Normalized.suffix_footprint
+      (resource_certificate_suffix_of_operational_suffix
+        (resource_close_stack_rest _ _ split)) ⊆
+    Normalized.suffix_footprint source.
+  Proof.
+    etransitivity;
+      last exact (suffix_footprint_expands_subseteq
+        (resource_close_stack_source_expansion _ _ split)).
     rewrite suffix_footprint_append_eq. apply union_subseteq_r.
   Qed.
 
@@ -13197,6 +17417,7 @@ Module AlignedTraceNormalization.
   Proof.
     exact (aligned_trace_chunk_runtime_refinement aligned_rest IHrest).
   Qed.
+
 
 End AlignedTraceNormalization.
 

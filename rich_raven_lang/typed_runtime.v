@@ -344,19 +344,6 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
       (Rules.FrameRule pre post frame statement
         (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
         derivation)
-| AlignedConsequence : forall (Γ F Δ : context) (fuel : nat)
-    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
-    (pre pre' post post' : Translation.Assertions.assertion Γ F Δ)
-    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
-    (derivation : @Rules.RavenHoareTriple Γ F Δ pre statement
-      (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit) post)
-    (pre_entails : Hoare.assertion_entails pre' pre)
-    (post_entails : Hoare.assertion_entails post post'),
-    certificate_hoare_aligned cost certificate derivation ->
-    certificate_hoare_aligned cost certificate
-      (Rules.ConsequenceRule pre pre' post post' statement
-        (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
-        derivation pre_entails post_entails)
 | AlignedExistsElim : forall (Γ F Δ : context) t (fuel : nat)
     (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
     (body : Translation.Assertions.assertion Γ F (t :: Δ))
@@ -380,7 +367,35 @@ Inductive certificate_hoare_aligned (cost : Atomicity.cost_model) :
     certificate_hoare_aligned cost certificate
       (Rules.ExistsPreserveRule t body post statement
         (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
-        derivation).
+        derivation)
+| AlignedPostConsequence : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (pre post post' : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenHoareTriple Γ F Δ pre statement
+      (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit) post)
+    (post_entails : Hoare.assertion_entails post post'),
+    certificate_hoare_aligned cost certificate derivation ->
+    certificate_hoare_aligned cost certificate
+      (Rules.ConsequenceRule pre pre post post' statement
+        (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
+        derivation (Hoare.EntailsRefl pre) post_entails)
+| AlignedStackConsequence : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (store : symbolic_store Γ F Δ)
+    (body body' post post' : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenHoareTriple Γ F Δ
+      (Translation.Assertions.AAnd (Translation.Assertions.AStack store) body)
+      statement (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
+      post)
+    (pre_entails : Hoare.assertion_entails body' body)
+    (post_entails : Hoare.assertion_entails post post'),
+    certificate_hoare_aligned cost certificate derivation ->
+    certificate_hoare_aligned cost certificate
+      (Rules.StackConsequenceRule store body body' post post' statement
+        (Atomicity.analysis_mask entry) (Atomicity.analysis_mask exit)
+        derivation pre_entails post_entails).
 
 (** Resource-only counterpart to [certificate_hoare_aligned].  The analysis
     certificate owns all mask bookkeeping; this pairing records just the
@@ -483,17 +498,6 @@ Inductive resource_certificate_hoare_aligned (cost : Atomicity.cost_model) :
     resource_certificate_hoare_aligned cost certificate derivation ->
     resource_certificate_hoare_aligned cost certificate
       (Rules.ResourceFrameRule pre post frame statement derivation)
-| ResourceAlignedConsequence : forall (Γ F Δ : context) (fuel : nat)
-    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
-    (pre pre' post post' : Translation.Assertions.assertion Γ F Δ)
-    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
-    (derivation : @Rules.RavenResourceTriple Γ F Δ pre statement post)
-    (pre_entails : Hoare.assertion_entails pre' pre)
-    (post_entails : Hoare.assertion_entails post post'),
-    resource_certificate_hoare_aligned cost certificate derivation ->
-    resource_certificate_hoare_aligned cost certificate
-      (Rules.ResourceConsequenceRule pre pre' post post' statement
-        derivation pre_entails post_entails)
 | ResourceAlignedExistsElim : forall (Γ F Δ : context) t (fuel : nat)
     (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
     (body : Translation.Assertions.assertion Γ F (t :: Δ))
@@ -511,7 +515,31 @@ Inductive resource_certificate_hoare_aligned (cost : Atomicity.cost_model) :
     (derivation : @Rules.RavenResourceTriple Γ F (t :: Δ) body statement post),
     resource_certificate_hoare_aligned cost certificate derivation ->
     resource_certificate_hoare_aligned cost certificate
-      (Rules.ResourceExistsPreserveRule t body post statement derivation).
+      (Rules.ResourceExistsPreserveRule t body post statement derivation)
+| ResourceAlignedPostConsequence : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (pre post post' : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F Δ pre statement post)
+    (post_entails : Hoare.assertion_entails post post'),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceConsequenceRule pre pre post post' statement
+        derivation (Hoare.EntailsRefl pre) post_entails)
+| ResourceAlignedStackConsequence : forall (Γ F Δ : context) (fuel : nat)
+    (entry exit : Atomicity.analysis_state) (statement : stmt Γ)
+    (store : symbolic_store Γ F Δ)
+    (body body' post post' : Translation.Assertions.assertion Γ F Δ)
+    (certificate : Atomicity.analysis_certificate cost Γ fuel entry statement exit)
+    (derivation : @Rules.RavenResourceTriple Γ F Δ
+      (Translation.Assertions.AAnd (Translation.Assertions.AStack store) body)
+      statement post)
+    (pre_entails : Hoare.assertion_entails body' body)
+    (post_entails : Hoare.assertion_entails post post'),
+    resource_certificate_hoare_aligned cost certificate derivation ->
+    resource_certificate_hoare_aligned cost certificate
+      (Rules.ResourceStackConsequenceRule store body body' post post' statement
+        derivation pre_entails post_entails).
 
 Lemma resource_alignment_proof_irrelevance
     {cost Γ F Δ fuel entry statement exit pre post}
@@ -561,13 +589,16 @@ Proof.
     + eapply ResourceAlignedFrame; eauto.
   - eapply resource_alignment_proof_irrelevance.
     + apply proof_irrelevance.
-    + eapply ResourceAlignedConsequence; eauto.
-  - eapply resource_alignment_proof_irrelevance.
-    + apply proof_irrelevance.
     + eapply ResourceAlignedExistsElim; eauto.
   - eapply resource_alignment_proof_irrelevance.
     + apply proof_irrelevance.
     + eapply ResourceAlignedExistsPreserve; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedPostConsequence; eauto.
+  - eapply resource_alignment_proof_irrelevance.
+    + apply proof_irrelevance.
+    + eapply ResourceAlignedStackConsequence; eauto.
   Unshelve.
   all: eauto.
 Qed.
@@ -708,6 +739,7 @@ Proof.
     + left. exact Hexit_mask.
     + right. exact Hexit_open.
     + apply IHHaligned. exact Hbody.
+  - exact IHHaligned.
   - exact IHHaligned.
   - exact IHHaligned.
   - exact IHHaligned.
@@ -3829,6 +3861,10 @@ Proof.
   - eapply Logical.predicate_unfold_rule_valid; eauto.
   - eapply Logical.predicate_fold_rule_valid; eauto.
   - eapply Controlled.spawn_rule_valid; eauto.
+  - eapply Structural.consequence_rule_valid; eauto.
+    apply Hoare.EntailsAndMono.
+    + apply Hoare.EntailsRefl.
+    + assumption.
 Qed.
 
 End FullValidity.

@@ -476,7 +476,12 @@ Inductive RavenHoareTriple {Γ F Δ} :
     RavenHoareTriple
       (AAnd (AStack store) contract_pre)
       (TSpawn node procedure arguments) current_mask current_mask
-      (AStack store).
+      (AStack store)
+| StackConsequenceRule store body body' post post' statement mask_pre mask_post :
+    RavenHoareTriple (AAnd (AStack store) body) statement mask_pre mask_post post ->
+    assertion_entails body' body -> assertion_entails post post' ->
+    RavenHoareTriple (AAnd (AStack store) body') statement mask_pre mask_post
+      post'.
 
 (** The compatibility-stage resource relation.  Unlike [RavenHoareTriple],
     this relation deliberately has no analyzer-owned mask state. *)
@@ -626,7 +631,11 @@ Inductive RavenResourceTriple {Γ F Δ} :
       (symbolize_expr_list store arguments) contract_pre ->
     RavenResourceTriple
       (AAnd (AStack store) contract_pre)
-      (TSpawn node procedure arguments) (AStack store).
+      (TSpawn node procedure arguments) (AStack store)
+| ResourceStackConsequenceRule store body body' post post' statement :
+    RavenResourceTriple (AAnd (AStack store) body) statement post ->
+    assertion_entails body' body -> assertion_entails post post' ->
+    RavenResourceTriple (AAnd (AStack store) body') statement post'.
 
 Theorem RavenHoareTriple_erases_resource {Γ F Δ}
     (pre : assertion Γ F Δ) statement mask_pre mask_post
@@ -645,7 +654,7 @@ Proof.
       ResourceCallDiscardRule, ResourceCallStoreRule,
       ResourceUnfoldInvariantRule, ResourceFoldInvariantRule,
       ResourceUnfoldPredicateRule, ResourceFoldPredicateRule,
-      ResourceSpawnRule.
+      ResourceSpawnRule, ResourceStackConsequenceRule.
 Qed.
 
 Theorem RavenHoareTriple_mask_transition {Γ F Δ}
