@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Program-specific trusted-atomic classifiers and transition obligations.
 - Obsolete assertion-shaped runtime-validity lemmas retained alongside the
   resource-native soundness proof.
+- The unused `RUNTIME_RESOURCES` compatibility bundle and its parallel model,
+  control-operation, execution, and invariant-operation functors.
 
 ### Fixed
 
