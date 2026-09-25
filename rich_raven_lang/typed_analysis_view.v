@@ -17,6 +17,9 @@ End STATEMENT_FAMILY.
 
 Inductive statement_view (statement : context -> Type) (Γ : context) : Type :=
 | ViewLeaf
+(* The empty continuation.  Unlike a leaf it is never charged through the
+   cost model: it is the identity on the analysis state by construction. *)
+| ViewDone
 | ViewUnfold (invariant : inv_id)
 | ViewFold (invariant : inv_id)
 | ViewSequence (first second : statement Γ)
@@ -25,6 +28,7 @@ Inductive statement_view (statement : context -> Type) (Γ : context) : Type :=
 | ViewAtomic (body : statement Γ).
 
 Arguments ViewLeaf {_ _}.
+Arguments ViewDone {_ _}.
 Arguments ViewUnfold {_ _} _.
 Arguments ViewFold {_ _} _.
 Arguments ViewSequence {_ _} _ _.
@@ -372,6 +376,7 @@ Fixpoint analyze_fuel {Γ} (fuel : nat) (cost : cost_model)
   | S fuel' =>
       match Syntax.view Γ statement with
       | ViewLeaf => take_step (cost Γ statement) state
+      | ViewDone => inr state
       | ViewUnfold invariant => open_invariant invariant state
       | ViewFold invariant => inr (fold_invariant invariant state)
       | ViewSequence first second =>
@@ -523,6 +528,9 @@ Inductive analysis_certificate (cost : cost_model) :
     Syntax.view Γ statement = ViewLeaf ->
     take_step (cost Γ statement) state = inr exit ->
     analysis_certificate cost Γ state statement exit
+| CertDone Γ state statement :
+    Syntax.view Γ statement = ViewDone ->
+    analysis_certificate cost Γ state statement state
 | CertUnfold Γ state statement invariant exit :
     Syntax.view Γ statement = ViewUnfold invariant ->
     open_invariant invariant state = inr exit ->
@@ -568,6 +576,7 @@ Lemma analysis_certificate_preserves_in_atomic
 Proof.
   induction certificate; simpl.
   - eapply take_step_preserves_in_atomic. exact e0.
+  - reflexivity.
   - eapply open_invariant_preserves_in_atomic. exact e0.
   - unfold fold_invariant.
     destruct (bool_decide (invariant ∈ analysis_open state)); reflexivity.
@@ -741,6 +750,7 @@ Fixpoint lifo_certificate {Γ entry statement exit} {cost : cost_model}
     (stack_in stack_out : list access_marker) : Prop :=
   match certificate with
   | CertLeaf _ _ _ _ _ _ _ => stack_out = stack_in
+  | CertDone _ _ _ _ _ => stack_out = stack_in
   | CertUnfold _ _ _ _ invariant _ _ _ =>
       stack_out = (invariant, analysis_open entry) :: stack_in
   | CertFold _ _ state _ invariant _ =>
@@ -774,6 +784,7 @@ Fixpoint replay_lifo_certificate {Γ entry statement exit}
     (stack_in : list access_marker) : option (list access_marker) :=
   match certificate with
   | CertLeaf _ _ _ _ _ _ _ => Some stack_in
+  | CertDone _ _ _ _ _ => Some stack_in
   | CertUnfold _ _ _ _ invariant _ _ _ =>
       Some ((invariant, analysis_open entry) :: stack_in)
   | CertFold _ _ state _ invariant _ =>
@@ -820,6 +831,7 @@ Lemma replay_lifo_certificate_sound {Γ entry statement exit}
 Proof.
   revert stack_in stack_out.
   induction certificate; intros stack_in stack_out Hreplay; simpl in *.
+  - inversion Hreplay. reflexivity.
   - inversion Hreplay. reflexivity.
   - inversion Hreplay. reflexivity.
   - destruct stack_in as [|[candidate outer_open] rest].
@@ -871,6 +883,7 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat) (cost : cost_model)
           | inl _ => None
           | inr exit => Some (exit, stack)
           end
+      | ViewDone => Some (state, stack)
       | ViewUnfold invariant =>
           match open_invariant invariant state with
           | inl _ => None
@@ -960,6 +973,7 @@ Proof.
   - destruct (take_step (cost Γ statement) state) as [error|actual]
       eqn:Hstep; try discriminate.
     inversion Hrun; subst. simpl. rewrite Hview. exact Hstep.
+  - inversion Hrun; subst. simpl. rewrite Hview. reflexivity.
   - destruct (open_invariant invariant state) as [error|actual]
       eqn:Hstep; try discriminate.
     inversion Hrun; subst. simpl. rewrite Hview. exact Hstep.
@@ -1023,6 +1037,7 @@ Proof.
     intros Γ state stack statement exit stack_out Hrun; simpl in Hrun;
     first discriminate.
   destruct (Syntax.view Γ statement) eqn:Hview; simpl.
+  - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
@@ -1186,6 +1201,7 @@ Lemma lifo_certificate_functional {Γ entry statement exit}
 Proof.
   revert stack_in stack_out1 stack_out2.
   induction certificate; simpl; intros stack_in stack_out1 stack_out2 H1 H2.
+  - congruence.
   - congruence.
   - congruence.
   - destruct H1 as [(o1 & Hin1 & Hmem1 & Hnm1 & Ho1) | (Heq1 & Hnm1)];
@@ -1428,6 +1444,7 @@ Proof.
     + apply Hstart. apply elem_of_union_r. exact Hopen.
     + apply elem_of_union_l. exact Hexit_mask.
     + apply elem_of_union_r. exact Hexit_open.
+  - set_solver.
   - apply open_invariant_success in e0 as
       (Hfresh & Havailable & Hmask & Hopen).
     rewrite Hmask, Hopen.
@@ -1576,6 +1593,7 @@ Fixpoint certificate_height {Γ entry statement exit} {cost : cost_model}
     (certificate : analysis_certificate cost Γ entry statement exit) : nat :=
   match certificate with
   | CertLeaf _ _ _ _ _ _ _ => 1
+  | CertDone _ _ _ _ _ => 1
   | CertUnfold _ _ _ _ _ _ _ _ => 1
   | CertFold _ _ _ _ _ _ => 1
   | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
@@ -1597,6 +1615,7 @@ Proof.
   induction fuel as [|fuel IH]; intros Γ state statement exit Hrun;
     simpl in Hrun |- *; first discriminate.
   destruct (Syntax.view Γ statement) eqn:Hview; simpl in Hrun |- *.
+  - exact Hrun.
   - exact Hrun.
   - exact Hrun.
   - exact Hrun.
@@ -1685,6 +1704,7 @@ Lemma certificate_replays_height {Γ entry statement exit}
 Proof.
   induction certificate; simpl.
   - rewrite e. exact e0.
+  - rewrite e. reflexivity.
   - rewrite e. exact e0.
   - rewrite e. reflexivity.
   - rewrite e.
@@ -1709,6 +1729,7 @@ Lemma certificate_height_le_size {Γ entry statement exit}
   certificate_height certificate <= Syntax.size Γ statement.
 Proof.
   induction certificate; simpl.
+  - pose proof (Syntax.size_positive Γ statement). lia.
   - pose proof (Syntax.size_positive Γ statement). lia.
   - pose proof (Syntax.size_positive Γ statement). lia.
   - pose proof (Syntax.size_positive Γ statement). lia.
@@ -1773,6 +1794,10 @@ Proof.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
     rewrite e, e0 in Hrun.
+    inversion Hrun; reflexivity.
+  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
+      [discriminate|].
+    rewrite e in Hrun.
     inversion Hrun; reflexivity.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
@@ -1883,6 +1908,7 @@ Proof.
   - exact I.
   - exact I.
   - exact I.
+  - exact I.
   - destruct fuel as [|fuel]; [lia|].
     cbn in Hcheck. rewrite e in Hcheck.
     assert (Hfirst_run : analyze_fuel fuel cost state first = inr middle).
@@ -1949,6 +1975,7 @@ Proof.
   induction certificate1; intros certificate2; dependent destruction certificate2;
     try solve [exfalso; congruence].
   - f_equal; apply proof_irrelevance.
+  - f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
     f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
@@ -1988,6 +2015,7 @@ Theorem certificate_preserves_wf {Γ} (cost : cost_model) state
 Proof.
   intros Hwf certificate. induction certificate.
   - eapply take_step_preserves_wf; eauto.
+  - exact Hwf.
   - eapply open_invariant_preserves_wf; eauto.
   - apply fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
@@ -2017,6 +2045,7 @@ Proof.
   - subst stack_out.
     apply take_step_preserves_open in e0 as Hopen.
     now rewrite Hopen.
+  - subst stack_out. exact Hstack.
   - subst stack_out.
     apply open_invariant_success in e0 as (Hfresh & _ & _ & Hopen).
     simpl. split; [exact Hfresh|].
@@ -2200,6 +2229,7 @@ Proof.
     simpl in Hanalyze; first discriminate.
   destruct (Syntax.view Γ statement) eqn:Hview.
   - eapply CertLeaf; [exact Hview|exact Hanalyze].
+  - inversion Hanalyze; subst exit. eapply CertDone. exact Hview.
   - eapply CertUnfold; [exact Hview|exact Hanalyze].
   - inversion Hanalyze; subst exit. eapply CertFold. exact Hview.
   - destruct (analyze_fuel fuel cost state first) as [error|middle] eqn:Hfirst;

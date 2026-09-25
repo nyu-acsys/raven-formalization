@@ -156,8 +156,8 @@ Record certified_program_registration := CertifiedProgramRegistration {
           @RegionExecution.Primitives.Model.runtime_stmt Γ
             (@RegionExecution.Primitives.Model.runtime_procedure_names
               Γ F procedure) stack (procedure_body Γ F procedure) =
-          Some (LegacyLang.to_rtstmt stack
-            (registered_runtime_procedure_statement packed))
+          LegacyLang.to_rtstmt stack
+            (registered_runtime_procedure_statement packed)
     end;
 }.
 
@@ -352,22 +352,27 @@ Inductive operational_suffix (cost : GenericRegions.Atomicity.cost_model) Γ :
 Arguments OperationalDone {_ _} _.
 Arguments OperationalCons {_ _ _ _ _ _} _ _.
 
+(** The runtime meaning of an erased statement: run it, then change masks.
+    Erasure is total, so there is no case split here; a proof-only statement
+    erases to the terminal statement, whose [wp] is just the mask change
+    ([runtime_masked_wp_noop]). *)
+Definition runtime_masked_wp (entry_mask exit_mask : coPset)
+    (physical : LegacyLang.runtime_stmt) (post : iProp) : iProp :=
+  @RegionExecution.Primitives.Model.runtime_wp Σ RG entry_mask physical
+    (fun result =>
+      (⌜result = LegacyLang.LitUnit⌝ ∗
+       |={entry_mask, exit_mask}=> post)%I).
+
 Definition translated_runtime_wp {Γ} (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (ambient : coPset) (entry exit : GenericRegions.Atomicity.analysis_state)
     (statement : stmt Γ) (post : iProp) : iProp :=
-  match @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement with
-  | None =>
-      (|={RegionExecution.Primitives.Model.active_runtime_mask ambient entry,
-           RegionExecution.Primitives.Model.active_runtime_mask ambient exit}=> post)%I
-  | Some runtime_statement =>
-      @RegionExecution.Primitives.Model.runtime_wp Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-        runtime_statement
-          (fun result =>
-          (⌜result = LegacyLang.LitUnit⌝ ∗
-           |={RegionExecution.Primitives.Model.active_runtime_mask ambient entry,
-              RegionExecution.Primitives.Model.active_runtime_mask ambient exit}=> post)%I)
-  end.
+  runtime_masked_wp
+    (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
+    (RegionExecution.Primitives.Model.active_runtime_mask ambient exit)
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ
+      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement)
+    post.
 
 Lemma term_translated_runtime_wp_runtime_stmt_ext {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient entry exit
@@ -384,16 +389,51 @@ Proof.
   intros Hequal. unfold translated_runtime_wp. now rewrite Hequal.
 Qed.
 
-Definition runtime_option_wp (entry_mask exit_mask : coPset)
-    (physical : option LegacyLang.runtime_stmt) (post : iProp) : iProp :=
-  match physical with
-  | None => (|={entry_mask, exit_mask}=> post)%I
-  | Some statement =>
-      @RegionExecution.Primitives.Model.runtime_wp Σ RG entry_mask statement
-        (fun result =>
-          (⌜result = LegacyLang.LitUnit⌝ ∗
-           |={entry_mask, exit_mask}=> post)%I)
-  end.
+Lemma runtime_masked_wp_noop entry_mask exit_mask (post : iProp) :
+  runtime_masked_wp entry_mask exit_mask
+    RegionExecution.Primitives.Model.runtime_noop post ⊣⊢
+  (|={entry_mask, exit_mask}=> post)%I.
+Proof.
+  unfold runtime_masked_wp, RegionExecution.Primitives.Model.runtime_wp,
+    RegionExecution.Primitives.Model.runtime_noop.
+  change (LegacyLang.RTVal LegacyLang.LitUnit) with
+    (@of_val LegacyLang.simp_lang LegacyLang.LitUnit).
+  rewrite wp_value_fupd'.
+  iSplit.
+  - iIntros ">[_ H]". iExact "H".
+  - iIntros "H". iModIntro. iSplit; first done. iExact "H".
+Qed.
+
+Lemma translated_runtime_wp_erased {Γ}
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient entry exit
+    (statement : stmt Γ) post :
+  @RegionExecution.Primitives.Model.runtime_stmt Γ
+    (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement =
+    RegionExecution.Primitives.Model.runtime_noop ->
+  translated_runtime_wp runtime ambient entry exit statement post ⊣⊢
+  (|={RegionExecution.Primitives.Model.active_runtime_mask ambient entry,
+      RegionExecution.Primitives.Model.active_runtime_mask ambient exit}=> post)%I.
+Proof.
+  intros Herased. unfold translated_runtime_wp. rewrite Herased.
+  apply runtime_masked_wp_noop.
+Qed.
+
+Lemma runtime_masked_wp_noop_eq entry_mask exit_mask physical (post : iProp) :
+  physical = RegionExecution.Primitives.Model.runtime_noop ->
+  runtime_masked_wp entry_mask exit_mask physical post ⊣⊢
+  (|={entry_mask, exit_mask}=> post)%I.
+Proof. intros ->. apply runtime_masked_wp_noop. Qed.
+
+(** The terminal statement takes no step, so it is trivially atomic. *)
+Global Instance runtime_value_atomic value :
+  @Atomic LegacyLang.simp_lang WeaklyAtomic (LegacyLang.RTVal value).
+Proof. apply LegacyLang.atomic_val. Qed.
+
+Lemma runtime_noop_atomic :
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    RegionExecution.Primitives.Model.runtime_noop.
+Proof. apply _. Qed.
 
 Lemma runtime_wp_atomic_mask_change
     (physical : LegacyLang.runtime_stmt) E1 E2
@@ -419,64 +459,86 @@ Proof.
   iApply LegacyLifting.wp_seq_wp. iExact "Hfirst".
 Qed.
 
-Lemma translated_runtime_wp_as_option {Γ}
+Lemma translated_runtime_wp_as_masked {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient entry exit statement post :
   translated_runtime_wp runtime ambient entry exit statement post ⊣⊢
-    runtime_option_wp
+    runtime_masked_wp
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient exit)
       (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement) post.
 Proof. reflexivity. Qed.
 
-Lemma runtime_option_wp_mono entry_mask exit_mask physical (P Q : iProp) :
+Lemma runtime_masked_wp_mono entry_mask exit_mask physical (P Q : iProp) :
   (P ⊢ Q) ->
-  runtime_option_wp entry_mask exit_mask physical P ⊢
-    runtime_option_wp entry_mask exit_mask physical Q.
+  runtime_masked_wp entry_mask exit_mask physical P ⊢
+    runtime_masked_wp entry_mask exit_mask physical Q.
 Proof.
-  intros HPQ. destruct physical as [statement|]; simpl.
-  - iIntros "Hwp". iApply (wp_mono with "Hwp").
-    iIntros (result) "[%Hresult Hpost]". iSplit; first done.
-    iMod "Hpost". iModIntro. iApply HPQ. iExact "Hpost".
-  - iIntros "Hpost". iMod "Hpost". iModIntro.
-    iApply HPQ. iExact "Hpost".
+  intros HPQ. unfold runtime_masked_wp.
+  iIntros "Hwp". iApply (wp_mono with "Hwp").
+  iIntros (result) "[%Hresult Hpost]". iSplit; first done.
+  iMod "Hpost". iModIntro. iApply HPQ. iExact "Hpost".
 Qed.
 
-Lemma runtime_option_wp_frame entry_mask exit_mask physical (post frame : iProp) :
-  runtime_option_wp entry_mask exit_mask physical post ∗ frame ⊢
-    runtime_option_wp entry_mask exit_mask physical (post ∗ frame).
+Lemma runtime_masked_wp_frame entry_mask exit_mask physical (post frame : iProp) :
+  runtime_masked_wp entry_mask exit_mask physical post ∗ frame ⊢
+    runtime_masked_wp entry_mask exit_mask physical (post ∗ frame).
 Proof.
-  destruct physical as [statement|]; simpl.
-  - unfold RegionExecution.Primitives.Model.runtime_wp. iIntros "[Hwp Hframe]".
-    iPoseProof (@wp_frame_r HasLc LegacyLang.simp_lang Σ core_irisG
-      NotStuck entry_mask _
-      (fun result =>
-        (⌜result = LegacyLang.LitUnit⌝ ∗ |={entry_mask,exit_mask}=> post)%I)
-      frame with "[$Hwp $Hframe]") as "Hwp".
-    iApply (wp_mono with "Hwp").
-    iIntros (result) "[[%Hresult Hpost] Hframe]". iSplit; first done.
-    iMod "Hpost". iModIntro. iFrame.
-  - iIntros "[Hpost Hframe]". iMod "Hpost". iModIntro. iFrame.
+  unfold runtime_masked_wp, RegionExecution.Primitives.Model.runtime_wp.
+  iIntros "[Hwp Hframe]".
+  iPoseProof (@wp_frame_r HasLc LegacyLang.simp_lang Σ core_irisG
+    NotStuck entry_mask _
+    (fun result =>
+      (⌜result = LegacyLang.LitUnit⌝ ∗ |={entry_mask,exit_mask}=> post)%I)
+    frame with "[$Hwp $Hframe]") as "Hwp".
+  iApply (wp_mono with "Hwp").
+  iIntros (result) "[[%Hresult Hpost] Hframe]". iSplit; first done.
+  iMod "Hpost". iModIntro. iFrame.
 Qed.
 
-Lemma runtime_option_wp_atomic_mask_change outer inner physical (post : iProp) :
-  (forall statement, physical = Some statement ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic statement) ->
+Lemma runtime_masked_wp_atomic_mask_change outer inner physical (post : iProp) :
+  @Atomic LegacyLang.simp_lang WeaklyAtomic physical ->
   (|={outer,inner}=>
-    runtime_option_wp inner inner physical (|={inner,outer}=> post)) ⊢
-  runtime_option_wp outer outer physical post.
+    runtime_masked_wp inner inner physical (|={inner,outer}=> post)) ⊢
+  runtime_masked_wp outer outer physical post.
 Proof.
-  intros Hatomic. destruct physical as [statement|] eqn:Hphysical; simpl.
-  - pose proof (Hatomic statement eq_refl) as Hstatement_atomic.
-    iIntros "Hbracket". iApply runtime_wp_atomic_mask_change.
-    iMod "Hbracket". iModIntro.
-    iApply (wp_mono with "Hbracket").
-    iIntros (result) "[%Hresult Hpost]".
-    iMod "Hpost". iMod "Hpost". iModIntro.
-    iSplit; first done. iExact "Hpost".
-  - iIntros "Hbracket". iMod "Hbracket".
-    iMod "Hbracket". iMod "Hbracket". iModIntro.
-    iExact "Hbracket".
+  intros Hstatement_atomic. unfold runtime_masked_wp.
+  iIntros "Hbracket". iApply runtime_wp_atomic_mask_change.
+  iMod "Hbracket". iModIntro.
+  iApply (wp_mono with "Hbracket").
+  iIntros (result) "[%Hresult Hpost]".
+  iMod "Hpost". iMod "Hpost". iModIntro.
+  iSplit; first done. iExact "Hpost".
+Qed.
+
+(** Sequencing through the smart constructor: a terminal operand is dropped
+    and contributes only its (identity) mask change. *)
+Lemma runtime_masked_wp_seq mask exit_mask first second (post : iProp) :
+  runtime_masked_wp mask mask first
+      (runtime_masked_wp mask exit_mask second post) ⊢
+    runtime_masked_wp mask exit_mask
+      (RegionExecution.Primitives.Model.runtime_seq first second) post.
+Proof.
+  apply (RegionExecution.Primitives.Model.runtime_seq_ind
+    (fun combined => runtime_masked_wp mask mask first
+      (runtime_masked_wp mask exit_mask second post) ⊢
+      runtime_masked_wp mask exit_mask combined post)).
+  - intros ->. rewrite runtime_masked_wp_noop.
+    unfold runtime_masked_wp. iIntros "Hsecond". iMod "Hsecond".
+    iExact "Hsecond".
+  - intros ->. etrans.
+    { apply runtime_masked_wp_mono. apply bi.equiv_entails_1_1.
+      apply runtime_masked_wp_noop. }
+    unfold runtime_masked_wp. iIntros "Hfirst".
+    iApply (wp_mono with "Hfirst").
+    iIntros (result) "[%Hresult Hpost]". iSplit; first done.
+    iMod "Hpost". iExact "Hpost".
+  - intros _ _. unfold runtime_masked_wp. iIntros "Hfirst".
+    iApply runtime_wp_sequence.
+    iApply (wp_mono with "Hfirst").
+    iIntros (result) "[%Hresult Hsecond]".
+    iSplit; first done.
+    iMod "Hsecond". iExact "Hsecond".
 Qed.
 
 Lemma translated_runtime_wp_mono {Γ} (runtime : RegionExecution.Primitives.Model.stack_context Γ)
@@ -484,39 +546,13 @@ Lemma translated_runtime_wp_mono {Γ} (runtime : RegionExecution.Primitives.Mode
   (P ⊢ Q) ->
   translated_runtime_wp runtime ambient entry exit statement P ⊢
     translated_runtime_wp runtime ambient entry exit statement Q.
-Proof.
-  intros HPQ. unfold translated_runtime_wp.
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement) as [physical|].
-  - unfold RegionExecution.Primitives.Model.runtime_wp. iIntros "Hwp".
-    iApply (wp_mono with "Hwp").
-    iIntros (result) "[%Hresult Hpost]". iSplit; first done.
-    iMod "Hpost". iModIntro. iApply HPQ. iExact "Hpost".
-  - iIntros "Hpost". iMod "Hpost". iModIntro.
-    iApply HPQ. iExact "Hpost".
-Qed.
+Proof. apply runtime_masked_wp_mono. Qed.
 
 Lemma translated_runtime_wp_frame {Γ} (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     ambient entry exit statement (post frame : iProp) :
   translated_runtime_wp runtime ambient entry exit statement post ∗ frame ⊢
     translated_runtime_wp runtime ambient entry exit statement (post ∗ frame).
-Proof.
-  unfold translated_runtime_wp.
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement) as [physical|].
-  - unfold RegionExecution.Primitives.Model.runtime_wp. iIntros "[Hwp Hframe]".
-    iPoseProof (@wp_frame_r HasLc LegacyLang.simp_lang Σ core_irisG
-      NotStuck (RegionExecution.Primitives.Model.active_runtime_mask ambient entry) _
-      (fun result =>
-        (⌜result = LegacyLang.LitUnit⌝ ∗
-         |={RegionExecution.Primitives.Model.active_runtime_mask ambient entry,
-            RegionExecution.Primitives.Model.active_runtime_mask ambient exit}=> post)%I)
-      frame with "[$Hwp $Hframe]") as "Hwp".
-    iApply (wp_mono with "Hwp").
-    iIntros (result) "[[%Hresult Hpost] Hframe]". iSplit; first done.
-    iMod "Hpost". iModIntro. iFrame.
-  - iIntros "[Hpost Hframe]". iMod "Hpost". iModIntro. iFrame.
-Qed.
+Proof. apply runtime_masked_wp_frame. Qed.
 
 Definition term_semantic_runtime {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) :
@@ -944,8 +980,8 @@ Lemma term_runtime_procedure_layout_configured
         @RegionExecution.Primitives.Model.runtime_stmt Γ
           (@RegionExecution.Primitives.Model.runtime_procedure_names
             Γ F procedure) stack (procedure_body Γ F procedure) =
-        Some (LegacyLang.to_rtstmt stack
-          (term_runtime_procedure_statement  packed))
+        LegacyLang.to_rtstmt stack
+          (term_runtime_procedure_statement  packed)
   end.
 Proof.
   apply registered_runtime_procedure_layout.
@@ -1708,28 +1744,12 @@ Proof.
   apply (Translation.TermSemantics.interp_weaken_core_to semantic_data).
 Qed.
 
-(** Resource-shaped ambient rules for the two proof-only leaves.  Like their
-    assertion-shaped counterparts these carry no physical step, so the
-    weakest precondition is the identity and the interpretation never has to
-    cross into the assertion representation. *)
-Lemma term_ambient_resource_skip_rule_valid {Γ F Δ} (node : node_id)
-    (store : symbolic_store Γ F Δ)
-    (body : Translation.Resource.core_assertion F Δ)
-    (entry exit : GenericRegions.Atomicity.analysis_state) :
-  forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-    (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
-      (Translation.Resource.RState store body) ⊢
-    concrete_operation_wp runtime ambient entry (TSkip node) exit
-      (term_interp_resource_prenex runtime formals binders atoms
-        (Translation.Resource.RState store body)).
-Proof.
-  intros runtime formals binders atoms ambient.
-  unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
-  simpl. reflexivity.
-Qed.
-
+(** Resource-shaped ambient rule for [assert], a proof-only leaf.  Like its
+    assertion-shaped counterpart it carries no physical step, so the weakest
+    precondition is the identity and the interpretation never has to cross
+    into the assertion representation.  ([done] has no ambient rule: it is
+    not an operation at all, and its meaning is given structurally by
+    [region_wp].) *)
 Lemma term_ambient_resource_assert_rule_valid {Γ F Δ} (node : node_id)
     (store : symbolic_store Γ F Δ)
     (body : Translation.Resource.core_assertion F Δ) condition
@@ -2177,6 +2197,7 @@ Lemma term_structured_certificate_preserves_open
 Proof.
   induction certificate; simpl.
   - eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+  - reflexivity.
   - apply GenericRegions.Atomicity.fold_fresh_invariant in n as [_ Hopen].
     exact Hopen.
   - etrans; eauto.
@@ -2308,27 +2329,7 @@ Lemma term_translated_runtime_wp_sequence {Γ}
 Proof.
   unfold translated_runtime_wp. simpl.
   unfold RegionExecution.Primitives.Model.active_runtime_mask. rewrite Hopen.
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) first)
-      as [first_rt|] eqn:Hfirst;
-    destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) second)
-      as [second_rt|] eqn:Hsecond;
-    simpl in *.
-  - iIntros "Hfirst".
-    iApply runtime_wp_sequence.
-    iApply (wp_mono with "Hfirst").
-    iIntros (result) "[%Hresult Hsecond]".
-    iSplit; first done.
-    iMod "Hsecond". iExact "Hsecond".
-  - iIntros "Hfirst". iApply (wp_mono with "Hfirst").
-    iIntros (result) "[%Hresult Hpost]". iSplit; first done.
-    iMod "Hpost". iMod "Hpost". iModIntro. iExact "Hpost".
-  - iIntros "Hsecond". iMod "Hsecond". iExact "Hsecond".
-  - iIntros "Hpost". iMod "Hpost". iMod "Hpost".
-    iModIntro. iExact "Hpost".
+  apply runtime_masked_wp_seq.
 Qed.
 
 Lemma term_leaf_operation_to_translated {Γ}
@@ -2352,6 +2353,8 @@ Proof.
   all: unfold translated_runtime_wp; simpl.
   all: try destruct target; simpl.
   all: unfold RegionExecution.Primitives.ambient_physical_leaf_wp.
+  all: try (rewrite runtime_masked_wp_noop_eq; [|reflexivity]).
+  all: try unfold runtime_masked_wp.
   all: try rewrite Hactive.
   all: try (iIntros "Hwp"; iApply (wp_mono with "Hwp");
     iIntros (result) "[%Hresult Hpost]"; iSplit; first done;
@@ -2369,23 +2372,13 @@ Lemma translated_runtime_wp_default_arm {Γ}
     (statement : stmt Γ) post :
   translated_runtime_wp runtime ambient entry exit statement post ⊢
   @RegionExecution.Primitives.Model.runtime_wp Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-    (default RegionExecution.Primitives.Model.runtime_noop
-      (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement))
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement)
     (fun result =>
       (⌜result = LegacyLang.LitUnit⌝ ∗
        |={RegionExecution.Primitives.Model.active_runtime_mask ambient entry,
           RegionExecution.Primitives.Model.active_runtime_mask ambient exit}=> post)%I).
-Proof.
-  unfold translated_runtime_wp.
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement) as [physical|] eqn:Hphysical;
-    first reflexivity.
-  simpl. iIntros "Hpost". unfold RegionExecution.Primitives.Model.runtime_wp, RegionExecution.Primitives.Model.runtime_noop.
-  iApply wp_value.
-  - done.
-  - iSplit; first done. iExact "Hpost".
-Qed.
+Proof. reflexivity. Qed.
 
 Lemma runtime_condition_step {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
@@ -2490,139 +2483,29 @@ Lemma translated_runtime_wp_if {Γ F Δ}
     translated_runtime_wp runtime ambient entry exit
       (TIf node condition then_branch else_branch) post.
 Proof.
-  intros Hcondition Hselected. destruct b.
-  - destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) then_branch) as [then_runtime|]
-        eqn:Hthen;
-      destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) else_branch) as [else_runtime|]
-        eqn:Helse.
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          then_runtime else_runtime (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_true.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition true Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          then_branch post with "Hselected") as "Harm".
-        iEval (rewrite Hthen) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          then_runtime RegionExecution.Primitives.Model.runtime_noop (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_true.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition true Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          then_branch post with "Hselected") as "Harm".
-        iEval (rewrite Hthen) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          RegionExecution.Primitives.Model.runtime_noop else_runtime (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_true.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition true Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          then_branch post with "Hselected") as "Harm".
-        iEval (rewrite Hthen) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) = None.
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif. iIntros "Hresources".
-      iPoseProof (Hselected with "Hresources") as "Hselected".
-      iEval (unfold translated_runtime_wp; rewrite Hthen) in "Hselected".
-      iExact "Hselected".
-  - destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) then_branch) as [then_runtime|]
-        eqn:Hthen;
-      destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) else_branch) as [else_runtime|]
-        eqn:Helse.
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          then_runtime else_runtime (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_false.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition false Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          else_branch post with "Hselected") as "Harm".
-        iEval (rewrite Helse) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          then_runtime RegionExecution.Primitives.Model.runtime_noop (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_false.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition false Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          else_branch post with "Hselected") as "Harm".
-        iEval (rewrite Helse) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) =
-        Some (LegacyLang.RTIfS
-          (@RegionExecution.Primitives.Model.runtime_expr Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          RegionExecution.Primitives.Model.runtime_noop else_runtime (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)).
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif.
-      eapply runtime_wp_if_false.
-      * exact (runtime_condition_step runtime formals binders atoms store
-          condition false Hcondition).
-      * iIntros "Hresources".
-        iPoseProof (Hselected with "Hresources") as "Hselected".
-        iPoseProof (translated_runtime_wp_default_arm runtime ambient entry exit
-          else_branch post with "Hselected") as "Harm".
-        iEval (rewrite Helse) in "Harm". iExact "Harm".
-    + have Hif : @RegionExecution.Primitives.Model.runtime_stmt Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-          (TIf node condition then_branch else_branch) = None.
-      { cbn [RegionExecution.Primitives.Model.runtime_stmt].
-        rewrite Hthen Helse. reflexivity. }
-      unfold translated_runtime_wp. rewrite Hif. iIntros "Hresources".
-      iPoseProof (Hselected with "Hresources") as "Hselected".
-      iEval (unfold translated_runtime_wp; rewrite Helse) in "Hselected".
-      iExact "Hselected".
+  intros Hcondition Hselected.
+  unfold translated_runtime_wp.
+  cbn [RegionExecution.Primitives.Model.runtime_stmt].
+  match goal with
+  | |- ?lhs ⊢ runtime_masked_wp ?entry_mask ?exit_mask _ ?q =>
+      apply (RegionExecution.Primitives.Model.runtime_if_ind
+        (fun combined => lhs ⊢
+          runtime_masked_wp entry_mask exit_mask combined q))
+  end.
+  - (* both arms proof-only: the conditional is erased entirely *)
+    intros Hthen Helse. etrans; [exact Hselected|].
+    rewrite runtime_masked_wp_noop.
+    destruct b; cbv iota; unfold translated_runtime_wp;
+      [rewrite (runtime_masked_wp_noop_eq _ _ _ _ Hthen)
+      |rewrite (runtime_masked_wp_noop_eq _ _ _ _ Helse)];
+      reflexivity.
+  - intros _. unfold runtime_masked_wp. destruct b.
+    + eapply runtime_wp_if_true; [|exact Hselected].
+      exact (runtime_condition_step runtime formals binders atoms store
+        condition true Hcondition).
+    + eapply runtime_wp_if_false; [|exact Hselected].
+      exact (runtime_condition_step runtime formals binders atoms store
+        condition false Hcondition).
 Qed.
 
 Corollary translated_runtime_wp_if_total {Γ F Δ}
@@ -2766,7 +2649,7 @@ Proof.
     formals binders atoms with "[$Hglobal $Hpre]") as "Hwp".
   iEval (unfold concrete_operation_wp,
     RegionExecution.Primitives.operation_wp, RegionSyntax.view) in "Hwp".
-  unfold translated_runtime_wp. simpl. iExact "Hwp".
+  rewrite translated_runtime_wp_erased; [|reflexivity]. iExact "Hwp".
 Qed.
 
 Lemma term_structured_invariant_namespace_active_from_footprint
@@ -3117,7 +3000,7 @@ Lemma term_independent_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant
        (IR.pexpr_list_append tracked program_arguments)
        (Translation.tval_list_append tracked_values invariant_values)
        body_pre) ⊢
-    runtime_option_wp
+    runtime_masked_wp
       (outer_mask ∖ ↑(Config.invariant_namespace invariant))
       (outer_mask ∖ ↑(Config.invariant_namespace invariant))
       (@RegionExecution.Primitives.Model.runtime_stmt Γ
@@ -3128,16 +3011,14 @@ Lemma term_independent_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant
          (IR.pexpr_list_append tracked program_arguments)
          (Translation.tval_list_append tracked_values invariant_values)
          body_post)) ->
-  (forall physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body =
-        Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body) ->
   (global_world_context  atoms ∗
    term_interp_resource_prenex_at_arguments runtime formals binders atoms
      tracked tracked_values external_pre) ⊢
-  runtime_option_wp outer_mask outer_mask
+  runtime_masked_wp outer_mask outer_mask
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -3152,7 +3033,7 @@ Proof.
   iDestruct "Hglobal" as "[#Hworlds [#Hchunks #Hprocedures]]".
   iPoseProof (term_world_context_lookup  atoms invariant Hregistered
     with "Hworlds") as "#Hworld".
-  iApply (runtime_option_wp_atomic_mask_change outer_mask
+  iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(Config.invariant_namespace invariant))
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
@@ -3167,8 +3048,8 @@ Proof.
   iPoseProof (Hbody invariant_values with
     "[$Hworlds $Hchunks $Hprocedures $Hpre]") as "Hwp".
   iCombine "Hwp Hclose Htoken" as "Hwp".
-  iPoseProof (runtime_option_wp_frame with "Hwp") as "Hwp".
-  iApply (runtime_option_wp_mono with "Hwp").
+  iPoseProof (runtime_masked_wp_frame with "Hwp") as "Hwp".
+  iApply (runtime_masked_wp_mono with "Hwp").
   iIntros "[[#Hglobal Hpost] [Hclose Htoken]]". iFrame "Hglobal".
   iApply (term_resource_access_closing_arguments_valid invariant
     program_arguments focus_close body_post external_post Hclosing runtime
@@ -3486,7 +3367,7 @@ Lemma term_structured_inv_access_runtime_resource_valid {Γ F Δ} invariant argu
        (Translation.Resource.CAnd
          (ResourceInstances.instantiated_invariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame)) ⊢
-   runtime_option_wp inner_mask inner_mask
+   runtime_masked_wp inner_mask inner_mask
      (@RegionExecution.Primitives.Model.runtime_stmt Γ
        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
@@ -3498,19 +3379,18 @@ Lemma term_structured_inv_access_runtime_resource_valid {Γ F Δ} invariant argu
     (ResourceInstances.instantiated_invariant invariant
       (IR.symbolize_expr_list input_store arguments))
     opened_post closed_post ->
-  (forall physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        body) ->
   (global_world_context  atoms ∗
    term_interp_resource_prenex runtime formals binders atoms
      (Translation.Resource.RState input_store
        (Translation.Resource.CAnd
          (Translation.Resource.CInvariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame))) ⊢
-  runtime_option_wp outer_mask outer_mask
+  runtime_masked_wp outer_mask outer_mask
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -3534,7 +3414,7 @@ Proof.
   iPoseProof "Htoken" as "#Htoken_saved".
   iPoseProof (term_world_context_lookup  atoms invariant Hregistered
     with "Hworlds") as "#Hworld".
-  iApply (runtime_option_wp_atomic_mask_change outer_mask
+  iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(Config.invariant_namespace invariant))
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
@@ -3547,8 +3427,8 @@ Proof.
   iPoseProof (Hbody with
     "[$Hworlds $Hchunks $Hprocedures $Hstack $Hinv_body $Hframe]") as "Hwp".
   iCombine "Hwp Hclose Htoken_saved" as "Hwp".
-  iPoseProof (runtime_option_wp_frame with "Hwp") as "Hwp".
-  iApply (runtime_option_wp_mono with "Hwp").
+  iPoseProof (runtime_masked_wp_frame with "Hwp") as "Hwp".
+  iApply (runtime_masked_wp_mono with "Hwp").
   iIntros "[[#Hglobal Hpost] [Hclose Htoken_saved]]".
   iFrame "Hglobal".
   iApply (term_resource_invariant_access_closure_valid invariant
@@ -3583,7 +3463,7 @@ Lemma term_structured_inv_access_runtime_resource_arguments_valid {Γ F Δ ts} i
        (Translation.Resource.CAnd
          (ResourceInstances.instantiated_invariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame)) ⊢
-   runtime_option_wp inner_mask inner_mask
+   runtime_masked_wp inner_mask inner_mask
      (@RegionExecution.Primitives.Model.runtime_stmt Γ
        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
@@ -3595,12 +3475,11 @@ Lemma term_structured_inv_access_runtime_resource_arguments_valid {Γ F Δ ts} i
     (ResourceInstances.instantiated_invariant invariant
       (IR.symbolize_expr_list input_store arguments))
     opened_post closed_post ->
-  (forall physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        body) ->
   (global_world_context  atoms ∗
    term_interp_resource_prenex_at_arguments runtime formals binders atoms
      tracked tracked_values
@@ -3608,7 +3487,7 @@ Lemma term_structured_inv_access_runtime_resource_arguments_valid {Γ F Δ ts} i
        (Translation.Resource.CAnd
          (Translation.Resource.CInvariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame))) ⊢
-  runtime_option_wp outer_mask outer_mask
+  runtime_masked_wp outer_mask outer_mask
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -3632,7 +3511,7 @@ Proof.
   iPoseProof "Htoken" as "#Htoken_saved".
   iPoseProof (term_world_context_lookup  atoms invariant Hregistered
     with "Hworlds") as "#Hworld".
-  iApply (runtime_option_wp_atomic_mask_change outer_mask
+  iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(Config.invariant_namespace invariant))
     (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
@@ -3646,8 +3525,8 @@ Proof.
     "[$Hworlds $Hchunks $Hprocedures $Hstack $Hinv_body $Hframe]") as "Hwp".
   { iPureIntro. exact Htracked. }
   iCombine "Hwp Hclose Htoken_saved" as "Hwp".
-  iPoseProof (runtime_option_wp_frame with "Hwp") as "Hwp".
-  iApply (runtime_option_wp_mono with "Hwp").
+  iPoseProof (runtime_masked_wp_frame with "Hwp") as "Hwp".
+  iApply (runtime_masked_wp_mono with "Hwp").
   iIntros "[[#Hglobal Hpost] [Hclose Htoken_saved]]".
   iFrame "Hglobal".
   iApply (term_resource_invariant_access_closure_arguments_valid invariant
@@ -3689,12 +3568,12 @@ Lemma term_structured_runtime_resource_inv_access_valid
         (ResourceInstances.instantiated_invariant invariant
           (IR.symbolize_expr_list input_store arguments)) frame))
     opened_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        body)) ->
   term_structured_runtime_resource_valid
     (Structured.StructuredInvAccess cost Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
@@ -3725,7 +3604,7 @@ Proof.
       (Structured.StructuredInvAccess cost Γ entry invariant arguments body
         opened inner Hopen body_certificate Hpreserved)). }
   unfold term_structured_runtime_wp.
-  rewrite translated_runtime_wp_as_option Hexit_mask. simpl.
+  rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_structured_inv_access_runtime_resource_valid  invariant
     arguments input_store frame opened_post closed_post body runtime
     formals binders atoms
@@ -3742,7 +3621,7 @@ Proof.
       repeat rewrite elem_of_union. tauto. }
     specialize (Hbody_wp Hbody_envelope).
     unfold term_structured_runtime_wp in Hbody_wp.
-    rewrite translated_runtime_wp_as_option in Hbody_wp.
+    rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
     { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. symmetry. exact Hpreserved. }
@@ -3777,12 +3656,12 @@ Lemma term_structured_runtime_resource_inv_access_arguments_valid
         (ResourceInstances.instantiated_invariant invariant
           (IR.symbolize_expr_list input_store arguments)) frame))
     opened_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        body)) ->
   term_structured_runtime_resource_arguments_valid
     (Structured.StructuredInvAccess cost Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
@@ -3816,7 +3695,7 @@ Proof.
       (Structured.StructuredInvAccess cost Γ entry invariant arguments body
         opened inner Hopen body_certificate Hpreserved)). }
   unfold term_structured_runtime_wp.
-  rewrite translated_runtime_wp_as_option Hexit_mask. simpl.
+  rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_structured_inv_access_runtime_resource_arguments_valid
     invariant arguments input_store frame opened_post closed_post body runtime
     formals binders atoms tracked tracked_values
@@ -3834,7 +3713,7 @@ Proof.
       repeat rewrite elem_of_union. tauto. }
     specialize (Hbody_wp Hbody_envelope).
     unfold term_structured_runtime_wp in Hbody_wp.
-    rewrite translated_runtime_wp_as_option in Hbody_wp.
+    rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
     { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
@@ -3871,12 +3750,11 @@ Lemma term_structured_runtime_resource_independent_inv_access_arguments_valid
     (tracked : pexpr_list Γ ts) :
   term_structured_runtime_resource_arguments_valid  body_certificate
     (IR.pexpr_list_append tracked program_arguments) body_pre body_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body =
-        Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_resource_arguments_valid
     (Structured.StructuredInvAccess cost Γ entry invariant program_arguments
       body opened inner Hopen body_certificate Hpreserved)
@@ -3912,7 +3790,7 @@ Proof.
       (Structured.StructuredInvAccess cost Γ entry invariant program_arguments
         body opened inner Hopen body_certificate Hpreserved)). }
   unfold term_structured_runtime_wp.
-  rewrite translated_runtime_wp_as_option Hexit_mask. simpl.
+  rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_independent_inv_access_runtime_arguments_valid
     invariant program_arguments focus_open focus_close external_pre body_pre
     body_post external_post Hopening Hclosing body tracked tracked_values
@@ -3932,7 +3810,7 @@ Proof.
       (Translation.tval_list_append tracked_values invariant_values)
       runtime formals binders atoms ambient Hbody_envelope.
     unfold term_structured_runtime_wp in Hbody_wp.
-    rewrite translated_runtime_wp_as_option in Hbody_wp.
+    rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask
         ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
@@ -4066,12 +3944,12 @@ Lemma term_structured_runtime_resource_terminal_access_valid
         (ResourceInstances.instantiated_invariant invariant
           (IR.symbolize_expr_list input_store arguments)) frame))
     opened_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      (TAtomic node atomic_body) = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        (TAtomic node atomic_body))) ->
   term_structured_runtime_resource_valid
     (Structured.StructuredInvAccess cost Γ entry invariant arguments
       (TAtomic node atomic_body) opened _ Hopen
@@ -4559,11 +4437,11 @@ Lemma term_structured_runtime_resource_inv_access_focus_base_framed_arguments_va
     (tracked : pexpr_list Γ ts) :
   term_structured_runtime_resource_arguments_valid  body_certificate
       tracked (Translation.Resource.prenex_and body_pre frame) body_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_resource_arguments_valid
     (Structured.StructuredInvAccess cost Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
@@ -4616,11 +4494,11 @@ Lemma term_structured_runtime_resource_inv_access_boundary_arguments_valid
     (tracked : pexpr_list Γ ts) :
   term_structured_runtime_resource_arguments_valid  body_certificate
       tracked body_pre body_post ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_resource_arguments_valid
     (Structured.StructuredInvAccess cost Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
@@ -4910,9 +4788,6 @@ Proof.
     iApply (IHHtriple Hview Hstep runtime formals binders atoms ambient
       Henvelope).
     rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
-  - (* skip *)
-    iIntros "[_ Hpre]". iApply term_ambient_resource_skip_rule_valid.
-    iExact "Hpre".
   - (* assert *)
     iIntros "[_ Hpre]". iApply term_ambient_resource_assert_rule_valid.
     iExact "Hpre".
@@ -5312,12 +5187,12 @@ Lemma term_resource_terminal_access_then_normalization_valid
       (Translation.Resource.CAnd
         (ResourceInstances.instantiated_invariant invariant
           (IR.symbolize_expr_list input_store arguments)) remainder)) ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      (TAtomic node atomic_body) = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical) ->
+  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
+    @Atomic LegacyLang.simp_lang WeaklyAtomic
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        (TAtomic node atomic_body))) ->
   term_structured_runtime_resource_valid  work_certificate
     (Translation.Resource.RState output_store
       (Translation.Resource.CAnd
@@ -5533,6 +5408,7 @@ Lemma term_structured_certificate_preserves_wf
 Proof.
   induction certificate; intros Hwf.
   - eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto.
+  - exact Hwf.
   - apply GenericRegions.Atomicity.fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
   - have Hthen_wf := IHcertificate1 Hwf.
@@ -5561,6 +5437,7 @@ Proof.
   intro Hin_atomic. induction certificate; simpl in *.
   - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
       _ _ _ e0). exact Hin_atomic.
+  - exact Hin_atomic.
   - unfold GenericRegions.Atomicity.fold_invariant.
     destruct (bool_decide (invariant ∈
       GenericRegions.Atomicity.analysis_open entry)); exact Hin_atomic.
@@ -5583,67 +5460,44 @@ Qed.
 Lemma term_runtime_conditional_statement_atomic {Γ}
     (names : named_context Γ) stack node condition
     (then_branch else_branch : stmt Γ) :
-  (forall statement,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ names stack then_branch =
-      Some statement ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic statement) ->
-  (forall statement,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ names stack else_branch =
-      Some statement ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic statement) ->
-  forall statement,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ names stack
-      (TIf node condition then_branch else_branch) = Some statement ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic statement.
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ names stack then_branch) ->
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ names stack else_branch) ->
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ names stack
+      (TIf node condition then_branch else_branch)).
 Proof.
-  intros Hthen Helse statement Hstatement.
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ names stack
-    then_branch) as [then_runtime|] eqn:Hthen_runtime;
-  destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ names stack
-    else_branch) as [else_runtime|] eqn:Helse_runtime;
-    cbn [RegionExecution.Primitives.Model.runtime_stmt] in Hstatement;
-    rewrite Hthen_runtime Helse_runtime in Hstatement; simpl in Hstatement;
-    try discriminate.
-  all: injection Hstatement as <-; apply LegacyLang.atomic_if.
-  - apply Hthen. reflexivity.
-  - apply Helse. reflexivity.
-  - apply Hthen. reflexivity.
-  - unfold RegionExecution.Primitives.Model.runtime_noop, Atomic.
-    intros σ result κ σ' efs Hstep. exfalso.
-    eapply (val_irreducible
-      ((LegacyLang.RTVal LegacyLang.LitUnit) : language.expr LegacyLang.simp_lang) σ).
-    + eexists. reflexivity.
-    + exact Hstep.
-  - unfold RegionExecution.Primitives.Model.runtime_noop, Atomic.
-    intros σ result κ σ' efs Hstep. exfalso.
-    eapply (val_irreducible
-      ((LegacyLang.RTVal LegacyLang.LitUnit) : language.expr LegacyLang.simp_lang) σ).
-    + eexists. reflexivity.
-    + exact Hstep.
-  - apply Helse. reflexivity.
+  intros Hthen Helse. cbn [RegionExecution.Primitives.Model.runtime_stmt].
+  apply (RegionExecution.Primitives.Model.runtime_if_ind
+    (fun combined => @Atomic LegacyLang.simp_lang WeaklyAtomic combined)).
+  - intros _ _. apply runtime_noop_atomic.
+  - intros _. apply LegacyLang.atomic_if; assumption.
 Qed.
 
 Lemma term_open_leaf_runtime_atomic {Γ cost entry statement exit}
     (view : RegionSyntax.view statement = TypedAnalysisView.ViewLeaf)
     (step : GenericRegions.Atomicity.take_step (cost Γ statement) entry =
       inr exit)
-    (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical :
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ) :
   RegionExecution.Primitives.Model.runtime_cost_model_sound cost ->
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
-  @RegionExecution.Primitives.Model.runtime_stmt Γ
-    (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-    statement = Some physical ->
-  @Atomic LegacyLang.simp_lang WeaklyAtomic physical.
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ
+      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+      statement).
 Proof.
-  intros Hcost Hopen Hin_atomic Hruntime.
+  intros Hcost Hopen Hin_atomic.
   specialize (Hcost Γ
     (RegionExecution.Primitives.Model.runtime_names Γ runtime)
     (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-    statement physical view Hruntime).
+    statement view).
   destruct (cost Γ statement) eqn:Hstep_cost; simpl in Hcost.
-  - contradiction.
+  - refine (eq_ind_r (fun physical =>
+      @Atomic LegacyLang.simp_lang WeaklyAtomic physical)
+      runtime_noop_atomic Hcost).
   - exact Hcost.
   - unfold GenericRegions.Atomicity.take_step in step.
     rewrite (GenericRegions.Atomicity.take_plain_non_atomic_rejected entry
@@ -5661,24 +5515,27 @@ Lemma term_open_physical_leaf_takes_unique_step
     (view : RegionSyntax.view statement = TypedAnalysisView.ViewLeaf)
     (step : GenericRegions.Atomicity.take_step (cost Γ statement) entry =
       inr exit)
-    (runtime : RegionExecution.Primitives.Model.stack_context Γ) physical :
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ) :
   RegionExecution.Primitives.Model.runtime_cost_model_sound cost ->
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
-  @RegionExecution.Primitives.Model.runtime_stmt Γ
-    (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-    (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-    statement = Some physical ->
+  RegionExecution.Primitives.Model.runtime_is_noop
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ
+      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+      statement) = false ->
   GenericRegions.Atomicity.analysis_step_taken entry = false /\
   GenericRegions.Atomicity.analysis_step_taken exit = true.
 Proof.
-  intros Hcost Hopen Hin_atomic Hruntime.
+  intros Hcost Hopen Hin_atomic Hphysical.
   specialize (Hcost Γ
     (RegionExecution.Primitives.Model.runtime_names Γ runtime)
     (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-    statement physical view Hruntime).
+    statement view).
   destruct (cost Γ statement) eqn:Hstep_cost; simpl in Hcost.
-  - contradiction.
+  - pose proof (f_equal RegionExecution.Primitives.Model.runtime_is_noop Hcost)
+      as Hnoop.
+    pose proof (eq_trans (eq_sym Hnoop) Hphysical). discriminate.
   - unfold GenericRegions.Atomicity.take_step,
       GenericRegions.Atomicity.take_plain_step in step.
     rewrite Hin_atomic in step. simpl in step.
@@ -5698,19 +5555,63 @@ Proof.
       _ entry exit Hopen Hin_atomic). exact step.
 Qed.
 
-Definition term_runtime_option_count
-    (physical : option LegacyLang.runtime_stmt) : nat :=
-  match physical with Some _ => 1 | None => 0 end.
+(** The number of physical steps an erased statement contributes to a
+    region: none for the terminal statement, one otherwise. *)
+Definition term_runtime_step_count
+    (physical : LegacyLang.runtime_stmt) : nat :=
+  if RegionExecution.Primitives.Model.runtime_is_noop physical then 0 else 1.
 
 Definition term_analysis_step_bit
     (state : GenericRegions.Atomicity.analysis_state) : nat :=
   if GenericRegions.Atomicity.analysis_step_taken state then 1 else 0.
 
-Lemma term_runtime_option_count_combine first second :
-  term_runtime_option_count
-    (RegionExecution.Primitives.Model.combine_runtime_statements first second) <=
-  term_runtime_option_count first + term_runtime_option_count second.
-Proof. destruct first, second; simpl; lia. Qed.
+Lemma term_runtime_step_count_noop :
+  term_runtime_step_count RegionExecution.Primitives.Model.runtime_noop = 0.
+Proof. reflexivity. Qed.
+
+Lemma term_runtime_step_count_seq first second :
+  term_runtime_step_count
+    (RegionExecution.Primitives.Model.runtime_seq first second) <=
+  term_runtime_step_count first + term_runtime_step_count second.
+Proof.
+  apply (RegionExecution.Primitives.Model.runtime_seq_ind
+    (fun combined => term_runtime_step_count combined <=
+      term_runtime_step_count first + term_runtime_step_count second)).
+  - intros ->. rewrite term_runtime_step_count_noop. lia.
+  - intros ->. rewrite term_runtime_step_count_noop. lia.
+  - (* restate the Model-side hypotheses in local terms; see
+       [term_runtime_step_count_if] *)
+    intros Hfirst Hsecond.
+    assert (Hfirst' : RegionExecution.Primitives.Model.runtime_is_noop first =
+      false) by exact Hfirst.
+    assert (Hsecond' : RegionExecution.Primitives.Model.runtime_is_noop second =
+      false) by exact Hsecond.
+    unfold term_runtime_step_count. rewrite Hfirst' Hsecond'. simpl. lia.
+Qed.
+
+Lemma term_runtime_step_count_if condition then_branch else_branch stack :
+  term_runtime_step_count
+    (RegionExecution.Primitives.Model.runtime_if condition
+      then_branch else_branch stack) <=
+  Nat.max (term_runtime_step_count then_branch)
+    (term_runtime_step_count else_branch).
+Proof.
+  apply (RegionExecution.Primitives.Model.runtime_if_ind
+    (fun combined => term_runtime_step_count combined <=
+      Nat.max (term_runtime_step_count then_branch)
+        (term_runtime_step_count else_branch))).
+  - intros _ _. rewrite term_runtime_step_count_noop. lia.
+  - intros Hphysical.
+    assert (Hphysical' :
+      RegionExecution.Primitives.Model.runtime_is_noop then_branch &&
+      RegionExecution.Primitives.Model.runtime_is_noop else_branch = false)
+      by exact Hphysical.
+    clear Hphysical. rename Hphysical' into Hphysical.
+    unfold term_runtime_step_count. simpl.
+    destruct (RegionExecution.Primitives.Model.runtime_is_noop then_branch),
+      (RegionExecution.Primitives.Model.runtime_is_noop else_branch);
+      simpl in *; first discriminate; lia.
+Qed.
 
 Lemma term_open_invariant_preserves_step_bit invariant entry exit :
   GenericRegions.Atomicity.open_invariant invariant entry = inr exit ->
@@ -5754,7 +5655,7 @@ Lemma term_structured_certificate_runtime_step_budget
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   term_analysis_step_bit entry +
-      term_runtime_option_count
+      term_runtime_step_count
         (@RegionExecution.Primitives.Model.runtime_stmt Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -5764,6 +5665,7 @@ Proof.
   intros Hcost Hopen Hin_atomic.
   induction certificate as
       [Γ state statement exit view step
+      | Γ state statement view
       | Γ state node invariant arguments Hfresh
       | Γ state node first middle second exit first_certificate IHfirst
         second_certificate IHsecond
@@ -5772,15 +5674,17 @@ Proof.
       | Γ state node body outer inner step body_certificate IHbody open_equal
       | Γ state invariant arguments body opened inner step body_certificate
         IHbody open_equal]; simpl in *.
-  - destruct (@RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      statement) as [physical|] eqn:Hruntime.
-    + destruct (term_open_physical_leaf_takes_unique_step view step runtime
-        physical Hcost Hopen Hin_atomic Hruntime) as [Hentry Hexit].
-      unfold term_runtime_option_count, term_analysis_step_bit.
-      rewrite Hentry Hexit. lia.
-    + unfold term_runtime_option_count, term_analysis_step_bit.
+  - destruct (RegionExecution.Primitives.Model.runtime_is_noop
+      (@RegionExecution.Primitives.Model.runtime_stmt Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+        statement)) eqn:Hruntime.
+    2: { destruct (term_open_physical_leaf_takes_unique_step view step runtime
+        Hcost Hopen Hin_atomic Hruntime) as [Hentry Hexit].
+      unfold term_runtime_step_count, term_analysis_step_bit.
+      rewrite Hruntime Hentry Hexit. lia. }
+    + unfold term_runtime_step_count, term_analysis_step_bit.
+      rewrite Hruntime.
       destruct (cost Γ statement) eqn:Hstep_cost.
       * unfold GenericRegions.Atomicity.take_step,
           GenericRegions.Atomicity.take_plain_step in step.
@@ -5802,8 +5706,12 @@ Proof.
           _ _ state exit Hopen Hin_atomic). exact step.
       * exfalso. eapply (GenericRegions.Atomicity.procedure_spawn_rejected_while_open
           _ state exit Hopen Hin_atomic). exact step.
+  - (* done erases to the terminal statement, which takes no step, and
+       leaves the state unchanged *)
+    destruct statement; cbn in view; try discriminate.
+    cbn. lia.
   - unfold RegionExecution.Primitives.Model.runtime_stmt. simpl.
-    unfold term_analysis_step_bit, term_runtime_option_count.
+    unfold term_analysis_step_bit, term_runtime_step_count.
     unfold GenericRegions.Atomicity.fold_invariant.
     rewrite bool_decide_false; [simpl; lia|exact Hfresh].
   - have Hmiddle_open : GenericRegions.Atomicity.analysis_open middle ≠ ∅.
@@ -5815,7 +5723,7 @@ Proof.
     specialize (IHfirst runtime Hopen Hin_atomic).
     specialize (IHsecond runtime Hmiddle_open Hmiddle_atomic).
     unfold RegionExecution.Primitives.Model.runtime_stmt; simpl.
-    pose proof (term_runtime_option_count_combine
+    pose proof (term_runtime_step_count_seq
       (@RegionExecution.Primitives.Model.runtime_stmt Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) first)
@@ -5827,6 +5735,21 @@ Proof.
     + lia.
   - specialize (IHthen runtime Hopen Hin_atomic).
     specialize (IHelse runtime Hopen Hin_atomic).
+    match goal with
+    | |- context [term_runtime_step_count ?erased] =>
+        change erased with (RegionExecution.Primitives.Model.runtime_if
+          (@RegionExecution.Primitives.Model.runtime_expr Γ _
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
+          (@RegionExecution.Primitives.Model.runtime_stmt Γ
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+            (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+            then_branch)
+          (@RegionExecution.Primitives.Model.runtime_stmt Γ
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+            (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+            else_branch)
+          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime))
+    end.
     remember (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) then_branch)
@@ -5835,9 +5758,20 @@ Proof.
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) else_branch)
       as else_runtime eqn:Helse.
-    unfold RegionExecution.Primitives.Model.runtime_stmt; simpl.
-    destruct then_runtime, else_runtime;
-      unfold term_runtime_option_count, term_analysis_step_bit in *;
+    pose proof (term_runtime_step_count_if
+      (@RegionExecution.Primitives.Model.runtime_expr Γ _
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
+      then_runtime else_runtime
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)) as Hif.
+    unfold term_runtime_step_count, term_analysis_step_bit in *.
+    destruct (RegionExecution.Primitives.Model.runtime_is_noop then_runtime),
+      (RegionExecution.Primitives.Model.runtime_is_noop else_runtime),
+      (RegionExecution.Primitives.Model.runtime_is_noop
+        (RegionExecution.Primitives.Model.runtime_if
+          (@RegionExecution.Primitives.Model.runtime_expr Γ _
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
+          then_runtime else_runtime
+          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)));
       destruct (GenericRegions.Atomicity.analysis_step_taken state),
         (GenericRegions.Atomicity.analysis_step_taken then_exit),
         (GenericRegions.Atomicity.analysis_step_taken else_exit);
@@ -5854,8 +5788,8 @@ Proof.
     destruct (GenericRegions.Atomicity.analysis_step_taken state) eqn:Htaken;
       first discriminate.
     inversion step; subst outer. simpl.
-    unfold term_analysis_step_bit, term_runtime_option_count.
-    destruct body_runtime; rewrite Htaken; simpl; lia.
+    unfold term_analysis_step_bit, term_runtime_step_count.
+    rewrite Htaken; simpl; lia.
   - have Hopen_transition := step.
     apply GenericRegions.Atomicity.open_invariant_success in step as
       (Hfresh_open & Havailable & Hopened_mask & Hopened_open).
@@ -5910,16 +5844,16 @@ Lemma term_open_structured_certificate_runtime_atomic
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   term_structured_certificate_trusted_runtime_atomicity certificate runtime ->
-  forall physical,
-    @RegionExecution.Primitives.Model.runtime_stmt Γ
+  @Atomic LegacyLang.simp_lang WeaklyAtomic
+    (@RegionExecution.Primitives.Model.runtime_stmt Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      statement = Some physical ->
-    @Atomic LegacyLang.simp_lang WeaklyAtomic physical.
+      statement).
 Proof.
   intros Hcost Hopen Hin_atomic Htrusted.
   induction certificate as
       [Γ state statement exit view step
+      | Γ state statement view
       | Γ state node invariant arguments Hfresh
       | Γ state node first middle second exit first_certificate IHfirst
         second_certificate IHsecond
@@ -5928,9 +5862,11 @@ Proof.
       | Γ state node body outer inner step body_certificate IHbody open_equal
       | Γ state invariant arguments body opened inner step body_certificate
         IHbody open_equal]; simpl in Htrusted |- *.
-  - intros physical Hphysical.
-    eapply term_open_leaf_runtime_atomic; eauto.
-  - intros physical Hphysical. discriminate.
+  - eapply term_open_leaf_runtime_atomic; eauto.
+  - (* done erases to the terminal statement, which takes no step *)
+    destruct statement; cbn in view; try discriminate.
+    exact runtime_noop_atomic.
+  - exact runtime_noop_atomic.
   - destruct Htrusted as [Hfirst_trusted Hsecond_trusted].
     have Hmiddle_open : GenericRegions.Atomicity.analysis_open middle ≠ ∅.
     { rewrite (term_structured_certificate_preserves_open first_certificate).
@@ -5940,41 +5876,54 @@ Proof.
     { eapply term_structured_certificate_preserves_nonatomic; eauto. }
     specialize (IHfirst runtime Hopen Hin_atomic Hfirst_trusted).
     specialize (IHsecond runtime Hmiddle_open Hmiddle_atomic Hsecond_trusted).
-    remember (@RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) first)
-      as first_runtime.
-    remember (@RegionExecution.Primitives.Model.runtime_stmt Γ
-      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) second)
-      as second_runtime.
-    unfold RegionExecution.Primitives.Model.runtime_stmt; simpl.
-    destruct first_runtime as [first_physical|],
-      second_runtime as [second_physical|]; simpl; intros physical Hphysical.
-    + exfalso.
+    apply (RegionExecution.Primitives.Model.runtime_seq_ind
+      (fun combined => @Atomic LegacyLang.simp_lang WeaklyAtomic combined)).
+    + intros _. exact IHsecond.
+    + intros _. exact IHfirst.
+    + (* two physical steps would exceed the region's single-step budget *)
+      intros Hfirst_physical Hsecond_physical. exfalso.
+      assert (Hfirst_count : term_runtime_step_count
+        (@RegionExecution.Primitives.Model.runtime_stmt Γ
+          (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+          first) = 1).
+      { unfold term_runtime_step_count.
+        assert (Hnoop : RegionExecution.Primitives.Model.runtime_is_noop
+          (@RegionExecution.Primitives.Model.runtime_stmt Γ
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+            (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+            first) = false) by exact Hfirst_physical.
+        rewrite Hnoop. reflexivity. }
+      assert (Hsecond_count : term_runtime_step_count
+        (@RegionExecution.Primitives.Model.runtime_stmt Γ
+          (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+          second) = 1).
+      { unfold term_runtime_step_count.
+        assert (Hnoop : RegionExecution.Primitives.Model.runtime_is_noop
+          (@RegionExecution.Primitives.Model.runtime_stmt Γ
+            (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+            (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+            second) = false) by exact Hsecond_physical.
+        rewrite Hnoop. reflexivity. }
       have Hfirst_budget := term_structured_certificate_runtime_step_budget
         first_certificate runtime Hcost Hopen Hin_atomic.
       have Hsecond_budget := term_structured_certificate_runtime_step_budget
         second_certificate runtime Hcost Hmiddle_open Hmiddle_atomic.
-      rewrite <- Heqfirst_runtime in Hfirst_budget.
-      rewrite <- Heqsecond_runtime in Hsecond_budget.
-      unfold term_runtime_option_count, term_analysis_step_bit in *.
+      rewrite Hfirst_count in Hfirst_budget.
+      rewrite Hsecond_count in Hsecond_budget.
+      unfold term_analysis_step_bit in *.
       destruct (GenericRegions.Atomicity.analysis_step_taken state),
         (GenericRegions.Atomicity.analysis_step_taken middle),
         (GenericRegions.Atomicity.analysis_step_taken exit); simpl in *; lia.
-    + apply IHfirst. exact Hphysical.
-    + apply IHsecond. exact Hphysical.
-    + discriminate.
   - destruct Htrusted as [Hthen_trusted Helse_trusted].
-    intros physical Hphysical.
-    eapply (term_runtime_conditional_statement_atomic
+    apply (term_runtime_conditional_statement_atomic
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-      node condition then_branch else_branch); [| |exact Hphysical].
-    + intros arm Harm. eapply IHthen; eauto.
-    + intros arm Harm. eapply IHelse; eauto.
-  - intros physical Hphysical. injection Hphysical as <-.
-    apply LegacyLang.atomic_trusted_atomic.
+      node condition then_branch else_branch).
+    + eapply IHthen; eauto.
+    + eapply IHelse; eauto.
+  - apply LegacyLang.atomic_trusted_atomic.
   - have Hopen_transition := step.
     apply GenericRegions.Atomicity.open_invariant_success in step as
       (_ & _ & _ & Hopened_open).
@@ -5993,7 +5942,6 @@ Proof.
       destruct (bool_decide (invariant ∈
         GenericRegions.Atomicity.analysis_mask state)); try discriminate.
       inversion Hopen_transition; subst opened. exact Hin_atomic. }
-    intros physical Hphysical.
     eapply IHbody; eauto.
 Qed.
 
@@ -6101,15 +6049,15 @@ Proof.
       eapply term_structured_runtime_resource_arguments_stack_rewrite_valid;
         [apply Hvalid | exact H].
     + exact Htrusted.
-  - (* skip *)
+  - (* done: it erases to the terminal statement and leaves the analysis
+       state unchanged, so its runtime meaning is the identity update
+       [|={E,E}=> post] — no leaf machinery, and no dependence on the shape
+       of the pre- and postcondition. *)
     split; [|intros runtime; exact I]. intros ts tracked.
-    eapply term_structured_runtime_resource_arguments_same_store_valid.
-    match goal with
-    | Hview : _ = TypedAnalysisView.ViewLeaf,
-      Hstep : _ = inr _ |- _ =>
-        eapply (term_structured_runtime_resource_prenex_leaf_valid
-          Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
-    end.
+    intros Hdisjoint values runtime formals binders atoms ambient Henvelope.
+    unfold term_structured_runtime_wp.
+    rewrite translated_runtime_wp_erased; [|reflexivity].
+    iIntros "H". iModIntro. iExact "H".
   - (* assert *)
     split; [|intros runtime; exact I]. intros ts tracked.
     eapply term_structured_runtime_resource_arguments_same_store_valid.
@@ -6256,7 +6204,7 @@ Proof.
       * exact Hregistered_invariant.
       * exact H.
       * apply Hbody_valid.
-      * intros runtime physical Hphysical.
+      * intros runtime.
         eapply (term_open_structured_certificate_runtime_atomic certificate
           runtime Hcost).
         -- simpl. intros Hempty.
@@ -6272,7 +6220,6 @@ Proof.
         -- rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
              invariant entry opened e). exact Hentry_nonatomic.
         -- apply Hbody_trusted.
-        -- exact Hphysical.
     + exact Hbody_trusted.
   - (* independent invariant access *)
     simpl in Hsafe. destruct Hsafe as [Hentry_nonatomic Hbody_safe].
@@ -6300,7 +6247,7 @@ Proof.
         closing_focus external_pre body_pre body_post external_post H H0 H1
         tracked).
       * apply Hbody_valid.
-      * intros runtime physical Hphysical.
+      * intros runtime.
         eapply (term_open_structured_certificate_runtime_atomic certificate
           runtime Hcost).
         -- simpl. intros Hempty.
@@ -6316,7 +6263,6 @@ Proof.
         -- rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
              invariant entry opened e). exact Hentry_nonatomic.
         -- apply Hbody_trusted.
-        -- exact Hphysical.
     + exact Hbody_trusted.
   - (* trusted atomic block *)
     simpl in Hsafe.

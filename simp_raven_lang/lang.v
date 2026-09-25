@@ -216,7 +216,6 @@ Inductive stmt :=
 | Seq (s1 s2 : stmt)
 | IfS (e : expr) (s1 s2 : stmt)
 | Assign (v : var) (e : expr)
-| SkipS
 | DoneS
 | StuckS
 | Call (v : var) (proc : proc_name) (args : list expr)
@@ -313,7 +312,6 @@ Fixpoint subst_stmt (s : stmt) (subst : list (var * expr)) : stmt :=
   | IfS e s1 s2 => IfS (subst_expr e subst) (subst_stmt s1 subst) (subst_stmt s2 subst)
   | Assign v e => Assign v (subst_expr e subst)
   (* | Free e => Free (subst_expr e subst) *)
-  | SkipS => SkipS
   | DoneS => DoneS
   | StuckS => StuckS
   (* | ExprS e => ExprS (subst_expr e subst) *)
@@ -340,7 +338,6 @@ Inductive runtime_stmt :=
 | RTIfS (e : expr) (s1 s2 : runtime_stmt) (stk_id : stack_id)
 | RTAssign (v : var) (e : expr) (stk_id : stack_id)
 (* | RTFree (e : expr) (stk_id : stack_id) *)
-| RTSkipS (stk_id : stack_id)
 | RTStuckS
 | RTVal (v : val)
 | RTCall (v : var) (proc : proc_name) (args : list expr) (stk_id : stack_id)
@@ -389,7 +386,6 @@ match s with
 | IfS e s1 s2 => RTIfS e (to_rtstmt stk_id s1) (to_rtstmt stk_id s2) stk_id
 | Assign v e => RTAssign v e stk_id
 (* | Free (e : expr) *)
-| SkipS => RTSkipS stk_id
 | DoneS => RTVal LitUnit
 | StuckS => RTStuckS (* stuck statement *)
 (* | ExprS (e : expr) *)
@@ -443,7 +439,6 @@ Fixpoint reify_runtime_stmt (stk_id : stack_id) (runtime : runtime_stmt) :
       else None
   | RTAssign variable value actual =>
       if same_stack actual then Some (Assign variable value) else None
-  | RTSkipS actual => if same_stack actual then Some SkipS else None
   | RTStuckS => Some StuckS
   | RTVal LitUnit => Some DoneS
   | RTVal _ => None
@@ -625,9 +620,6 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   expr_step e stk_frm (Val v) ->
   let σ' := update_lvar σ var  stk_id v in
   runtime_step (RTAssign var e stk_id) σ [] (RTVal LitUnit) σ' []
-
-| RTSkipStep σ stk_id :
-  runtime_step (RTSkipS stk_id) σ [] (RTVal LitUnit) σ []
 
 | RTCallStep σ stk_id stk_frm v proc args arg_vals procedure local_vals :
   σ.(stack) !! stk_id = Some stk_frm ->
@@ -961,7 +953,6 @@ Qed.
 Definition is_atomic_redex (r : runtime_stmt) : Prop :=
   match r with
   | RTAssign _ _ _ => True
-  | RTSkipS _ => True
   | RTStuckS => True
   | RTFldWr _ _ _ _ => True
   | RTFldRd _ _ _ _ => True
@@ -992,6 +983,14 @@ Proof.
   pose proof (fill_not_atomic K e e1 r H). symmetry in H0. contradiction.
 Qed.
 
+
+(** A value takes no step, so it is trivially atomic. *)
+Lemma atomic_val v : Atomic WeaklyAtomic (RTVal v).
+Proof.
+  unfold Atomic. intros σ result κ σ' efs Hstep. exfalso.
+  eapply (val_irreducible ((RTVal v) : language.expr simp_lang) σ);
+    [eexists; reflexivity | exact Hstep].
+Qed.
 
 Lemma atomic_if e s1 s2 stk_id :
   Atomic WeaklyAtomic s1 ->
@@ -1052,21 +1051,6 @@ Proof.
   + simpl in *. subst. inversion H2. apply val_irreducible. simpl. done.
   + simpl in *.
     pose proof (fill_not_atomic e1 e0 e1' (RTFldWr base fld e stk_id)); simpl in *.
-    specialize (H3 I).
-    symmetry in H0. contradiction.
-Qed.
-
-Lemma atomic_skip stk_id :
-  Atomic WeaklyAtomic (RTSkipS stk_id).
-Proof.
-  unfold Atomic. intros.
-  inversion H.
-
-  destruct K.
-  + simpl in *; subst. inversion H2. apply val_irreducible. simpl. done.
-  + simpl in *.
-    pose proof (fill_not_atomic K e e1' (RTSkipS stk_id)).
-    simpl in H3.
     specialize (H3 I).
     symmetry in H0. contradiction.
 Qed.

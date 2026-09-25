@@ -2015,6 +2015,7 @@ Proof.
   revert stack.
   induction certificate; intros stack Hneutral; simpl in *.
   - reflexivity.
+  - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hneutral. contradiction.
   - destruct statement; cbn in e; try discriminate.
@@ -2040,6 +2041,7 @@ Lemma access_neutral_preserves_open {cost Γ entry statement exit}
 Proof.
   induction certificate; intros Hneutral.
   - eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+  - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hneutral. contradiction.
   - destruct statement; cbn in e; try discriminate.
@@ -2071,6 +2073,7 @@ Proof.
   - split; [reflexivity|].
     rewrite <- Hclosed.
     eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+  - split; [reflexivity | exact Hclosed].
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
   - split.
@@ -2102,7 +2105,7 @@ Lemma structured_certificate_unfold_free {cost Γ entry statement exit}
     unfold_free statement.
 Proof.
   induction certificate; simpl; intuition.
-  destruct statement; cbn in e |- *; try discriminate; exact I.
+  all: destruct statement; cbn in e |- *; try discriminate; exact I.
 Qed.
 
 (** Safety condition needed by the Iris interpretation: invariant-access
@@ -2139,6 +2142,7 @@ Proof.
   revert stack_in stack_out.
   induction certificate; intros stack_in stack_out Hfree Hlifo; simpl in *.
   - subst stack_out. lia.
+  - subst stack_out. lia.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
   - destruct Hlifo as [(outer & -> & _)|[-> _]]; simpl; lia.
@@ -2165,6 +2169,7 @@ Proof.
   revert stack_in stack_out.
   induction certificate; intros stack_in stack_out Hfree Hlifo Hlength;
     simpl in *.
+  - exact Hlifo.
   - exact Hlifo.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
@@ -2507,6 +2512,7 @@ Proof.
   revert stack.
   induction certificate; intros stack Hfree Hlifo; simpl in *.
   - econstructor; eauto.
+  - eapply StructuredDone. exact e.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
@@ -2570,6 +2576,10 @@ Proof.
   induction certificate; intros stack Hfree Hlifo; simpl in *.
   - refine {| balanced_structured_certificate := StructuredLeaf cost Γ state
         statement exit e e0 |}.
+    intros invariant Hmember. exact Hmember.
+    exact I.
+  - refine {| balanced_structured_certificate := StructuredDone cost Γ state
+        statement e |}.
     intros invariant Hmember. exact Hmember.
     exact I.
   - destruct statement; cbn in e; try discriminate.

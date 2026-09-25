@@ -344,7 +344,7 @@ Arguments CTDiscard {_ _}.
 Arguments CTStore {_ _} _.
 
 Inductive stmt (Γ : context) : Type :=
-| TSkip (node : node_id)
+| TDone (node : node_id)
 | TAssert (node : node_id) (condition : pexpr Γ TBool)
 | TAssign t (node : node_id) (target : pvar Γ t) (value : pexpr Γ t)
 | TFieldRead (node : node_id) (field : field_id)
@@ -376,7 +376,7 @@ Inductive stmt (Γ : context) : Type :=
 | TSeq (node : node_id) (first second : stmt Γ)
 | TAtomic (node : node_id) (body : stmt Γ).
 
-Arguments TSkip {_} _.
+Arguments TDone {_} _.
 Arguments TAssert {_} _ _.
 Arguments TAssign {_ _} _ _ _.
 Arguments TFieldRead {_} _ _ _ _.
@@ -396,7 +396,7 @@ Arguments TAtomic {_} _ _.
 
 Fixpoint stmt_nodes {Γ} (statement : stmt Γ) : list node_id :=
   match statement with
-  | TSkip node | TAssert node _ | TAssign node _ _
+  | TDone node | TAssert node _ | TAssign node _ _
   | TFieldRead node _ _ _ | TFieldWrite node _ _ _
   | TAlloc node _ _ | TGhostUpdate node _ _ _ _
   | TCall node _ _ _ | TSpawn node _ _
@@ -923,7 +923,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
     elaboration_error + (stmt Γ * node_id) :=
   let next' := node_successor next in
   match statement with
-  | SSSkip => inr (TSkip next, next')
+  | SSDone => inr (TDone next, next')
   | SSAssert condition =>
       match elaborate_expr variables condition with
       | inl error => inl error
@@ -1145,6 +1145,31 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       | inr (body', after_body) => inr (TAtomic next body', after_body)
       end
   end.
+
+(** Whether elaboration produced a statement. *)
+Definition elaboration_succeeded {Γ} (result : elaboration_error + (stmt Γ * node_id))
+    : Prop :=
+  match result with inl _ => False | inr _ => True end.
+
+(** The statement an elaboration produced, given evidence that it succeeded.
+    The failure branch is discharged by that evidence rather than by an
+    arbitrary placeholder statement, so a program whose source does not
+    elaborate is rejected where it is defined instead of silently becoming
+    some other program. *)
+Definition elaborated_body {Γ} (result : elaboration_error + (stmt Γ * node_id))
+    (succeeded : elaboration_succeeded result) : stmt Γ :=
+  match result as result' return elaboration_succeeded result' -> stmt Γ with
+  | inl _ => fun impossible => match impossible with end
+  | inr (body, _) => fun _ => body
+  end succeeded.
+
+Lemma elaborated_body_spec {Γ} (result : elaboration_error + (stmt Γ * node_id))
+    (succeeded : elaboration_succeeded result) :
+  exists finish, result = inr (elaborated_body result succeeded, finish).
+Proof.
+  destruct result as [|[body finish]]; [destruct succeeded |].
+  exists finish. reflexivity.
+Qed.
 
 Fixpoint source_node_count (statement : source_stmt) : nat :=
   match statement with

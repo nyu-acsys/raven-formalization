@@ -1547,8 +1547,11 @@ Inductive RavenResourceTriple {Γ F} : forall {Δ},
 
 (** *** Statement rules.  None carries a frame parameter: the core body of
     a resource state is already arbitrary. *)
-| RTSkip {Δ} node (store : symbolic_store Γ F Δ) (body : core_assertion F Δ) :
-    RavenResourceTriple (RState store body) (TSkip node) (RState store body)
+(* The empty continuation is the identity on every prenex, not only on a
+   single resource state: it neither reads nor changes the store, and binds
+   nothing. *)
+| RTDone {Δ} node (P : resource_prenex Γ F Δ) :
+    RavenResourceTriple P (TDone node) P
 | RTAssert {Δ} node (store : symbolic_store Γ F Δ)
     (body : core_assertion F Δ) condition :
     RavenResourceTriple
@@ -1994,7 +1997,7 @@ Proof.
     + apply RavenResourceTriple_denormalize_endpoints.
       apply RavenResourceTriple_normalize_boundaries. exact derivation.
     + exact H.
-  - apply RTSkip.
+  - apply RTDone.
   - apply RTAssert.
   - apply RTAssign.
   - apply RTFieldRead.

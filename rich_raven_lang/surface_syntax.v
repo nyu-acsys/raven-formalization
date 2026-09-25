@@ -56,7 +56,7 @@ Inductive source_assertion :=
 | SAAnd (left right : source_assertion).
 
 Inductive source_stmt :=
-| SSSkip
+| SSDone
 | SSAssert (condition : source_expr)
 | SSAssign (target : source_name) (value : source_expr)
 | SSFieldRead (target : source_name) (base : source_expr)
@@ -213,7 +213,7 @@ Notation "'(' a ')'" := a
   (in custom raven_assert at level 0, a custom raven_assert at level 99).
 
 (* Statements. *)
-Notation "'skip'" := SSSkip (in custom raven_stmt at level 10).
+Notation "'done'" := SSDone (in custom raven_stmt at level 10).
 Notation "'assert' e" := (SSAssert e)
   (in custom raven_stmt at level 10, e custom raven_expr at level 99).
 Notation "x ':=' e" := (SSAssign x e)

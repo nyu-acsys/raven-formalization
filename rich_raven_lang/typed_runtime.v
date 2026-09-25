@@ -84,6 +84,7 @@ Module RegionSyntax <: TypedAnalysisView.ANALYSIS_SYNTAX.
     | TInvAccess invariant _ body =>
         TypedAnalysisView.ViewStructuredAccess invariant body
     | TAtomic _ body => TypedAnalysisView.ViewAtomic body
+    | TDone _ => TypedAnalysisView.ViewDone
     | _ => TypedAnalysisView.ViewLeaf
     end.
   Fixpoint size {Γ} (statement : statement Γ) : nat :=
@@ -153,6 +154,9 @@ Inductive structured_certificate (cost : GenericRegions.Atomicity.cost_model) :
     RegionSyntax.view statement = TypedAnalysisView.ViewLeaf ->
     GenericRegions.Atomicity.take_step (cost Γ statement) entry = inr exit ->
     structured_certificate cost Γ entry statement exit
+| StructuredDone Γ entry statement :
+    RegionSyntax.view statement = TypedAnalysisView.ViewDone ->
+    structured_certificate cost Γ entry statement entry
 | StructuredFreshFold Γ entry node invariant arguments :
     invariant ∉ GenericRegions.Atomicity.analysis_open entry ->
     structured_certificate cost Γ entry (TFold node invariant arguments)
@@ -648,14 +652,14 @@ End RuntimeInitialization.
 (** *** The runtime erasure, extracted
 
     Everything from the typed program to the machine program it runs:
-    expressions, field initializers, [runtime_stmt], and the total
-    atomic-body erasure.  It is split out of [ConcreteModelCore] because
+    expressions, field initializers, and the total statement erasure
+    [runtime_stmt].  It is split out of [ConcreteModelCore] because
     that module is *generative* -- it declares records and an inductive --
     so a client that needs only the erasure cannot apply it a second time
     without creating incompatible copies of those types.  Nothing here
     declares a type, so this functor may be applied freely: a contract
     environment, which must be constructed before any semantic module,
-    can reach [atomic_body_runtime] through it. *)
+    can reach [runtime_stmt] through it. *)
 Module RuntimeErasure (Config : RUNTIME_CONFIGURATION).
 
 (** The fixed Iris mask envelope in which a certified region executes. *)
@@ -1699,79 +1703,140 @@ Definition runtime_ghost_field_names {Γ} (fields : list (field_init Γ)) :
     list LegacyLang.fld_name :=
   runtime_packed_ghost_field_names (ghost_field_initializers fields).
 
+(** The runtime terminal statement.  Erasure maps the empty continuation
+    and every proof-only statement to it; it takes no physical step. *)
 Definition runtime_noop : LegacyLang.runtime_stmt :=
   LegacyLang.RTVal LegacyLang.LitUnit.
 
-Definition combine_runtime_statements
-    (first second : option LegacyLang.runtime_stmt) :
-    option LegacyLang.runtime_stmt :=
-  match first, second with
-  | None, None => None
-  | Some statement, None | None, Some statement => Some statement
-  | Some first', Some second' => Some (LegacyLang.RTSeq first' second')
+Definition runtime_is_noop (statement : LegacyLang.runtime_stmt) : bool :=
+  match statement with
+  | LegacyLang.RTVal LegacyLang.LitUnit => true
+  | _ => false
   end.
+
+Lemma runtime_is_noop_spec statement :
+  runtime_is_noop statement = true <-> statement = runtime_noop.
+Proof.
+  split.
+  - destruct statement; try discriminate.
+    match goal with v : LegacyLang.val |- _ => destruct v end;
+      try discriminate; reflexivity.
+  - intros ->. reflexivity.
+Qed.
+
+(** Sequencing that drops a terminal operand, so erased proof-only
+    statements never contribute an [RTSeq] (and hence a physical step). *)
+Definition runtime_seq (first second : LegacyLang.runtime_stmt) :
+    LegacyLang.runtime_stmt :=
+  if runtime_is_noop first then second
+  else if runtime_is_noop second then first
+  else LegacyLang.RTSeq first second.
+
+(** A conditional whose arms both erase to the terminal statement is itself
+    proof-only: evaluating its pure condition is not observable. *)
+Definition runtime_if (condition : LegacyLang.expr)
+    (then_branch else_branch : LegacyLang.runtime_stmt)
+    (stack : LegacyLang.stack_id) : LegacyLang.runtime_stmt :=
+  if runtime_is_noop then_branch && runtime_is_noop else_branch
+  then runtime_noop
+  else LegacyLang.RTIfS condition then_branch else_branch stack.
+
+Lemma runtime_seq_noop_l statement :
+  runtime_seq runtime_noop statement = statement.
+Proof. reflexivity. Qed.
+
+Lemma runtime_seq_physical first second :
+  runtime_is_noop first = false -> runtime_is_noop second = false ->
+  runtime_seq first second = LegacyLang.RTSeq first second.
+Proof. intros Hfirst Hsecond. unfold runtime_seq. rewrite Hfirst Hsecond. reflexivity. Qed.
+
+(** Case analysis on the smart constructor, stated for an arbitrary
+    predicate so clients can [apply] it without rewriting. *)
+Lemma runtime_seq_ind (P : LegacyLang.runtime_stmt -> Prop) first second :
+  (first = runtime_noop -> P second) ->
+  (second = runtime_noop -> P first) ->
+  (runtime_is_noop first = false -> runtime_is_noop second = false ->
+    P (LegacyLang.RTSeq first second)) ->
+  P (runtime_seq first second).
+Proof.
+  intros Hfirst Hsecond Hboth. unfold runtime_seq.
+  destruct (runtime_is_noop first) eqn:Hfirst_noop.
+  { apply Hfirst. apply runtime_is_noop_spec. exact Hfirst_noop. }
+  destruct (runtime_is_noop second) eqn:Hsecond_noop.
+  { apply Hsecond. apply runtime_is_noop_spec. exact Hsecond_noop. }
+  apply Hboth; reflexivity.
+Qed.
+
+(** Case analysis on the conditional smart constructor. *)
+Lemma runtime_if_ind (P : LegacyLang.runtime_stmt -> Prop)
+    condition then_branch else_branch stack :
+  (then_branch = runtime_noop -> else_branch = runtime_noop ->
+    P runtime_noop) ->
+  (runtime_is_noop then_branch && runtime_is_noop else_branch = false ->
+    P (LegacyLang.RTIfS condition then_branch else_branch stack)) ->
+  P (runtime_if condition then_branch else_branch stack).
+Proof.
+  intros Hnoop Hphysical. unfold runtime_if.
+  destruct (runtime_is_noop then_branch) eqn:Hthen;
+    destruct (runtime_is_noop else_branch) eqn:Helse; simpl;
+    [apply Hnoop; apply runtime_is_noop_spec; assumption
+    |apply Hphysical; reflexivity ..].
+Qed.
+
+Lemma runtime_seq_noop_r statement :
+  runtime_seq statement runtime_noop = statement.
+Proof.
+  unfold runtime_seq. destruct (runtime_is_noop statement) eqn:Hnoop;
+    [symmetry; apply runtime_is_noop_spec; exact Hnoop | reflexivity].
+Qed.
 
 Fixpoint runtime_stmt {Γ} (names : named_context Γ)
     (stack : LegacyLang.stack_id) (statement : stmt Γ) :
-    option LegacyLang.runtime_stmt :=
+    LegacyLang.runtime_stmt :=
   match statement with
-  | TSkip _ => None
-  | TAssert _ _ => None
+  | TDone _ => runtime_noop
+  | TAssert _ _ => runtime_noop
   | TAssign _ target value =>
-      Some (LegacyLang.RTAssign (runtime_variable names target)
-        (runtime_expr names value) stack)
+      LegacyLang.RTAssign (runtime_variable names target)
+        (runtime_expr names value) stack
   | TFieldRead _ field target base =>
-      Some (LegacyLang.RTFldRd (runtime_variable names target)
-        (runtime_expr names base) (Config.field_name field) stack)
+      LegacyLang.RTFldRd (runtime_variable names target)
+        (runtime_expr names base) (Config.field_name field) stack
   | TFieldWrite _ field base value =>
-      Some (LegacyLang.RTFldWr (runtime_expr names base)
-        (Config.field_name field) (runtime_expr names value) stack)
+      LegacyLang.RTFldWr (runtime_expr names base)
+        (Config.field_name field) (runtime_expr names value) stack
   | TAlloc _ target fields =>
-      Some (LegacyLang.RTAlloc (runtime_variable names target)
+      LegacyLang.RTAlloc (runtime_variable names target)
         (runtime_field_initializers names
-          (physical_field_initializers fields)) stack)
-  | TGhostUpdate _ _ _ _ _ => None
+          (physical_field_initializers fields)) stack
+  | TGhostUpdate _ _ _ _ _ => runtime_noop
   | TCall _ procedure arguments target =>
       match target with
       | CTStore target' =>
-          Some (LegacyLang.RTCall (runtime_variable names target')
+          LegacyLang.RTCall (runtime_variable names target')
             (Config.procedure_name procedure)
-            (runtime_expr_list names arguments) stack)
+            (runtime_expr_list names arguments) stack
       | CTDiscard =>
-          Some (LegacyLang.RTCallNoStore
+          LegacyLang.RTCallNoStore
             (Config.procedure_name procedure)
-            (runtime_expr_list names arguments) stack)
+            (runtime_expr_list names arguments) stack
       end
   | TSpawn _ procedure arguments =>
-      Some (LegacyLang.RTSpawn (Config.procedure_name procedure)
-        (runtime_expr_list names arguments) stack)
+      LegacyLang.RTSpawn (Config.procedure_name procedure)
+        (runtime_expr_list names arguments) stack
   | TUnfold _ _ _ | TFold _ _ _
-  | TPredicateUnfold _ _ _ | TPredicateFold _ _ _ => None
+  | TPredicateUnfold _ _ _ | TPredicateFold _ _ _ => runtime_noop
   | TInvAccess _ _ body => runtime_stmt names stack body
   | TIf _ condition then_branch else_branch =>
-      match runtime_stmt names stack then_branch,
-            runtime_stmt names stack else_branch with
-      | None, None => None
-      | then_runtime, else_runtime =>
-          Some (LegacyLang.RTIfS (runtime_expr names condition)
-            (default runtime_noop then_runtime)
-            (default runtime_noop else_runtime) stack)
-      end
+      runtime_if (runtime_expr names condition)
+        (runtime_stmt names stack then_branch)
+        (runtime_stmt names stack else_branch) stack
   | TSeq _ first second =>
-      combine_runtime_statements
-        (runtime_stmt names stack first) (runtime_stmt names stack second)
+      runtime_seq (runtime_stmt names stack first)
+        (runtime_stmt names stack second)
   | TAtomic node body =>
-      Some (LegacyLang.RTTrustedAtomic
-        (trusted_atomic_transition node body) stack)
+      LegacyLang.RTTrustedAtomic (trusted_atomic_transition node body) stack
   end.
-
-(** The total erasure of an atomic block's body: the program the machine
-    runs for it, with a proof-only body erasing to [runtime_noop] rather
-    than to nothing.  Totality is what lets the trusted transition take
-    it as an argument. *)
-Definition atomic_body_runtime {Γ} (names : named_context Γ)
-    (stack : LegacyLang.stack_id) (body : stmt Γ) : LegacyLang.runtime_stmt :=
-  default runtime_noop (runtime_stmt names stack body).
 
 (** The trusted substrate observes an atomic block only through its runtime
     behavior.  Consequently, proof-only rewrites with identical erasure
@@ -1786,8 +1851,7 @@ Axiom trusted_atomic_transition_runtime_erasure : forall {Γ}
 Lemma runtime_stmt_atomic {Γ} (names : named_context Γ) stack node
     (body : stmt Γ) :
   runtime_stmt names stack (TAtomic node body) =
-    Some (LegacyLang.RTTrustedAtomic
-      (trusted_atomic_transition node body) stack).
+    LegacyLang.RTTrustedAtomic (trusted_atomic_transition node body) stack.
 Proof. reflexivity. Qed.
 
 (** The point of the refactor: a proof-only rewrite of an atomic body
@@ -1820,7 +1884,7 @@ Lemma runtime_stmt_distribute_erased_before_if {Γ}
     (names : named_context Γ) stack before_node conditional_node
     then_seq_node else_seq_node (before : stmt Γ) condition
     (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack before = None ->
+  runtime_stmt names stack before = runtime_noop ->
   runtime_stmt names stack
     (TSeq before_node before
       (TIf conditional_node condition then_branch else_branch)) =
@@ -1829,9 +1893,7 @@ Lemma runtime_stmt_distribute_erased_before_if {Γ}
       (TSeq then_seq_node before then_branch)
       (TSeq else_seq_node before else_branch)).
 Proof.
-  intros Hbefore. simpl. rewrite Hbefore.
-  destruct (runtime_stmt names stack then_branch),
-    (runtime_stmt names stack else_branch); reflexivity.
+  intros Hbefore. simpl. rewrite Hbefore. reflexivity.
 Qed.
 
 Corollary runtime_stmt_distribute_unfold_before_if {Γ}
@@ -1856,8 +1918,8 @@ Lemma runtime_stmt_distribute_erased_around_if {Γ}
     (names : named_context Γ) stack
     unfold_node inner_node conditional_node
     (before after : stmt Γ) condition (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack before = None ->
-  runtime_stmt names stack after = None ->
+  runtime_stmt names stack before = runtime_noop ->
+  runtime_stmt names stack after = runtime_noop ->
   runtime_stmt names stack
     (TSeq unfold_node before
       (TSeq inner_node
@@ -1870,8 +1932,7 @@ Lemma runtime_stmt_distribute_erased_around_if {Γ}
         (TSeq inner_node else_branch after))).
 Proof.
   intros Hbefore Hafter. simpl. rewrite Hbefore Hafter.
-  destruct (runtime_stmt names stack then_branch),
-    (runtime_stmt names stack else_branch); reflexivity.
+  rewrite !runtime_seq_noop_l !runtime_seq_noop_r. reflexivity.
 Qed.
 
 Corollary runtime_stmt_distribute_unfold_fold_if {Γ}
@@ -1897,21 +1958,22 @@ Proof.
 Qed.
 
 (** Soundness condition for the user-selected atomicity cost model at the
-    concrete runtime boundary.  Proof-only leaves must not emit code; a leaf
-    classified as one atomic step must translate to an Iris-atomic runtime
-    statement.  Non-atomic leaves need no additional witness because the
+    concrete runtime boundary.  Proof-only leaves must erase to the terminal
+    statement; a leaf classified as one atomic step must translate to an
+    Iris-atomic runtime statement.  Non-atomic leaves need no additional witness because the
     analysis already rejects them while an invariant is open.  Trusted
     [TAtomic] blocks are structural certificates rather than leaves and are
     handled by their separate module refinement assumption. *)
 Definition runtime_cost_model_sound
     (cost : GenericRegions.Atomicity.cost_model) : Prop :=
-  forall Γ (names : named_context Γ) stack (statement : stmt Γ) physical,
+  forall Γ (names : named_context Γ) stack (statement : stmt Γ),
     RegionSyntax.view statement = TypedAnalysisView.ViewLeaf ->
-    runtime_stmt names stack statement = Some physical ->
     match cost Γ statement with
-    | GenericRegions.Atomicity.NoStep => False
+    | GenericRegions.Atomicity.NoStep =>
+        runtime_stmt names stack statement = runtime_noop
     | GenericRegions.Atomicity.AtomicStep =>
-        @Atomic LegacyLang.simp_lang WeaklyAtomic physical
+        @Atomic LegacyLang.simp_lang WeaklyAtomic
+          (runtime_stmt names stack statement)
     | GenericRegions.Atomicity.NonAtomicStep
     | GenericRegions.Atomicity.ProcedureCallStep _ _
     | GenericRegions.Atomicity.ProcedureSpawnStep _ => True
@@ -1942,7 +2004,7 @@ Record runtime_procedure_registration {Γ F}
   registered_procedure_body : forall stack,
     runtime_stmt (runtime_procedure_names procedure) stack
       (procedure_body _ _ procedure) =
-    Some (LegacyLang.to_rtstmt stack (LegacyLang.proc_stmt entry));
+    LegacyLang.to_rtstmt stack (LegacyLang.proc_stmt entry);
 }.
 
 Definition packed_runtime_procedure_registration
@@ -3122,16 +3184,13 @@ Definition procedure_wp {Γ} (runtime : Model.stack_context Γ)
     (post : iProp) : iProp :=
   match statement with
   | TCall _ _ _ _ | TSpawn _ _ _ =>
-      match Model.runtime_stmt (Model.runtime_names _ runtime)
-          (Model.runtime_stack_id _ runtime) statement with
-      | Some runtime_statement =>
-          Model.runtime_wp (Model.runtime_mask mask_pre) runtime_statement
-            (fun result =>
-              (⌜result = LegacyLang.LitUnit⌝ ∗
-               |={Model.runtime_mask mask_pre,
-                   Model.runtime_mask mask_post}=> post)%I)
-      | None => False%I
-      end
+      Model.runtime_wp (Model.runtime_mask mask_pre)
+        (Model.runtime_stmt (Model.runtime_names _ runtime)
+          (Model.runtime_stack_id _ runtime) statement)
+        (fun result =>
+          (⌜result = LegacyLang.LitUnit⌝ ∗
+           |={Model.runtime_mask mask_pre,
+               Model.runtime_mask mask_post}=> post)%I)
   | _ => False%I
   end.
 
@@ -3240,7 +3299,6 @@ End WithRuntime.
 End ConcreteControlCore.
 
 
-
 Import Translation.Assertions.
 
 Module TermSemanticLeafContracts
@@ -3304,70 +3362,6 @@ Record invariant_region_operations_data := InvariantRegionOperationsData {
 End WithModel.
 End TermInvariantRegionOperations.
 
-(** Dynamic counterpart of [FancyUpdateInvariantRegionOperations]. *)
-Module ConcreteInvariantRegionOperationsCore (Config : RUNTIME_CONFIGURATION).
-Module Control := ConcreteControlCore Config.
-Module Model := Control.Model.
-Section WithRuntime.
-Context {Σ : gFunctors} `{RG : runtimeG Σ}.
-Local Instance core_simpLangG : LegacyLifting.simpLangG Σ := runtime_simpLangG.
-Local Instance core_invTokenG : Legacy.invTokenG Σ := runtime_invTokenG.
-Local Instance core_irisG : irisGS LegacyLang.simp_lang Σ :=
-  @Model.core_irisG Σ RG.
-Local Existing Instance weakestpre.wp'.
-Local Notation iProp := (iProp Σ).
-
-Definition region_model : GenericRegions.region_model_data (iPropI Σ) :=
-  @GenericRegions.RegionModelData (iPropI Σ)
-    (fun Γ => Model.stack_context Γ) Model.ambient_mask.
-
-(** Export the transparent components of the region-model record.  Clients
-    outside this functor need these equalities to transport between the
-    record projections expected by the generic interpreter and the concrete
-    runtime types used by endpoint WPs. *)
-Lemma region_model_stack_context_eq Γ :
-  GenericRegions.term_region_stack_context region_model Γ =
-    Model.stack_context Γ.
-Proof. reflexivity. Qed.
-
-Lemma region_model_ambient_mask_eq :
-  GenericRegions.term_region_ambient_mask region_model = Model.ambient_mask.
-Proof. reflexivity. Qed.
-
-Definition operation_wp {Γ} (_ : Model.stack_context Γ) (ambient : Model.ambient_mask)
-    (entry : GenericRegions.Atomicity.analysis_state) (statement : stmt Γ)
-    (exit : GenericRegions.Atomicity.analysis_state) (post : iProp) : iProp :=
-  match statement with
-  | TUnfold _ _ _ | TFold _ _ _ =>
-      (|={Model.active_runtime_mask ambient entry,
-           Model.active_runtime_mask ambient exit}=> post)%I
-  | _ => False%I
-  end.
-
-Lemma operation_mono Γ runtime ambient entry statement exit P Q :
-  (P ⊢ Q) -> @operation_wp Γ runtime ambient entry statement exit P ⊢
-    @operation_wp Γ runtime ambient entry statement exit Q.
-Proof.
-  intros HPQ. unfold operation_wp. destruct statement; simpl; try reflexivity.
-  all: iIntros "HP"; iMod "HP"; iModIntro; iApply HPQ; iExact "HP".
-Qed.
-
-Lemma operation_frame Γ runtime ambient entry statement exit P R :
-  @operation_wp Γ runtime ambient entry statement exit P ∗ R ⊢
-    @operation_wp Γ runtime ambient entry statement exit (P ∗ R).
-Proof.
-  unfold operation_wp. destruct statement; simpl;
-    try (iIntros "[H _]"; done).
-  all: iIntros "[HP HR]"; iMod "HP"; iModIntro; iFrame.
-Qed.
-
-Definition operations :
-    @TermInvariantRegionOperations.invariant_region_operations_data (iPropI Σ)
-      region_model :=
-  @TermInvariantRegionOperations.InvariantRegionOperationsData (iPropI Σ)
-    region_model (@operation_wp) operation_mono operation_frame.
-End WithRuntime.
-End ConcreteInvariantRegionOperationsCore.
 
 (** Dynamic counterpart of [OperationalGenericRegionPrimitives].  It turns
     the term-level control and invariant-operation records into the generic
@@ -3375,7 +3369,6 @@ End ConcreteInvariantRegionOperationsCore.
 Module OperationalGenericRegionPrimitivesCore (Config : RUNTIME_CONFIGURATION).
 Module Control := ConcreteControlCore Config.
 Module Model := Control.Model.
-Module InvariantOperations := ConcreteInvariantRegionOperationsCore Config.
 
 (** Construct a runtime stack context through the model's public alias.  Keep
     this adapter at the functor boundary: clients must not rely on reduction
@@ -3469,13 +3462,10 @@ Definition ambient_leaf_wp {Γ} (runtime : Model.stack_context Γ)
     (statement : stmt Γ) (post : iProp) : iProp :=
   match statement with
   | TCall _ _ _ _ | TSpawn _ _ _ =>
-      match Model.runtime_stmt (Model.runtime_names _ runtime)
-          (Model.runtime_stack_id _ runtime) statement with
-      | Some runtime_statement =>
-          ambient_physical_leaf_wp runtime ambient entry runtime_statement post
-      | None => False%I
-      end
-  | TSkip _ | TAssert _ _ => post
+      ambient_physical_leaf_wp runtime ambient entry
+        (Model.runtime_stmt (Model.runtime_names _ runtime)
+          (Model.runtime_stack_id _ runtime) statement) post
+  | TDone _ | TAssert _ _ => post
   | TAssign _ target expression =>
       ambient_physical_leaf_wp runtime ambient entry
         (LegacyLang.RTAssign
@@ -3711,7 +3701,6 @@ Definition interpreter := @Primitives.interpreter Σ RG
   (@Primitives.concrete_invariant_operations Σ RG).
 End WithRuntime.
 End ConcreteGenericRegionExecutionCore.
-
 
 
 End Make.

@@ -17,7 +17,6 @@ rich_raven_lang/typed_resource.v
 rich_raven_lang/typed_ir.v
 rich_raven_lang/typed_resource_hoare.v
 rich_raven_lang/typed_hoare.v
-rich_raven_lang/typed_atomicity.v
 rich_raven_lang/typed_translation.v
 rich_raven_lang/typed_validity.v
 rich_raven_lang/typed_runtime.v

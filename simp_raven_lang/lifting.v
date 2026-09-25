@@ -62,7 +62,7 @@ Section lifting.
 
 
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
-      inversion H as [  |  |  |  |  |
+      inversion H as [  |  |  |  |
         | σ0 stk_id0 stk_frm0 e1 fld e' l0 v0 Hstk_frm0  Hl0 Hv0
       |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 fld stk_id0 e' e1 e2; simpl; iFrame.
 
@@ -126,7 +126,7 @@ Section lifting.
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [  |  |  |
         σ0 stk_id0 stk_frm0 e1 v0 e0 Hstk_frm0 Hv0
-      |  |  |  |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl.
+      |  |  |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. {
           rewrite HstkPure in Hstk_frm0.
@@ -175,7 +175,7 @@ Section lifting.
       apply (FldRdStep σ stk_id stk_frm x e fld l val); try done.
 
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
-      inversion H as [ | | | | | | |
+      inversion H as [ | | | | | |
           σ0 stk_id0 stk_frm0 v0 e0 fld0 l0 v2 Hstk_frm0 HexSt HlookUp
         |  |  |  |  |  |  |  |  |  ]; subst v0 e0 fld0 stk_id0 σ0 κ e2 σ2 efs. simpl.
       iSplitR; try done.
@@ -294,7 +294,7 @@ Section lifting.
       apply (AllocStep σ stk_id stk_frm x initializers fs); done.
 
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
-    inversion H as [  |  |  |  |  |  |  |  |  |
+    inversion H as [  |  |  |  |  |  |  |  |
         | σ0 stk_id0 stk_frm0 x0 initializers0 fs0 Hstack0 Hinitializers0
         |  |  |  |  |  |  ]; subst x0 initializers0 stk_id0 σ0 κ e2 σ2 efs; simpl;
         iRevert "Hgdom"; iFrame; iIntros "Hgdom".
@@ -530,20 +530,6 @@ Section lifting.
   Proof.
     iIntros "Hwp". iApply (wp_bind (fill_item (SeqCtx s2)) _ _ _ _).
     iApply (wp_wand with "Hwp"). iIntros (v) "Hwp". iExact "Hwp".
-  Qed.
-
-  Lemma wp_skip p mask stk_id :
-  {{{ p }}} RTSkipS stk_id @ mask {{{ RET lang.LitUnit; p ∗ £1 }}}.
-  Proof.
-    iIntros (Φ) "HP HΦ".
-    iApply wp_lift_atomic_base_step_no_fork; first done.
-    iIntros (σ ns κ κs nt) "Hstate".
-    iSplitR.
-    - unfold base_reducible. iExists [], (RTVal LitUnit), σ, [].
-    iPureIntro. apply RTSkipStep.
-
-    - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred". iModIntro.
-    inversion H; subst σ0 κ e2 σ2 efs. iSplitR; try done. iFrame. simpl. iApply "HΦ". iFrame.
   Qed.
 
   Lemma wp_cas_succ x e1 fld e2 e3 stk_id stk_frm l v v' mask:

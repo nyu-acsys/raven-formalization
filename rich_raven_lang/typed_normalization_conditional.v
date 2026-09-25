@@ -15,7 +15,10 @@ Import TypedCore TypedIR Runtime IR Core Runtime.Translation.
 Import StructuredCertificates.
 Module ConditionalNormalizationPrefix (Config : Runtime.RUNTIME_CONFIGURATION)
     (ResourceContracts : Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
-Module Model := Runtime.ConcreteModelCore Config.
+(* Only the (non-generative) erasure is needed here.  Applying the full
+   [ConcreteModelCore] would mint a second copy of its generative
+   records, independent of the runtime model on the soundness path. *)
+Module Model := Runtime.RuntimeErasure Config.
 Module Certified := Runtime.CertifiedRegions ResourceContracts.
 Module Resource := Runtime.Translation.Resource.
 (** The single application of the resource calculus's rule functor.  It
@@ -38,7 +41,7 @@ Lemma runtime_stmt_linear_access {Γ} names stack outer_node unfold_node
           (TFold fold_node invariant closing_arguments))) =
     Model.runtime_stmt names stack body.
 Proof.
-  simpl. destruct (Model.runtime_stmt names stack body); reflexivity.
+  simpl. rewrite Model.runtime_seq_noop_r. reflexivity.
 Qed.
 
 Lemma runtime_stmt_linear_access_then {Γ} names stack outer_node unfold_node
@@ -49,14 +52,10 @@ Lemma runtime_stmt_linear_access_then {Γ} names stack outer_node unfold_node
         (TSeq body_sequence_node body
           (TSeq fold_sequence_node
             (TFold fold_node invariant closing_arguments) work))) =
-    Model.combine_runtime_statements
+    Model.runtime_seq
       (Model.runtime_stmt names stack body)
       (Model.runtime_stmt names stack work).
-Proof.
-  simpl.
-  destruct (Model.runtime_stmt names stack body);
-    destruct (Model.runtime_stmt names stack work); reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
 (** A normalized statement together with the resource derivation and
     structured analyzer certificate that justify it. *)
@@ -1138,6 +1137,11 @@ Inductive resource_certificate_aligned (cost : GenericRegions.Atomicity.cost_mod
     (derivation : @ResourceRules.RavenResourceTriple Γ F Δ pre statement post),
     resource_certificate_aligned cost
       (GenericRegions.Atomicity.CertLeaf cost Γ entry statement exit view step)
+      derivation
+| ResourceAlignedDone : forall Γ F Δ entry statement pre post view
+    (derivation : @ResourceRules.RavenResourceTriple Γ F Δ pre statement post),
+    resource_certificate_aligned cost
+      (GenericRegions.Atomicity.CertDone cost Γ entry statement view)
       derivation
 | ResourceAlignedUnfold : forall Γ F Δ entry node invariant arguments exit
     (store : symbolic_store Γ F Δ)

@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data, without proof-irrelevant operational evidence packages.
 - The monotonic-counter example now uses the typed resource calculus and the
   generic analyzed-library soundness path.
+- Verification-language erasure is total: every statement maps to a runtime
+  statement, with proof-only operations represented by the terminal unit
+  value and smart sequence/conditional constructors preserving zero-step
+  erasure.
 
 ### Removed
 
@@ -57,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource-native soundness proof.
 - The unused `RUNTIME_RESOURCES` compatibility bundle and its parallel model,
   control-operation, execution, and invariant-operation functors.
+- `skip` constructors and reduction rules from both languages; `done` is now
+  the structural empty continuation and is never charged as a physical step.
+- The archived pre-redesign calculus and its translation, soundness, and
+  monotonic-counter developments.
+- The superseded parallel atomicity-analysis module.
 
 ### Fixed
 

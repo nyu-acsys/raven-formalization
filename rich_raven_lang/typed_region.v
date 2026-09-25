@@ -1,8 +1,7 @@
 From iris.proofmode Require Import tactics.
 
 From raven_iris.rich_raven_lang Require Import
-  typed_core typed_analysis_view typed_assertion typed_ir typed_translation
-  typed_atomicity.
+  typed_core typed_analysis_view typed_assertion typed_ir typed_translation.
 
 (** Continuation semantics for certificates emitted by the flat atomicity
     analyzer.  An unfold wraps the complete remaining continuation, so its
@@ -91,6 +90,10 @@ Fixpoint region_wp {Γ entry statement exit} {cost : cost_model}
   | @CertLeaf _ Γ' entry' statement' exit' _ _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement' exit' post
+  (* The empty continuation performs no operation: its meaning is the
+     postcondition itself, not an operation that happens to do nothing. *)
+  | @CertDone _ _ _ _ _ =>
+      fun _ _ post => post
   | @CertUnfold _ Γ' entry' statement' _ exit' _ _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement' exit' post
@@ -125,6 +128,7 @@ Lemma region_wp_mono {Γ entry statement exit}
 Proof.
   revert P Q. induction certificate; intros P Q HPQ; simpl.
   - apply (term_region_operation_mono Primitives). exact HPQ.
+  - exact HPQ.
   - apply (term_region_operation_mono Primitives). exact HPQ.
   - apply (term_region_operation_mono Primitives). exact HPQ.
   - apply IHcertificate1. apply IHcertificate2. exact HPQ.
@@ -142,6 +146,7 @@ Lemma region_wp_frame {Γ entry statement exit}
 Proof.
   revert P R. induction certificate; intros P R; simpl.
   - apply (term_region_operation_frame Primitives).
+  - reflexivity.
   - apply (term_region_operation_frame Primitives).
   - apply (term_region_operation_frame Primitives).
   - iIntros "[H HR]".
@@ -210,62 +215,4 @@ End REGION_PRIMITIVES.
 End Semantics.
 End Generic.
 
-Module Make (RAs : RA_VALUE_CONFIG) (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Atomicity := TypedAtomicity.Make RAs Logic.
-Module IR := Atomicity.IR.
-Module Core := Atomicity.Core.
-Module Assertions := Atomicity.Assertions.
-Import Core Assertions IR Atomicity.
-
-Module Type REGION_MODEL.
-  Parameter PROP : bi.
-  Parameter stack_context : context -> Type.
-End REGION_MODEL.
-
-Module Semantics (Model : REGION_MODEL).
-Local Notation iProp := (bi_car Model.PROP).
-
-Module Type REGION_PRIMITIVES.
-  Parameter leaf_wp : forall Γ, Model.stack_context Γ ->
-    analysis_state -> stmt Γ -> analysis_state -> iProp -> iProp.
-  Parameter unfold_wp : forall Γ, Model.stack_context Γ ->
-    analysis_state -> node_id -> forall invariant,
-    pexpr_list Γ (Logic.invariant_args invariant) ->
-    analysis_state -> iProp -> iProp.
-  Parameter fold_wp : forall Γ, Model.stack_context Γ ->
-    analysis_state -> node_id -> forall invariant,
-    pexpr_list Γ (Logic.invariant_args invariant) ->
-    analysis_state -> iProp -> iProp.
-  Parameter branch_wp : forall Γ, Model.stack_context Γ ->
-    pexpr Γ TBool -> analysis_state -> analysis_state -> analysis_state ->
-    iProp -> iProp -> iProp.
-  Parameter atomic_wp : forall Γ, Model.stack_context Γ ->
-    analysis_state -> stmt Γ -> analysis_state -> iProp -> iProp.
-
-  Parameter leaf_mono : forall Γ runtime entry statement exit P Q,
-    (P ⊢ Q) ->
-    leaf_wp Γ runtime entry statement exit P ⊢
-      leaf_wp Γ runtime entry statement exit Q.
-  Parameter unfold_mono : forall Γ runtime entry node invariant arguments
-      exit P Q,
-    (P ⊢ Q) ->
-    unfold_wp Γ runtime entry node invariant arguments exit P ⊢
-      unfold_wp Γ runtime entry node invariant arguments exit Q.
-  Parameter fold_mono : forall Γ runtime entry node invariant arguments
-      exit P Q,
-    (P ⊢ Q) ->
-    fold_wp Γ runtime entry node invariant arguments exit P ⊢
-      fold_wp Γ runtime entry node invariant arguments exit Q.
-  Parameter branch_mono : forall Γ runtime condition entry then_exit else_exit
-      P P' Q Q',
-    (P ⊢ P') -> (Q ⊢ Q') ->
-    branch_wp Γ runtime condition entry then_exit else_exit P Q ⊢
-      branch_wp Γ runtime condition entry then_exit else_exit P' Q'.
-  Parameter atomic_mono : forall Γ runtime entry body exit P Q,
-    (P ⊢ Q) ->
-    atomic_wp Γ runtime entry body exit P ⊢
-      atomic_wp Γ runtime entry body exit Q.
-End REGION_PRIMITIVES.
-End Semantics.
-End Make.
 End TypedRegion.

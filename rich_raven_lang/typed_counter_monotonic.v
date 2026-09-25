@@ -4,7 +4,7 @@ From stdpp Require Import namespaces sets.
 
 From raven_iris.rich_raven_lang Require Import
   mono_nat_ra surface_syntax typed_core typed_assertion typed_ir
-  typed_hoare typed_atomicity typed_runtime_certified.
+  typed_hoare typed_runtime_certified.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -232,11 +232,9 @@ Definition cas_source : source_stmt :=
     range is the one assigned to the body of [incr_source]'s atomic block. *)
 Definition cas_typed_body :
     stmt [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] :=
-  match elaborate_stmt counter_environment incr_variables 113%positive
-      cas_source with
-  | inr (body, _) => body
-  | inl _ => TSkip 199%positive
-  end.
+  elaborated_body
+    (elaborate_stmt counter_environment incr_variables 113%positive cas_source)
+    ltac:(vm_compute; exact I).
 
 Lemma cas_typed_body_elaboration :
   exists finish,
@@ -304,13 +302,13 @@ Definition incr_source : source_stmt :=
      if res {
        fpu(x . h, v1, v1 + 1)
      } else {
-       skip
+       done
      });
     fold counterInv(x);
     if ! res {
       incr(x)
     } else {
-      skip
+      done
     };
     ret := tt
   }}.
@@ -344,19 +342,15 @@ Proof. do 2 eexists. reflexivity. Qed.
     Keeping the equations named lets later certificates rewrite back to the
     readable source without depending on reduction through the elaborator. *)
 Definition read_typed_body : stmt [TRef; TInt; TInt] :=
-  match elaborate_stmt counter_environment read_variables 1%positive
-      read_source with
-  | inr (body, _) => body
-  | inl _ => TSkip 99%positive
-  end.
+  elaborated_body
+    (elaborate_stmt counter_environment read_variables 1%positive read_source)
+    ltac:(vm_compute; exact I).
 
 Definition incr_typed_body :
     stmt [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] :=
-  match elaborate_stmt counter_environment incr_variables 100%positive
-      incr_source with
-  | inr (body, _) => body
-  | inl _ => TSkip 199%positive
-  end.
+  elaborated_body
+    (elaborate_stmt counter_environment incr_variables 100%positive incr_source)
+    ltac:(vm_compute; exact I).
 
 (** Cache the intrinsic syntax produced by elaboration.  Structural proofs
     below can unfold this VM-normalized term without re-running the surface
@@ -368,11 +362,9 @@ Lemma incr_typed_body_normalized_eq :
 Proof. vm_compute. reflexivity. Qed.
 
 Definition make_typed_body : stmt [TRef; TRef] :=
-  match elaborate_stmt counter_environment make_variables 200%positive
-      make_source with
-  | inr (body, _) => body
-  | inl _ => TSkip 299%positive
-  end.
+  elaborated_body
+    (elaborate_stmt counter_environment make_variables 200%positive make_source)
+    ltac:(vm_compute; exact I).
 
 Lemma read_typed_body_elaboration :
   exists finish,
@@ -702,7 +694,10 @@ Import Runtime.Hoare.
 Definition counter_cost_model : Runtime.GenericRegions.Atomicity.cost_model :=
   fun Γ statement =>
     match statement with
-    | TSkip _ | TAssert _ _ | TGhostUpdate _ _ _ _ _ =>
+    (* [done] is analyzed structurally ([ViewDone]) and never charged; this
+       arm only keeps the match exhaustive. *)
+    | TDone _ => Runtime.GenericRegions.Atomicity.NoStep
+    | TAssert _ _ | TGhostUpdate _ _ _ _ _ =>
         Runtime.GenericRegions.Atomicity.NoStep
     | TCall _ procedure _ _ =>
         Runtime.GenericRegions.Atomicity.ProcedureCallStep
@@ -2105,11 +2100,11 @@ Lemma incr_resource_skip_branch (node : positive) :
     (Resource.RState incr_res_store
       (Resource.CAnd incr_cas_result_core
         (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
-    (TSkip node)
+    (TDone node)
     (Resource.RState incr_res_store incr_post_cas_core).
 Proof.
   eapply RRules.RTConsequence;
-    [eapply RRules.RTSkip | | apply RH.resource_prenex_entails_refl].
+    [eapply RRules.RTDone | | apply RH.resource_prenex_entails_refl].
   unfold incr_cas_result_core, incr_post_cas_core.
   eapply RH.CEntailsTrans; [apply RH.CEntailsStep; apply RH.CESAndAssocR |].
   eapply RH.CEntailsTrans;
@@ -2216,11 +2211,11 @@ Lemma incr_resource_retry_skip (node : positive) :
       (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
         (Resource.CExpr (EUnOp UNot
           (EUnOp UNot (ERef (RefBound MHere)))))))
-    (TSkip node)
+    (TDone node)
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
   eapply RRules.RTConsequence;
-    [eapply RRules.RTSkip | apply RH.CEntailsRefl |].
+    [eapply RRules.RTDone | apply RH.CEntailsRefl |].
   apply RH.RPEBody. split;
     [reflexivity | apply RH.CEntailsStep; apply RH.CESTrueIntro].
 Qed.
@@ -2254,14 +2249,14 @@ Qed.
     per binder the block introduces, which is exactly
     [incr_threaded_equality_core]. *)
 
-Lemma incr_resource_retry_conditional (node call_node skip_node : positive) :
+Lemma incr_resource_retry_conditional (node call_node done_node : positive) :
   RRules.RavenResourceTriple
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere))))
     (TIf node (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere))))))
       (TCall call_node incr_procedure (PECons (PEVar MHere) PENil)
         (@CTDiscard _ TUnit))
-      (TSkip skip_node))
+      (TDone done_node))
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
   eapply RRules.RTIf.
@@ -2321,13 +2316,11 @@ Definition counter_runtime_procedure_statement
     (packed : packed_typed_procedure) : Runtime.LegacyLang.stmt :=
   match packed with
   | existT Γ (existT F procedure) =>
-      match @CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt Γ
-          (@CounterSoundness.RegionExecution.Primitives.Model.runtime_procedure_names
-            Γ F procedure) 0 (procedure_body Γ F procedure) with
-      | Some runtime => default Runtime.LegacyLang.StuckS
-          (Runtime.LegacyLang.reify_runtime_stmt 0 runtime)
-      | None => Runtime.LegacyLang.StuckS
-      end
+      default Runtime.LegacyLang.StuckS
+        (Runtime.LegacyLang.reify_runtime_stmt 0
+          (@CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt Γ
+            (@CounterSoundness.RegionExecution.Primitives.Model.runtime_procedure_names
+              Γ F procedure) 0 (procedure_body Γ F procedure)))
   end.
 
 Lemma counter_runtime_procedure_statement_nonvalue packed :
@@ -2355,8 +2348,8 @@ Lemma counter_runtime_procedure_layout packed :
         @CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt Γ
           (@CounterSoundness.RegionExecution.Primitives.Model.runtime_procedure_names
             Γ F procedure) stack (procedure_body Γ F procedure) =
-        Some (Runtime.LegacyLang.to_rtstmt stack
-          (counter_runtime_procedure_statement packed))
+        Runtime.LegacyLang.to_rtstmt stack
+          (counter_runtime_procedure_statement packed)
   end.
 Proof.
   intros Hin. simpl in Hin.

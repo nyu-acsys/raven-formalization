@@ -26,22 +26,20 @@ Lemma counter_runtime_cost_model_sound :
   CounterSoundness.RegionExecution.Primitives.Model.runtime_cost_model_sound
     counter_cost_model.
 Proof.
-  intros Γ names stack statement physical Hview Hruntime.
+  intros Γ names stack statement Hview.
   destruct statement; cbn in Hview; try discriminate;
     cbn [counter_cost_model].
+  (* procedure calls and spawns need no witness *)
   all: try exact I.
-  - cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt]
-      in Hruntime.
-    inversion Hruntime; subst. apply Runtime.LegacyLang.atomic_assign.
-  - cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt]
-      in Hruntime.
-    inversion Hruntime; subst. apply Runtime.LegacyLang.atomic_fld_rd.
-  - cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt]
-      in Hruntime.
-    inversion Hruntime; subst. apply Runtime.LegacyLang.atomic_fld_wr.
-  - cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt]
-      in Hruntime.
-    inversion Hruntime; subst. apply Runtime.LegacyLang.atomic_alloc.
+  (* proof-only leaves erase to the terminal statement *)
+  all: try reflexivity.
+  all: cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt].
+  all: first
+    [ apply Runtime.LegacyLang.atomic_assign
+    | apply Runtime.LegacyLang.atomic_fld_rd
+    | apply Runtime.LegacyLang.atomic_fld_wr
+    | apply Runtime.LegacyLang.atomic_alloc
+    | apply Runtime.LegacyLang.atomic_val ].
 Qed.
 
 End CounterResourceProgramPackaging.
