@@ -312,23 +312,6 @@ Proof.
     + apply IH; exact Htail.
 Qed.
 
-Inductive result_kind :=
-| RKAssignment
-| RKFieldRead
-| RKAllocation
-| RKCall.
-
-Record result_origin (t : typ) := ResultOrigin {
-  result_node : node_id;
-  result_origin_kind : result_kind;
-  result_symbol : atom t;
-}.
-
-Arguments ResultOrigin {_} _ _ _.
-
-Definition canonical_result {t} (node : node_id) (kind : result_kind) :
-    result_origin t := ResultOrigin node kind (Atom node).
-
 Definition return_context (return_type : typ) : context := [return_type].
 
 Inductive return_slot : forall return_type t,
@@ -344,81 +327,55 @@ Arguments CTDiscard {_ _}.
 Arguments CTStore {_ _} _.
 
 Inductive stmt (Γ : context) : Type :=
-| TDone (node : node_id)
-| TAssert (node : node_id) (condition : pexpr Γ TBool)
-| TAssign t (node : node_id) (target : pvar Γ t) (value : pexpr Γ t)
-| TFieldRead (node : node_id) (field : field_id)
+| TDone
+| TAssert (condition : pexpr Γ TBool)
+| TAssign t (target : pvar Γ t) (value : pexpr Γ t)
+| TFieldRead (field : field_id)
     (target : pvar Γ (Logic.field_type field)) (base : pexpr Γ TRef)
-| TFieldWrite (node : node_id) (field : field_id) (base : pexpr Γ TRef)
+| TFieldWrite (field : field_id) (base : pexpr Γ TRef)
     (value : pexpr Γ (Logic.field_type field))
-| TAlloc (node : node_id) (target : pvar Γ TRef)
+| TAlloc (target : pvar Γ TRef)
     (fields : list (field_init Γ))
-| TGhostUpdate (node : node_id) (field : field_id) (base : pexpr Γ TRef)
+| TGhostUpdate (field : field_id) (base : pexpr Γ TRef)
     (old_value new_value : pexpr Γ (Logic.field_type field))
-| TCall (node : node_id) (procedure : proc_id)
+| TCall (procedure : proc_id)
     (arguments : pexpr_list Γ (Logic.procedure_args procedure))
     (target : call_target Γ (Logic.procedure_return procedure))
-| TSpawn (node : node_id) (procedure : proc_id)
+| TSpawn (procedure : proc_id)
     (arguments : pexpr_list Γ (Logic.procedure_args procedure))
-| TUnfold (node : node_id) (invariant : inv_id)
+| TUnfold (invariant : inv_id)
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
-| TFold (node : node_id) (invariant : inv_id)
+| TFold (invariant : inv_id)
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
-| TPredicateUnfold (node : node_id) (predicate : pred_id)
+| TPredicateUnfold (predicate : pred_id)
     (arguments : pexpr_list Γ (Logic.predicate_args predicate))
-| TPredicateFold (node : node_id) (predicate : pred_id)
+| TPredicateFold (predicate : pred_id)
     (arguments : pexpr_list Γ (Logic.predicate_args predicate))
 | TInvAccess (invariant : inv_id)
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body : stmt Γ)
-| TIf (node : node_id) (condition : pexpr Γ TBool)
+| TIf (condition : pexpr Γ TBool)
     (then_branch else_branch : stmt Γ)
-| TSeq (node : node_id) (first second : stmt Γ)
-| TAtomic (node : node_id) (body : stmt Γ).
+| TSeq (first second : stmt Γ)
+| TAtomic (body : stmt Γ).
 
-Arguments TDone {_} _.
-Arguments TAssert {_} _ _.
-Arguments TAssign {_ _} _ _ _.
-Arguments TFieldRead {_} _ _ _ _.
-Arguments TFieldWrite {_} _ _ _ _.
-Arguments TAlloc {_} _ _ _.
-Arguments TGhostUpdate {_} _ _ _ _ _.
-Arguments TCall {_} _ _ _ _.
-Arguments TSpawn {_} _ _ _.
-Arguments TUnfold {_} _ _ _.
-Arguments TFold {_} _ _ _.
-Arguments TPredicateUnfold {_} _ _ _.
-Arguments TPredicateFold {_} _ _ _.
+Arguments TDone {_}.
+Arguments TAssert {_} _.
+Arguments TAssign {_ _} _ _.
+Arguments TFieldRead {_} _ _ _.
+Arguments TFieldWrite {_} _ _ _.
+Arguments TAlloc {_} _ _.
+Arguments TGhostUpdate {_} _ _ _ _.
+Arguments TCall {_} _ _ _.
+Arguments TSpawn {_} _ _.
+Arguments TUnfold {_} _ _.
+Arguments TFold {_} _ _.
+Arguments TPredicateUnfold {_} _ _.
+Arguments TPredicateFold {_} _ _.
 Arguments TInvAccess {_} _ _ _.
-Arguments TIf {_} _ _ _ _.
-Arguments TSeq {_} _ _ _.
-Arguments TAtomic {_} _ _.
-
-Fixpoint stmt_nodes {Γ} (statement : stmt Γ) : list node_id :=
-  match statement with
-  | TDone node | TAssert node _ | TAssign node _ _
-  | TFieldRead node _ _ _ | TFieldWrite node _ _ _
-  | TAlloc node _ _ | TGhostUpdate node _ _ _ _
-  | TCall node _ _ _ | TSpawn node _ _
-  | TUnfold node _ _ | TFold node _ _
-  | TPredicateUnfold node _ _ | TPredicateFold node _ _ => [node]
-  | TInvAccess _ _ body => stmt_nodes body
-  | TIf node _ then_branch else_branch =>
-      node :: stmt_nodes then_branch ++ stmt_nodes else_branch
-  | TSeq node first second => node :: stmt_nodes first ++ stmt_nodes second
-  | TAtomic node body => node :: stmt_nodes body
-  end.
-
-Fixpoint stmt_results {Γ} (statement : stmt Γ) : list positive :=
-  match statement with
-  | TAssign node _ _ | TFieldRead node _ _ _ | TAlloc node _ _ => [node]
-  | TCall node _ _ (CTStore _) => [node]
-  | TIf _ _ then_branch else_branch =>
-      stmt_results then_branch ++ stmt_results else_branch
-  | TSeq _ first second => stmt_results first ++ stmt_results second
-  | TAtomic _ body | TInvAccess _ _ body => stmt_results body
-  | _ => []
-  end.
+Arguments TIf {_} _ _ _.
+Arguments TSeq {_} _ _.
+Arguments TAtomic {_} _.
 
 (** Canonical procedure-entry stores.  Every frame slot starts as a fresh
     procedure-local symbolic atom; installing the formal-variable embedding
@@ -545,11 +502,6 @@ Record procedure_wf {Γ F} (procedure : typed_procedure Γ F) : Prop := {
     Resource.core_entry_free (procedure_precondition _ _ procedure);
   procedure_postcondition_entry_free :
     Resource.core_entry_free (procedure_postcondition _ _ procedure);
-  procedure_nodes_unique : NoDup (stmt_nodes (procedure_body _ _ procedure));
-  procedure_results_unique : NoDup (stmt_results (procedure_body _ _ procedure));
-  procedure_results_are_nodes :
-    forall result, In result (stmt_results (procedure_body _ _ procedure)) ->
-      In result (stmt_nodes (procedure_body _ _ procedure));
 }.
 
 (** A procedure table must be heterogeneous: procedures may have different
@@ -912,25 +864,18 @@ Fixpoint elaborate_field_inits {Γ} (environment : elaboration_environment)
       end
   end.
 
-Definition node_successor (node : node_id) : node_id := Pos.succ node.
-
-(** Elaboration returns the next unused node ID.  The current slice handles
-    assignment, field read/write, assertion, sequencing, conditionals, and
-    atomic blocks; calls and fold/unfold await their typed declaration
-    tables. *)
 Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
-    (variables : named_context Γ) (next : node_id) (statement : source_stmt) :
-    elaboration_error + (stmt Γ * node_id) :=
-  let next' := node_successor next in
+    (variables : named_context Γ) (statement : source_stmt) :
+    elaboration_error + stmt Γ :=
   match statement with
-  | SSDone => inr (TDone next, next')
+  | SSDone => inr TDone
   | SSAssert condition =>
       match elaborate_expr variables condition with
       | inl error => inl error
       | inr condition' =>
           match expect_pexpr TBool condition' with
           | inl error => inl error
-          | inr condition'' => inr (TAssert next condition'', next')
+          | inr condition'' => inr (TAssert condition'')
           end
       end
   | SSAssign target (SEField base field_name)
@@ -945,8 +890,8 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
               match expect_pvar (Logic.field_type (field_identity field))
                       (existT target_type target') with
               | inr target'' =>
-                  inr (TFieldRead next (field_identity field)
-                    target'' base'', next')
+                  inr (TFieldRead (field_identity field)
+                    target'' base'')
               | inl error => inl error
               end
           end
@@ -960,7 +905,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
           match expect_pexpr target_type value' with
           | inl error => inl error
           | inr value'' =>
-              inr (TAssign next target' value'', next')
+              inr (TAssign target' value'')
           end
       | None, _ => inl (EEUnknownVariable target)
       | _, inl error => inl error
@@ -973,7 +918,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
           match expect_pexpr TRef base',
                 expect_pexpr (Logic.field_type (field_identity field)) value' with
           | inr base'', inr value'' =>
-              inr (TFieldWrite next (field_identity field) base'' value'', next')
+              inr (TFieldWrite (field_identity field) base'' value'')
           | inl error, _ | _, inl error => inl error
           end
       | inl error, _, _ | _, inl error, _ => inl error
@@ -984,7 +929,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
             elaborate_field_inits environment variables fields with
       | Some (existT target_type target'), inr fields' =>
           match expect_pvar TRef (existT target_type target') with
-          | inr target'' => inr (TAlloc next target'' fields', next')
+          | inr target'' => inr (TAlloc target'' fields')
           | inl error => inl error
           end
       | None, _ => inl (EEUnknownVariable target)
@@ -1002,8 +947,8 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                 expect_field_chunk
                   (Logic.field_type (field_identity field)) new_value' with
           | inr base'', inr old_value'', inr new_value'' =>
-              inr (TGhostUpdate next (field_identity field) base''
-                old_value'' new_value'', next')
+              inr (TGhostUpdate (field_identity field) base''
+                old_value'' new_value'')
           | inl error, _, _ | _, inl error, _ | _, _, inl error => inl error
           end
       | None, _, _, _ => inl (EEUnknownField field_name)
@@ -1020,9 +965,8 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
           | inr arguments' =>
               match target with
               | None =>
-                  inr (TCall next (signature_identity procedure)
-                    arguments' (@CTDiscard Γ (Logic.procedure_return (signature_identity procedure))),
-                    next')
+                  inr (TCall (signature_identity procedure)
+                    arguments' (@CTDiscard Γ (Logic.procedure_return (signature_identity procedure))))
               | Some target_name =>
                   match lookup_named variables target_name with
                   | None => inl (EEUnknownVariable target_name)
@@ -1036,11 +980,11 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                              surface program, not bookkeeping: the user's
                              target variable must have the callee's return
                              type. *)
-                          inr (TCall next (signature_identity procedure)
+                          inr (TCall (signature_identity procedure)
                             arguments'
                             (CTStore (eq_rect target_type
                               (fun result => pvar Γ result) target' _
-                              equality)), next')
+                              equality)))
                       | right _ => inl (EETypeMismatch target_type
                           (Logic.procedure_return
                             (signature_identity procedure)))
@@ -1058,7 +1002,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   (Logic.procedure_args (signature_identity procedure)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TSpawn next (signature_identity procedure) arguments', next')
+              inr (TSpawn (signature_identity procedure) arguments')
           end
       end
   | SSUnfold invariant_name arguments =>
@@ -1070,7 +1014,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   (Logic.invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TUnfold next (invariant_identity invariant) arguments', next')
+              inr (TUnfold (invariant_identity invariant) arguments')
           end
       end
   | SSFold invariant_name arguments =>
@@ -1082,7 +1026,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   (Logic.invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TFold next (invariant_identity invariant) arguments', next')
+              inr (TFold (invariant_identity invariant) arguments')
           end
       end
   | SSPredicateUnfold predicate_name arguments =>
@@ -1094,8 +1038,8 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   (Logic.predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TPredicateUnfold next (predicate_identity predicate)
-                arguments', next')
+              inr (TPredicateUnfold (predicate_identity predicate)
+                arguments')
           end
       end
   | SSPredicateFold predicate_name arguments =>
@@ -1107,18 +1051,18 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   (Logic.predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TPredicateFold next (predicate_identity predicate)
-                arguments', next')
+              inr (TPredicateFold (predicate_identity predicate)
+                arguments')
           end
       end
   | SSSeq first second =>
-      match elaborate_stmt environment variables next' first with
+      match elaborate_stmt environment variables first with
       | inl error => inl error
-      | inr (first', after_first) =>
-          match elaborate_stmt environment variables after_first second with
+      | inr first' =>
+          match elaborate_stmt environment variables second with
           | inl error => inl error
-          | inr (second', after_second) =>
-              inr (TSeq next first' second', after_second)
+          | inr second' =>
+              inr (TSeq first' second')
           end
       end
   | SSIf condition then_branch else_branch =>
@@ -1128,26 +1072,26 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
           match expect_pexpr TBool condition' with
           | inl error => inl error
           | inr condition'' =>
-              match elaborate_stmt environment variables next' then_branch with
+              match elaborate_stmt environment variables then_branch with
               | inl error => inl error
-              | inr (then_branch', after_then) =>
-                  match elaborate_stmt environment variables after_then else_branch with
+              | inr then_branch' =>
+                  match elaborate_stmt environment variables else_branch with
                   | inl error => inl error
-                  | inr (else_branch', after_else) =>
-                      inr (TIf next condition'' then_branch' else_branch', after_else)
+                  | inr else_branch' =>
+                      inr (TIf condition'' then_branch' else_branch')
                   end
               end
           end
       end
   | SSAtomic body =>
-      match elaborate_stmt environment variables next' body with
+      match elaborate_stmt environment variables body with
       | inl error => inl error
-      | inr (body', after_body) => inr (TAtomic next body', after_body)
+      | inr body' => inr (TAtomic body')
       end
   end.
 
 (** Whether elaboration produced a statement. *)
-Definition elaboration_succeeded {Γ} (result : elaboration_error + (stmt Γ * node_id))
+Definition elaboration_succeeded {Γ} (result : elaboration_error + stmt Γ)
     : Prop :=
   match result with inl _ => False | inr _ => True end.
 
@@ -1156,239 +1100,17 @@ Definition elaboration_succeeded {Γ} (result : elaboration_error + (stmt Γ * n
     arbitrary placeholder statement, so a program whose source does not
     elaborate is rejected where it is defined instead of silently becoming
     some other program. *)
-Definition elaborated_body {Γ} (result : elaboration_error + (stmt Γ * node_id))
+Definition elaborated_body {Γ} (result : elaboration_error + stmt Γ)
     (succeeded : elaboration_succeeded result) : stmt Γ :=
   match result as result' return elaboration_succeeded result' -> stmt Γ with
   | inl _ => fun impossible => match impossible with end
-  | inr (body, _) => fun _ => body
+  | inr body => fun _ => body
   end succeeded.
 
-Lemma elaborated_body_spec {Γ} (result : elaboration_error + (stmt Γ * node_id))
+Lemma elaborated_body_spec {Γ} (result : elaboration_error + stmt Γ)
     (succeeded : elaboration_succeeded result) :
-  exists finish, result = inr (elaborated_body result succeeded, finish).
-Proof.
-  destruct result as [|[body finish]]; [destruct succeeded |].
-  exists finish. reflexivity.
-Qed.
-
-Fixpoint source_node_count (statement : source_stmt) : nat :=
-  match statement with
-  | SSSeq first second =>
-      S (source_node_count first + source_node_count second)
-  | SSIf _ then_branch else_branch =>
-      S (source_node_count then_branch + source_node_count else_branch)
-  | SSAtomic body => S (source_node_count body)
-  | _ => 1
-  end.
-
-Fixpoint iterate_node (count : nat) (first : node_id) : node_id :=
-  match count with
-  | O => first
-  | S count' => iterate_node count' (node_successor first)
-  end.
-
-Fixpoint node_range (first : node_id) (count : nat) : list node_id :=
-  match count with
-  | O => []
-  | S count' => first :: node_range (node_successor first) count'
-  end.
-
-Lemma iterate_node_succ count first :
-  iterate_node count (node_successor first) =
-    node_successor (iterate_node count first).
-Proof.
-  revert first. induction count; intros first; simpl.
-  - reflexivity.
-  - rewrite IHcount. reflexivity.
-Qed.
-
-Lemma iterate_node_add left right first :
-  iterate_node (left + right) first =
-    iterate_node right (iterate_node left first).
-Proof.
-  revert first. induction left; intros first; simpl.
-  - reflexivity.
-  - rewrite IHleft. reflexivity.
-Qed.
-
-Lemma node_range_add left right first :
-  node_range first (left + right) =
-    node_range first left ++ node_range (iterate_node left first) right.
-Proof.
-  revert first. induction left; intros first; simpl.
-  - reflexivity.
-  - rewrite IHleft. reflexivity.
-Qed.
-
-Lemma iterate_node_Z count first :
-  Z.pos (iterate_node count first) = Z.pos first + Z.of_nat count.
-Proof.
-  revert first. induction count; intros first; simpl.
-  - lia.
-  - rewrite IHcount, Pos2Z.inj_succ, Nat2Z.inj_succ. lia.
-Qed.
-
-Lemma in_node_range first count node :
-  In node (node_range first count) ->
-  (Z.pos first <= Z.pos node < Z.pos first + Z.of_nat count)%Z.
-Proof.
-  revert first. induction count; intros first Hin; simpl in Hin.
-  - contradiction.
-  - destruct Hin as [<- | Hin].
-    + rewrite Nat2Z.inj_succ. lia.
-    + specialize (IHcount (node_successor first) Hin).
-      rewrite Pos2Z.inj_succ in IHcount.
-      rewrite Nat2Z.inj_succ. lia.
-Qed.
-
-Lemma node_range_nodup first count : NoDup (node_range first count).
-Proof.
-  revert first. induction count; intros first; simpl.
-  - constructor.
-  - constructor.
-    + intro Hin. pose proof (in_node_range _ _ _ Hin).
-      rewrite Pos2Z.inj_succ in H. lia.
-    + apply IHcount.
-Qed.
-
-Inductive list_subsequence {A : Type} : list A -> list A -> Prop :=
-| SubsequenceNil : list_subsequence [] []
-| SubsequenceKeep x xs ys :
-    list_subsequence xs ys -> list_subsequence (x :: xs) (x :: ys)
-| SubsequenceDrop x xs ys :
-    list_subsequence xs ys -> list_subsequence xs (x :: ys).
-
-Arguments SubsequenceNil {_}.
-Arguments SubsequenceKeep {_ _ _ _} _.
-Arguments SubsequenceDrop {_ _ _ _} _.
-
-Lemma list_subsequence_app {A} (xs xs' ys ys' : list A) :
-  list_subsequence xs ys -> list_subsequence xs' ys' ->
-  list_subsequence (xs ++ xs') (ys ++ ys').
-Proof.
-  intros Hsub. revert xs' ys'. induction Hsub; intros xs' ys' Hsub'; simpl.
-  - exact Hsub'.
-  - constructor. apply IHHsub. exact Hsub'.
-  - constructor. apply IHHsub. exact Hsub'.
-Qed.
-
-Lemma list_subsequence_in {A} (xs ys : list A) (x : A) :
-  list_subsequence xs ys -> In x xs -> In x ys.
-Proof.
-  intros Hsub. induction Hsub; intros Hin; simpl in *.
-  - contradiction.
-  - destruct Hin as [<- | Hin]; auto.
-  - right. apply IHHsub. exact Hin.
-Qed.
-
-Lemma list_subsequence_nodup {A} (xs ys : list A) :
-  list_subsequence xs ys -> NoDup ys -> NoDup xs.
-Proof.
-  intros Hsub. induction Hsub; intros Hnodup.
-  - constructor.
-  - inversion Hnodup as [| ? ? Hnotin Htail]. constructor.
-    + intro Hin. apply Hnotin. eapply list_subsequence_in; eauto.
-    + apply IHHsub. exact Htail.
-  - inversion Hnodup. apply IHHsub. assumption.
-Qed.
-
-Lemma stmt_results_subsequence {Γ} (statement : stmt Γ) :
-  list_subsequence (stmt_results statement) (stmt_nodes statement).
-Proof.
-  induction statement; simpl.
-  all: try (constructor; constructor).
-  - destruct target; constructor; constructor.
-  - assumption.
-  - constructor. apply list_subsequence_app; assumption.
-  - constructor. apply list_subsequence_app; assumption.
-  - constructor. assumption.
-Qed.
-
-Corollary stmt_results_nodup {Γ} (statement : stmt Γ) :
-  NoDup (stmt_nodes statement) -> NoDup (stmt_results statement).
-Proof.
-  apply list_subsequence_nodup. apply stmt_results_subsequence.
-Qed.
-
-Corollary stmt_result_is_node {Γ} (statement : stmt Γ) result :
-  In result (stmt_results statement) -> In result (stmt_nodes statement).
-Proof.
-  eapply list_subsequence_in. apply stmt_results_subsequence.
-Qed.
-
-Theorem elaborate_stmt_node_range {Γ}
-    (environment : elaboration_environment) (variables : named_context Γ)
-    (source : source_stmt) (first finish : node_id) (core : stmt Γ) :
-  elaborate_stmt environment variables first source = inr (core, finish) ->
-  stmt_nodes core = node_range first (source_node_count source) /\
-  finish = iterate_node (source_node_count source) first.
-Proof.
-  revert first finish core.
-  induction source; intros first finish core Helaborates;
-    cbn [elaborate_stmt source_node_count] in Helaborates.
-  all: repeat match type of Helaborates with
-       | context [match ?scrutinee with _ => _ end] =>
-           destruct scrutinee eqn:?Hscrutinee
-       end; try discriminate.
-  all: try (injection Helaborates as <- <-; split; reflexivity).
-  - injection Helaborates as <- <-.
-    destruct (IHsource1 _ _ _ Hscrutinee1) as [Hnodes1 Hfinish1].
-    destruct (IHsource2 _ _ _ Hscrutinee3) as [Hnodes2 Hfinish2].
-    subst n n0. simpl. rewrite Hnodes1, Hnodes2.
-    split.
-    + f_equal. symmetry. apply node_range_add.
-    + symmetry. apply iterate_node_add.
-  - injection Helaborates as <- <-.
-    destruct (IHsource1 _ _ _ Hscrutinee) as [Hnodes1 Hfinish1].
-    destruct (IHsource2 _ _ _ Hscrutinee1) as [Hnodes2 Hfinish2].
-    subst n n0. simpl. rewrite Hnodes1, Hnodes2.
-    split.
-    + f_equal. symmetry. apply node_range_add.
-    + symmetry. apply iterate_node_add.
-  - injection Helaborates as <- <-.
-    destruct (IHsource _ _ _ Hscrutinee) as [Hnodes Hfinish].
-    subst n. simpl. rewrite Hnodes. split; reflexivity.
-Qed.
-
-Corollary elaborate_stmt_wf {Γ}
-    (environment : elaboration_environment) (variables : named_context Γ)
-    (source : source_stmt) (first finish : node_id) (core : stmt Γ) :
-  elaborate_stmt environment variables first source = inr (core, finish) ->
-  NoDup (stmt_nodes core) /\
-  NoDup (stmt_results core) /\
-  (forall result, In result (stmt_results core) ->
-    In result (stmt_nodes core)).
-Proof.
-  intro Helaborates.
-  pose proof (elaborate_stmt_node_range environment variables source
-    first finish core Helaborates) as [Hnodes _].
-  assert (NoDup (stmt_nodes core)) as Hnodes_unique.
-  { rewrite Hnodes. apply node_range_nodup. }
-  split; [exact Hnodes_unique |]. split.
-  - apply stmt_results_nodup. exact Hnodes_unique.
-  - intros result Hin. apply stmt_result_is_node. exact Hin.
-Qed.
-
-Theorem procedure_wf_of_elaboration {Γ F}
-    (environment : elaboration_environment) (source : source_stmt)
-    (first finish : node_id) (procedure : typed_procedure Γ F) :
-  NoDup (named_context_names (procedure_variables _ _ procedure)) ->
-  NoDup (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
-  ~ In (member_index (procedure_return_variable _ _ procedure))
-      (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
-  Resource.core_entry_free (procedure_precondition _ _ procedure) ->
-  Resource.core_entry_free (procedure_postcondition _ _ procedure) ->
-  elaborate_stmt environment (procedure_variables _ _ procedure) first source =
-      inr (procedure_body _ _ procedure, finish) ->
-  procedure_wf procedure.
-Proof.
-  intros Hnames Hformals Hreturn Hpre Hpost Helaborates.
-  destruct (elaborate_stmt_wf environment
-    (procedure_variables _ _ procedure) source first finish
-    (procedure_body _ _ procedure) Helaborates)
-    as [Hnodes [Hresults Hlive]].
-  constructor; assumption.
-Qed.
+  result = inr (elaborated_body result succeeded).
+Proof. destruct result; [destruct succeeded | reflexivity]. Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** Program syntax against a symbolic store
@@ -1784,27 +1506,27 @@ Definition source_body : source_stmt :=
           (SEBinOp SBAdd (SEVar "v") (SEVal (SVInt 1)))))).
 
 Example source_body_elaborates :
-  exists result, elaborate_stmt environment variables 1%positive source_body =
+  exists result, elaborate_stmt environment variables source_body =
     inr result.
 Proof.
   eexists. reflexivity.
 Qed.
 
 Example ill_typed_assignment_is_rejected :
-  elaborate_stmt environment variables 1%positive
+  elaborate_stmt environment variables
       (SSAssign "v" (SEVal (SVBool true))) =
     inl (EETypeMismatch TInt TBool).
 Proof. reflexivity. Qed.
 
 Example allocation_elaborates :
   exists result,
-    elaborate_stmt environment variables 1%positive
+    elaborate_stmt environment variables
       (SSAlloc "c" [("value", SEVal (SVInt 0))]) = inr result.
 Proof. eexists. reflexivity. Qed.
 
 Example ghost_update_elaborates :
   exists result,
-    elaborate_stmt environment variables 1%positive
+    elaborate_stmt environment variables
       (SSGhostUpdate (SEVar "c") "value"
         (SEVal (SVInt 0)) (SEVal (SVInt 1))) = inr result.
 Proof. eexists. reflexivity. Qed.

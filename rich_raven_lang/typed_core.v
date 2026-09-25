@@ -23,7 +23,6 @@ Global Instance typ_eq : EqDecision typ := typ_eq_dec.
 
 Definition context := list typ.
 Definition proc_id := positive.
-Definition node_id := positive.
 Definition field_id := positive.
 Definition pred_id := positive.
 Definition inv_id := positive.

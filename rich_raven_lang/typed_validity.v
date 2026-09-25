@@ -268,7 +268,7 @@ Qed.
 (** *** Soundness of the resource core's entailment
 
     Proved directly over [interp_core]; nothing here routes through the
-    old grammar.  The argument is the one behind
+    assertion grammar.  The argument is the one behind
     [entailment_step_valid]/[assertion_entails_valid] above, one case
     shorter: [ESStackExclusive] has no core counterpart, because a core
     assertion cannot mention the symbolic store at all. *)
@@ -620,105 +620,7 @@ Qed.
 
 End EntailmentValidity.
 
-Record statement_wp_data := StatementWpData {
-  term_statement_wp : forall Γ,
-    Translation.data_stack_context Model Γ -> stmt Γ ->
-    Hoare.mask -> Hoare.mask -> iProp -> iProp;
-  term_statement_wp_mono : forall Γ runtime statement mask_pre mask_post
-      (left right : iProp),
-    (left ⊢ right) ->
-    term_statement_wp Γ runtime statement mask_pre mask_post left ⊢
-      term_statement_wp Γ runtime statement mask_pre mask_post right;
-  term_skip_wp : forall Γ runtime node current_mask (post : iProp),
-    post ⊢ term_statement_wp Γ runtime (TDone node)
-      current_mask current_mask post;
-  term_assert_wp : forall Γ runtime node condition current_mask
-      (post : iProp),
-    post ⊢ term_statement_wp Γ runtime (TAssert node condition)
-      current_mask current_mask post;
-  term_sequence_wp : forall Γ runtime node first second mask1 mask2 mask3
-      (post : iProp),
-    term_statement_wp Γ runtime first mask1 mask2
-      (term_statement_wp Γ runtime second mask2 mask3 post) ⊢
-    term_statement_wp Γ runtime (TSeq node first second) mask1 mask3 post;
-  term_frame_wp : forall Γ runtime statement mask_pre mask_post
-      (post frame : iProp),
-    term_statement_wp Γ runtime statement mask_pre mask_post post ∗ frame ⊢
-    term_statement_wp Γ runtime statement mask_pre mask_post (post ∗ frame);
-  term_conditional_wp : forall Γ F Δ runtime
-      (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-      node (store : symbolic_store Γ F Δ) (frame : iProp) condition
-      then_branch else_branch mask_pre mask_post (post : iProp),
-    (Translation.data_stack_own Model runtime
-         (interp_store formals binders atoms store) ∗ frame ∗
-       ⌜interp_expr formals binders atoms
-          (IR.symbolize_expr store condition) = Some (VBool true)⌝ ⊢
-       term_statement_wp Γ runtime then_branch mask_pre mask_post post) ->
-    (Translation.data_stack_own Model runtime
-         (interp_store formals binders atoms store) ∗ frame ∗
-       ⌜interp_expr formals binders atoms
-          (IR.symbolize_expr store condition) <> Some (VBool true)⌝ ⊢
-       term_statement_wp Γ runtime else_branch mask_pre mask_post post) ->
-    Translation.data_stack_own Model runtime
-        (interp_store formals binders atoms store) ∗ frame ⊢
-    term_statement_wp Γ runtime (TIf node condition then_branch else_branch)
-      mask_pre mask_post post
-}.
-
 End WithModel.
-
-
-Section ContinuationData.
-Context {PROP : bi} (Model : Translation.semantic_config_data PROP).
-Local Notation iProp := (bi_car PROP).
-
-Record continuation_primitives_data := ContinuationPrimitivesData {
-  term_leaf_wp : forall Γ, Translation.data_stack_context Model Γ -> stmt Γ ->
-    Hoare.mask -> Hoare.mask -> iProp -> iProp;
-  term_branch_wp : forall Γ, Translation.data_stack_context Model Γ ->
-    pexpr Γ TBool -> Hoare.mask -> iProp -> iProp -> iProp;
-  term_atomic_wp : forall Γ, Translation.data_stack_context Model Γ ->
-    stmt Γ -> Hoare.mask -> Hoare.mask -> iProp -> iProp;
-  term_leaf_mono : forall Γ runtime statement mask_pre mask_post P Q,
-    (P ⊢ Q) -> term_leaf_wp Γ runtime statement mask_pre mask_post P ⊢
-      term_leaf_wp Γ runtime statement mask_pre mask_post Q;
-  term_leaf_frame : forall Γ runtime statement mask_pre mask_post P R,
-    term_leaf_wp Γ runtime statement mask_pre mask_post P ∗ R ⊢
-      term_leaf_wp Γ runtime statement mask_pre mask_post (P ∗ R);
-  term_leaf_skip : forall Γ runtime node mask P,
-    P ⊢ term_leaf_wp Γ runtime (TDone node) mask mask P;
-  term_leaf_assert : forall Γ runtime node condition mask P,
-    P ⊢ term_leaf_wp Γ runtime (TAssert node condition) mask mask P;
-  term_atomic_mono : forall Γ runtime body mask_pre mask_post P Q,
-    (P ⊢ Q) -> term_atomic_wp Γ runtime body mask_pre mask_post P ⊢
-      term_atomic_wp Γ runtime body mask_pre mask_post Q;
-  term_atomic_frame : forall Γ runtime body mask_pre mask_post P R,
-    term_atomic_wp Γ runtime body mask_pre mask_post P ∗ R ⊢
-      term_atomic_wp Γ runtime body mask_pre mask_post (P ∗ R);
-  term_branch_mono : forall Γ runtime condition mask P P' Q Q',
-    (P ⊢ P') -> (Q ⊢ Q') ->
-    term_branch_wp Γ runtime condition mask P Q ⊢
-      term_branch_wp Γ runtime condition mask P' Q';
-  term_branch_frame : forall Γ runtime condition mask P Q R,
-    term_branch_wp Γ runtime condition mask P Q ∗ R ⊢
-      term_branch_wp Γ runtime condition mask (P ∗ R) (Q ∗ R);
-  term_branch_select : forall Γ F Δ runtime
-      (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-      (store : symbolic_store Γ F Δ) (frame : iProp) condition mask P Q,
-    (Translation.data_stack_own Model runtime
-         (interp_store formals binders atoms store) ∗ frame ∗
-       ⌜interp_expr formals binders atoms
-          (IR.symbolize_expr store condition) = Some (VBool true)⌝ ⊢ P) ->
-    (Translation.data_stack_own Model runtime
-         (interp_store formals binders atoms store) ∗ frame ∗
-       ⌜interp_expr formals binders atoms
-          (IR.symbolize_expr store condition) <> Some (VBool true)⌝ ⊢ Q) ->
-    Translation.data_stack_own Model runtime
-        (interp_store formals binders atoms store) ∗ frame ⊢
-      term_branch_wp Γ runtime condition mask P Q
-}.
-End ContinuationData.
-
 
 End TermSemantics.
 

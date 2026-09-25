@@ -1115,8 +1115,8 @@ Qed.
 (** *** Renaming and weakening for resource states and prenex telescopes.
 
     Stated directly over [interp_resource] / [interp_resource_prenex] so
-    that the resource calculus's validity proofs never have to detour
-    through the old grammar. *)
+    that the Hoare calculus's validity proofs never have to detour
+    through the assertion grammar. *)
 Lemma interp_rename_bound_resource {Γ F Δ Δ'} predicates
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
@@ -1172,10 +1172,10 @@ Proof.
   intros t variable. apply binder_cons_weaken.
 Qed.
 
-(** *** Agreement with the embedding into the old grammar
+(** *** Agreement with the embedding into the assertion grammar
 
-    This is the bridge that lets the existing Iris validity proofs be
-    reused for the resource calculus: interpreting an embedded resource
+    This is the bridge that lets the Iris validity proofs for assertions be
+    reused for resource telescopes: interpreting an embedded resource
     telescope is interpreting the telescope. *)
 Lemma interp_core_to_assertion {Γ F Δ} predicates runtime formals binders atoms
     (formula : Resource.core_assertion F Δ) :

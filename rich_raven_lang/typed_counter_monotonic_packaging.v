@@ -18,32 +18,6 @@ Import TypedCounterMonotonic.
 Import TypedCore TypedCounterMonotonic.IR TypedCounterMonotonic.IR.Core
   TypedCounterMonotonic.IR.Assertions.
 
-Section CounterResourceProgramPackaging.
-Context {Σ : iris.base_logic.lib.iprop.gFunctors}
-  (RG : Runtime.runtimeG Σ).
-
-Lemma counter_runtime_cost_model_sound :
-  CounterSoundness.RegionExecution.Primitives.Model.runtime_cost_model_sound
-    counter_cost_model.
-Proof.
-  intros Γ names stack statement Hview.
-  destruct statement; cbn in Hview; try discriminate;
-    cbn [counter_cost_model].
-  (* procedure calls and spawns need no witness *)
-  all: try exact I.
-  (* proof-only leaves erase to the terminal statement *)
-  all: try reflexivity.
-  all: cbn [CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt].
-  all: first
-    [ apply Runtime.LegacyLang.atomic_assign
-    | apply Runtime.LegacyLang.atomic_fld_rd
-    | apply Runtime.LegacyLang.atomic_fld_wr
-    | apply Runtime.LegacyLang.atomic_alloc
-    | apply Runtime.LegacyLang.atomic_val ].
-Qed.
-
-End CounterResourceProgramPackaging.
-
 (* ================================================================== *)
 (** * Instantiating the analyzed adequacy boundary
 
@@ -71,7 +45,7 @@ Proof.
   { exact (fun _ _ _ => False%I). }
   - abstract (intros; apply _).
   - abstract (intros; reflexivity).
-  (* The resource-shaped obligation is a plain equivalence between the
+  (* The obligation is a plain equivalence between the
      instantiated body and the predicate atom: the instantiation is a total
      function of the arguments, so there is no relation to destruct and no
      reindexing to discharge.  This example declares no predicate bodies, so
@@ -92,7 +66,7 @@ Defined.
     interpretation: its currently declared contracts are [CPure True], so
     the example does not yet rely on that exclusivity. *)
 Definition counter_ghost_own
-    (_ : Runtime.LegacyLifting.simpLangG Sigma) (_ : unit)
+    (_ : Runtime.RuntimeLifting.simpLangG Sigma) (_ : unit)
     (field : TypedCore.field_id)
     (location : Runtime.IR.Core.tval TypedCore.TRef)
     (chunk : Runtime.IR.Core.tval (CounterLogic.field_type field)) :
@@ -130,59 +104,23 @@ End CounterLeafContracts.
 (* ================================================================== *)
 (** * The analyzed program certificate, and the library boundary *)
 
-(** Which body answers for which registered procedure.  The [Prop]-to-[Type]
-    crossing is the same one the retired legacy dispatch used, but the
-    cost model is carried *inside* the existential: the chosen body is
-    otherwise opaque, and the program record's cost-soundness field has to
-    see it. *)
-Definition packed_analyzed_cost (packed : Runtime.IR.packed_typed_procedure) :
-    CounterSoundness.packed_resource_analyzed_body packed ->
-    Runtime.GenericRegions.Atomicity.cost_model :=
-  match packed with
-  | existT _ (existT _ procedure) =>
-      fun body => CounterSoundness.resource_analyzed_body_cost procedure _ body
-  end.
-
-Definition counter_analyzed_dispatch :
-  forall packed,
-    List.In packed
-      (procedure_entries CounterProcedureContracts.procedures) ->
-    { body : CounterSoundness.packed_resource_analyzed_body packed |
-      packed_analyzed_cost packed body = counter_cost_model }.
+(** Which body answers for which registered procedure.  Membership is a
+    [Prop], so the body is selected by choice from the fact that one exists
+    for each registered procedure. *)
+Definition counter_analyzed_bodies packed
+    (Hin : List.In packed
+      (procedure_entries CounterProcedureContracts.procedures)) :
+    CounterSoundness.packed_analyzed_body packed.
 Proof.
-  intros packed Hin.
   assert (Hexists : exists
-      body : CounterSoundness.packed_resource_analyzed_body packed,
-      packed_analyzed_cost packed body = counter_cost_model).
+      _ : CounterSoundness.packed_analyzed_body packed, True).
   { simpl in Hin.
     destruct Hin as [Hin | [Hin | [Hin | []]]].
-    - dependent destruction Hin. exists read_analyzed_body. reflexivity.
-    - dependent destruction Hin. exists incr_analyzed_body. reflexivity.
-    - dependent destruction Hin. exists make_analyzed_body. reflexivity. }
-  exact (constructive_indefinite_description _ Hexists).
+    - dependent destruction Hin. exists read_analyzed_body. exact I.
+    - dependent destruction Hin. exists incr_analyzed_body. exact I.
+    - dependent destruction Hin. exists make_analyzed_body. exact I. }
+  exact (proj1_sig (constructive_indefinite_description _ Hexists)).
 Defined.
-
-Definition counter_analyzed_bodies packed Hin :
-    CounterSoundness.packed_resource_analyzed_body packed :=
-  proj1_sig (counter_analyzed_dispatch packed Hin).
-
-Lemma counter_analyzed_bodies_cost packed Hin :
-  packed_analyzed_cost packed (counter_analyzed_bodies packed Hin) =
-    counter_cost_model.
-Proof. exact (proj2_sig (counter_analyzed_dispatch packed Hin)). Qed.
-
-(** The same fact in unpacked form, which is the shape the program
-    record's cost-soundness field presents. *)
-Lemma counter_analyzed_body_cost {Gamma identity}
-    (procedure : Runtime.IR.typed_procedure Gamma identity)
-    (Hin : List.In (pack_typed_procedure procedure)
-      (procedure_entries CounterProcedureContracts.procedures)) :
-  CounterSoundness.resource_analyzed_body_cost procedure
-      (CounterResourceContracts.required_mask
-        (Runtime.IR.procedure_identity Gamma identity procedure))
-      (counter_analyzed_bodies (pack_typed_procedure procedure) Hin) =
-    counter_cost_model.
-Proof. exact (counter_analyzed_bodies_cost (pack_typed_procedure procedure) Hin). Qed.
 
 Section CounterAnalyzedProgram.
 Context {Sigma : iris.base_logic.lib.iprop.gFunctors}.
@@ -196,8 +134,8 @@ Lemma counter_analyzed_registered
     (Hin : List.In (pack_typed_procedure procedure)
       (procedure_entries CounterProcedureContracts.procedures)) :
   Runtime.GenericRegions.Atomicity.certificate_footprint
-    (CounterSoundness.CertifiedNormalization.resource_analyzed_certificate
-      (CounterSoundness.resource_analyzed_body_triple _ _
+    (CounterSoundness.CertifiedNormalization.analyzed_certificate
+      (CounterSoundness.analyzed_body_triple _ _
         (counter_analyzed_bodies (pack_typed_procedure procedure) Hin)))
   ⊆ CounterSoundness.term_registered_invariants
       counter_program_registration .
@@ -206,9 +144,9 @@ Proof.
   etrans.
   - eapply
       Runtime.GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-    + exact (CounterSoundness.resource_analyzed_body_conditionals _ _ body).
-    + exact (CounterSoundness.resource_analyzed_body_exit_closed _ _ body).
-  - rewrite (CounterSoundness.resource_analyzed_body_exit_mask _ _ body).
+    + exact (CounterSoundness.analyzed_body_conditionals _ _ body).
+    + exact (CounterSoundness.analyzed_body_exit_closed _ _ body).
+  - rewrite (CounterSoundness.analyzed_body_exit_mask _ _ body).
     unfold CounterSoundness.term_registered_invariants,
       counter_program_registration. simpl.
     unfold CounterResourceContracts.required_mask,
@@ -220,14 +158,11 @@ Proof.
 Qed.
 
 Definition counter_analyzed_program (RG : Runtime.runtimeG Sigma) :
-  CounterSoundness.resource_analyzed_program counter_program_registration.
+  CounterSoundness.analyzed_program counter_program_registration.
 Proof.
   unshelve econstructor.
   { exact counter_analyzed_bodies. }
-  - intros Gamma identity procedure Hin.
-    rewrite (counter_analyzed_body_cost procedure Hin).
-    apply counter_runtime_cost_model_sound.
-  - intros. apply counter_analyzed_registered.
+  intros. apply counter_analyzed_registered.
 Defined.
 
 End CounterAnalyzedProgram.
@@ -241,12 +176,12 @@ End CounterAnalyzedProgram.
 Section CounterLibrarySoundness.
 Context {Sigma : iris.base_logic.lib.iprop.gFunctors}.
 Context `{!invGS Sigma}.
-Context `{!Runtime.LegacyGhost.heapGpreS Sigma}.
-Context `{!Runtime.Legacy.invTokenGpreS Sigma}.
+Context `{!Runtime.RuntimeGhost.heapGpreS Sigma}.
+Context `{!Runtime.RuntimeModel.invTokenGpreS Sigma}.
 Definition counter_library_soundness :=
   CounterSoundness.raven_analyzed_library_soundness
     counter_program_registration counter_ghost_factory counter_leaf
-    CounterSoundness.resource_analyzed_normalization_complete_from_raw_access_cut
+    CounterSoundness.analyzed_normalization_complete_from_raw_access_cut
     counter_analyzed_program.
 
 End CounterLibrarySoundness.

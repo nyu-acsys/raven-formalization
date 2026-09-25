@@ -1500,8 +1500,8 @@ Qed.
 (** ** Structural entailment on assertions
 
     Moved here from [TypedHoare]: these rules mention only the assertion
-    grammar, so both the legacy calculus and the resource calculus of
-    [typed_resource_hoare.v] need them. *)
+    grammar, which the Hoare calculus of [typed_resource_hoare.v]
+    needs. *)
 
 
 

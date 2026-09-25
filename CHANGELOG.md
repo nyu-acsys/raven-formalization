@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statement, with proof-only operations represented by the terminal unit
   value and smart sequence/conditional constructors preserving zero-step
   erasure.
+- Verification statements are identified structurally rather than carrying
+  node labels, and elaboration no longer threads a node counter.
+- Procedure contracts use one canonical derived cost model; clients no longer
+  provide program-specific cost models or coherence proofs.
+- The resource calculus is now exposed as `RavenHoareRules.RavenHoareTriple`,
+  with redundant resource-specific qualifiers removed from its public names.
+- Runtime-model modules and aliases use `Runtime*` terminology consistently;
+  “legacy” is reserved for genuinely historical code.
 
 ### Removed
 
@@ -66,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The archived pre-redesign calculus and its translation, soundness, and
   monotonic-counter developments.
 - The superseded parallel atomicity-analysis module.
+- Node identifiers and their associated well-formedness and bookkeeping
+  obligations.
+- Unused continuation-executor records left behind by the earlier soundness
+  architecture.
 
 ### Fixed
 

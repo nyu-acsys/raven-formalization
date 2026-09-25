@@ -885,7 +885,7 @@ Proof. apply prenex_to_assertion_rename. Qed.
 
 (** [prenex_and] pushes a core frame under the telescope, so it is not the
     syntactic [AAnd] of the embeddings — but the two are interderivable in
-    the legacy entailment, which is what the erasure of [RTFrame] needs. *)
+    the assertion entailment, which is what the erasure of [RTFrame] needs. *)
 Lemma prenex_and_to_assertion_in {Γ F Δ} (prenex : resource_prenex Γ F Δ) :
   forall (frame : core_assertion F Δ),
   assertion_entails

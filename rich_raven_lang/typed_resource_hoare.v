@@ -78,11 +78,11 @@ Qed.
 
 Fixpoint statement_writes {Γ} (statement : stmt Γ) : gset nat :=
   match statement with
-  | TAssign _ target _ | TFieldRead _ _ target _ | TAlloc _ target _ =>
+  | TAssign target _ | TFieldRead _ target _ | TAlloc target _ =>
       {[member_index target]}
-  | TCall _ _ _ (CTStore target) => {[member_index target]}
-  | TInvAccess _ _ body | TAtomic _ body => statement_writes body
-  | TIf _ _ then_branch else_branch | TSeq _ then_branch else_branch =>
+  | TCall _ _ (CTStore target) => {[member_index target]}
+  | TInvAccess _ _ body | TAtomic body => statement_writes body
+  | TIf _ then_branch else_branch | TSeq then_branch else_branch =>
       statement_writes then_branch ∪ statement_writes else_branch
   | _ => ∅
   end.
@@ -521,7 +521,7 @@ Proof.
     + apply core_existential_prenex_and_entails_back.
     + apply CEntailsAndMono; eassumption.
 Qed.
-(** *** Erasure into the old entailment
+(** *** Erasure into the assertion entailment
 
     Each core rule is the corresponding assertion rule on the embedded
     image.  This is what lets the validity slice reuse
@@ -942,7 +942,7 @@ End ContractInstances.
 (* ------------------------------------------------------------------ *)
 (** ** 5. The calculus *)
 
-Module ResourceRules (Contracts : RESOURCE_CONTRACT_ENV_BASE).
+Module RavenHoareRules (Contracts : RESOURCE_CONTRACT_ENV_BASE).
 Module Instances := ContractInstances Contracts.
 Import Instances.
 
@@ -952,72 +952,72 @@ Import Instances.
     hide a second stack, and [invariant_access_closure_stack_count] — whose
     only job was to show the closure neither loses nor duplicates the
     distinguished stack — has nothing left to prove. *)
-Inductive resource_access_closure {Γ F} (invariant : inv_id) :
+Inductive access_closure {Γ F} (invariant : inv_id) :
     forall Δ (arguments : expr_list F Δ (Logic.invariant_args invariant)),
       core_assertion F Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
-| ResourceAccessBase Δ arguments invariant_body store remainder :
-    resource_access_closure invariant Δ arguments invariant_body
+| AccessBase Δ arguments invariant_body store remainder :
+    access_closure invariant Δ arguments invariant_body
       (RState store (CAnd invariant_body remainder))
       (RState store (CAnd (CInvariant invariant arguments) remainder))
-| ResourceAccessExists Δ t arguments invariant_body opened closed :
-    resource_access_closure invariant (t :: Δ)
+| AccessExists Δ t arguments invariant_body opened closed :
+    access_closure invariant (t :: Δ)
       (weaken_expr_list arguments) (weaken_core invariant_body)
       opened closed ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       (ResourceExists t opened) (ResourceExists t closed)
-| ResourceAccessEquality Δ
+| AccessEquality Δ
     (opening_arguments closing_arguments :
       expr_list F Δ (Logic.invariant_args invariant))
     opening_body store remainder condition :
     expr_list_equal_assuming condition _ closing_arguments opening_arguments ->
-    resource_access_closure invariant Δ opening_arguments opening_body
+    access_closure invariant Δ opening_arguments opening_body
       (RState store
         (CAnd (instantiated_invariant invariant closing_arguments)
           (CAnd remainder (CExpr condition))))
       (RState store
         (CAnd (CInvariant invariant opening_arguments)
           (CAnd remainder (CExpr condition))))
-| ResourceAccessFrame Δ arguments invariant_body opened closed frame :
-    resource_access_closure invariant Δ arguments invariant_body
+| AccessFrame Δ arguments invariant_body opened closed frame :
+    access_closure invariant Δ arguments invariant_body
       opened closed ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       (prenex_and opened frame) (prenex_and closed frame)
-| ResourceAccessConsequence Δ arguments invariant_body
+| AccessConsequence Δ arguments invariant_body
     opened opened' closed closed' :
     resource_prenex_entails opened' opened ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       opened closed ->
     resource_prenex_entails closed closed' ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       opened' closed'
-| ResourceAccessStackRewrite Δ arguments invariant_body
+| AccessStackRewrite Δ arguments invariant_body
     store store' body closed :
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       (RState store body) closed ->
     store_equal_under body Γ store' store ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       (RState store' body) closed
-| ResourceAccessArgumentStoreRewrite Δ
+| AccessArgumentStoreRewrite Δ
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     opening_store closing_store body closed :
-    resource_access_closure invariant Δ
+    access_closure invariant Δ
       (symbolize_expr_list closing_store program_arguments)
       (instantiated_invariant invariant
         (symbolize_expr_list closing_store program_arguments))
       (RState closing_store body) closed ->
     store_equal_under body Γ opening_store closing_store ->
-    resource_access_closure invariant Δ
+    access_closure invariant Δ
       (symbolize_expr_list opening_store program_arguments)
       (instantiated_invariant invariant
         (symbolize_expr_list opening_store program_arguments))
       (RState opening_store body) closed
-| ResourceAccessRename Δ Δ' (renaming : bound_renaming Δ Δ')
+| AccessRename Δ Δ' (renaming : bound_renaming Δ Δ')
     arguments invariant_body opened closed :
     bound_renaming_injective renaming ->
-    resource_access_closure invariant Δ arguments invariant_body
+    access_closure invariant Δ arguments invariant_body
       opened closed ->
-    resource_access_closure invariant Δ'
+    access_closure invariant Δ'
       (rename_bound_expr_list renaming arguments)
       (rename_bound_core renaming invariant_body)
       (rename_resource_prenex opened _ renaming)
@@ -1027,22 +1027,22 @@ Inductive resource_access_closure {Γ F} (invariant : inv_id) :
     closure carries an explicit core frame; choosing [CTrue] and eliminating
     it by consequence recovers the exact pre/postconditions of
     [RTFoldInvariant]. *)
-Lemma resource_access_closure_fold_base {Γ F Δ} invariant
+Lemma access_closure_fold_base {Γ F Δ} invariant
     (arguments : expr_list F Δ (Logic.invariant_args invariant))
     (store : symbolic_store Γ F Δ) :
-  resource_access_closure invariant Δ arguments
+  access_closure invariant Δ arguments
     (Instances.instantiated_invariant invariant arguments)
     (RState store (Instances.instantiated_invariant invariant arguments))
     (RState store (CInvariant invariant arguments)).
 Proof.
-  eapply ResourceAccessConsequence with
+  eapply AccessConsequence with
     (opened := RState store
       (CAnd (Instances.instantiated_invariant invariant arguments) CTrue))
     (closed := RState store
       (CAnd (CInvariant invariant arguments) CTrue)).
   - apply RPEBody. split; [reflexivity |].
     apply CEntailsStep. apply CESAndTrueIntro.
-  - apply ResourceAccessBase.
+  - apply AccessBase.
   - apply RPEBody. split; [reflexivity |].
     apply CEntailsStep. apply CESAndElimL.
 Qed.
@@ -1051,7 +1051,7 @@ Qed.
     boundary.  This is the fold-side inversion principle used by the
     normalizer: the rule's precondition entailment strengthens the opened
     resources and its postcondition entailment weakens the closed result. *)
-Lemma resource_access_closure_fold_consequence {Γ F Δ} invariant
+Lemma access_closure_fold_consequence {Γ F Δ} invariant
     (arguments : expr_list F Δ (Logic.invariant_args invariant))
     (store : symbolic_store Γ F Δ) (pre_body : core_assertion F Δ)
     (post : resource_prenex Γ F Δ) :
@@ -1059,24 +1059,24 @@ Lemma resource_access_closure_fold_consequence {Γ F Δ} invariant
     (Instances.instantiated_invariant invariant arguments) ->
   resource_prenex_entails
     (RState store (CInvariant invariant arguments)) post ->
-  resource_access_closure invariant Δ arguments
+  access_closure invariant Δ arguments
     (Instances.instantiated_invariant invariant arguments)
     (RState store pre_body) post.
 Proof.
-  intros Hpre Hpost. eapply ResourceAccessConsequence with
+  intros Hpre Hpost. eapply AccessConsequence with
     (opened := RState store
       (Instances.instantiated_invariant invariant arguments))
     (closed := RState store (CInvariant invariant arguments)).
   - apply RPEBody. split; [reflexivity | exact Hpre].
-  - apply resource_access_closure_fold_base.
+  - apply access_closure_fold_base.
   - exact Hpost.
 Qed.
 
 (** The canonical fold leaf when its symbolic store has been rewritten after
     the access body.  The inner fold closes the invariant at the closing
-    store; [ResourceAccessArgumentStoreRewrite] transports both stack
+    store; [AccessArgumentStoreRewrite] transports both stack
     ownership and the symbolized argument vector back to the opening store. *)
-Lemma resource_access_closure_fold_store_rewrite {Γ F Δ} invariant
+Lemma access_closure_fold_store_rewrite {Γ F Δ} invariant
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ)
     (fold_pre : core_assertion F Δ) (post : resource_prenex Γ F Δ) :
@@ -1088,35 +1088,35 @@ Lemma resource_access_closure_fold_store_rewrite {Γ F Δ} invariant
       (CInvariant invariant
         (symbolize_expr_list closing_store program_arguments))) post ->
   store_equal_under fold_pre Γ opening_store closing_store ->
-  resource_access_closure invariant Δ
+  access_closure invariant Δ
     (symbolize_expr_list opening_store program_arguments)
     (Instances.instantiated_invariant invariant
       (symbolize_expr_list opening_store program_arguments))
     (RState opening_store fold_pre) post.
 Proof.
   intros Hfold_pre Hfold_post Hstore.
-  eapply ResourceAccessArgumentStoreRewrite.
-  - eapply resource_access_closure_fold_consequence; eassumption.
+  eapply AccessArgumentStoreRewrite.
+  - eapply access_closure_fold_consequence; eassumption.
   - exact Hstore.
 Qed.
 
 (** Eliminate a vacuous focused binder after closing an access.  This is the
     closure-side counterpart of [RTPrenexElim]: lift the inner closure through
     the existential, then discard the weakened closed result by consequence. *)
-Lemma resource_access_closure_exists_elim {Γ F Δ} invariant t
+Lemma access_closure_exists_elim {Γ F Δ} invariant t
     (arguments : expr_list F Δ (Logic.invariant_args invariant))
     (invariant_body : core_assertion F Δ)
     (opened : resource_prenex Γ F (t :: Δ))
     (closed : resource_prenex Γ F Δ) :
-  resource_access_closure invariant (t :: Δ)
+  access_closure invariant (t :: Δ)
     (weaken_expr_list arguments) (weaken_core invariant_body)
     opened (weaken_resource_prenex closed) ->
-  resource_access_closure invariant Δ arguments invariant_body
+  access_closure invariant Δ arguments invariant_body
     (ResourceExists t opened) closed.
 Proof.
-  intro Hclosure. eapply ResourceAccessConsequence.
+  intro Hclosure. eapply AccessConsequence.
   - apply resource_prenex_entails_refl.
-  - apply ResourceAccessExists. exact Hclosure.
+  - apply AccessExists. exact Hclosure.
   - apply RPEVacuous.
 Qed.
 
@@ -1124,91 +1124,91 @@ Qed.
     the canonical unfold and its telescope path, but deliberately carries no
     assertion endpoints: opening and closing may use different structural
     wrappers around the same scoped access. *)
-Inductive resource_access_focus {Γ F} (invariant : inv_id)
+Inductive access_focus {Γ F} (invariant : inv_id)
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
     context -> Type :=
-| ResourceAccessFocusBase Δ
+| AccessFocusBase Δ
     (focus_arguments : expr_list F Δ (Logic.invariant_args invariant)) :
-    resource_access_focus invariant program_arguments Δ
-| ResourceAccessFocusPreserve Δ t :
-    resource_access_focus invariant program_arguments (t :: Δ) ->
-    resource_access_focus invariant program_arguments Δ
-| ResourceAccessFocusBoundWeaken Δ t :
-    resource_access_focus invariant program_arguments Δ ->
-    resource_access_focus invariant program_arguments (t :: Δ)
-| ResourceAccessFocusElim Δ t :
-    resource_access_focus invariant program_arguments (t :: Δ) ->
-    resource_access_focus invariant program_arguments Δ.
+    access_focus invariant program_arguments Δ
+| AccessFocusPreserve Δ t :
+    access_focus invariant program_arguments (t :: Δ) ->
+    access_focus invariant program_arguments Δ
+| AccessFocusBoundWeaken Δ t :
+    access_focus invariant program_arguments Δ ->
+    access_focus invariant program_arguments (t :: Δ)
+| AccessFocusElim Δ t :
+    access_focus invariant program_arguments (t :: Δ) ->
+    access_focus invariant program_arguments Δ.
 
-Inductive resource_access_opening {Γ F} (invariant : inv_id)
+Inductive access_opening {Γ F} (invariant : inv_id)
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
-    forall {Δ}, resource_access_focus invariant program_arguments Δ ->
+    forall {Δ}, access_focus invariant program_arguments Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
-| ResourceAccessOpeningBase Δ (store : symbolic_store Γ F Δ) :
-    resource_access_opening invariant program_arguments
-      (@ResourceAccessFocusBase Γ F invariant program_arguments Δ
+| AccessOpeningBase Δ (store : symbolic_store Γ F Δ) :
+    access_opening invariant program_arguments
+      (@AccessFocusBase Γ F invariant program_arguments Δ
         (symbolize_expr_list store program_arguments))
       (RState store
         (CInvariant invariant (symbolize_expr_list store program_arguments)))
       (RState store
         (instantiated_invariant invariant
           (symbolize_expr_list store program_arguments)))
-| ResourceAccessOpeningPreserve Δ t focus external body_pre :
-    resource_access_opening invariant program_arguments
+| AccessOpeningPreserve Δ t focus external body_pre :
+    access_opening invariant program_arguments
       (Δ := t :: Δ) focus external body_pre ->
-    resource_access_opening invariant program_arguments
-      (@ResourceAccessFocusPreserve Γ F invariant program_arguments Δ t focus)
+    access_opening invariant program_arguments
+      (@AccessFocusPreserve Γ F invariant program_arguments Δ t focus)
       (ResourceExists t external) (ResourceExists t body_pre)
-| ResourceAccessOpeningBoundWeaken Δ t focus external body_pre :
-    resource_access_opening invariant program_arguments
+| AccessOpeningBoundWeaken Δ t focus external body_pre :
+    access_opening invariant program_arguments
       (Δ := Δ) focus external body_pre ->
-    resource_access_opening invariant program_arguments
-      (@ResourceAccessFocusBoundWeaken Γ F invariant program_arguments
+    access_opening invariant program_arguments
+      (@AccessFocusBoundWeaken Γ F invariant program_arguments
         Δ t focus)
       (weaken_resource_prenex external) (weaken_resource_prenex body_pre)
-| ResourceAccessOpeningElim Δ t focus external body_pre :
-    resource_access_opening invariant program_arguments
+| AccessOpeningElim Δ t focus external body_pre :
+    access_opening invariant program_arguments
       (Δ := t :: Δ) focus external (weaken_resource_prenex body_pre) ->
-    resource_access_opening invariant program_arguments
-      (@ResourceAccessFocusElim Γ F invariant program_arguments Δ t focus)
+    access_opening invariant program_arguments
+      (@AccessFocusElim Γ F invariant program_arguments Δ t focus)
       (ResourceExists t external) body_pre
-| ResourceAccessOpeningPrenexConsequence Δ focus
+| AccessOpeningPrenexConsequence Δ focus
     external external' body_pre body_pre' :
-    resource_access_opening invariant program_arguments
+    access_opening invariant program_arguments
       (Δ := Δ) focus external body_pre ->
     resource_prenex_entails external' external ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       external' body_pre'
-| ResourceAccessOpeningFrame Δ focus (store : symbolic_store Γ F Δ)
+| AccessOpeningFrame Δ focus (store : symbolic_store Γ F Δ)
     pre_body frame body_pre :
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store pre_body) body_pre ->
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store (CAnd pre_body frame)) (prenex_and body_pre frame)
-| ResourceAccessOpeningConsequence Δ focus (store : symbolic_store Γ F Δ)
+| AccessOpeningConsequence Δ focus (store : symbolic_store Γ F Δ)
     pre_body pre_body' body_pre body_pre' :
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store pre_body) body_pre ->
     core_entails pre_body' pre_body ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store pre_body') body_pre'
-| ResourceAccessOpeningStackRewrite Δ focus
+| AccessOpeningStackRewrite Δ focus
     (store store' : symbolic_store Γ F Δ) pre_body body_pre :
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store pre_body) body_pre ->
     store_equal_under pre_body Γ store' store ->
-    resource_access_opening invariant program_arguments focus
+    access_opening invariant program_arguments focus
       (RState store' pre_body) body_pre.
 
-Inductive resource_access_closing {Γ F} (invariant : inv_id)
+Inductive access_closing {Γ F} (invariant : inv_id)
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
-    forall {Δ}, resource_access_focus invariant program_arguments Δ ->
+    forall {Δ}, access_focus invariant program_arguments Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
-| ResourceAccessClosingBase Δ (store : symbolic_store Γ F Δ) :
-    resource_access_closing invariant program_arguments
-      (@ResourceAccessFocusBase Γ F invariant program_arguments Δ
+| AccessClosingBase Δ (store : symbolic_store Γ F Δ) :
+    access_closing invariant program_arguments
+      (@AccessFocusBase Γ F invariant program_arguments Δ
         (symbolize_expr_list store program_arguments))
       (RState store
         (instantiated_invariant invariant
@@ -1216,57 +1216,57 @@ Inductive resource_access_closing {Γ F} (invariant : inv_id)
       (RState store
         (CInvariant invariant
           (symbolize_expr_list store program_arguments)))
-| ResourceAccessClosingPreserve Δ t focus body_post external_post :
-    resource_access_closing invariant program_arguments
+| AccessClosingPreserve Δ t focus body_post external_post :
+    access_closing invariant program_arguments
       (Δ := t :: Δ) focus body_post external_post ->
-    resource_access_closing invariant program_arguments
-      (@ResourceAccessFocusPreserve Γ F invariant program_arguments Δ t focus)
+    access_closing invariant program_arguments
+      (@AccessFocusPreserve Γ F invariant program_arguments Δ t focus)
       (ResourceExists t body_post) (ResourceExists t external_post)
-| ResourceAccessClosingBoundWeaken Δ t focus body_post external_post :
-    resource_access_closing invariant program_arguments
+| AccessClosingBoundWeaken Δ t focus body_post external_post :
+    access_closing invariant program_arguments
       (Δ := Δ) focus body_post external_post ->
-    resource_access_closing invariant program_arguments
-      (@ResourceAccessFocusBoundWeaken Γ F invariant program_arguments
+    access_closing invariant program_arguments
+      (@AccessFocusBoundWeaken Γ F invariant program_arguments
         Δ t focus)
       (weaken_resource_prenex body_post)
       (weaken_resource_prenex external_post)
-| ResourceAccessClosingElim Δ t focus body_post external_post :
-    resource_access_closing invariant program_arguments
+| AccessClosingElim Δ t focus body_post external_post :
+    access_closing invariant program_arguments
       (Δ := t :: Δ) focus body_post (weaken_resource_prenex external_post) ->
-    resource_access_closing invariant program_arguments
-      (@ResourceAccessFocusElim Γ F invariant program_arguments Δ t focus)
+    access_closing invariant program_arguments
+      (@AccessFocusElim Γ F invariant program_arguments Δ t focus)
       (ResourceExists t body_post) external_post
-| ResourceAccessClosingConsequence Δ focus
+| AccessClosingConsequence Δ focus
     body_post body_post' external_post external_post' :
     resource_prenex_entails body_post' body_post ->
-    resource_access_closing invariant program_arguments
+    access_closing invariant program_arguments
       (Δ := Δ) focus body_post external_post ->
     resource_prenex_entails external_post external_post' ->
-    resource_access_closing invariant program_arguments focus
+    access_closing invariant program_arguments focus
       body_post' external_post'
-| ResourceAccessClosingFrame Δ focus body_post external_post frame :
-    resource_access_closing invariant program_arguments
+| AccessClosingFrame Δ focus body_post external_post frame :
+    access_closing invariant program_arguments
       (Δ := Δ) focus body_post external_post ->
-    resource_access_closing invariant program_arguments focus
+    access_closing invariant program_arguments focus
       (prenex_and body_post frame) (prenex_and external_post frame)
-| ResourceAccessClosingStackRewrite Δ focus
+| AccessClosingStackRewrite Δ focus
     (store store' : symbolic_store Γ F Δ) body external_post :
-    resource_access_closing invariant program_arguments focus
+    access_closing invariant program_arguments focus
       (RState store body) external_post ->
     store_equal_under body Γ store' store ->
-    resource_access_closing invariant program_arguments focus
+    access_closing invariant program_arguments focus
       (RState store' body) external_post.
 
 (** A non-dependent view of an opening whose shared focus is canonical.
     Keeping this small inversion view in the resource layer prevents the
     runtime soundness file from expanding a large dependent-induction proof
     term merely to eliminate impossible binder-focus constructors. *)
-Inductive resource_access_base_opening {Γ F Δ} (invariant : inv_id)
+Inductive access_base_opening {Γ F Δ} (invariant : inv_id)
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
     expr_list F Δ (Logic.invariant_args invariant) ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
-| ResourceAccessBaseOpening (store : symbolic_store Γ F Δ) :
-    resource_access_base_opening invariant program_arguments
+| AccessBaseOpening (store : symbolic_store Γ F Δ) :
+    access_base_opening invariant program_arguments
       (symbolize_expr_list store program_arguments)
       (RState store
         (CInvariant invariant
@@ -1274,79 +1274,79 @@ Inductive resource_access_base_opening {Γ F Δ} (invariant : inv_id)
       (RState store
         (instantiated_invariant invariant
           (symbolize_expr_list store program_arguments)))
-| ResourceAccessBaseOpeningPrenexConsequence
+| AccessBaseOpeningPrenexConsequence
     focus_arguments external external' body_pre body_pre' :
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       external body_pre ->
     resource_prenex_entails external' external ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       external' body_pre'
-| ResourceAccessBaseOpeningFrame focus_arguments
+| AccessBaseOpeningFrame focus_arguments
     (store : symbolic_store Γ F Δ)
     pre_body frame body_pre :
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store pre_body) body_pre ->
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store (CAnd pre_body frame)) (prenex_and body_pre frame)
-| ResourceAccessBaseOpeningConsequence
+| AccessBaseOpeningConsequence
     focus_arguments (store : symbolic_store Γ F Δ)
     pre_body pre_body' body_pre body_pre' :
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store pre_body) body_pre ->
     core_entails pre_body' pre_body ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store pre_body') body_pre'
-| ResourceAccessBaseOpeningStackRewrite
+| AccessBaseOpeningStackRewrite
     focus_arguments (store store' : symbolic_store Γ F Δ)
     pre_body body_pre :
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store pre_body) body_pre ->
     store_equal_under pre_body Γ store' store ->
-    resource_access_base_opening invariant program_arguments focus_arguments
+    access_base_opening invariant program_arguments focus_arguments
       (RState store' pre_body) body_pre.
 
-Lemma resource_access_opening_base_view {Γ F Δ} invariant
+Lemma access_opening_base_view {Γ F Δ} invariant
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (focus_arguments : expr_list F Δ (Logic.invariant_args invariant))
     (external body_pre : resource_prenex Γ F Δ) :
-  resource_access_opening invariant program_arguments
-    (@ResourceAccessFocusBase Γ F invariant program_arguments Δ
+  access_opening invariant program_arguments
+    (@AccessFocusBase Γ F invariant program_arguments Δ
       focus_arguments)
     external body_pre ->
-  resource_access_base_opening invariant program_arguments focus_arguments
+  access_base_opening invariant program_arguments focus_arguments
     external body_pre.
 Proof.
   intro Hopening. dependent induction Hopening.
-  - apply ResourceAccessBaseOpening.
-  - eapply ResourceAccessBaseOpeningPrenexConsequence.
+  - apply AccessBaseOpening.
+  - eapply AccessBaseOpeningPrenexConsequence.
     { apply (IHHopening focus_arguments eq_refl). }
     { exact H. }
     { exact H0. }
-  - apply ResourceAccessBaseOpeningFrame.
+  - apply AccessBaseOpeningFrame.
     apply (IHHopening focus_arguments eq_refl).
-  - eapply ResourceAccessBaseOpeningConsequence.
+  - eapply AccessBaseOpeningConsequence.
     + apply (IHHopening focus_arguments eq_refl).
     + exact H.
     + exact H0.
-  - eapply ResourceAccessBaseOpeningStackRewrite.
+  - eapply AccessBaseOpeningStackRewrite.
     + apply (IHHopening focus_arguments eq_refl).
     + exact H.
 Qed.
 
-Inductive resource_access_boundary {Γ F} (invariant : inv_id)
+Inductive access_boundary {Γ F} (invariant : inv_id)
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
     forall {Δ}, resource_prenex Γ F Δ -> resource_prenex Γ F Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
-| ResourceAccessBoundaryBase Δ (store : symbolic_store Γ F Δ)
+| AccessBoundaryBase Δ (store : symbolic_store Γ F Δ)
     (frame : core_assertion F Δ) body_post external_post :
-    resource_access_closure invariant Δ
+    access_closure invariant Δ
       (symbolize_expr_list store program_arguments)
       (instantiated_invariant invariant
         (symbolize_expr_list store program_arguments))
       body_post external_post ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store
         (CAnd (CInvariant invariant
           (symbolize_expr_list store program_arguments)) frame))
@@ -1354,64 +1354,64 @@ Inductive resource_access_boundary {Γ F} (invariant : inv_id)
         (CAnd (instantiated_invariant invariant
           (symbolize_expr_list store program_arguments)) frame))
       body_post external_post
-| ResourceAccessBoundaryOpeningPrenexConsequence Δ external external'
+| AccessBoundaryOpeningPrenexConsequence Δ external external'
     body_pre body_pre' body_post external_post :
-    resource_access_boundary invariant program_arguments (Δ := Δ)
+    access_boundary invariant program_arguments (Δ := Δ)
       external body_pre body_post external_post ->
     resource_prenex_entails external' external ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       external' body_pre' body_post external_post
-| ResourceAccessBoundaryOpeningFrame Δ (store : symbolic_store Γ F Δ)
+| AccessBoundaryOpeningFrame Δ (store : symbolic_store Γ F Δ)
     pre_body frame body_pre body_post external_post :
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store pre_body) body_pre body_post external_post ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store (CAnd pre_body frame)) (prenex_and body_pre frame)
       body_post external_post
-| ResourceAccessBoundaryOpeningConsequence Δ
+| AccessBoundaryOpeningConsequence Δ
     (store : symbolic_store Γ F Δ) pre_body pre_body' body_pre body_pre'
     body_post external_post :
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store pre_body) body_pre body_post external_post ->
     core_entails pre_body' pre_body ->
     resource_prenex_entails body_pre body_pre' ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store pre_body') body_pre' body_post external_post
-| ResourceAccessBoundaryOpeningStackRewrite Δ
+| AccessBoundaryOpeningStackRewrite Δ
     (store store' : symbolic_store Γ F Δ) pre_body body_pre body_post
     external_post :
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store pre_body) body_pre body_post external_post ->
     store_equal_under pre_body Γ store' store ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       (RState store' pre_body) body_pre body_post external_post
-| ResourceAccessBoundaryClosingConsequence Δ external_pre body_pre
+| AccessBoundaryClosingConsequence Δ external_pre body_pre
     body_post body_post' external_post external_post' :
     resource_prenex_entails body_post' body_post ->
-    resource_access_boundary invariant program_arguments (Δ := Δ)
+    access_boundary invariant program_arguments (Δ := Δ)
       external_pre body_pre body_post external_post ->
     resource_prenex_entails external_post external_post' ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       external_pre body_pre body_post' external_post'
-| ResourceAccessBoundaryClosingFrame Δ external_pre body_pre body_post
+| AccessBoundaryClosingFrame Δ external_pre body_pre body_post
     external_post frame :
-    resource_access_boundary invariant program_arguments (Δ := Δ)
+    access_boundary invariant program_arguments (Δ := Δ)
       external_pre body_pre body_post external_post ->
-    resource_access_boundary invariant program_arguments
+    access_boundary invariant program_arguments
       external_pre body_pre (prenex_and body_post frame)
       (prenex_and external_post frame).
 
-Lemma resource_access_boundary_base {Γ F Δ} invariant
+Lemma access_boundary_base {Γ F Δ} invariant
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (store : symbolic_store Γ F Δ) (frame : core_assertion F Δ)
     (body_post external_post : resource_prenex Γ F Δ) :
-  resource_access_closure invariant Δ
+  access_closure invariant Δ
     (symbolize_expr_list store program_arguments)
     (instantiated_invariant invariant
       (symbolize_expr_list store program_arguments))
     body_post external_post ->
-  resource_access_boundary invariant program_arguments
+  access_boundary invariant program_arguments
     (RState store
       (CAnd (CInvariant invariant
         (symbolize_expr_list store program_arguments)) frame))
@@ -1420,49 +1420,49 @@ Lemma resource_access_boundary_base {Γ F Δ} invariant
         (symbolize_expr_list store program_arguments)) frame))
     body_post external_post.
 Proof.
-  apply ResourceAccessBoundaryBase.
+  apply AccessBoundaryBase.
 Qed.
 
-Lemma resource_access_boundary_consequence {Γ F Δ} invariant
+Lemma access_boundary_consequence {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (external_pre external_pre' body_pre body_post
       external_post external_post' : resource_prenex Γ F Δ) :
   resource_prenex_entails external_pre' external_pre ->
-  resource_access_boundary invariant arguments
+  access_boundary invariant arguments
     external_pre body_pre body_post external_post ->
   resource_prenex_entails external_post external_post' ->
-  resource_access_boundary invariant arguments
+  access_boundary invariant arguments
     external_pre' body_pre body_post external_post'.
 Proof.
   intros Hpre Hboundary Hpost.
-  eapply ResourceAccessBoundaryClosingConsequence.
+  eapply AccessBoundaryClosingConsequence.
   - apply resource_prenex_entails_refl.
-  - eapply ResourceAccessBoundaryOpeningPrenexConsequence.
+  - eapply AccessBoundaryOpeningPrenexConsequence.
     + exact Hboundary.
     + exact Hpre.
     + apply resource_prenex_entails_refl.
   - exact Hpost.
 Qed.
 
-Lemma resource_access_boundary_base_view {Γ F Δ} invariant
+Lemma access_boundary_base_view {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (external_pre body_pre body_post external_post :
       resource_prenex Γ F Δ) :
-  resource_access_boundary invariant arguments
+  access_boundary invariant arguments
     external_pre body_pre body_post external_post ->
   exists focus_arguments : expr_list F Δ
       (Logic.invariant_args invariant),
-    resource_access_opening invariant arguments
-      (@ResourceAccessFocusBase Γ F invariant arguments Δ focus_arguments)
+    access_opening invariant arguments
+      (@AccessFocusBase Γ F invariant arguments Δ focus_arguments)
       external_pre body_pre /\
-    resource_access_closure invariant Δ focus_arguments
+    access_closure invariant Δ focus_arguments
       (instantiated_invariant invariant focus_arguments)
       body_post external_post.
 Proof.
   intro Hboundary. induction Hboundary.
   - exists (symbolize_expr_list store arguments). split.
-    + change (resource_access_opening invariant arguments
-        (ResourceAccessFocusBase invariant arguments Δ
+    + change (access_opening invariant arguments
+        (AccessFocusBase invariant arguments Δ
           (symbolize_expr_list store arguments))
         (RState store
           (CAnd (CInvariant invariant
@@ -1471,29 +1471,29 @@ Proof.
           (RState store
             (instantiated_invariant invariant
               (symbolize_expr_list store arguments))) frame)).
-      apply ResourceAccessOpeningFrame. apply ResourceAccessOpeningBase.
+      apply AccessOpeningFrame. apply AccessOpeningBase.
     + exact H.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply ResourceAccessOpeningPrenexConsequence; eassumption.
+    eapply AccessOpeningPrenexConsequence; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    apply ResourceAccessOpeningFrame. exact Hopening.
+    apply AccessOpeningFrame. exact Hopening.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply ResourceAccessOpeningConsequence; eassumption.
+    eapply AccessOpeningConsequence; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply ResourceAccessOpeningStackRewrite; eassumption.
+    eapply AccessOpeningStackRewrite; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [exact Hopening |].
-    eapply ResourceAccessConsequence; eassumption.
+    eapply AccessConsequence; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [exact Hopening |].
-    apply ResourceAccessFrame. exact Hclosing.
+    apply AccessFrame. exact Hclosing.
 Qed.
 
-Inductive RavenResourceTriple {Γ F} : forall {Δ},
+Inductive RavenHoareTriple {Γ F} : forall {Δ},
     resource_prenex Γ F Δ -> stmt Γ -> resource_prenex Γ F Δ -> Prop :=
 
 (** *** Telescope rules.  These replace [ResourceExistsElimRule] and
@@ -1501,76 +1501,75 @@ Inductive RavenResourceTriple {Γ F} : forall {Δ},
     wrapped around a stack. *)
 | RTPrenexPreserve {Δ} t statement
     (pre post : resource_prenex Γ F (t :: Δ)) :
-    RavenResourceTriple pre statement post ->
-    RavenResourceTriple (ResourceExists t pre) statement (ResourceExists t post)
+    RavenHoareTriple pre statement post ->
+    RavenHoareTriple (ResourceExists t pre) statement (ResourceExists t post)
 | RTBoundWeaken {Δ} t statement
     (pre post : resource_prenex Γ F Δ) :
-    RavenResourceTriple pre statement post ->
-    RavenResourceTriple (weaken_resource_prenex (u := t) pre) statement
+    RavenHoareTriple pre statement post ->
+    RavenHoareTriple (weaken_resource_prenex (u := t) pre) statement
       (weaken_resource_prenex (u := t) post)
 | RTPrenexElim {Δ} t statement
     (pre : resource_prenex Γ F (t :: Δ)) (post : resource_prenex Γ F Δ) :
-    RavenResourceTriple pre statement (weaken_resource_prenex post) ->
-    RavenResourceTriple (ResourceExists t pre) statement post
+    RavenHoareTriple pre statement (weaken_resource_prenex post) ->
+    RavenHoareTriple (ResourceExists t pre) statement post
 
 (** General consequence at the telescope boundary.  Unlike ordinary
     [RTConsequence], this rule may move a core existential into the prenex;
     stack safety is still enforced by [resource_prenex_entails]. *)
 | RTPrenexConsequence {Δ} statement
     (pre pre' post post' : resource_prenex Γ F Δ) :
-    RavenResourceTriple pre statement post ->
+    RavenHoareTriple pre statement post ->
     resource_prenex_entails pre' pre ->
     resource_prenex_entails post post' ->
-    RavenResourceTriple pre' statement post'
+    RavenHoareTriple pre' statement post'
 
 (** *** Structural rules.  Frame takes a [core_assertion]; ordinary
     consequence keeps the stack fixed; a change of store is the separate
-    structural [RTStackRewrite].  Together they replace
-    [ResourceStackConsequenceRule]. *)
+    structural [RTStackRewrite]. *)
 | RTFrame {Δ} statement (store : symbolic_store Γ F Δ)
     (pre_body frame : core_assertion F Δ) (post : resource_prenex Γ F Δ) :
-    RavenResourceTriple (RState store pre_body) statement post ->
-    RavenResourceTriple (RState store (CAnd pre_body frame)) statement
+    RavenHoareTriple (RState store pre_body) statement post ->
+    RavenHoareTriple (RState store (CAnd pre_body frame)) statement
       (prenex_and post frame)
 | RTConsequence {Δ} statement (store : symbolic_store Γ F Δ)
     (pre_body pre_body' : core_assertion F Δ)
     (post post' : resource_prenex Γ F Δ) :
-    RavenResourceTriple (RState store pre_body) statement post ->
+    RavenHoareTriple (RState store pre_body) statement post ->
     core_entails pre_body' pre_body ->
     resource_prenex_entails post post' ->
-    RavenResourceTriple (RState store pre_body') statement post'
+    RavenHoareTriple (RState store pre_body') statement post'
 | RTStackRewrite {Δ} statement (store store' : symbolic_store Γ F Δ)
     (body : core_assertion F Δ) (post : resource_prenex Γ F Δ) :
-    RavenResourceTriple (RState store body) statement post ->
+    RavenHoareTriple (RState store body) statement post ->
     store_equal_under body Γ store' store ->
-    RavenResourceTriple (RState store' body) statement post
+    RavenHoareTriple (RState store' body) statement post
 
 (** *** Statement rules.  None carries a frame parameter: the core body of
     a resource state is already arbitrary. *)
 (* The empty continuation is the identity on every prenex, not only on a
    single resource state: it neither reads nor changes the store, and binds
    nothing. *)
-| RTDone {Δ} node (P : resource_prenex Γ F Δ) :
-    RavenResourceTriple P (TDone node) P
-| RTAssert {Δ} node (store : symbolic_store Γ F Δ)
+| RTDone {Δ} (P : resource_prenex Γ F Δ) :
+    RavenHoareTriple P TDone P
+| RTAssert {Δ} (store : symbolic_store Γ F Δ)
     (body : core_assertion F Δ) condition :
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store (CAnd body (CExpr (symbolize_expr store condition))))
-      (TAssert node condition)
+      (TAssert condition)
       (RState store (CAnd body (CExpr (symbolize_expr store condition))))
-| RTAssign {Δ} t node (store : symbolic_store Γ F Δ) target value :
-    RavenResourceTriple
+| RTAssign {Δ} t (store : symbolic_store Γ F Δ) target value :
+    RavenHoareTriple
       (RState store CTrue)
-      (TAssign node target value)
+      (TAssign target value)
       (ResourceExists t
         (RState (update_store_with_bound store target)
           (CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
             (weaken_expr (symbolize_expr store value))))))
-| RTFieldRead {Δ} node (store : symbolic_store Γ F Δ) field
+| RTFieldRead {Δ} (store : symbolic_store Γ F Δ) field
     (target : pvar Γ (Logic.field_type field)) base chunk :
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store (COwn field (symbolize_expr store base) chunk))
-      (TFieldRead node field target base)
+      (TFieldRead field target base)
       (ResourceExists (Logic.field_type field)
         (RState (update_store_with_bound store target)
           (CAnd
@@ -1578,29 +1577,29 @@ Inductive RavenResourceTriple {Γ F} : forall {Δ},
               (weaken_expr chunk))
             (CExpr (EBinOp (BEq (Logic.field_type field))
               (ERef (RefBound MHere)) (weaken_expr chunk))))))
-| RTFieldWrite {Δ} node (store : symbolic_store Γ F Δ) field base
+| RTFieldWrite {Δ} (store : symbolic_store Γ F Δ) field base
     (value : pexpr Γ (Logic.field_type field)) old_chunk :
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store (COwn field (symbolize_expr store base) old_chunk))
-      (TFieldWrite node field base value)
+      (TFieldWrite field base value)
       (RState store
         (COwn field (symbolize_expr store base)
           (symbolize_expr store value)))
-| RTAlloc {Δ} node (store : symbolic_store Γ F Δ) target fields :
+| RTAlloc {Δ} (store : symbolic_store Γ F Δ) target fields :
     NoDup (map field_init_id fields) ->
     NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
     ghost_initializers_require_physical fields ->
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (ghost_initializers_valid_core store
           (ghost_field_initializers fields)))
-      (TAlloc node target fields)
+      (TAlloc target fields)
       (ResourceExists TRef
         (RState (update_store_with_bound store target)
           (allocated_fields_core store fields)))
-| RTGhostUpdate {Δ} node (store : symbolic_store Γ F Δ)
+| RTGhostUpdate {Δ} (store : symbolic_store Γ F Δ)
     field base old_value new_value :
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (CAnd
           (CGhostOwn field (symbolize_expr store base)
@@ -1608,69 +1607,69 @@ Inductive RavenResourceTriple {Γ F} : forall {Δ},
           (CFpuAllowed (Logic.field_type field)
             (symbolize_expr store old_value)
             (symbolize_expr store new_value))))
-      (TGhostUpdate node field base old_value new_value)
+      (TGhostUpdate field base old_value new_value)
       (RState store
         (CGhostOwn field (symbolize_expr store base)
           (symbolize_expr store new_value)))
-| RTSeq {Δ} node (pre middle post : resource_prenex Γ F Δ) first second :
-    RavenResourceTriple pre first middle ->
-    RavenResourceTriple middle second post ->
-    RavenResourceTriple pre (TSeq node first second) post
+| RTSeq {Δ} (pre middle post : resource_prenex Γ F Δ) first second :
+    RavenHoareTriple pre first middle ->
+    RavenHoareTriple middle second post ->
+    RavenHoareTriple pre (TSeq first second) post
 
 (** Baseline conditional: both branches establish the same output resource
     assertion, store included.  No join operation. *)
-| RTIf {Δ} node (store : symbolic_store Γ F Δ) (body : core_assertion F Δ)
+| RTIf {Δ} (store : symbolic_store Γ F Δ) (body : core_assertion F Δ)
     condition then_branch else_branch (post : resource_prenex Γ F Δ) :
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store (CAnd body (CExpr (symbolize_expr store condition))))
       then_branch post ->
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (CAnd body (CExpr (EUnOp UNot (symbolize_expr store condition)))))
       else_branch post ->
-    RavenResourceTriple (RState store body)
-      (TIf node condition then_branch else_branch) post
+    RavenHoareTriple (RState store body)
+      (TIf condition then_branch else_branch) post
 
 (** *** Fold / unfold.  The store is threaded unchanged. *)
-| RTUnfoldInvariant {Δ} node invariant (store : symbolic_store Γ F Δ) arguments :
-    RavenResourceTriple
+| RTUnfoldInvariant {Δ} invariant (store : symbolic_store Γ F Δ) arguments :
+    RavenHoareTriple
       (RState store
         (CInvariant invariant (symbolize_expr_list store arguments)))
-      (TUnfold node invariant arguments)
+      (TUnfold invariant arguments)
       (RState store
         (instantiated_invariant invariant
           (symbolize_expr_list store arguments)))
-| RTFoldInvariant {Δ} node invariant (store : symbolic_store Γ F Δ) arguments :
-    RavenResourceTriple
+| RTFoldInvariant {Δ} invariant (store : symbolic_store Γ F Δ) arguments :
+    RavenHoareTriple
       (RState store
         (instantiated_invariant invariant
           (symbolize_expr_list store arguments)))
-      (TFold node invariant arguments)
+      (TFold invariant arguments)
       (RState store
         (CInvariant invariant (symbolize_expr_list store arguments)))
-| RTUnfoldPredicate {Δ} node predicate (store : symbolic_store Γ F Δ) arguments :
-    RavenResourceTriple
+| RTUnfoldPredicate {Δ} predicate (store : symbolic_store Γ F Δ) arguments :
+    RavenHoareTriple
       (RState store
         (CPredicate predicate (symbolize_expr_list store arguments)))
-      (TPredicateUnfold node predicate arguments)
+      (TPredicateUnfold predicate arguments)
       (RState store
         (instantiated_predicate predicate
           (symbolize_expr_list store arguments)))
-| RTFoldPredicate {Δ} node predicate (store : symbolic_store Γ F Δ) arguments :
-    RavenResourceTriple
+| RTFoldPredicate {Δ} predicate (store : symbolic_store Γ F Δ) arguments :
+    RavenHoareTriple
       (RState store
         (instantiated_predicate predicate
           (symbolize_expr_list store arguments)))
-      (TPredicateFold node predicate arguments)
+      (TPredicateFold predicate arguments)
       (RState store
         (CPredicate predicate (symbolize_expr_list store arguments)))
 
 | RTInvAccess {Δ} invariant arguments body
     (external_pre body_pre body_post external_post : resource_prenex Γ F Δ) :
-    resource_access_boundary invariant arguments
+    access_boundary invariant arguments
       external_pre body_pre body_post external_post ->
-    RavenResourceTriple body_pre body body_post ->
-    RavenResourceTriple external_pre
+    RavenHoareTriple body_pre body body_post ->
+    RavenHoareTriple external_pre
       (TInvAccess invariant arguments body) external_post
 (** General matched access.  The opening and closing prenex spines are
     intentionally independent: existential witnesses exposed while opening
@@ -1680,69 +1679,69 @@ Inductive RavenResourceTriple {Γ F} : forall {Δ},
 | RTInvAccessIndependent {Δ} invariant arguments body
     (external_pre body_pre body_post external_post : resource_prenex Γ F Δ)
     (opening_focus closing_focus :
-      resource_access_focus invariant arguments Δ) :
+      access_focus invariant arguments Δ) :
     pexpr_list_dependencies arguments ## statement_writes body ->
-    resource_access_opening invariant arguments opening_focus
+    access_opening invariant arguments opening_focus
       external_pre body_pre ->
-    RavenResourceTriple body_pre body body_post ->
-    resource_access_closing invariant arguments closing_focus
+    RavenHoareTriple body_pre body body_post ->
+    access_closing invariant arguments closing_focus
       body_post external_post ->
-    RavenResourceTriple external_pre
+    RavenHoareTriple external_pre
       (TInvAccess invariant arguments body) external_post
-| RTAtomicBlock {Δ} node (pre post : resource_prenex Γ F Δ) body :
-    RavenResourceTriple pre body post ->
-    RavenResourceTriple pre (TAtomic node body) post
+| RTAtomicBlock {Δ} (pre post : resource_prenex Γ F Δ) body :
+    RavenHoareTriple pre body post ->
+    RavenHoareTriple pre (TAtomic body) post
 
 (** *** Calls and spawn.  The result binder lands in the telescope; the
     "callee is declared and verified" guard is an explicit premise. *)
-| RTCallDiscard {Δ} node procedure (store : symbolic_store Γ F Δ)
+| RTCallDiscard {Δ} procedure (store : symbolic_store Γ F Δ)
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure)) :
     Contracts.procedure_verified procedure ->
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (instantiated_pre procedure
           (symbolize_expr_list store typed_arguments)))
-      (TCall node procedure typed_arguments
+      (TCall procedure typed_arguments
         (@CTDiscard Γ (Logic.procedure_return procedure)))
       (ResourceExists (Logic.procedure_return procedure)
         (RState (weaken_store store)
           (instantiated_post procedure
             (weaken_expr_list
               (symbolize_expr_list store typed_arguments)))))
-| RTCallStore {Δ} node procedure (store : symbolic_store Γ F Δ)
+| RTCallStore {Δ} procedure (store : symbolic_store Γ F Δ)
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure))
     (target : pvar Γ (Logic.procedure_return procedure)) :
     Contracts.procedure_verified procedure ->
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (instantiated_pre procedure
           (symbolize_expr_list store typed_arguments)))
-      (TCall node procedure typed_arguments (CTStore target))
+      (TCall procedure typed_arguments (CTStore target))
       (ResourceExists (Logic.procedure_return procedure)
         (RState (update_store_with_bound store target)
           (instantiated_post procedure
             (weaken_expr_list
               (symbolize_expr_list store typed_arguments)))))
-| RTSpawn {Δ} node procedure (store : symbolic_store Γ F Δ)
+| RTSpawn {Δ} procedure (store : symbolic_store Γ F Δ)
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure)) :
     Contracts.procedure_verified procedure ->
-    RavenResourceTriple
+    RavenHoareTriple
       (RState store
         (instantiated_pre procedure
           (symbolize_expr_list store typed_arguments)))
-      (TSpawn node procedure typed_arguments)
+      (TSpawn procedure typed_arguments)
       (RState store CTrue).
 
 (** Telescope transport is deliberately stated over the completed access,
-    not over [resource_access_boundary].  These are the three outcomes used
+    not over [access_boundary].  These are the three outcomes used
     by the joint body/fold cut: preservation retains the witness, elimination
     discharges it around the whole access, and weakening runs an access that
     is independent of the fresh binder. *)
 Lemma RTInvAccessPrenexPreserve {Γ F Δ} t invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant)) body
     (pre post : resource_prenex Γ F (t :: Δ)) :
-  RavenResourceTriple pre (TInvAccess invariant arguments body) post ->
-  RavenResourceTriple (ResourceExists t pre)
+  RavenHoareTriple pre (TInvAccess invariant arguments body) post ->
+  RavenHoareTriple (ResourceExists t pre)
     (TInvAccess invariant arguments body) (ResourceExists t post).
 Proof. apply RTPrenexPreserve. Qed.
 
@@ -1750,29 +1749,29 @@ Lemma RTInvAccessPrenexElim {Γ F Δ} t invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant)) body
     (pre : resource_prenex Γ F (t :: Δ))
     (post : resource_prenex Γ F Δ) :
-  RavenResourceTriple pre (TInvAccess invariant arguments body)
+  RavenHoareTriple pre (TInvAccess invariant arguments body)
     (weaken_resource_prenex post) ->
-  RavenResourceTriple (ResourceExists t pre)
+  RavenHoareTriple (ResourceExists t pre)
     (TInvAccess invariant arguments body) post.
 Proof. apply RTPrenexElim. Qed.
 
 Lemma RTInvAccessBoundWeaken {Γ F Δ} t invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
-  RavenResourceTriple pre (TInvAccess invariant arguments body) post ->
-  RavenResourceTriple (weaken_resource_prenex (u := t) pre)
+  RavenHoareTriple pre (TInvAccess invariant arguments body) post ->
+  RavenHoareTriple (weaken_resource_prenex (u := t) pre)
     (TInvAccess invariant arguments body)
     (weaken_resource_prenex (u := t) post).
 Proof. apply RTBoundWeaken. Qed.
 
-Lemma resource_access_opening_triple {Γ F Δ node invariant}
+Lemma access_opening_triple {Γ F Δ invariant}
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
-    (focus : resource_access_focus invariant program_arguments Δ)
+    (focus : access_focus invariant program_arguments Δ)
     (external body_pre : resource_prenex Γ F Δ) :
-  resource_access_opening invariant program_arguments focus
+  access_opening invariant program_arguments focus
     external body_pre ->
-  RavenResourceTriple external
-    (TUnfold node invariant program_arguments) body_pre.
+  RavenHoareTriple external
+    (TUnfold invariant program_arguments) body_pre.
 Proof.
   intro Hopening. induction Hopening.
   - apply RTUnfoldInvariant.
@@ -1785,98 +1784,98 @@ Proof.
   - eapply RTStackRewrite; eassumption.
 Qed.
 
-Lemma resource_access_opening_complete {Γ F Δ node invariant}
+Lemma access_opening_complete {Γ F Δ invariant}
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (external body_pre : resource_prenex Γ F Δ)
-    (derivation : RavenResourceTriple external
-      (TUnfold node invariant program_arguments) body_pre) :
-  exists (focus : resource_access_focus invariant program_arguments Δ),
-    resource_access_opening invariant program_arguments focus
+    (derivation : RavenHoareTriple external
+      (TUnfold invariant program_arguments) body_pre) :
+  exists (focus : access_focus invariant program_arguments Δ),
+    access_opening invariant program_arguments focus
       external body_pre.
 Proof.
   dependent induction derivation.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening).
-    exists (@ResourceAccessFocusPreserve Γ F invariant program_arguments
+    exists (@AccessFocusPreserve Γ F invariant program_arguments
       Δ t focus).
-    exact (@ResourceAccessOpeningPreserve Γ F invariant program_arguments
+    exact (@AccessOpeningPreserve Γ F invariant program_arguments
       Δ t focus pre post Hopening).
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening).
-    exists (@ResourceAccessFocusBoundWeaken Γ F invariant program_arguments
+    exists (@AccessFocusBoundWeaken Γ F invariant program_arguments
       Δ t focus).
-    exact (@ResourceAccessOpeningBoundWeaken Γ F invariant program_arguments
+    exact (@AccessOpeningBoundWeaken Γ F invariant program_arguments
       Δ t focus pre post Hopening).
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening).
-    exists (@ResourceAccessFocusElim Γ F invariant program_arguments
+    exists (@AccessFocusElim Γ F invariant program_arguments
       Δ t focus).
-    exact (@ResourceAccessOpeningElim Γ F invariant program_arguments
+    exact (@AccessOpeningElim Γ F invariant program_arguments
       Δ t focus pre post Hopening).
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening). exists focus.
-    eapply ResourceAccessOpeningPrenexConsequence; eassumption.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    eapply AccessOpeningPrenexConsequence; eassumption.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening). exists focus.
-    apply ResourceAccessOpeningFrame. exact Hopening.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    apply AccessOpeningFrame. exact Hopening.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening). exists focus.
-    eapply ResourceAccessOpeningConsequence; eassumption.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    eapply AccessOpeningConsequence; eassumption.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hopening). exists focus.
-    eapply ResourceAccessOpeningStackRewrite; eassumption.
-  - exists (@ResourceAccessFocusBase Γ F invariant program_arguments Δ
+    eapply AccessOpeningStackRewrite; eassumption.
+  - exists (@AccessFocusBase Γ F invariant program_arguments Δ
       (symbolize_expr_list store program_arguments)).
-    apply ResourceAccessOpeningBase.
+    apply AccessOpeningBase.
 Qed.
 
-(** Fold-side counterpart of [resource_access_opening_complete].  The focus
+(** Fold-side counterpart of [access_opening_complete].  The focus
     records the telescope path and canonical argument vector selected by the fold
     derivation; the joint access cut later reconciles it with the opening
     focus through the body derivation. *)
-Lemma resource_access_closing_complete {Γ F Δ node invariant}
+Lemma access_closing_complete {Γ F Δ invariant}
     (program_arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body_post external_post : resource_prenex Γ F Δ)
-    (derivation : RavenResourceTriple body_post
-      (TFold node invariant program_arguments) external_post) :
-  exists (focus : resource_access_focus invariant program_arguments Δ),
-    resource_access_closing invariant program_arguments focus
+    (derivation : RavenHoareTriple body_post
+      (TFold invariant program_arguments) external_post) :
+  exists (focus : access_focus invariant program_arguments Δ),
+    access_closing invariant program_arguments focus
       body_post external_post.
 Proof.
   dependent induction derivation.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing).
-    exists (@ResourceAccessFocusPreserve Γ F invariant program_arguments
-      Δ t focus). apply ResourceAccessClosingPreserve. exact Hclosing.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    exists (@AccessFocusPreserve Γ F invariant program_arguments
+      Δ t focus). apply AccessClosingPreserve. exact Hclosing.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing).
-    exists (@ResourceAccessFocusBoundWeaken Γ F invariant program_arguments
-      Δ t focus). apply ResourceAccessClosingBoundWeaken. exact Hclosing.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    exists (@AccessFocusBoundWeaken Γ F invariant program_arguments
+      Δ t focus). apply AccessClosingBoundWeaken. exact Hclosing.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing).
-    exists (@ResourceAccessFocusElim Γ F invariant program_arguments
-      Δ t focus). apply ResourceAccessClosingElim. exact Hclosing.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    exists (@AccessFocusElim Γ F invariant program_arguments
+      Δ t focus). apply AccessClosingElim. exact Hclosing.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing). exists focus.
-    eapply ResourceAccessClosingConsequence; eassumption.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    eapply AccessClosingConsequence; eassumption.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing). exists focus.
-    change (resource_access_closing invariant program_arguments focus
+    change (access_closing invariant program_arguments focus
       (prenex_and (RState store pre_body) frame) (prenex_and post frame)).
-    apply ResourceAccessClosingFrame. exact Hclosing.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+    apply AccessClosingFrame. exact Hclosing.
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing). exists focus.
-    eapply ResourceAccessClosingConsequence with
+    eapply AccessClosingConsequence with
       (body_post := RState store pre_body) (external_post := post).
     + apply RPEBody. split; [reflexivity|exact H].
     + exact Hclosing.
     + exact H0.
-  - destruct (IHderivation node invariant program_arguments eq_refl)
+  - destruct (IHderivation invariant program_arguments eq_refl)
       as (focus & Hclosing). exists focus.
-    eapply ResourceAccessClosingStackRewrite; eassumption.
-  - exists (@ResourceAccessFocusBase Γ F invariant program_arguments Δ
+    eapply AccessClosingStackRewrite; eassumption.
+  - exists (@AccessFocusBase Γ F invariant program_arguments Δ
       (symbolize_expr_list store program_arguments)).
-    apply ResourceAccessClosingBase.
+    apply AccessClosingBase.
 Qed.
 
 (** Canonical surface rule, now derived from the four-ended boundary rather
@@ -1886,24 +1885,24 @@ Lemma RTInvAccessBase {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (frame : core_assertion F Δ) body
     (opened_post closed_post : resource_prenex Γ F Δ) :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState store
       (CAnd (instantiated_invariant invariant
         (symbolize_expr_list store arguments)) frame))
     body opened_post ->
-  resource_access_closure invariant Δ
+  access_closure invariant Δ
     (symbolize_expr_list store arguments)
     (instantiated_invariant invariant
       (symbolize_expr_list store arguments))
     opened_post closed_post ->
-  RavenResourceTriple
+  RavenHoareTriple
     (RState store
       (CAnd (CInvariant invariant (symbolize_expr_list store arguments))
         frame))
     (TInvAccess invariant arguments body) closed_post.
 Proof.
   intros Hbody Hclosure. eapply RTInvAccess.
-  - apply resource_access_boundary_base. exact Hclosure.
+  - apply access_boundary_base. exact Hclosure.
   - exact Hbody.
 Qed.
 
@@ -1911,10 +1910,10 @@ Qed.
     statement.  The recursive derivation preprocessor uses this operation at
     every constructor, so both children of a sequence choose the identical
     normal form for their shared assertion. *)
-Lemma RavenResourceTriple_normalize_endpoints {Γ F Δ}
+Lemma RavenHoareTriple_normalize_endpoints {Γ F Δ}
     (pre post : resource_prenex Γ F Δ) statement :
-  RavenResourceTriple pre statement post ->
-  RavenResourceTriple (Resource.normalize_resource_prenex pre) statement
+  RavenHoareTriple pre statement post ->
+  RavenHoareTriple (Resource.normalize_resource_prenex pre) statement
     (Resource.normalize_resource_prenex post).
 Proof.
   intro derivation.
@@ -1924,11 +1923,11 @@ Proof.
   - apply normalize_resource_prenex_entails.
 Qed.
 
-Lemma RavenResourceTriple_denormalize_endpoints {Γ F Δ}
+Lemma RavenHoareTriple_denormalize_endpoints {Γ F Δ}
     (pre post : resource_prenex Γ F Δ) statement :
-  RavenResourceTriple (Resource.normalize_resource_prenex pre) statement
+  RavenHoareTriple (Resource.normalize_resource_prenex pre) statement
     (Resource.normalize_resource_prenex post) ->
-  RavenResourceTriple pre statement post.
+  RavenHoareTriple pre statement post.
 Proof.
   intro derivation.
   eapply RTPrenexConsequence.
@@ -1937,10 +1936,10 @@ Proof.
   - apply normalize_resource_prenex_entails_back.
 Qed.
 
-Lemma RavenResourceTriple_denormalize_pre {Γ F Δ}
+Lemma RavenHoareTriple_denormalize_pre {Γ F Δ}
     (pre post : resource_prenex Γ F Δ) statement :
-  RavenResourceTriple (Resource.normalize_resource_prenex pre) statement post ->
-  RavenResourceTriple pre statement post.
+  RavenHoareTriple (Resource.normalize_resource_prenex pre) statement post ->
+  RavenHoareTriple pre statement post.
 Proof.
   intro derivation. eapply RTPrenexConsequence.
   - exact derivation.
@@ -1948,11 +1947,11 @@ Proof.
   - apply resource_prenex_entails_refl.
 Qed.
 
-Lemma RavenResourceTriple_denormalize_post {Γ F Δ}
+Lemma RavenHoareTriple_denormalize_post {Γ F Δ}
     (pre post : resource_prenex Γ F Δ) statement :
-  RavenResourceTriple pre statement
+  RavenHoareTriple pre statement
     (Resource.normalize_resource_prenex post) ->
-  RavenResourceTriple pre statement post.
+  RavenHoareTriple pre statement post.
 Proof.
   intro derivation. eapply RTPrenexConsequence.
   - exact derivation.
@@ -1962,40 +1961,40 @@ Qed.
 
 (** Canonicalize every internal sequence cut.  This is proof preprocessing:
     the Raven statement is unchanged. *)
-Fixpoint RavenResourceTriple_normalize_boundaries {Γ F Δ}
+Fixpoint RavenHoareTriple_normalize_boundaries {Γ F Δ}
     (pre post : resource_prenex Γ F Δ) statement
-    (derivation : RavenResourceTriple pre statement post)
+    (derivation : RavenHoareTriple pre statement post)
     {struct derivation} :
-  RavenResourceTriple (Resource.normalize_resource_prenex pre) statement
+  RavenHoareTriple (Resource.normalize_resource_prenex pre) statement
     (Resource.normalize_resource_prenex post).
 Proof.
   destruct derivation.
-  all: apply RavenResourceTriple_normalize_endpoints.
+  all: apply RavenHoareTriple_normalize_endpoints.
   - apply RTPrenexPreserve.
-    apply RavenResourceTriple_denormalize_endpoints.
-    apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    apply RavenHoareTriple_denormalize_endpoints.
+    apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - apply RTBoundWeaken.
-    apply RavenResourceTriple_denormalize_endpoints.
-    apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    apply RavenHoareTriple_denormalize_endpoints.
+    apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - apply RTPrenexElim.
-    apply RavenResourceTriple_denormalize_endpoints.
-    apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    apply RavenHoareTriple_denormalize_endpoints.
+    apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - eapply RTPrenexConsequence.
-    + apply RavenResourceTriple_denormalize_endpoints.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    + apply RavenHoareTriple_denormalize_endpoints.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation.
     + exact H.
     + exact H0.
   - apply RTFrame.
-    apply RavenResourceTriple_denormalize_endpoints.
-    apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    apply RavenHoareTriple_denormalize_endpoints.
+    apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - eapply RTConsequence.
-    + apply RavenResourceTriple_denormalize_endpoints.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    + apply RavenHoareTriple_denormalize_endpoints.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation.
     + exact H.
     + exact H0.
   - eapply RTStackRewrite.
-    + apply RavenResourceTriple_denormalize_endpoints.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    + apply RavenHoareTriple_denormalize_endpoints.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation.
     + exact H.
   - apply RTDone.
   - apply RTAssert.
@@ -2005,15 +2004,15 @@ Proof.
   - apply RTAlloc; assumption.
   - apply RTGhostUpdate.
   - eapply RTSeq with (middle := Resource.normalize_resource_prenex middle).
-    + apply RavenResourceTriple_denormalize_pre.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation1.
-    + apply RavenResourceTriple_denormalize_post.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation2.
+    + apply RavenHoareTriple_denormalize_pre.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation1.
+    + apply RavenHoareTriple_denormalize_post.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation2.
   - eapply RTIf.
-    + apply RavenResourceTriple_denormalize_endpoints.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation1.
-    + apply RavenResourceTriple_denormalize_endpoints.
-      apply RavenResourceTriple_normalize_boundaries. exact derivation2.
+    + apply RavenHoareTriple_denormalize_endpoints.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation1.
+    + apply RavenHoareTriple_denormalize_endpoints.
+      apply RavenHoareTriple_normalize_boundaries. exact derivation2.
   - apply RTUnfoldInvariant.
   - apply RTFoldInvariant.
   - apply RTUnfoldPredicate.
@@ -2021,8 +2020,8 @@ Proof.
   - eapply RTInvAccess; eassumption.
   - eapply RTInvAccessIndependent; eassumption.
   - apply RTAtomicBlock.
-    apply RavenResourceTriple_denormalize_endpoints.
-    apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    apply RavenHoareTriple_denormalize_endpoints.
+    apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - apply RTCallDiscard. assumption.
   - apply RTCallStore. assumption.
   - apply RTSpawn. assumption.
@@ -2043,9 +2042,9 @@ Defined.
 Lemma RTPostOpenCoreExists {Γ F Δ} t statement
     (store : symbolic_store Γ F Δ) (pre : core_assertion F Δ)
     (post_store : symbolic_store Γ F Δ) (post : core_assertion F (t :: Δ)) :
-  RavenResourceTriple (RState store pre) statement
+  RavenHoareTriple (RState store pre) statement
     (RState post_store (CExists t post)) ->
-  RavenResourceTriple (RState store pre) statement
+  RavenHoareTriple (RState store pre) statement
     (ResourceExists t (RState (weaken_store post_store) post)).
 Proof.
   intro derivation.
@@ -2058,23 +2057,23 @@ Qed.
 (** The two canonical sequence outcomes used by telescope focusing.  Keeping
     these as derived rules makes the consumer cut an induction over logical
     structure, rather than a continuation semantics. *)
-Lemma RTSeqPrenexPreserve {Γ F Δ} t node
+Lemma RTSeqPrenexPreserve {Γ F Δ} t
     (pre middle post : resource_prenex Γ F (t :: Δ)) first second :
-  RavenResourceTriple pre first middle ->
-  RavenResourceTriple middle second post ->
-  RavenResourceTriple (ResourceExists t pre) (TSeq node first second)
+  RavenHoareTriple pre first middle ->
+  RavenHoareTriple middle second post ->
+  RavenHoareTriple (ResourceExists t pre) (TSeq first second)
     (ResourceExists t post).
 Proof.
   intros Hfirst Hsecond. apply RTPrenexPreserve.
   eapply RTSeq; eassumption.
 Qed.
 
-Lemma RTSeqPrenexElim {Γ F Δ} t node
+Lemma RTSeqPrenexElim {Γ F Δ} t
     (pre middle : resource_prenex Γ F (t :: Δ))
     (post : resource_prenex Γ F Δ) first second :
-  RavenResourceTriple pre first middle ->
-  RavenResourceTriple middle second (weaken_resource_prenex post) ->
-  RavenResourceTriple (ResourceExists t pre) (TSeq node first second) post.
+  RavenHoareTriple pre first middle ->
+  RavenHoareTriple middle second (weaken_resource_prenex post) ->
+  RavenHoareTriple (ResourceExists t pre) (TSeq first second) post.
 Proof.
   intros Hfirst Hsecond. apply RTPrenexElim.
   eapply RTSeq; eassumption.
@@ -2083,12 +2082,12 @@ Qed.
 (** Once a focused binder has ceased to affect the intermediate assertion,
     an ordinary continuation can run below it by [RTBoundWeaken], after which
     the one outer elimination closes the complete sequence. *)
-Lemma RTSeqPrenexElimClosedContinuation {Γ F Δ} t node
+Lemma RTSeqPrenexElimClosedContinuation {Γ F Δ} t
     (pre : resource_prenex Γ F (t :: Δ))
     (middle post : resource_prenex Γ F Δ) first second :
-  RavenResourceTriple pre first (weaken_resource_prenex middle) ->
-  RavenResourceTriple middle second post ->
-  RavenResourceTriple (ResourceExists t pre) (TSeq node first second) post.
+  RavenHoareTriple pre first (weaken_resource_prenex middle) ->
+  RavenHoareTriple middle second post ->
+  RavenHoareTriple (ResourceExists t pre) (TSeq first second) post.
 Proof.
   intros Hfirst Hsecond. apply RTPrenexElim.
   eapply RTSeq; [exact Hfirst |].
@@ -2105,14 +2104,14 @@ Inductive existential_consumer_normal_form {Γ F Δ} (t : typ)
     resource_prenex Γ F Δ -> Prop :=
 | ExistentialConsumerEliminates
     (canonical_post : resource_prenex Γ F Δ) :
-    RavenResourceTriple pre statement
+    RavenHoareTriple pre statement
       (weaken_resource_prenex canonical_post) ->
     forall requested_post,
       resource_prenex_entails canonical_post requested_post ->
       existential_consumer_normal_form t pre statement requested_post
 | ExistentialConsumerPreserves
     (inner_post : resource_prenex Γ F (t :: Δ)) :
-    RavenResourceTriple pre statement inner_post ->
+    RavenHoareTriple pre statement inner_post ->
     forall requested_post,
       resource_prenex_entails (ResourceExists t inner_post) requested_post ->
       existential_consumer_normal_form t pre statement requested_post.
@@ -2121,7 +2120,7 @@ Lemma existential_consumer_normal_form_rewrap {Γ F Δ t}
     {pre : resource_prenex Γ F (t :: Δ)} {statement : stmt Γ}
     {post : resource_prenex Γ F Δ} :
   existential_consumer_normal_form t pre statement post ->
-  RavenResourceTriple (ResourceExists t pre) statement post.
+  RavenHoareTriple (ResourceExists t pre) statement post.
 Proof.
   intros Hnormal. destruct Hnormal.
   - eapply RTPrenexConsequence.
@@ -2150,14 +2149,14 @@ Qed.
     binder.  Its accumulated post-entailment becomes the pre-consequence of
     the ordinary continuation, which is then weakened below the binder. *)
 Lemma existential_consumer_normal_form_sequence_eliminated {Γ F Δ t}
-    node {pre : resource_prenex Γ F (t :: Δ)}
+    {pre : resource_prenex Γ F (t :: Δ)}
     {middle post : resource_prenex Γ F Δ} {first second : stmt Γ}
     {inner_post : resource_prenex Γ F Δ}
-    (Hfirst : RavenResourceTriple pre first
+    (Hfirst : RavenHoareTriple pre first
       (weaken_resource_prenex inner_post))
     (Hmiddle : resource_prenex_entails inner_post middle)
-    (Hsecond : RavenResourceTriple middle second post) :
-  existential_consumer_normal_form t pre (TSeq node first second) post.
+    (Hsecond : RavenHoareTriple middle second post) :
+  existential_consumer_normal_form t pre (TSeq first second) post.
 Proof.
   econstructor 1.
   - eapply RTSeq; [exact Hfirst |].
@@ -2173,11 +2172,11 @@ Qed.
     component, after using the first outcome's accumulated entailment as its
     source cut. *)
 Lemma existential_consumer_normal_form_sequence_preserved {Γ F Δ t}
-    node {pre middle : resource_prenex Γ F (t :: Δ)}
+    {pre middle : resource_prenex Γ F (t :: Δ)}
     {post : resource_prenex Γ F Δ} {first second : stmt Γ} :
-  RavenResourceTriple pre first middle ->
+  RavenHoareTriple pre first middle ->
   existential_consumer_normal_form t middle second post ->
-  existential_consumer_normal_form t pre (TSeq node first second) post.
+  existential_consumer_normal_form t pre (TSeq first second) post.
 Proof.
   intros Hfirst Hsecond. destruct Hsecond.
   - econstructor 1; [| exact H0]. eapply RTSeq; eassumption.
@@ -2216,21 +2215,21 @@ Qed.
     normalization to commute with weakening by definitional equality. *)
 Lemma normalize_prenex_preserve_consumer {Γ F Δ t statement}
     (pre post : resource_prenex Γ F (t :: Δ))
-    (derivation : RavenResourceTriple pre statement post) :
+    (derivation : RavenHoareTriple pre statement post) :
   existential_consumer_normal_form t
     (Resource.normalize_resource_prenex pre) statement
     (Resource.normalize_resource_prenex (ResourceExists t post)).
 Proof.
   cbn [Resource.normalize_resource_prenex].
   econstructor 2.
-  - apply RavenResourceTriple_normalize_boundaries. exact derivation.
+  - apply RavenHoareTriple_normalize_boundaries. exact derivation.
   - apply resource_prenex_entails_refl.
 Qed.
 
 Lemma normalize_prenex_elim_consumer {Γ F Δ t statement}
     (pre : resource_prenex Γ F (t :: Δ))
     (post : resource_prenex Γ F Δ)
-    (derivation : RavenResourceTriple pre statement
+    (derivation : RavenHoareTriple pre statement
       (Resource.weaken_resource_prenex post)) :
   existential_consumer_normal_form t
     (Resource.normalize_resource_prenex pre) statement
@@ -2238,7 +2237,7 @@ Lemma normalize_prenex_elim_consumer {Γ F Δ t statement}
 Proof.
   econstructor 1.
   - eapply RTPrenexConsequence.
-    + apply RavenResourceTriple_normalize_boundaries. exact derivation.
+    + apply RavenHoareTriple_normalize_boundaries. exact derivation.
     + apply resource_prenex_entails_refl.
     + apply normalize_weaken_resource_prenex_entails.
   - apply resource_prenex_entails_refl.
@@ -2254,7 +2253,7 @@ Lemma existential_consumer_normal_form_complete {Γ F Δ t statement}
     (consumer_pre consumer_post : resource_prenex Γ F Δ)
     (source_entails : resource_prenex_entails
       (ResourceExists t body) consumer_pre)
-    (consumer : RavenResourceTriple consumer_pre statement consumer_post) :
+    (consumer : RavenHoareTriple consumer_pre statement consumer_post) :
   existential_consumer_normal_form t body statement consumer_post.
 Proof.
   econstructor 1.
@@ -2265,12 +2264,12 @@ Proof.
   - apply resource_prenex_entails_refl.
 Qed.
 
-Lemma RavenResourceTriple_under_exists {Γ F Δ t statement}
+Lemma RavenHoareTriple_under_exists {Γ F Δ t statement}
     (body : resource_prenex Γ F (t :: Δ))
     (consumer_pre consumer_post : resource_prenex Γ F Δ) :
   resource_prenex_entails (ResourceExists t body) consumer_pre ->
-  RavenResourceTriple consumer_pre statement consumer_post ->
-  RavenResourceTriple body statement
+  RavenHoareTriple consumer_pre statement consumer_post ->
+  RavenHoareTriple body statement
     (Resource.weaken_resource_prenex consumer_post).
 Proof.
   intros Hsource Hconsumer. eapply RTPrenexConsequence.
@@ -2283,10 +2282,10 @@ Qed.
     telescope.  At an existential, run the original derivation below the
     binder, frame there with the weakened core assertion, and eliminate the
     binder around the complete statement. *)
-Lemma RavenResourceTriple_prenex_frame {Γ F Δ statement}
+Lemma RavenHoareTriple_prenex_frame {Γ F Δ statement}
     (pre post : resource_prenex Γ F Δ) (frame : core_assertion F Δ) :
-  RavenResourceTriple pre statement post ->
-  RavenResourceTriple (prenex_and pre frame) statement
+  RavenHoareTriple pre statement post ->
+  RavenHoareTriple (prenex_and pre frame) statement
     (prenex_and post frame).
 Proof.
   revert post frame.
@@ -2295,7 +2294,7 @@ Proof.
   - apply RTPrenexElim.
     rewrite <- prenex_and_weaken.
     apply IH.
-    eapply RavenResourceTriple_under_exists.
+    eapply RavenHoareTriple_under_exists.
     + apply resource_prenex_entails_refl.
     + exact Htriple.
 Qed.
@@ -2303,39 +2302,39 @@ Qed.
 (** Structural inversion for sequencing.  Proof-only wrappers are pushed to
     the appropriate side of the cut, so the returned intermediate assertion
     is a genuine resource telescope rather than a derivation-side artifact. *)
-Lemma RavenResourceTriple_sequence_decompose {Γ F Δ node first second}
+Lemma RavenHoareTriple_sequence_decompose {Γ F Δ first second}
     (pre post : resource_prenex Γ F Δ) :
-  RavenResourceTriple pre (TSeq node first second) post ->
+  RavenHoareTriple pre (TSeq first second) post ->
   exists middle : resource_prenex Γ F Δ,
-    RavenResourceTriple pre first middle /\
-    RavenResourceTriple middle second post.
+    RavenHoareTriple pre first middle /\
+    RavenHoareTriple middle second post.
 Proof.
   intro derivation. dependent induction derivation.
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists (ResourceExists t middle). split.
     + apply RTPrenexPreserve. exact Hfirst.
     + apply RTPrenexPreserve. exact Hsecond.
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists (weaken_resource_prenex middle). split.
     + apply RTBoundWeaken. exact Hfirst.
     + apply RTBoundWeaken. exact Hsecond.
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists (ResourceExists t middle). split.
     + apply RTPrenexPreserve. exact Hfirst.
     + apply RTPrenexElim. exact Hsecond.
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists middle. split.
     + eapply RTPrenexConsequence; [exact Hfirst|exact H|apply resource_prenex_entails_refl].
     + eapply RTPrenexConsequence; [exact Hsecond|apply resource_prenex_entails_refl|exact H0].
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists (prenex_and middle frame). split.
     + apply RTFrame. exact Hfirst.
-    + apply RavenResourceTriple_prenex_frame. exact Hsecond.
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+    + apply RavenHoareTriple_prenex_frame. exact Hsecond.
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists middle. split.
     + eapply RTConsequence; [exact Hfirst|exact H|apply resource_prenex_entails_refl].
     + eapply RTPrenexConsequence; [exact Hsecond|apply resource_prenex_entails_refl|exact H0].
-  - destruct (IHderivation node first second eq_refl) as (middle & Hfirst & Hsecond).
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
     exists middle. split.
     + eapply RTStackRewrite; eassumption.
     + exact Hsecond.
@@ -2344,24 +2343,24 @@ Qed.
 
 (** The syntactic spine selected by the restricted normalizer can therefore
     be exposed without inspecting the proof term's outer structural rules. *)
-Lemma RavenResourceTriple_unfold_body_fold_decompose {Γ F Δ}
-    outer_node unfold_node body_sequence_node fold_node invariant
+Lemma RavenHoareTriple_unfold_body_fold_decompose {Γ F Δ}
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
-  RavenResourceTriple pre
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body
-        (TFold fold_node invariant arguments))) post ->
+  RavenHoareTriple pre
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body
+        (TFold invariant arguments))) post ->
   exists opened opened_post : resource_prenex Γ F Δ,
-    RavenResourceTriple pre (TUnfold unfold_node invariant arguments) opened /\
-    RavenResourceTriple opened body opened_post /\
-    RavenResourceTriple opened_post
-      (TFold fold_node invariant arguments) post.
+    RavenHoareTriple pre (TUnfold invariant arguments) opened /\
+    RavenHoareTriple opened body opened_post /\
+    RavenHoareTriple opened_post
+      (TFold invariant arguments) post.
 Proof.
   intro derivation.
-  destruct (RavenResourceTriple_sequence_decompose _ _ derivation)
+  destruct (RavenHoareTriple_sequence_decompose _ _ derivation)
     as (opened & Hunfold & Htail).
-  destruct (RavenResourceTriple_sequence_decompose _ _ Htail)
+  destruct (RavenHoareTriple_sequence_decompose _ _ Htail)
     as (opened_post & Hbody & Hfold).
   exists opened, opened_post. repeat split; assumption.
 Qed.
@@ -2370,30 +2369,30 @@ Qed.
     focus witnesses are kept separate here on purpose: reconciling them is
     precisely the remaining joint body/fold argument, whereas syntactic
     sequence inversion and wrapper extraction are now fully discharged. *)
-Lemma RavenResourceTriple_unfold_body_fold_spines {Γ F Δ}
-    outer_node unfold_node body_sequence_node fold_node invariant
+Lemma RavenHoareTriple_unfold_body_fold_spines {Γ F Δ}
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
-  RavenResourceTriple pre
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body
-        (TFold fold_node invariant arguments))) post ->
+  RavenHoareTriple pre
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body
+        (TFold invariant arguments))) post ->
   exists opened opened_post : resource_prenex Γ F Δ,
     exists opening_focus closing_focus :
-      resource_access_focus invariant arguments Δ,
-    resource_access_opening invariant arguments opening_focus pre opened /\
-    RavenResourceTriple opened body opened_post /\
-    resource_access_closing invariant arguments closing_focus
+      access_focus invariant arguments Δ,
+    access_opening invariant arguments opening_focus pre opened /\
+    RavenHoareTriple opened body opened_post /\
+    access_closing invariant arguments closing_focus
       opened_post post.
 Proof.
   intro derivation.
-  destruct (RavenResourceTriple_unfold_body_fold_decompose
-    outer_node unfold_node body_sequence_node fold_node invariant arguments
+  destruct (RavenHoareTriple_unfold_body_fold_decompose
+    invariant arguments
     body pre post derivation)
     as (opened & opened_post & Hunfold & Hbody & Hfold).
-  destruct (resource_access_opening_complete arguments pre opened
+  destruct (access_opening_complete arguments pre opened
     Hunfold) as (opening_focus & Hopening).
-  destruct (resource_access_closing_complete arguments opened_post
+  destruct (access_closing_complete arguments opened_post
     post Hfold) as (closing_focus & Hclosing).
   exists opened, opened_post, opening_focus, closing_focus.
   repeat split; assumption.
@@ -2402,55 +2401,55 @@ Qed.
 (** Cut a binder-preserving prefix against an arbitrary outer consumer.
     The entailment is the logical fold boundary: it identifies the
     existentially closed result of [first] with the precondition expected by
-    [second].  [RavenResourceTriple_under_exists] moves the consumer below the
+    [second].  [RavenHoareTriple_under_exists] moves the consumer below the
     binder, so the complete sequence can be derived there and eliminated only
     once, around both statements. *)
-Lemma RTSeqPrenexConsumerCut {Γ F Δ t} node
+Lemma RTSeqPrenexConsumerCut {Γ F Δ t}
     (body middle : resource_prenex Γ F (t :: Δ))
     (consumer_pre consumer_post : resource_prenex Γ F Δ)
     (first second : stmt Γ) :
-  RavenResourceTriple body first middle ->
+  RavenHoareTriple body first middle ->
   resource_prenex_entails (ResourceExists t middle) consumer_pre ->
-  RavenResourceTriple consumer_pre second consumer_post ->
-  RavenResourceTriple (ResourceExists t body)
-    (TSeq node first second) consumer_post.
+  RavenHoareTriple consumer_pre second consumer_post ->
+  RavenHoareTriple (ResourceExists t body)
+    (TSeq first second) consumer_post.
 Proof.
   intros Hfirst Hcut Hsecond. apply RTPrenexElim.
   eapply RTSeq; [exact Hfirst |].
-  eapply RavenResourceTriple_under_exists; eassumption.
+  eapply RavenHoareTriple_under_exists; eassumption.
 Qed.
 
 (** Assemble a matched invariant access with an arbitrary continuation once
     the fold-side closure has been exposed.  The closed access postcondition
     need only entail the continuation precondition; telescope binders may
     already occur inside [opened_post] and [closed_post]. *)
-Lemma RTInvAccessThen {Γ F Δ} node invariant
+Lemma RTInvAccessThen {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (store : symbolic_store Γ F Δ) (frame : core_assertion F Δ) body
     (opened_post closed_post consumer_pre consumer_post :
       resource_prenex Γ F Δ) work :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState store
       (CAnd
         (instantiated_invariant invariant
           (symbolize_expr_list store arguments)) frame))
     body opened_post ->
-  resource_access_closure invariant Δ
+  access_closure invariant Δ
     (symbolize_expr_list store arguments)
     (instantiated_invariant invariant
       (symbolize_expr_list store arguments))
     opened_post closed_post ->
   resource_prenex_entails closed_post consumer_pre ->
-  RavenResourceTriple consumer_pre work consumer_post ->
-  RavenResourceTriple
+  RavenHoareTriple consumer_pre work consumer_post ->
+  RavenHoareTriple
     (RState store
       (CAnd
         (CInvariant invariant (symbolize_expr_list store arguments)) frame))
-    (TSeq node (TInvAccess invariant arguments body) work) consumer_post.
+    (TSeq (TInvAccess invariant arguments body) work) consumer_post.
 Proof.
   intros Hbody Hclosure Hcut Hwork. eapply RTSeq.
   - eapply RTInvAccess.
-    + apply resource_access_boundary_base. exact Hclosure.
+    + apply access_boundary_base. exact Hclosure.
     + exact Hbody.
   - eapply RTPrenexConsequence; [exact Hwork | exact Hcut |].
     apply resource_prenex_entails_refl.
@@ -2460,12 +2459,12 @@ Qed.
     store, but the fold arguments are already expressed in the body's exit
     context.  Ordinary fold consequence supplies both the strengthened fold
     precondition and the cut into the following statement. *)
-Lemma RTInvAccessThenFoldConsequence {Γ F Δ} node invariant
+Lemma RTInvAccessThenFoldConsequence {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (input_store fold_store : symbolic_store Γ F Δ)
     (frame pre_body : core_assertion F Δ) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (instantiated_invariant invariant
@@ -2478,13 +2477,13 @@ Lemma RTInvAccessThenFoldConsequence {Γ F Δ} node invariant
     (RState fold_store
       (CInvariant invariant
         (symbolize_expr_list input_store arguments))) consumer_pre ->
-  RavenResourceTriple consumer_pre work consumer_post ->
-  RavenResourceTriple
+  RavenHoareTriple consumer_pre work consumer_post ->
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (CInvariant invariant
           (symbolize_expr_list input_store arguments)) frame))
-    (TSeq node (TInvAccess invariant arguments body) work) consumer_post.
+    (TSeq (TInvAccess invariant arguments body) work) consumer_post.
 Proof.
   intros Hbody Hfold_pre Hcut Hwork.
   eapply RTInvAccessThen with
@@ -2493,7 +2492,7 @@ Proof.
       (CInvariant invariant (symbolize_expr_list input_store arguments)))
     (consumer_pre := consumer_pre).
   - exact Hbody.
-  - apply resource_access_closure_fold_consequence.
+  - apply access_closure_fold_consequence.
     + exact Hfold_pre.
     + apply resource_prenex_entails_refl.
   - exact Hcut.
@@ -2502,12 +2501,12 @@ Qed.
 
 (** Complete access-plus-continuation leaf when the fold is performed after a
     proof-only symbolic-store rewrite. *)
-Lemma RTInvAccessThenFoldStoreRewrite {Γ F Δ} node invariant
+Lemma RTInvAccessThenFoldStoreRewrite {Γ F Δ} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (input_store closing_store : symbolic_store Γ F Δ)
     (frame fold_pre : core_assertion F Δ) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (instantiated_invariant invariant
@@ -2521,20 +2520,20 @@ Lemma RTInvAccessThenFoldStoreRewrite {Γ F Δ} node invariant
       (CInvariant invariant
         (symbolize_expr_list closing_store arguments))) consumer_pre ->
   store_equal_under fold_pre Γ input_store closing_store ->
-  RavenResourceTriple consumer_pre work consumer_post ->
-  RavenResourceTriple
+  RavenHoareTriple consumer_pre work consumer_post ->
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (CInvariant invariant
           (symbolize_expr_list input_store arguments)) frame))
-    (TSeq node (TInvAccess invariant arguments body) work) consumer_post.
+    (TSeq (TInvAccess invariant arguments body) work) consumer_post.
 Proof.
   intros Hbody Hfold_pre Hfold_post Hstore Hwork.
   eapply RTInvAccessThen with
     (opened_post := RState input_store fold_pre)
     (closed_post := consumer_pre) (consumer_pre := consumer_pre).
   - exact Hbody.
-  - eapply resource_access_closure_fold_store_rewrite; eassumption.
+  - eapply access_closure_fold_store_rewrite; eassumption.
   - apply resource_prenex_entails_refl.
   - exact Hwork.
 Qed.
@@ -2545,7 +2544,7 @@ Lemma RTInvAccessFoldStoreRewrite {Γ F Δ} invariant
     (input_store closing_store : symbolic_store Γ F Δ)
     (frame fold_pre : core_assertion F Δ) body
     (post : resource_prenex Γ F Δ) :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (instantiated_invariant invariant
@@ -2559,7 +2558,7 @@ Lemma RTInvAccessFoldStoreRewrite {Γ F Δ} invariant
       (CInvariant invariant
         (symbolize_expr_list closing_store arguments))) post ->
   store_equal_under fold_pre Γ input_store closing_store ->
-  RavenResourceTriple
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (CInvariant invariant
@@ -2568,8 +2567,8 @@ Lemma RTInvAccessFoldStoreRewrite {Γ F Δ} invariant
 Proof.
   intros Hbody Hfold_pre Hfold_post Hstore.
   eapply RTInvAccess.
-  - apply resource_access_boundary_base.
-    eapply resource_access_closure_fold_store_rewrite; eassumption.
+  - apply access_boundary_base.
+    eapply access_closure_fold_store_rewrite; eassumption.
   - exact Hbody.
 Qed.
 
@@ -2579,49 +2578,49 @@ Qed.
     Applying this lemma once per outer [ResourceExists] moves an arbitrary
     telescope of result binders around the complete access-plus-continuation
     segment. *)
-Lemma RTInvAccessThenConsumerCut {Γ F Δ t} node invariant
+Lemma RTInvAccessThenConsumerCut {Γ F Δ t} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (store : symbolic_store Γ F (t :: Δ))
     (frame : core_assertion F (t :: Δ)) body
     (opened_post closed_post : resource_prenex Γ F (t :: Δ))
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState store
       (CAnd
         (instantiated_invariant invariant
           (symbolize_expr_list store arguments)) frame))
     body opened_post ->
-  resource_access_closure invariant (t :: Δ)
+  access_closure invariant (t :: Δ)
     (symbolize_expr_list store arguments)
     (instantiated_invariant invariant
       (symbolize_expr_list store arguments))
     opened_post closed_post ->
   resource_prenex_entails (ResourceExists t closed_post) consumer_pre ->
-  RavenResourceTriple consumer_pre work consumer_post ->
-  RavenResourceTriple
+  RavenHoareTriple consumer_pre work consumer_post ->
+  RavenHoareTriple
     (ResourceExists t
       (RState store
         (CAnd
           (CInvariant invariant (symbolize_expr_list store arguments))
           frame)))
-    (TSeq node (TInvAccess invariant arguments body) work) consumer_post.
+    (TSeq (TInvAccess invariant arguments body) work) consumer_post.
 Proof.
   intros Hbody Hclosure Hcut Hwork.
   eapply RTSeqPrenexConsumerCut; [| exact Hcut | exact Hwork].
   eapply RTInvAccess.
-  - apply resource_access_boundary_base. exact Hclosure.
+  - apply access_boundary_base. exact Hclosure.
   - exact Hbody.
 Qed.
 
 (** One telescope layer around the canonical consequence-wrapped fold.
     Repeated application handles any result telescope produced by the access
     body before the continuation resumes in the outer context. *)
-Lemma RTInvAccessThenFoldConsequenceConsumerCut {Γ F Δ t} node invariant
+Lemma RTInvAccessThenFoldConsequenceConsumerCut {Γ F Δ t} invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (input_store fold_store : symbolic_store Γ F (t :: Δ))
     (frame fold_pre : core_assertion F (t :: Δ)) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
-  RavenResourceTriple
+  RavenHoareTriple
     (RState input_store
       (CAnd
         (instantiated_invariant invariant
@@ -2635,14 +2634,14 @@ Lemma RTInvAccessThenFoldConsequenceConsumerCut {Γ F Δ t} node invariant
       (RState fold_store
         (CInvariant invariant
           (symbolize_expr_list input_store arguments)))) consumer_pre ->
-  RavenResourceTriple consumer_pre work consumer_post ->
-  RavenResourceTriple
+  RavenHoareTriple consumer_pre work consumer_post ->
+  RavenHoareTriple
     (ResourceExists t
       (RState input_store
         (CAnd
           (CInvariant invariant
             (symbolize_expr_list input_store arguments)) frame)))
-    (TSeq node (TInvAccess invariant arguments body) work) consumer_post.
+    (TSeq (TInvAccess invariant arguments body) work) consumer_post.
 Proof.
   intros Hbody Hfold_pre Hcut Hwork.
   eapply RTInvAccessThenConsumerCut with
@@ -2651,7 +2650,7 @@ Proof.
       (CInvariant invariant (symbolize_expr_list input_store arguments)))
     (consumer_pre := consumer_pre).
   - exact Hbody.
-  - apply resource_access_closure_fold_consequence.
+  - apply access_closure_fold_consequence.
     + exact Hfold_pre.
     + apply resource_prenex_entails_refl.
   - exact Hcut.
@@ -2661,14 +2660,14 @@ Qed.
 Corollary existential_consumer_normal_form_of_triple {Γ F Δ t statement}
     (body : resource_prenex Γ F (t :: Δ))
     (post : resource_prenex Γ F Δ) :
-  RavenResourceTriple (ResourceExists t body) statement post ->
+  RavenHoareTriple (ResourceExists t body) statement post ->
   existential_consumer_normal_form t body statement post.
 Proof.
   apply existential_consumer_normal_form_complete.
   apply resource_prenex_entails_refl.
 Qed.
 
-End ResourceRules.
+End RavenHoareRules.
 
 End Make.
 End TypedResourceHoare.

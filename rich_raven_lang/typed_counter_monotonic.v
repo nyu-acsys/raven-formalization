@@ -10,12 +10,11 @@ Import ListNotations.
 Open Scope list_scope.
 Open Scope string_scope.
 
-(** Typed replacement for the legacy proof in [counter_monotonic.v].
+(** The monotonic counter, verified end to end.
 
-    This file deliberately starts from Raven-like surface syntax.  The old
-    proof remains available as a regression oracle while the typed Hoare,
-    analysis, normalization, and procedure-validity witnesses below replace
-    it end to end. *)
+    This file deliberately starts from Raven-like surface syntax; the typed
+    Hoare derivations, analysis, normalization, and procedure-validity
+    witnesses below are all stated against the elaborated program. *)
 Module TypedCounterMonotonic.
 
 Module CounterValues <: TypedCore.RA_VALUE_CONFIG.
@@ -228,23 +227,17 @@ Definition cas_source : source_stmt :=
     }
   }}.
 
-(** The sole trusted hardware component used by this program.  Its node
-    range is the one assigned to the body of [incr_source]'s atomic block. *)
+(** The sole trusted hardware component used by this program: the body of
+    [incr_source]'s atomic block. *)
 Definition cas_typed_body :
     stmt [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] :=
   elaborated_body
-    (elaborate_stmt counter_environment incr_variables 113%positive cas_source)
+    (elaborate_stmt counter_environment incr_variables cas_source)
     ltac:(vm_compute; exact I).
 
-Lemma cas_typed_body_elaboration :
-  exists finish,
-    elaborate_stmt counter_environment incr_variables 113%positive cas_source =
-      inr (cas_typed_body, finish).
-Proof. eexists. reflexivity. Qed.
-
-(** An explicit atomic block is Raven's trust declaration.  The compatibility
-    instance below is needed only by the retained legacy calculus; the live
-    resource rule has no per-block trust premise. *)
+(** An explicit atomic block is Raven's trust declaration; the resource
+    rule for [TAtomic] has no separate per-block trust premise to
+    discharge. *)
 
 (** Superseded source shape, retained as documentation while the generic
     normalizer does not yet implement branch-local closes followed by
@@ -320,36 +313,18 @@ Definition make_source : source_stmt :=
     ret := x
   }}.
 
-Example read_source_elaborates :
-  exists body finish,
-    elaborate_stmt counter_environment read_variables 1%positive read_source =
-      inr (body, finish).
-Proof. do 2 eexists. reflexivity. Qed.
-
-Example incr_source_elaborates :
-  exists body finish,
-    elaborate_stmt counter_environment incr_variables 100%positive incr_source =
-      inr (body, finish).
-Proof. do 2 eexists. reflexivity. Qed.
-
-Example make_source_elaborates :
-  exists body finish,
-    elaborate_stmt counter_environment make_variables 200%positive make_source =
-      inr (body, finish).
-Proof. do 2 eexists. reflexivity. Qed.
-
 (** Intrinsic bodies are definitionally the successful elaboration results.
     Keeping the equations named lets later certificates rewrite back to the
     readable source without depending on reduction through the elaborator. *)
 Definition read_typed_body : stmt [TRef; TInt; TInt] :=
   elaborated_body
-    (elaborate_stmt counter_environment read_variables 1%positive read_source)
+    (elaborate_stmt counter_environment read_variables read_source)
     ltac:(vm_compute; exact I).
 
 Definition incr_typed_body :
     stmt [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] :=
   elaborated_body
-    (elaborate_stmt counter_environment incr_variables 100%positive incr_source)
+    (elaborate_stmt counter_environment incr_variables incr_source)
     ltac:(vm_compute; exact I).
 
 (** Cache the intrinsic syntax produced by elaboration.  Structural proofs
@@ -363,26 +338,11 @@ Proof. vm_compute. reflexivity. Qed.
 
 Definition make_typed_body : stmt [TRef; TRef] :=
   elaborated_body
-    (elaborate_stmt counter_environment make_variables 200%positive make_source)
+    (elaborate_stmt counter_environment make_variables make_source)
     ltac:(vm_compute; exact I).
 
-Lemma read_typed_body_elaboration :
-  exists finish,
-    elaborate_stmt counter_environment read_variables 1%positive read_source =
-      inr (read_typed_body, finish).
-Proof. eexists. reflexivity. Qed.
 
-Lemma incr_typed_body_elaboration :
-  exists finish,
-    elaborate_stmt counter_environment incr_variables 100%positive incr_source =
-      inr (incr_typed_body, finish).
-Proof. eexists. reflexivity. Qed.
 
-Lemma make_typed_body_elaboration :
-  exists finish,
-    elaborate_stmt counter_environment make_variables 200%positive make_source =
-      inr (make_typed_body, finish).
-Proof. eexists. reflexivity. Qed.
 
 Definition read_formals : TypedIR.pvar_list [TRef; TInt; TInt] [TRef] :=
   TypedIR.PVCons MHere TypedIR.PVNil.
@@ -438,44 +398,32 @@ Definition make_entry_store :=
 
 Lemma read_typed_procedure_wf : procedure_wf read_typed_procedure.
 Proof.
-  destruct read_typed_body_elaboration as [finish Helaboration].
-  eapply procedure_wf_of_elaboration with
-    (environment := counter_environment) (source := read_source)
-    (first := 1%positive) (finish := finish).
+  constructor.
   - simpl. repeat constructor; set_solver.
   - simpl. repeat constructor; tauto.
   - vm_compute. intros [H | []]. discriminate H.
   - simpl. repeat split; exact I.
   - simpl. repeat split; exact I.
-  - exact Helaboration.
 Qed.
 
 Lemma incr_typed_procedure_wf : procedure_wf incr_typed_procedure.
 Proof.
-  destruct incr_typed_body_elaboration as [finish Helaboration].
-  eapply procedure_wf_of_elaboration with
-    (environment := counter_environment) (source := incr_source)
-    (first := 100%positive) (finish := finish).
+  constructor.
   - simpl. repeat constructor; set_solver.
   - simpl. repeat constructor; tauto.
   - vm_compute. intros [H | []]. discriminate H.
   - simpl. repeat split; exact I.
   - simpl. repeat split; exact I.
-  - exact Helaboration.
 Qed.
 
 Lemma make_typed_procedure_wf : procedure_wf make_typed_procedure.
 Proof.
-  destruct make_typed_body_elaboration as [finish Helaboration].
-  eapply procedure_wf_of_elaboration with
-    (environment := counter_environment) (source := make_source)
-    (first := 200%positive) (finish := finish).
+  constructor.
   - simpl. repeat constructor; set_solver.
   - simpl. constructor.
   - simpl. tauto.
   - simpl. repeat split; exact I.
   - simpl. repeat split; exact I.
-  - exact Helaboration.
 Qed.
 
 Definition counter_typed_procedures : typed_procedure_environment.
@@ -498,7 +446,7 @@ Defined.
 
 Definition counter_mask : Runtime.Hoare.mask := {[counter_invariant]}.
 
-(** The resource-shaped contract environment.  The
+(** The contract environment for the counter module.  The
     procedure half is read straight off the typed table: with contracts
     core-shaped, [procedure_precondition] and [procedure_postcondition]
     already have exactly the types [RESOURCE_CONTRACT_ENV] asks for, so
@@ -687,34 +635,6 @@ Module CounterSoundness := Runtime.CertifiedRegionValidityCore
 
 Import Runtime.Hoare.
 
-(** The analyzer treats executable primitive leaves as atomic physical steps,
-    ghost updates as proof-only steps, and obtains procedure effects directly
-    from the declared contracts.  Trusted [TAtomic] blocks are handled by the
-    analyzer's structural atomic-block case, independently of this function. *)
-Definition counter_cost_model : Runtime.GenericRegions.Atomicity.cost_model :=
-  fun Γ statement =>
-    match statement with
-    (* [done] is analyzed structurally ([ViewDone]) and never charged; this
-       arm only keeps the match exhaustive. *)
-    | TDone _ => Runtime.GenericRegions.Atomicity.NoStep
-    | TAssert _ _ | TGhostUpdate _ _ _ _ _ =>
-        Runtime.GenericRegions.Atomicity.NoStep
-    | TCall _ procedure _ _ =>
-        Runtime.GenericRegions.Atomicity.ProcedureCallStep
-          (CounterResourceContracts.required_mask procedure)
-          (CounterResourceContracts.granted_mask procedure)
-    | TSpawn _ procedure _ =>
-        Runtime.GenericRegions.Atomicity.ProcedureSpawnStep
-          (CounterResourceContracts.required_mask procedure)
-    | _ => Runtime.GenericRegions.Atomicity.AtomicStep
-    end.
-
-Lemma counter_procedure_cost_model_sound :
-  CounterSoundness.Certified.procedure_cost_model_sound counter_cost_model.
-Proof.
-  intros Γ statement.
-  destruct statement; reflexivity.
-Qed.
 Lemma counter_formal_location_subst {F Δ}
     (location : expr F Δ TRef) :
   subst_formals_expr
@@ -980,7 +900,7 @@ Proof.
   fold (tval_eqb t left_value right_value) in Heq.
   apply tval_eqb_eq in Heq. subst right_value. congruence.
 Qed.
-Module RRules := CounterSoundness.CertifiedNormalization.ResourceRules.
+Module HoareRules := CounterSoundness.CertifiedNormalization.RavenHoareRules.
 Module RH := Runtime.Hoare.ResourceHoare.
 
 (** Binder zero is untouched by a lifted substitution.  Local renaming
@@ -994,9 +914,9 @@ Proof.
   rewrite view_member_here. reflexivity.
 Qed.
 
-Lemma counter_resource_invariant_instantiated {F Δ}
+Lemma counter_invariant_instantiated {F Δ}
     (location : expr F Δ TRef) :
-  RRules.Instances.instantiated_invariant counter_invariant
+  HoareRules.Instances.instantiated_invariant counter_invariant
       (ExprCons location ExprNil) =
     Resource.CExists TInt
       (Resource.CAnd
@@ -1005,7 +925,7 @@ Lemma counter_resource_invariant_instantiated {F Δ}
         (Resource.COwn counter_field (weaken_expr location)
           (ERef (RefBound MHere)))).
 Proof.
-  unfold RRules.Instances.instantiated_invariant,
+  unfold HoareRules.Instances.instantiated_invariant,
     CounterResourceContracts.invariant_body, counter_invariant_body_core,
     Resource.weaken_core_to.
   cbn [Resource.subst_bound_core Resource.subst_formals_core].
@@ -1027,33 +947,33 @@ Definition read_open_core : Resource.core_assertion [TRef] [TInt] :=
     (Resource.COwn counter_field (ERef (RefFormal MHere))
       (ERef (RefBound MHere))).
 
-Lemma counter_resource_invariant_at_formal :
-  RRules.Instances.instantiated_invariant (F := [TRef]) (Δ := [])
+Lemma counter_invariant_at_formal :
+  HoareRules.Instances.instantiated_invariant (F := [TRef]) (Δ := [])
       counter_invariant (ExprCons (ERef (RefFormal MHere)) ExprNil) =
     Resource.CExists TInt read_open_core.
 Proof.
-  rewrite (counter_resource_invariant_instantiated (ERef (RefFormal MHere))).
+  rewrite (counter_invariant_instantiated (ERef (RefFormal MHere))).
   reflexivity.
 Qed.
 
 (** Slice, direction one: unfolding the invariant produces a core
     existential, which [RTPostOpenCoreExists] moves into the telescope so
     that the rest of the body can be derived under the binder. *)
-Lemma read_resource_unfold_open :
-  RRules.RavenResourceTriple
+Lemma read_unfold_open :
+  HoareRules.RavenHoareTriple
     (Resource.RState read_entry_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TUnfold 2%positive counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState read_open_store read_open_core)).
 Proof.
   unfold read_open_store.
-  apply RRules.RTPostOpenCoreExists.
+  apply HoareRules.RTPostOpenCoreExists.
   unfold counter_token_core.
   change (CounterLogic.procedure_args read_procedure) with ([TRef] : context).
-  rewrite <- counter_resource_invariant_at_formal.
+  rewrite <- counter_invariant_at_formal.
   rewrite <- read_entry_arguments.
-  apply RRules.RTUnfoldInvariant.
+  apply HoareRules.RTUnfoldInvariant.
 Qed.
 
 (** Slice, direction two: everything after the unfold is derived *under*
@@ -1069,29 +989,29 @@ Definition read_field_core : Resource.core_assertion [TRef] [TInt; TInt] :=
     (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
       (EUnOp (URAOfInt h_ra) (ERef (RefBound (MThere MHere))))).
 
-Lemma read_resource_field_read :
-  RRules.RavenResourceTriple
+Lemma read_field_read :
+  HoareRules.RavenHoareTriple
     (Resource.RState read_open_store read_open_core)
-    (TFieldRead 4%positive counter_field (MThere MHere) (PEVar MHere))
+    (TFieldRead counter_field (MThere MHere) (PEVar MHere))
     (Resource.ResourceExists TInt
       (Resource.RState read_field_store read_field_core)).
 Proof.
   unfold read_open_core, read_field_core, read_field_store.
-  eapply RRules.RTConsequence with
+  eapply HoareRules.RTConsequence with
     (pre_body := Resource.CAnd
       (Resource.COwn counter_field (ERef (RefFormal MHere))
         (ERef (RefBound MHere)))
       (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
-  - eapply RRules.RTFrame.
+  - eapply HoareRules.RTFrame.
     change (CounterLogic.field_type counter_field) with TInt.
     rewrite <- read_open_location.
-    eapply RRules.RTFieldRead.
+    eapply HoareRules.RTFieldRead.
   - apply RH.CEntailsStep. apply RH.CESAndComm.
   - rewrite read_open_location. apply RH.resource_prenex_entails_refl.
 Qed.
-Lemma counter_resource_invariant_at_formal_two :
-  RRules.Instances.instantiated_invariant (F := [TRef]) (Δ := [TInt; TInt])
+Lemma counter_invariant_at_formal_two :
+  HoareRules.Instances.instantiated_invariant (F := [TRef]) (Δ := [TInt; TInt])
       counter_invariant (ExprCons (ERef (RefFormal MHere)) ExprNil) =
     Resource.CExists TInt
       (Resource.CAnd
@@ -1100,7 +1020,7 @@ Lemma counter_resource_invariant_at_formal_two :
         (Resource.COwn counter_field (ERef (RefFormal MHere))
           (ERef (RefBound MHere)))).
 Proof.
-  rewrite (counter_resource_invariant_instantiated (ERef (RefFormal MHere))).
+  rewrite (counter_invariant_instantiated (ERef (RefFormal MHere))).
   reflexivity.
 Qed.
 
@@ -1128,17 +1048,17 @@ Proof.
   reflexivity.
 Qed.
 
-Lemma read_resource_fold :
-  RRules.RavenResourceTriple
+Lemma read_fold :
+  HoareRules.RavenHoareTriple
     (Resource.RState read_field_store read_field_core)
-    (TFold 6%positive counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.RState read_field_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
-  eapply RRules.RTConsequence; [eapply RRules.RTFoldInvariant | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTFoldInvariant | | ].
   - cbn [Runtime.IR.symbolize_expr_list]. rewrite read_field_location.
     try change (CounterLogic.procedure_args read_procedure) with ([TRef] : context).
-    rewrite counter_resource_invariant_at_formal_two.
+    rewrite counter_invariant_at_formal_two.
     eapply RH.CEntailsTrans;
       [| apply (RH.CEntailsExistsIntro TInt _
            (@ERef [TRef] [TInt; TInt] TInt (RefBound (MThere MHere))))].
@@ -1151,44 +1071,44 @@ Proof.
     unfold counter_token_core. apply RH.resource_prenex_entails_refl.
 Qed.
 
-Lemma read_resource_assign :
-  RRules.RavenResourceTriple
+Lemma read_assign :
+  HoareRules.RavenHoareTriple
     (Resource.RState read_field_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign 7%positive (MThere (MThere MHere)) (PEVar (MThere MHere)))
+    (TAssign (MThere (MThere MHere)) (PEVar (MThere MHere)))
     (Resource.ResourceExists TInt
       (Resource.RState read_exit_store Resource.CTrue)).
 Proof.
   unfold read_exit_store.
-  eapply RRules.RTConsequence; [eapply RRules.RTAssign | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTAssign | | ].
   - apply RH.CEntailsStep. apply RH.CESTrueIntro.
   - apply RH.RPEMono. apply RH.RPEBody.
     split; [reflexivity | apply RH.CEntailsStep; apply RH.CESTrueIntro].
 Qed.
 
-Lemma read_resource_rest :
-  RRules.RavenResourceTriple
+Lemma read_rest :
+  HoareRules.RavenHoareTriple
     (Resource.RState read_open_store read_open_core)
-    (TSeq 3%positive
-      (TFieldRead 4%positive counter_field (MThere MHere) (PEVar MHere))
-      (TSeq 5%positive
-        (TFold 6%positive counter_invariant (PECons (PEVar MHere) PENil))
-        (TAssign 7%positive (MThere (MThere MHere))
+    (TSeq
+      (TFieldRead counter_field (MThere MHere) (PEVar MHere))
+      (TSeq
+        (TFold counter_invariant (PECons (PEVar MHere) PENil))
+        (TAssign (MThere (MThere MHere))
           (PEVar (MThere MHere)))))
     (Resource.ResourceExists TInt
       (Resource.ResourceExists TInt
         (Resource.RState read_exit_store Resource.CTrue))).
 Proof.
-  eapply RRules.RTSeq.
-  - exact read_resource_field_read.
-  - apply RRules.RTPrenexPreserve.
-    eapply RRules.RTSeq.
-    + exact read_resource_fold.
-    + exact read_resource_assign.
+  eapply HoareRules.RTSeq.
+  - exact read_field_read.
+  - apply HoareRules.RTPrenexPreserve.
+    eapply HoareRules.RTSeq.
+    + exact read_fold.
+    + exact read_assign.
 Qed.
 
 Lemma read_resource_body_derivation :
-  RRules.RavenResourceTriple
+  HoareRules.RavenHoareTriple
     (Runtime.Hoare.procedure_body_pre read_typed_procedure)
     read_typed_body
     (Runtime.Hoare.procedure_body_post read_typed_procedure read_exit_store
@@ -1200,9 +1120,9 @@ Proof.
     procedure_postcondition Runtime.Hoare.existentially_close_prenex
     Runtime.Hoare.existentially_close_prenex_at
     Resource.subst_bound_core].
-  eapply RRules.RTSeq; [exact read_resource_unfold_open |].
-  apply RRules.RTPrenexPreserve.
-  exact read_resource_rest.
+  eapply HoareRules.RTSeq; [exact read_unfold_open |].
+  apply HoareRules.RTPrenexPreserve.
+  exact read_rest.
 Qed.
 
 Module CounterAtomicity := Runtime.GenericRegions.Atomicity.
@@ -1235,7 +1155,7 @@ Qed.
 Definition make_exit_store :
     symbolic_store [TRef; TRef] [] [TRef; TRef] :=
   Runtime.IR.update_store_with_bound make_alloc_store (MThere MHere).
-Lemma make_resource_ghost_initializers_valid :
+Lemma make_ghost_initializers_valid :
   RH.core_entails (@Resource.CTrue [] [])
     (RH.ghost_initializers_valid_core make_entry_store
       (ghost_field_initializers make_initializers)).
@@ -1252,16 +1172,16 @@ Proof.
   eexists. reflexivity.
 Qed.
 
-Lemma make_resource_alloc :
-  RRules.RavenResourceTriple
+Lemma make_alloc :
+  HoareRules.RavenHoareTriple
     (Resource.RState make_entry_store Resource.CTrue)
-    (TAlloc 201%positive MHere make_initializers)
+    (TAlloc MHere make_initializers)
     (Resource.ResourceExists TRef
       (Resource.RState make_alloc_store
         (RH.allocated_fields_core make_entry_store make_initializers))).
 Proof.
   unfold make_alloc_store.
-  eapply RRules.RTConsequence; [eapply RRules.RTAlloc | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTAlloc | | ].
   { unfold make_initializers, counter_field, ghost_field. cbn.
     repeat first [constructor | apply NoDup_nil | set_solver]. }
   { unfold make_initializers, ghost_field_initializers. cbn.
@@ -1269,17 +1189,17 @@ Proof.
   { unfold ghost_initializers_require_physical, make_initializers,
       ghost_field_initializers, physical_field_initializers.
     cbn. intros _. discriminate. }
-  { exact make_resource_ghost_initializers_valid. }
+  { exact make_ghost_initializers_valid. }
   apply RH.resource_prenex_entails_refl.
 Qed.
 
-Lemma make_resource_allocated_to_invariant :
+Lemma make_allocated_to_invariant :
   RH.core_entails
     (RH.allocated_fields_core make_entry_store make_initializers)
-    (RRules.Instances.instantiated_invariant (F := []) (Δ := [TRef])
+    (HoareRules.Instances.instantiated_invariant (F := []) (Δ := [TRef])
       counter_invariant (ExprCons (ERef (RefBound MHere)) ExprNil)).
 Proof.
-  rewrite (counter_resource_invariant_instantiated (ERef (RefBound MHere))).
+  rewrite (counter_invariant_instantiated (ERef (RefBound MHere))).
   unfold RH.allocated_fields_core, RH.allocated_physical_fields_core,
     RH.allocated_ghost_fields_core, physical_field_initializers,
     ghost_field_initializers, make_initializers.
@@ -1298,28 +1218,28 @@ Proof.
   apply RH.CEntailsRefl.
 Qed.
 
-Lemma make_resource_fold_assign :
-  RRules.RavenResourceTriple
+Lemma make_fold_assign :
+  HoareRules.RavenHoareTriple
     (Resource.RState make_alloc_store
       (RH.allocated_fields_core make_entry_store make_initializers))
-    (TSeq 202%positive
-      (TFold 203%positive counter_invariant (PECons (PEVar MHere) PENil))
-      (TAssign 204%positive (MThere MHere) (PEVar MHere)))
+    (TSeq
+      (TFold counter_invariant (PECons (PEVar MHere) PENil))
+      (TAssign (MThere MHere) (PEVar MHere)))
     (Resource.ResourceExists TRef
       (Resource.RState make_exit_store
         (counter_token_core (ERef (RefBound MHere))))).
 Proof.
-  eapply RRules.RTSeq with
+  eapply HoareRules.RTSeq with
     (middle := Resource.RState make_alloc_store
       (counter_token_core (ERef (RefBound MHere)))).
-  - eapply RRules.RTConsequence; [eapply RRules.RTFoldInvariant | | ].
+  - eapply HoareRules.RTConsequence; [eapply HoareRules.RTFoldInvariant | | ].
     + cbn [Runtime.IR.symbolize_expr_list]. rewrite make_alloc_location.
-      exact make_resource_allocated_to_invariant.
+      exact make_allocated_to_invariant.
     + cbn [Runtime.IR.symbolize_expr_list]. rewrite make_alloc_location.
       unfold counter_token_core. apply RH.resource_prenex_entails_refl.
   - unfold make_exit_store, counter_token_core.
-    eapply RRules.RTConsequence;
-      [eapply RRules.RTFrame; eapply RRules.RTAssign | | ].
+    eapply HoareRules.RTConsequence;
+      [eapply HoareRules.RTFrame; eapply HoareRules.RTAssign | | ].
     + eapply RH.CEntailsTrans;
         [apply RH.CEntailsStep; apply RH.CESAndTrueIntro |].
       apply RH.CEntailsStep. apply RH.CESAndComm.
@@ -1344,7 +1264,7 @@ Proof.
 Qed.
 
 Lemma make_resource_body_derivation :
-  RRules.RavenResourceTriple
+  HoareRules.RavenHoareTriple
     (Runtime.Hoare.procedure_body_pre make_typed_procedure)
     make_typed_body
     (Runtime.Hoare.procedure_body_post make_typed_procedure make_exit_store
@@ -1359,9 +1279,9 @@ Proof.
   cbn [IR.Resource.subst_bound_core Assertions.subst_bound_expr_list
     Assertions.subst_bound_expr Assertions.subst_bound_ref].
   rewrite Assertions.singleton_bound_subst_here.
-  eapply RRules.RTSeq; [exact make_resource_alloc |].
-  apply RRules.RTPrenexPreserve.
-  exact make_resource_fold_assign.
+  eapply HoareRules.RTSeq; [exact make_alloc |].
+  apply HoareRules.RTPrenexPreserve.
+  exact make_fold_assign.
 Qed.
 Definition incr_open1_store :
     symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
@@ -1474,56 +1394,56 @@ Proof.
   rewrite lookup_update_store_other by (cbn; congruence).
   f_equal. apply weaken_ref_formal_eq, Hlookup.
 Qed.
-Lemma incr_resource_unfold1_open (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_unfold1_open :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_entry_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TUnfold node counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState incr_open1_store read_open_core)).
 Proof.
   unfold incr_open1_store.
-  apply RRules.RTPostOpenCoreExists.
+  apply HoareRules.RTPostOpenCoreExists.
   unfold counter_token_core.
   try change (CounterLogic.procedure_args incr_procedure) with ([TRef] : context).
-  rewrite <- counter_resource_invariant_at_formal.
+  rewrite <- counter_invariant_at_formal.
   rewrite <- incr_entry_arguments.
-  apply RRules.RTUnfoldInvariant.
+  apply HoareRules.RTUnfoldInvariant.
 Qed.
 
-Lemma incr_resource_field1_read (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_field1_read :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_open1_store read_open_core)
-    (TFieldRead node counter_field (MThere MHere) (PEVar MHere))
+    (TFieldRead counter_field (MThere MHere) (PEVar MHere))
     (Resource.ResourceExists TInt
       (Resource.RState incr_read1_store read_field_core)).
 Proof.
   unfold read_open_core, read_field_core, incr_read1_store.
-  eapply RRules.RTConsequence with
+  eapply HoareRules.RTConsequence with
     (pre_body := Resource.CAnd
       (Resource.COwn counter_field (ERef (RefFormal MHere))
         (ERef (RefBound MHere)))
       (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
-  - eapply RRules.RTFrame.
+  - eapply HoareRules.RTFrame.
     change (CounterLogic.field_type counter_field) with TInt.
     rewrite <- incr_open1_location.
-    eapply RRules.RTFieldRead.
+    eapply HoareRules.RTFieldRead.
   - apply RH.CEntailsStep. apply RH.CESAndComm.
   - rewrite incr_open1_location. apply RH.resource_prenex_entails_refl.
 Qed.
 
-Lemma incr_resource_fold1 (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_fold1 :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_read1_store read_field_core)
-    (TFold node counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.RState incr_read1_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
-  eapply RRules.RTConsequence; [eapply RRules.RTFoldInvariant | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTFoldInvariant | | ].
   - cbn [Runtime.IR.symbolize_expr_list]. rewrite incr_read1_location.
     try change (CounterLogic.procedure_args incr_procedure) with ([TRef] : context).
-    rewrite counter_resource_invariant_at_formal_two.
+    rewrite counter_invariant_at_formal_two.
     eapply RH.CEntailsTrans;
       [| apply (RH.CEntailsExistsIntro TInt _
            (@ERef [TRef] [TInt; TInt] TInt (RefBound (MThere MHere))))].
@@ -1554,11 +1474,11 @@ Definition incr_new_equality_core :
     (weaken_expr (Runtime.IR.symbolize_expr incr_read1_store
       (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z))))).
 
-Lemma incr_resource_assign_new (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_assign_new :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_read1_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign node (MThere (MThere MHere))
+    (TAssign (MThere (MThere MHere))
       (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z))))
     (Resource.ResourceExists TInt
       (Resource.RState incr_new_store
@@ -1566,8 +1486,8 @@ Lemma incr_resource_assign_new (node : positive) :
           (counter_token_core (ERef (RefFormal MHere)))))).
 Proof.
   unfold incr_new_store, incr_new_equality_core, counter_token_core.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTFrame; eapply RRules.RTAssign | | ].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTFrame; eapply HoareRules.RTAssign | | ].
   - eapply RH.CEntailsTrans;
       [apply RH.CEntailsStep; apply RH.CESAndTrueIntro |].
     apply RH.CEntailsStep. apply RH.CESAndComm.
@@ -1581,20 +1501,20 @@ Qed.
 
 (** *** Step 3: the second unfold, under the carried equality *)
 
-Lemma incr_resource_unfold2 (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_unfold2 :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_new_store
       (Resource.CAnd (Resource.CExpr incr_new_equality_core)
         (counter_token_core (ERef (RefFormal MHere)))))
-    (TUnfold node counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState incr_open2_store
         (Resource.CAnd (@counter_open_core [TInt; TInt; TInt])
           (Resource.CExpr (weaken_expr incr_new_equality_core))))).
 Proof.
   unfold incr_open2_store.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTFrame; eapply RRules.RTUnfoldInvariant | | ].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTFrame; eapply HoareRules.RTUnfoldInvariant | | ].
   - cbn [Runtime.IR.symbolize_expr_list]. rewrite incr_new_location.
     unfold counter_token_core.
     apply RH.CEntailsStep. apply RH.CESAndComm.
@@ -1605,7 +1525,7 @@ Proof.
       Runtime.Hoare.ResourceHoare.Resource.resource_stack].
     cbn [Runtime.IR.symbolize_expr_list]. rewrite incr_new_location.
     try change (CounterLogic.procedure_args incr_procedure) with ([TRef] : context).
-    rewrite (counter_resource_invariant_instantiated (ERef (RefFormal MHere))).
+    rewrite (counter_invariant_instantiated (ERef (RefFormal MHere))).
     unfold counter_open_core.
     exact (RH.CEntailsExistsAndRight TInt _
       (Resource.CExpr incr_new_equality_core)).
@@ -1661,41 +1581,41 @@ Definition incr_cas_join_prenex :
           (Resource.weaken_core incr_cas_success_core)
           (Resource.weaken_core incr_cas_failure_core)))).
 
-Lemma incr_resource_cas_read (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_cas_read :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    (TFieldRead node counter_field (MThere (MThere (MThere MHere)))
+    (TFieldRead counter_field (MThere (MThere (MThere MHere)))
       (PEVar MHere))
     (Resource.ResourceExists TInt
       (Resource.RState incr_cas_read_store incr_cas_read_core)).
 Proof.
   unfold counter_open_core, incr_cas_read_core, incr_cas_read_store,
     incr_cas_old_core.
-  eapply RRules.RTConsequence with
+  eapply HoareRules.RTConsequence with
     (pre_body := Resource.CAnd
       (Resource.COwn counter_field (ERef (RefFormal MHere))
         (ERef (RefBound MHere)))
       (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
-  - eapply RRules.RTFrame.
+  - eapply HoareRules.RTFrame.
     change (CounterLogic.field_type counter_field) with TInt.
     rewrite <- incr_open2_location.
-    eapply RRules.RTFieldRead.
+    eapply HoareRules.RTFieldRead.
   - apply RH.CEntailsStep. apply RH.CESAndComm.
   - rewrite incr_open2_location. apply RH.resource_prenex_entails_refl.
 Qed.
 
-Lemma incr_resource_cas_success_branch :
-  RRules.RavenResourceTriple
+Lemma incr_cas_success_branch :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_cas_read_store
       (Resource.CAnd incr_cas_read_core
         (Resource.CExpr (Runtime.IR.symbolize_expr incr_cas_read_store
           (PEBinOp (BEq TInt) (PEVar (MThere (MThere (MThere MHere))))
             (PEVar (MThere MHere)))))))
-    (TSeq 116%positive
-      (TFieldWrite 117%positive counter_field (PEVar MHere)
+    (TSeq
+      (TFieldWrite counter_field (PEVar MHere)
         (PEVar (MThere (MThere MHere))))
-      (TAssign 118%positive (MThere (MThere (MThere (MThere MHere))))
+      (TAssign (MThere (MThere (MThere (MThere MHere))))
         (PEVal (VBool true))))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1703,7 +1623,7 @@ Lemma incr_resource_cas_success_branch :
           (Resource.weaken_core incr_cas_success_core)
           (Resource.weaken_core incr_cas_failure_core)))).
 Proof.
-  eapply RRules.RTConsequence with
+  eapply HoareRules.RTConsequence with
     (pre_body := Resource.CAnd
       (Resource.COwn counter_field (ERef (RefFormal MHere)) incr_cas_old_core)
       (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
@@ -1750,23 +1670,23 @@ Proof.
        injection Hvalue as Hvalue.
        cbn [RH.Core.interp_ref] in Hvalue |- *.
        rewrite Hvalue. reflexivity. }
-  eapply RRules.RTSeq with
+  eapply HoareRules.RTSeq with
     (middle := Resource.RState incr_cas_read_store
       (Resource.CAnd
         (Resource.COwn counter_field (ERef (RefFormal MHere))
           incr_cas_new_core)
         (Resource.CGhostOwn ghost_field (ERef (RefFormal MHere))
           (EUnOp (URAOfInt h_ra) incr_cas_expected_core)))).
-  - eapply RRules.RTConsequence;
-      [eapply RRules.RTFrame; eapply RRules.RTFieldWrite | | ].
+  - eapply HoareRules.RTConsequence;
+      [eapply HoareRules.RTFrame; eapply HoareRules.RTFieldWrite | | ].
     + rewrite <- incr_cas_read_location. apply RH.CEntailsRefl.
     + unfold incr_cas_new_core.
       cbn [Runtime.Hoare.ResourceHoare.Resource.prenex_and].
       rewrite <- incr_cas_read_location.
       apply RH.resource_prenex_entails_refl.
   - unfold incr_res_store.
-    eapply RRules.RTConsequence;
-      [eapply RRules.RTFrame; eapply RRules.RTAssign | | ].
+    eapply HoareRules.RTConsequence;
+      [eapply HoareRules.RTFrame; eapply HoareRules.RTAssign | | ].
     + eapply RH.CEntailsTrans;
         [apply RH.CEntailsStep; apply RH.CESAndTrueIntro |].
       apply RH.CEntailsStep. apply RH.CESAndComm.
@@ -1790,15 +1710,15 @@ Proof.
         injection Hvalue as Hvalue. rewrite Hvalue. reflexivity.
 Qed.
 
-Lemma incr_resource_cas_failure_branch :
-  RRules.RavenResourceTriple
+Lemma incr_cas_failure_branch :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_cas_read_store
       (Resource.CAnd incr_cas_read_core
         (Resource.CExpr (EUnOp UNot
           (Runtime.IR.symbolize_expr incr_cas_read_store
             (PEBinOp (BEq TInt) (PEVar (MThere (MThere (MThere MHere))))
               (PEVar (MThere MHere))))))))
-    (TAssign 119%positive (MThere (MThere (MThere (MThere MHere))))
+    (TAssign (MThere (MThere (MThere (MThere MHere))))
       (PEVal (VBool false)))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1807,8 +1727,8 @@ Lemma incr_resource_cas_failure_branch :
           (Resource.weaken_core incr_cas_failure_core)))).
 Proof.
   unfold incr_res_store.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTFrame; eapply RRules.RTAssign | | ].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTFrame; eapply HoareRules.RTAssign | | ].
   - unfold incr_cas_read_core, incr_cas_failure_core.
     eapply RH.CEntailsTrans;
       [apply RH.CEntailsStep; apply RH.CESAndElimL |].
@@ -1838,32 +1758,32 @@ Proof.
     injection Hvalue as Hvalue. rewrite Hvalue. reflexivity.
 Qed.
 
-Lemma incr_resource_cas_body :
-  RRules.RavenResourceTriple
+Lemma incr_cas_body :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
     cas_typed_body incr_cas_join_prenex.
 Proof.
   unfold cas_typed_body, incr_cas_join_prenex.
   cbn [elaborate_stmt].
-  eapply RRules.RTSeq; [apply incr_resource_cas_read |].
-  apply RRules.RTPrenexPreserve.
-  eapply RRules.RTIf;
-    [apply incr_resource_cas_success_branch
-    | apply incr_resource_cas_failure_branch].
+  eapply HoareRules.RTSeq; [apply incr_cas_read |].
+  apply HoareRules.RTPrenexPreserve.
+  eapply HoareRules.RTIf;
+    [apply incr_cas_success_branch
+    | apply incr_cas_failure_branch].
 Qed.
 
-Lemma incr_resource_atomic_cas (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_atomic_cas :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    (TAtomic node cas_typed_body) incr_cas_join_prenex.
+    (TAtomic cas_typed_body) incr_cas_join_prenex.
 Proof.
-  apply RRules.RTAtomicBlock. exact incr_resource_cas_body.
+  apply HoareRules.RTAtomicBlock. exact incr_cas_body.
 Qed.
 
-(** *** Step 5 groundwork: the ghost update after a successful CAS
+(** *** The ghost update after a successful CAS
 
-    Both facts are re-derived here rather than taken from the legacy
-    [incr_fpu_*] cluster, which the analyzed path retires. *)
+    The ghost values before and after the increment, and the
+    frame-preserving update between them. *)
 
 Definition incr_fpu_old_core :
     expr [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] (TRA h_ra) :=
@@ -1877,7 +1797,7 @@ Definition incr_fpu_new_core :
       (Runtime.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)))
       (EVal (VInt 1%Z))).
 
-Lemma incr_resource_fpu_allowed :
+Lemma incr_fpu_allowed :
   RH.core_entails
     (@Resource.CTrue [TRef] [TBool; TInt; TInt; TInt; TInt; TInt])
     (Resource.CFpuAllowed (TRA h_ra) incr_fpu_old_core incr_fpu_new_core).
@@ -1898,7 +1818,7 @@ Proof.
 Qed.
 
 (** The result assignment does not disturb [v1]'s slot. *)
-Lemma incr_resource_v1_weaken :
+Lemma incr_v1_weaken :
   weaken_expr
       (Runtime.IR.symbolize_expr incr_cas_read_store (PEVar (MThere MHere))) =
     Runtime.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)).
@@ -1990,19 +1910,19 @@ Definition incr_cas_result_core :
       (Resource.weaken_core incr_cas_failure_core))
     incr_threaded_equality_core.
 
-Lemma incr_resource_fpu_branch (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_fpu_branch :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (Resource.CAnd incr_cas_result_core
         (Resource.CExpr (ERef (RefBound MHere)))))
-    (TGhostUpdate node ghost_field (PEVar MHere)
+    (TGhostUpdate ghost_field (PEVar MHere)
       (PEUnOp (URAOfInt h_ra) (PEVar (MThere MHere)))
       (PEUnOp (URAOfInt h_ra)
         (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z)))))
     (Resource.RState incr_res_store incr_post_cas_core).
 Proof.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTFrame; eapply RRules.RTGhostUpdate | | ].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTFrame; eapply HoareRules.RTGhostUpdate | | ].
   (** [CESIteTrue] selects the success shape while the threaded equality
       rides along; the ghost is then put in the form [RTGhostUpdate]
       demands and the [CFpuAllowed] conjunct is introduced from [CPure
@@ -2030,13 +1950,13 @@ Proof.
          Resource.Assertions.weaken_bound_renaming incr_cas_expected_core)
          with (weaken_expr (u := TBool) incr_cas_expected_core).
        unfold incr_cas_expected_core.
-       rewrite incr_resource_v1_weaken.
+       rewrite incr_v1_weaken.
        rewrite <- incr_res_location.
        change (CounterLogic.field_type ghost_field) with (TRA h_ra).
        eapply RH.CEntailsTrans;
          [apply RH.CEntailsStep; apply RH.CESAndTrueIntro |].
        apply RH.CEntailsAndMono;
-         [apply RH.CEntailsRefl | apply incr_resource_fpu_allowed]. }
+         [apply RH.CEntailsRefl | apply incr_fpu_allowed]. }
   (** The advanced chunk is [v1 + 1]; the threaded equality identifies it
       with [new_v1], which is the witness the invariant body is closed
       at. *)
@@ -2095,16 +2015,16 @@ Proof.
   rewrite <- Hvalue. reflexivity.
 Qed.
 
-Lemma incr_resource_skip_branch (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_done_branch :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (Resource.CAnd incr_cas_result_core
         (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
-    (TDone node)
+    TDone
     (Resource.RState incr_res_store incr_post_cas_core).
 Proof.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTDone | | apply RH.resource_prenex_entails_refl].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTDone | | apply RH.resource_prenex_entails_refl].
   unfold incr_cas_result_core, incr_post_cas_core.
   eapply RH.CEntailsTrans; [apply RH.CEntailsStep; apply RH.CESAndAssocR |].
   eapply RH.CEntailsTrans;
@@ -2129,17 +2049,17 @@ Qed.
 
 (** *** Steps 6-8: the second fold, the retry conditional, the return *)
 
-Lemma incr_resource_fold2 (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_fold2 :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store incr_post_cas_core)
-    (TFold node counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar MHere) PENil))
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
-  eapply RRules.RTConsequence; [eapply RRules.RTFoldInvariant | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTFoldInvariant | | ].
   - cbn [Runtime.IR.symbolize_expr_list]. rewrite incr_res_location.
     try change (CounterLogic.procedure_args incr_procedure) with ([TRef] : context).
-    rewrite (counter_resource_invariant_instantiated (ERef (RefFormal MHere))).
+    rewrite (counter_invariant_instantiated (ERef (RefFormal MHere))).
     unfold incr_post_cas_core, counter_open_core.
     cbn [Resource.Assertions.weaken_expr Resource.Assertions.weaken_ref
       Resource.Assertions.rename_bound_expr
@@ -2151,11 +2071,11 @@ Qed.
 
 Lemma counter_resource_instantiated_pre {Delta : context}
     (location : expr [TRef] Delta TRef) :
-  RRules.Instances.instantiated_pre incr_procedure
+  HoareRules.Instances.instantiated_pre incr_procedure
       (ExprCons location ExprNil) =
     Resource.CInvariant counter_invariant (ExprCons location ExprNil).
 Proof.
-  unfold RRules.Instances.instantiated_pre.
+  unfold HoareRules.Instances.instantiated_pre.
   assert (Hpre : CounterResourceContracts.contract_pre incr_procedure
     = counter_token_core (ERef (RefFormal MHere))) by reflexivity.
   rewrite Hpre.
@@ -2177,16 +2097,16 @@ Proof.
   rewrite Hhead. reflexivity.
 Qed.
 
-Lemma incr_resource_retry_call (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_retry_call :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
         (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
-    (TCall node incr_procedure (PECons (PEVar MHere) PENil)
+    (TCall incr_procedure (PECons (PEVar MHere) PENil)
       (@CTDiscard _ TUnit))
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
-  eapply RRules.RTConsequence; [eapply RRules.RTCallDiscard | | ].
+  eapply HoareRules.RTConsequence; [eapply HoareRules.RTCallDiscard | | ].
   3: { eapply RH.RPETrans;
          [| apply (RH.RPEVacuous TUnit
               (Resource.RState incr_res_store Resource.CTrue))].
@@ -2205,38 +2125,38 @@ Proof.
   unfold CounterResourceContracts.procedure_verified. cbn. discriminate.
 Qed.
 
-Lemma incr_resource_retry_skip (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_retry_done :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
         (Resource.CExpr (EUnOp UNot
           (EUnOp UNot (ERef (RefBound MHere)))))))
-    (TDone node)
+    TDone
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTDone | apply RH.CEntailsRefl |].
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTDone | apply RH.CEntailsRefl |].
   apply RH.RPEBody. split;
     [reflexivity | apply RH.CEntailsStep; apply RH.CESTrueIntro].
 Qed.
 
-Definition incr_resource_exit_store :
+Definition incr_exit_store :
     symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] [TRef]
       [TUnit; TBool; TInt; TInt; TInt; TInt; TInt] :=
   Runtime.IR.update_store_with_bound incr_res_store
     (MThere (MThere (MThere (MThere (MThere (MThere MHere)))))).
 
-Lemma incr_resource_return (node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_return :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store Resource.CTrue)
-    (TAssign node (MThere (MThere (MThere (MThere (MThere (MThere MHere))))))
+    (TAssign (MThere (MThere (MThere (MThere (MThere (MThere MHere))))))
       (PEVal VUnit))
     (Resource.ResourceExists TUnit
-      (Resource.RState incr_resource_exit_store Resource.CTrue)).
+      (Resource.RState incr_exit_store Resource.CTrue)).
 Proof.
-  unfold incr_resource_exit_store.
-  eapply RRules.RTConsequence;
-    [eapply RRules.RTAssign | apply RH.CEntailsRefl |].
+  unfold incr_exit_store.
+  eapply HoareRules.RTConsequence;
+    [eapply HoareRules.RTAssign | apply RH.CEntailsRefl |].
   apply RH.RPEMono. apply RH.RPEBody. split;
     [reflexivity | apply RH.CEntailsStep; apply RH.CESTrueIntro].
 Qed.
@@ -2249,37 +2169,37 @@ Qed.
     per binder the block introduces, which is exactly
     [incr_threaded_equality_core]. *)
 
-Lemma incr_resource_retry_conditional (node call_node done_node : positive) :
-  RRules.RavenResourceTriple
+Lemma incr_retry_conditional :
+  HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TIf node (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere))))))
-      (TCall call_node incr_procedure (PECons (PEVar MHere) PENil)
+    (TIf (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere))))))
+      (TCall incr_procedure (PECons (PEVar MHere) PENil)
         (@CTDiscard _ TUnit))
-      (TDone done_node))
+      TDone)
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
-  eapply RRules.RTIf.
+  eapply HoareRules.RTIf.
   - change (Runtime.IR.symbolize_expr incr_res_store
       (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere)))))))
       with (EUnOp UNot (Runtime.IR.symbolize_expr incr_res_store
         (PEVar (MThere (MThere (MThere (MThere MHere))))))).
     rewrite incr_res_slot.
-    apply incr_resource_retry_call.
+    apply incr_retry_call.
   - change (Runtime.IR.symbolize_expr incr_res_store
       (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere)))))))
       with (EUnOp UNot (Runtime.IR.symbolize_expr incr_res_store
         (PEVar (MThere (MThere (MThere (MThere MHere))))))).
     rewrite incr_res_slot.
-    apply incr_resource_retry_skip.
+    apply incr_retry_done.
 Qed.
 
 Lemma incr_resource_body_derivation :
-  RRules.RavenResourceTriple
+  HoareRules.RavenHoareTriple
     (Runtime.Hoare.procedure_body_pre incr_typed_procedure)
     incr_typed_body
     (Runtime.Hoare.procedure_body_post incr_typed_procedure
-      incr_resource_exit_store (RefBound MHere)).
+      incr_exit_store (RefBound MHere)).
 Proof.
   unfold Runtime.Hoare.procedure_body_pre, Runtime.Hoare.procedure_body_post,
     incr_typed_procedure.
@@ -2289,35 +2209,35 @@ Proof.
   cbn [IR.Resource.subst_bound_core].
   rewrite incr_typed_body_normalized_eq.
   unfold incr_typed_body_normalized.
-  eapply RRules.RTSeq; [apply incr_resource_unfold1_open |].
-  apply RRules.RTPrenexPreserve.
-  eapply RRules.RTSeq; [apply incr_resource_field1_read |].
-  apply RRules.RTPrenexPreserve.
-  eapply RRules.RTSeq; [apply incr_resource_fold1 |].
-  eapply RRules.RTSeq; [apply incr_resource_assign_new |].
-  apply RRules.RTPrenexPreserve.
-  eapply RRules.RTSeq; [apply incr_resource_unfold2 |].
-  apply RRules.RTPrenexPreserve.
-  eapply RRules.RTSeq.
-  - eapply RRules.RTSeq.
-    + eapply RRules.RTFrame. apply incr_resource_atomic_cas.
-    + apply RRules.RTPrenexPreserve. apply RRules.RTPrenexPreserve.
-      eapply (RRules.RTIf _ incr_res_store incr_cas_result_core
+  eapply HoareRules.RTSeq; [apply incr_unfold1_open |].
+  apply HoareRules.RTPrenexPreserve.
+  eapply HoareRules.RTSeq; [apply incr_field1_read |].
+  apply HoareRules.RTPrenexPreserve.
+  eapply HoareRules.RTSeq; [apply incr_fold1 |].
+  eapply HoareRules.RTSeq; [apply incr_assign_new |].
+  apply HoareRules.RTPrenexPreserve.
+  eapply HoareRules.RTSeq; [apply incr_unfold2 |].
+  apply HoareRules.RTPrenexPreserve.
+  eapply HoareRules.RTSeq.
+  - eapply HoareRules.RTSeq.
+    + eapply HoareRules.RTFrame. apply incr_atomic_cas.
+    + apply HoareRules.RTPrenexPreserve. apply HoareRules.RTPrenexPreserve.
+      eapply (HoareRules.RTIf incr_res_store incr_cas_result_core
         (PEVar (MThere (MThere (MThere (MThere MHere))))) _ _ _).
-      * rewrite incr_res_slot. apply incr_resource_fpu_branch.
-      * rewrite incr_res_slot. apply incr_resource_skip_branch.
-  - apply RRules.RTPrenexPreserve. apply RRules.RTPrenexPreserve.
-    eapply RRules.RTSeq; [apply incr_resource_fold2 |].
-    eapply RRules.RTSeq; [apply incr_resource_retry_conditional |].
-    apply incr_resource_return.
+      * rewrite incr_res_slot. apply incr_fpu_branch.
+      * rewrite incr_res_slot. apply incr_done_branch.
+  - apply HoareRules.RTPrenexPreserve. apply HoareRules.RTPrenexPreserve.
+    eapply HoareRules.RTSeq; [apply incr_fold2 |].
+    eapply HoareRules.RTSeq; [apply incr_retry_conditional |].
+    apply incr_return.
 Qed.
 
 Definition counter_runtime_procedure_statement
-    (packed : packed_typed_procedure) : Runtime.LegacyLang.stmt :=
+    (packed : packed_typed_procedure) : Runtime.RuntimeLang.stmt :=
   match packed with
   | existT Γ (existT F procedure) =>
-      default Runtime.LegacyLang.StuckS
-        (Runtime.LegacyLang.reify_runtime_stmt 0
+      default Runtime.RuntimeLang.StuckS
+        (Runtime.RuntimeLang.reify_runtime_stmt 0
           (@CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt Γ
             (@CounterSoundness.RegionExecution.Primitives.Model.runtime_procedure_names
               Γ F procedure) 0 (procedure_body Γ F procedure)))
@@ -2326,7 +2246,7 @@ Definition counter_runtime_procedure_statement
 Lemma counter_runtime_procedure_statement_nonvalue packed :
   List.In packed (procedure_entries CounterProcedureContracts.procedures) ->
   forall stack,
-  Runtime.LegacyLang.to_val (Runtime.LegacyLang.to_rtstmt stack
+  Runtime.RuntimeLang.to_val (Runtime.RuntimeLang.to_rtstmt stack
     (counter_runtime_procedure_statement packed)) = None.
 Proof.
   intros Hin stack.
@@ -2348,7 +2268,7 @@ Lemma counter_runtime_procedure_layout packed :
         @CounterSoundness.RegionExecution.Primitives.Model.runtime_stmt Γ
           (@CounterSoundness.RegionExecution.Primitives.Model.runtime_procedure_names
             Γ F procedure) stack (procedure_body Γ F procedure) =
-        Runtime.LegacyLang.to_rtstmt stack
+        Runtime.RuntimeLang.to_rtstmt stack
           (counter_runtime_procedure_statement packed)
   end.
 Proof.
@@ -2408,9 +2328,9 @@ Proof. vm_compute. eexists. reflexivity. Qed.
 (* ------------------------------------------------------------------ *)
 (** ** The three analyzed procedure bodies
 
-    [resource_analyzed_triple] wants four things: an analysis certificate,
-    cost-model soundness, the [ResourceRules] derivation, and the
-    executable restricted-fragment check.  Nothing else -- no alignment,
+    [analyzed_triple] wants three things: an analysis certificate
+    (under the framework's [contract_cost_model]), the [RavenHoareRules]
+    derivation, and the executable restricted-fragment check.  Nothing else -- no alignment,
     no LIFO witness, no normalization.  Taking the certificate from
     [analyze_coherent_lifo_builds_certificate] means the record's
     branch-coherence field comes packaged with it, so the certificate
@@ -2419,63 +2339,70 @@ Proof. vm_compute. eexists. reflexivity. Qed.
 Module CN := CounterSoundness.CertifiedNormalization.
 
 Lemma read_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo counter_cost_model
+  CounterAtomicity.analyze_coherent_lifo
+    CounterSoundness.Certified.contract_cost_model
       (counter_closed_state counter_mask) read_typed_body =
     Some read_exit_state.
 Proof. reflexivity. Qed.
 
 Lemma incr_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo counter_cost_model
+  CounterAtomicity.analyze_coherent_lifo
+    CounterSoundness.Certified.contract_cost_model
       (counter_closed_state counter_mask) incr_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
 Lemma make_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo counter_cost_model
+  CounterAtomicity.analyze_coherent_lifo
+    CounterSoundness.Certified.contract_cost_model
       (counter_closed_state ∅) make_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
 Definition read_coherent_run :=
   CounterAtomicity.analyze_coherent_lifo_builds_certificate
-    counter_cost_model (counter_closed_state counter_mask) read_typed_body
+    CounterSoundness.Certified.contract_cost_model
+    (counter_closed_state counter_mask) read_typed_body
     read_exit_state read_analysis_coherent.
 
 Definition incr_coherent_run :=
   CounterAtomicity.analyze_coherent_lifo_builds_certificate
-    counter_cost_model (counter_closed_state counter_mask) incr_typed_body
+    CounterSoundness.Certified.contract_cost_model
+    (counter_closed_state counter_mask) incr_typed_body
     (counter_closed_state counter_mask) incr_analysis_coherent.
 
 Definition make_coherent_run :=
   CounterAtomicity.analyze_coherent_lifo_builds_certificate
-    counter_cost_model (counter_closed_state ∅) make_typed_body
+    CounterSoundness.Certified.contract_cost_model
+    (counter_closed_state ∅) make_typed_body
     (counter_closed_state counter_mask) make_analysis_coherent.
 
 Definition read_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate counter_cost_model
+  CounterAtomicity.coherent_flat_certificate
+    CounterSoundness.Certified.contract_cost_model
     (projT1 read_coherent_run).
 Definition incr_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate counter_cost_model
+  CounterAtomicity.coherent_flat_certificate
+    CounterSoundness.Certified.contract_cost_model
     (projT1 incr_coherent_run).
 Definition make_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate counter_cost_model
+  CounterAtomicity.coherent_flat_certificate
+    CounterSoundness.Certified.contract_cost_model
     (projT1 make_coherent_run).
 
 Definition read_analyzed_body :
-  CounterSoundness.resource_analyzed_body_valid read_typed_procedure.
+  CounterSoundness.analyzed_body_valid read_typed_procedure.
 Proof.
-  unfold CounterSoundness.resource_analyzed_body_valid,
+  unfold CounterSoundness.analyzed_body_valid,
     CounterResourceContracts.required_mask. simpl.
-  unshelve refine (@CounterSoundness.ResourceAnalyzedBodyCertificate
+  unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TInt; TInt] read_procedure read_typed_procedure counter_mask
-    counter_cost_model (counter_closed_state counter_mask) read_exit_state
+    (counter_closed_state counter_mask) read_exit_state
     [TInt; TInt; TInt] read_exit_store (RefBound MHere)
     _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.resource_analyzed_certificate := read_analyzed_certificate;
-                 CN.resource_analyzed_cost_sound :=
-                   counter_procedure_cost_model_sound;
-                 CN.resource_analyzed_hoare := read_resource_body_derivation;
-                 CN.resource_analyzed_restricted :=
+  1: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
+                 CN.analyzed_hoare := read_resource_body_derivation;
+                 CN.analyzed_restricted :=
                    read_restricted_fragment_accepted |}. }
   - apply lookup_update_store_same.
   - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
@@ -2484,27 +2411,26 @@ Proof.
   - reflexivity.
   - reflexivity.
   - unfold read_exit_state. simpl. rewrite counter_mask_close. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks counter_cost_model
+  - exact (CounterAtomicity.coherent_conditional_masks
+      CounterSoundness.Certified.contract_cost_model
       (projT1 read_coherent_run)).
 Defined.
 
 Definition incr_analyzed_body :
-  CounterSoundness.resource_analyzed_body_valid incr_typed_procedure.
+  CounterSoundness.analyzed_body_valid incr_typed_procedure.
 Proof.
-  unfold CounterSoundness.resource_analyzed_body_valid,
+  unfold CounterSoundness.analyzed_body_valid,
     CounterResourceContracts.required_mask. simpl.
-  unshelve refine (@CounterSoundness.ResourceAnalyzedBodyCertificate
+  unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] incr_procedure
     incr_typed_procedure counter_mask
-    counter_cost_model (counter_closed_state counter_mask)
     (counter_closed_state counter_mask)
-    [TUnit; TBool; TInt; TInt; TInt; TInt; TInt] incr_resource_exit_store
+    (counter_closed_state counter_mask)
+    [TUnit; TBool; TInt; TInt; TInt; TInt; TInt] incr_exit_store
     (RefBound MHere) _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.resource_analyzed_certificate := incr_analyzed_certificate;
-                 CN.resource_analyzed_cost_sound :=
-                   counter_procedure_cost_model_sound;
-                 CN.resource_analyzed_hoare := incr_resource_body_derivation;
-                 CN.resource_analyzed_restricted :=
+  1: { refine {| CN.analyzed_certificate := incr_analyzed_certificate;
+                 CN.analyzed_hoare := incr_resource_body_derivation;
+                 CN.analyzed_restricted :=
                    incr_restricted_fragment_accepted |}. }
   - apply lookup_update_store_same.
   - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
@@ -2513,25 +2439,24 @@ Proof.
   - reflexivity.
   - reflexivity.
   - simpl. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks counter_cost_model
+  - exact (CounterAtomicity.coherent_conditional_masks
+      CounterSoundness.Certified.contract_cost_model
       (projT1 incr_coherent_run)).
 Defined.
 
 Definition make_analyzed_body :
-  CounterSoundness.resource_analyzed_body_valid make_typed_procedure.
+  CounterSoundness.analyzed_body_valid make_typed_procedure.
 Proof.
-  unfold CounterSoundness.resource_analyzed_body_valid,
+  unfold CounterSoundness.analyzed_body_valid,
     CounterResourceContracts.required_mask. simpl.
-  unshelve refine (@CounterSoundness.ResourceAnalyzedBodyCertificate
+  unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TRef] make_procedure make_typed_procedure ∅
-    counter_cost_model (counter_closed_state ∅)
+    (counter_closed_state ∅)
     (counter_closed_state counter_mask)
     [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.resource_analyzed_certificate := make_analyzed_certificate;
-                 CN.resource_analyzed_cost_sound :=
-                   counter_procedure_cost_model_sound;
-                 CN.resource_analyzed_hoare := make_resource_body_derivation;
-                 CN.resource_analyzed_restricted :=
+  1: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
+                 CN.analyzed_hoare := make_resource_body_derivation;
+                 CN.analyzed_restricted :=
                    make_restricted_fragment_accepted |}. }
   - apply lookup_update_store_same.
   - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
@@ -2540,7 +2465,8 @@ Proof.
   - reflexivity.
   - reflexivity.
   - simpl. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks counter_cost_model
+  - exact (CounterAtomicity.coherent_conditional_masks
+      CounterSoundness.Certified.contract_cost_model
       (projT1 make_coherent_run)).
 Defined.
 End TypedCounterMonotonic.

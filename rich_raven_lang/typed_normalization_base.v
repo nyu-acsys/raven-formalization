@@ -8,9 +8,9 @@ From raven_iris.rich_raven_lang Require Import
 (** Certified source-to-source normalization for typed Raven programs. *)
 Module TypedNormalizationBase.
 
-Module Make (LegacyRAs : ra_base.RA_CONFIG)
+Module Make (RuntimeRAs : ra_base.RA_CONFIG)
     (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Runtime := TypedRuntime.Make LegacyRAs Logic.
+Module Runtime := TypedRuntime.Make RuntimeRAs Logic.
 Module Hoare := Runtime.Validation.Hoare.
 Module Assertions := Runtime.Translation.Assertions.
 Module Core := Runtime.Core.
@@ -80,21 +80,21 @@ Definition syntactic_access_argument_stability {Γ F Δ invariant}
 
 Fixpoint unfold_free {Γ} (statement : stmt Γ) : Prop :=
   match statement with
-  | TUnfold _ _ _ => False
-  | TInvAccess _ _ body | TAtomic _ body => unfold_free body
-  | TIf _ _ then_branch else_branch =>
+  | TUnfold _ _ => False
+  | TInvAccess _ _ body | TAtomic body => unfold_free body
+  | TIf _ then_branch else_branch =>
       unfold_free then_branch /\ unfold_free else_branch
-  | TSeq _ first second => unfold_free first /\ unfold_free second
+  | TSeq first second => unfold_free first /\ unfold_free second
   | _ => True
   end.
 
 Fixpoint access_neutral {Γ} (statement : stmt Γ) : Prop :=
   match statement with
-  | TUnfold _ _ _ | TFold _ _ _ => False
-  | TInvAccess _ _ body | TAtomic _ body => access_neutral body
-  | TIf _ _ then_branch else_branch =>
+  | TUnfold _ _ | TFold _ _ => False
+  | TInvAccess _ _ body | TAtomic body => access_neutral body
+  | TIf _ then_branch else_branch =>
       access_neutral then_branch /\ access_neutral else_branch
-  | TSeq _ first second => access_neutral first /\ access_neutral second
+  | TSeq first second => access_neutral first /\ access_neutral second
   | _ => True
   end.
 
@@ -106,39 +106,39 @@ Fixpoint access_neutral {Γ} (statement : stmt Γ) : Prop :=
 Inductive baseline_normalizable {Γ} : stmt Γ -> Type :=
 | BaselineUnfoldFree statement :
     unfold_free statement -> baseline_normalizable statement
-| BaselineSequence node first second :
+| BaselineSequence first second :
     access_neutral first ->
     baseline_normalizable second ->
-    baseline_normalizable (TSeq node first second)
-| BaselineBalancedSequence node first second :
+    baseline_normalizable (TSeq first second)
+| BaselineBalancedSequence first second :
     baseline_normalizable first ->
     baseline_normalizable second ->
-    baseline_normalizable (TSeq node first second)
-| BaselineConditional node condition then_branch else_branch :
+    baseline_normalizable (TSeq first second)
+| BaselineConditional condition then_branch else_branch :
     baseline_normalizable then_branch ->
     baseline_normalizable else_branch ->
-    baseline_normalizable (TIf node condition then_branch else_branch)
-| BaselineTerminalAccess outer_node unfold_node body_sequence_node fold_node
+    baseline_normalizable (TIf condition then_branch else_branch)
+| BaselineTerminalAccess
     invariant opening_arguments closing_arguments body :
     access_neutral body ->
     opening_arguments = closing_arguments ->
     pexpr_list_dependencies opening_arguments ## statement_writes body ->
     baseline_normalizable
-      (TSeq outer_node (TUnfold unfold_node invariant opening_arguments)
-        (TSeq body_sequence_node body
-          (TFold fold_node invariant closing_arguments)))
-| BaselineAccessThen outer_node unfold_node body_sequence_node
-    fold_sequence_node fold_node invariant opening_arguments closing_arguments
+      (TSeq (TUnfold invariant opening_arguments)
+        (TSeq body
+          (TFold invariant closing_arguments)))
+| BaselineAccessThen
+    invariant opening_arguments closing_arguments
     body work :
     access_neutral body ->
     opening_arguments = closing_arguments ->
     pexpr_list_dependencies opening_arguments ## statement_writes body ->
     baseline_normalizable work ->
     baseline_normalizable
-      (TSeq outer_node (TUnfold unfold_node invariant opening_arguments)
-        (TSeq body_sequence_node body
-          (TSeq fold_sequence_node
-            (TFold fold_node invariant closing_arguments) work))).
+      (TSeq (TUnfold invariant opening_arguments)
+        (TSeq body
+          (TSeq
+            (TFold invariant closing_arguments) work))).
 
 (** Executable recognizers for the source-shape portion of the restricted
     analysis.  Argument stability and write effects are intentionally not
@@ -146,21 +146,21 @@ Inductive baseline_normalizable {Γ} : stmt Γ -> Type :=
     information. *)
 Fixpoint unfold_freeb {Γ} (statement : stmt Γ) : bool :=
   match statement with
-  | TUnfold _ _ _ => false
-  | TInvAccess _ _ body | TAtomic _ body => unfold_freeb body
-  | TIf _ _ then_branch else_branch =>
+  | TUnfold _ _ => false
+  | TInvAccess _ _ body | TAtomic body => unfold_freeb body
+  | TIf _ then_branch else_branch =>
       unfold_freeb then_branch && unfold_freeb else_branch
-  | TSeq _ first second => unfold_freeb first && unfold_freeb second
+  | TSeq first second => unfold_freeb first && unfold_freeb second
   | _ => true
   end.
 
 Fixpoint access_neutralb {Γ} (statement : stmt Γ) : bool :=
   match statement with
-  | TUnfold _ _ _ | TFold _ _ _ => false
-  | TInvAccess _ _ body | TAtomic _ body => access_neutralb body
-  | TIf _ _ then_branch else_branch =>
+  | TUnfold _ _ | TFold _ _ => false
+  | TInvAccess _ _ body | TAtomic body => access_neutralb body
+  | TIf _ then_branch else_branch =>
       access_neutralb then_branch && access_neutralb else_branch
-  | TSeq _ first second => access_neutralb first && access_neutralb second
+  | TSeq first second => access_neutralb first && access_neutralb second
   | _ => true
   end.
 
@@ -171,19 +171,19 @@ Fixpoint access_neutralb {Γ} (statement : stmt Γ) : bool :=
     is deliberately deferred to the effect-aware pass. *)
 Fixpoint restricted_fragment_shape_check {Γ} (statement : stmt Γ) : bool :=
   match statement with
-  | TUnfold _ _ _ => false
-  | TInvAccess _ _ body | TAtomic _ body => unfold_freeb body
-  | TIf _ _ then_branch else_branch =>
+  | TUnfold _ _ => false
+  | TInvAccess _ _ body | TAtomic body => unfold_freeb body
+  | TIf _ then_branch else_branch =>
       restricted_fragment_shape_check then_branch &&
         restricted_fragment_shape_check else_branch
-  | TSeq _ first second =>
+  | TSeq first second =>
       match first, second with
-      | TUnfold _ opening_invariant _,
-          TSeq _ body (TFold _ closing_invariant _) =>
+      | TUnfold opening_invariant _,
+          TSeq body (TFold closing_invariant _) =>
           bool_decide (opening_invariant = closing_invariant) &&
             access_neutralb body
-      | TUnfold _ opening_invariant _,
-          TSeq _ body (TSeq _ (TFold _ closing_invariant _) work) =>
+      | TUnfold opening_invariant _,
+          TSeq body (TSeq (TFold closing_invariant _) work) =>
           bool_decide (opening_invariant = closing_invariant) &&
             access_neutralb body && restricted_fragment_shape_check work
       | _, _ =>
@@ -1362,14 +1362,14 @@ Qed.
     remains the independent executable decision above. *)
 Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
   match statement with
-  | TInvAccess _ _ body | TAtomic _ body => restricted_access_effect_check body
-  | TIf _ _ then_branch else_branch =>
+  | TInvAccess _ _ body | TAtomic body => restricted_access_effect_check body
+  | TIf _ then_branch else_branch =>
       restricted_access_effect_check then_branch &&
         restricted_access_effect_check else_branch
-  | TSeq _ first second =>
+  | TSeq first second =>
       match first, second with
-      | TUnfold _ opening_invariant opening_arguments,
-          TSeq _ body (TFold _ closing_invariant closing_arguments) =>
+      | TUnfold opening_invariant opening_arguments,
+          TSeq body (TFold closing_invariant closing_arguments) =>
           match decide (opening_invariant = closing_invariant) with
           | left Heq =>
               restricted_access_boundary_check opening_arguments
@@ -1378,9 +1378,9 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
                   closing_arguments _ (eq_sym Heq)) body
           | right _ => false
           end
-      | TUnfold _ opening_invariant opening_arguments,
-          TSeq _ body
-            (TSeq _ (TFold _ closing_invariant closing_arguments) work) =>
+      | TUnfold opening_invariant opening_arguments,
+          TSeq body
+            (TSeq (TFold closing_invariant closing_arguments) work) =>
           match decide (opening_invariant = closing_invariant) with
           | left Heq =>
               restricted_access_boundary_check opening_arguments
@@ -1406,9 +1406,9 @@ Definition restricted_fragment_accepted {Γ} (statement : stmt Γ) : Prop :=
 
 Fixpoint normalization_statement_size {Γ} (statement : stmt Γ) : nat :=
   match statement with
-  | TInvAccess _ _ body | TAtomic _ body =>
+  | TInvAccess _ _ body | TAtomic body =>
       S (normalization_statement_size body)
-  | TIf _ _ then_branch else_branch | TSeq _ then_branch else_branch =>
+  | TIf _ then_branch else_branch | TSeq then_branch else_branch =>
       S (normalization_statement_size then_branch +
         normalization_statement_size else_branch)
   | _ => 1
@@ -1423,29 +1423,29 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
   | 0 => None
   | S fuel' =>
       match statement with
-      | TUnfold _ _ _ => None
+      | TUnfold _ _ => None
       | TInvAccess invariant arguments body =>
           match restricted_normalize_statement_fuel fuel' body with
           | Some normalized_body =>
               Some (TInvAccess invariant arguments normalized_body)
           | None => None
           end
-      | TAtomic node body =>
+      | TAtomic body =>
           match restricted_normalize_statement_fuel fuel' body with
-          | Some normalized_body => Some (TAtomic node normalized_body)
+          | Some normalized_body => Some (TAtomic normalized_body)
           | None => None
           end
-      | TIf node condition then_branch else_branch =>
+      | TIf condition then_branch else_branch =>
           match restricted_normalize_statement_fuel fuel' then_branch,
               restricted_normalize_statement_fuel fuel' else_branch with
           | Some normalized_then, Some normalized_else =>
-              Some (TIf node condition normalized_then normalized_else)
+              Some (TIf condition normalized_then normalized_else)
           | _, _ => None
           end
-      | TSeq outer_node first second =>
+      | TSeq first second =>
           match first, second with
-          | TUnfold _ opening_invariant opening_arguments,
-              TSeq _ body (TFold _ closing_invariant closing_arguments) =>
+          | TUnfold opening_invariant opening_arguments,
+              TSeq body (TFold closing_invariant closing_arguments) =>
               match decide (opening_invariant = closing_invariant) with
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
@@ -1456,9 +1456,9 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
                   else None
               | right _ => None
               end
-          | TUnfold _ opening_invariant opening_arguments,
-              TSeq _ body
-                (TSeq _ (TFold _ closing_invariant closing_arguments) work) =>
+          | TUnfold opening_invariant opening_arguments,
+              TSeq body
+                (TSeq (TFold closing_invariant closing_arguments) work) =>
               match decide (opening_invariant = closing_invariant) with
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
@@ -1468,7 +1468,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
                   then
                     match restricted_normalize_statement_fuel fuel' work with
                     | Some normalized_work =>
-                        Some (TSeq outer_node
+                        Some (TSeq
                           (TInvAccess opening_invariant opening_arguments body)
                           normalized_work)
                     | None => None
@@ -1480,7 +1480,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
               match restricted_normalize_statement_fuel fuel' first,
                   restricted_normalize_statement_fuel fuel' second with
               | Some normalized_first, Some normalized_second =>
-                  Some (TSeq outer_node normalized_first normalized_second)
+                  Some (TSeq normalized_first normalized_second)
               | _, _ => None
               end
           end
@@ -1711,14 +1711,14 @@ Proof.
     inversion Hworker; subst. f_equal. eapply IHstatement; eauto.
 Qed.
 
-Lemma restricted_normalize_terminal_access {Γ} fuel outer_node unfold_node
-    body_sequence_node fold_node invariant
+Lemma restricted_normalize_terminal_access {Γ} fuel
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel (S fuel)
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body (TFold fold_node invariant arguments))) =
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body (TFold invariant arguments))) =
     Some (TInvAccess invariant arguments body).
 Proof.
   intro Hboundary. cbn [restricted_normalize_statement_fuel].
@@ -1728,18 +1728,18 @@ Proof.
   cbn. now rewrite Hboundary.
 Qed.
 
-Lemma restricted_normalize_continued_access {Γ} fuel outer_node unfold_node
-    body_sequence_node fold_sequence_node fold_node invariant
+Lemma restricted_normalize_continued_access {Γ} fuel
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body work normalized_work : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel fuel work = Some normalized_work ->
   restricted_normalize_statement_fuel (S fuel)
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body
-        (TSeq fold_sequence_node (TFold fold_node invariant arguments)
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body
+        (TSeq (TFold invariant arguments)
           work))) =
-    Some (TSeq outer_node (TInvAccess invariant arguments body)
+    Some (TSeq (TInvAccess invariant arguments body)
       normalized_work).
 Proof.
   intros Hboundary Hwork. cbn [restricted_normalize_statement_fuel].
@@ -1749,13 +1749,13 @@ Proof.
   cbn. now rewrite Hboundary, Hwork.
 Qed.
 
-Lemma restricted_terminal_access_accepted_inv {Γ} outer_node unfold_node
-    body_sequence_node fold_node invariant
+Lemma restricted_terminal_access_accepted_inv {Γ}
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body : stmt Γ) :
   restricted_fragment_accepted
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body (TFold fold_node invariant arguments))) ->
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body (TFold invariant arguments))) ->
   access_neutral body /\
     restricted_access_boundary_check arguments arguments body = true.
 Proof.
@@ -1771,14 +1771,14 @@ Proof.
   - exact Hboundary.
 Qed.
 
-Lemma restricted_continued_access_accepted_inv {Γ} outer_node unfold_node
-    body_sequence_node fold_sequence_node fold_node invariant
+Lemma restricted_continued_access_accepted_inv {Γ}
+    invariant
     (arguments : pexpr_list Γ (Logic.invariant_args invariant))
     (body work : stmt Γ) :
   restricted_fragment_accepted
-    (TSeq outer_node (TUnfold unfold_node invariant arguments)
-      (TSeq body_sequence_node body
-        (TSeq fold_sequence_node (TFold fold_node invariant arguments)
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body
+        (TSeq (TFold invariant arguments)
           work))) ->
   access_neutral body /\
     restricted_access_boundary_check arguments arguments body = true /\
@@ -1816,10 +1816,10 @@ Proof.
   - now rewrite IHstatement.
 Qed.
 
-Lemma access_neutral_sequence_effect_check {Γ} node
+Lemma access_neutral_sequence_effect_check {Γ}
     (first second : stmt Γ) :
   access_neutral first ->
-  restricted_access_effect_check (TSeq node first second) =
+  restricted_access_effect_check (TSeq first second) =
     (restricted_access_effect_check first &&
       restricted_access_effect_check second).
 Proof.
@@ -1885,7 +1885,7 @@ Proof.
       | Some normalized_then =>
           match restricted_normalize_statement_fuel fuel current2 with
           | Some normalized_else =>
-              Some (TIf node condition normalized_then normalized_else)
+              Some (TIf condition normalized_then normalized_else)
           | None => None
           end
       | None => None
@@ -1895,7 +1895,7 @@ Proof.
     all: try (apply Bool.andb_true_iff in Hshape as [Hshape1 Hshape2];
       apply Bool.andb_true_iff in Heffect as [Heffect1 Heffect2];
       match goal with
-      | |- context [TSeq ?seq_node ?first ?second] =>
+      | |- context [TSeq ?first ?second] =>
           destruct (IH first ltac:(unfold ltof; cbn; lia) fuel
             ltac:(unfold restricted_fragment_accepted,
               restricted_fragment_check;
@@ -1945,9 +1945,9 @@ Proof.
         apply Bool.andb_true_iff. split; assumption. }
       assert (Hwork_smaller : ltof (stmt Γ) normalization_statement_size
         current2_2_2
-        (TSeq node (TUnfold node0 invariant arguments)
-          (TSeq node1 current2_1
-            (TSeq node2 (TFold node3 invariant arguments0)
+        (TSeq (TUnfold invariant arguments)
+          (TSeq current2_1
+            (TSeq (TFold invariant arguments0)
               current2_2_2)))).
       { unfold ltof. cbn. lia. }
       assert (Hwork_fuel :
@@ -1966,7 +1966,7 @@ Proof.
       Hshape ltac:(lia)) as [normalized Hnormalized].
     change (exists normalized0,
       match restricted_normalize_statement_fuel fuel current with
-      | Some normalized_body => Some (TAtomic node normalized_body)
+      | Some normalized_body => Some (TAtomic normalized_body)
       | None => None
       end = Some normalized0).
     rewrite Hnormalized. eexists; reflexivity.
@@ -2115,13 +2115,13 @@ Fixpoint structured_accesses_outside_atomic
     {cost Γ entry statement exit}
     (certificate : structured_certificate cost Γ entry statement exit) : Prop :=
   match certificate with
-  | StructuredSequence _ _ _ _ _ _ _ _ first second =>
+  | StructuredSequence _ _ _ _ _ _ _ first second =>
       structured_accesses_outside_atomic first /\
       structured_accesses_outside_atomic second
-  | StructuredConditional _ _ _ _ _ _ _ _ _ then_branch else_branch _ _ =>
+  | StructuredConditional _ _ _ _ _ _ _ _ then_branch else_branch _ _ =>
       structured_accesses_outside_atomic then_branch /\
       structured_accesses_outside_atomic else_branch
-  | StructuredAtomic _ _ _ _ _ _ _ _ body _ =>
+  | StructuredAtomic _ _ _ _ _ _ _ body _ =>
       structured_accesses_outside_atomic body
   | StructuredInvAccess _ _ access_entry _ _ _ _ _ _ body _ =>
       GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
@@ -2245,16 +2245,16 @@ Proof.
     cbn in e. inversion e; subst.
     destruct Hlifo as [Hthen _]. eauto.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & Hopen & Htail).
     destruct Htail as (body_stack & Hbody & Hfold).
@@ -2279,23 +2279,23 @@ Proof.
           apply elem_of_union_l; apply elem_of_singleton_2; reflexivity
       end.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     match goal with
     | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ _ (TFold _ _ _) _ |- _ =>
+        _ _ _ (TFold _ _) _ |- _ =>
         dependent destruction Hfold_certificate
     end; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & Hopen & Htail).
     destruct Htail as (body_stack & Hbody & Hfold_work).
@@ -2358,16 +2358,16 @@ Proof.
     destruct (IHHbaseline2 _ _ _ certificate2 Hentry) as [Helse Helse_exit].
     split; [split; assumption|exact Hthen_exit].
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     pose proof (GenericRegions.Atomicity.open_invariant_success _ _ _ e0)
       as (Hfresh & _ & _ & Hopened).
@@ -2380,7 +2380,7 @@ Proof.
     { rewrite (access_neutral_preserves_open certificate2_1 a). exact Hopened. }
     assert (Hfold : GenericRegions.Atomicity.lifo_certificate
       (GenericRegions.Atomicity.CertFold cost Γ state1
-        (TFold fold_node invariant closing_arguments) invariant e3)
+        (TFold invariant closing_arguments) invariant e3)
       [(invariant, GenericRegions.Atomicity.analysis_open state)] []).
     { left. exists (GenericRegions.Atomicity.analysis_open state).
       repeat split; try reflexivity.
@@ -2397,23 +2397,23 @@ Proof.
       * rewrite Hclosed, Hbody_open, Hentry.
         set_solver.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     match goal with
     | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ _ (TFold _ _ _) _ |- _ =>
+        _ _ _ (TFold _ _) _ |- _ =>
         dependent destruction Hfold_certificate
     end; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _ _) = _ |- _ =>
+    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     pose proof (GenericRegions.Atomicity.open_invariant_success _ _ _ e0)
       as (Hfresh & _ & _ & Hopened).
@@ -2426,7 +2426,7 @@ Proof.
     { rewrite (access_neutral_preserves_open certificate2_1 a). exact Hopened. }
     assert (Hfold : GenericRegions.Atomicity.lifo_certificate
       (GenericRegions.Atomicity.CertFold cost Γ state1
-        (TFold fold_node invariant closing_arguments) invariant e3)
+        (TFold invariant closing_arguments) invariant e3)
       [(invariant, GenericRegions.Atomicity.analysis_open state)] []).
     { left. exists (GenericRegions.Atomicity.analysis_open state).
       repeat split; try reflexivity.
@@ -2486,12 +2486,12 @@ Qed.
 (** A fold that shortens the focused stack is necessarily the matching fold,
     not the fresh-invariant-allocation alternative of the analyzer rule. *)
 Lemma lifo_fold_consumes_focused_marker
-    {cost Γ state node invariant arguments}
+    {cost Γ state invariant arguments}
     {focused : inv_id} {outer_open : gset inv_id}
     {tail : list GenericRegions.Atomicity.access_marker}
     (Hlifo : GenericRegions.Atomicity.lifo_certificate
       (GenericRegions.Atomicity.CertFold cost Γ state
-        (TFold node invariant arguments) invariant eq_refl)
+        (TFold invariant arguments) invariant eq_refl)
       ((focused, outer_open) :: tail) tail) :
   invariant = focused.
 Proof.
@@ -2593,7 +2593,7 @@ Proof.
       * apply (f_equal (@length _)) in Hcons. simpl in Hcons. lia.
       * exact (Hnot_member Hmember).
     + refine {| balanced_structured_certificate :=
-          StructuredFreshFold cost Γ state _ invariant arguments Hfresh |}.
+          StructuredFreshFold cost Γ state invariant arguments Hfresh |}.
       intros candidate Hcandidate. exact Hcandidate.
       exact I.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
@@ -2611,7 +2611,7 @@ Proof.
     pose (first_result := IHcertificate1 stack Hfirst_free Hfirst).
     pose (second_result := IHcertificate2 stack Hsecond_free Hsecond).
     refine {| balanced_structured_certificate :=
-        StructuredSequence cost Γ state _ first middle second exit
+        StructuredSequence cost Γ state first middle second exit
           first_result.(balanced_structured_certificate)
           second_result.(balanced_structured_certificate) |}.
     intros invariant Hmember.
@@ -2629,7 +2629,7 @@ Proof.
     pose (then_result := IHcertificate1 stack Hthen_free (proj1 Hlifo)).
     pose (else_result := IHcertificate2 stack Helse_free (proj2 Hlifo)).
     refine {| balanced_structured_certificate :=
-        StructuredConditional cost Γ state _ condition then_branch else_branch
+        StructuredConditional cost Γ state condition then_branch else_branch
           then_exit else_exit then_result.(balanced_structured_certificate)
           else_result.(balanced_structured_certificate) e0 e1 |}.
     intros invariant Hmember.
@@ -2646,7 +2646,7 @@ Proof.
     cbn in Hfree.
     pose (body_result := IHcertificate stack Hfree (proj1 Hlifo)).
     refine {| balanced_structured_certificate :=
-        StructuredAtomic cost Γ state _ body outer inner e0
+        StructuredAtomic cost Γ state body outer inner e0
           body_result.(balanced_structured_certificate) e1 |}.
     intros invariant Hmember.
     simpl in Hmember |- *.

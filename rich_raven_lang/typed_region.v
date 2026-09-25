@@ -45,8 +45,8 @@ Record region_model_data (PROP : bi) : Type := RegionModelData {
 Arguments term_region_stack_context {_} _ _.
 Arguments term_region_ambient_mask {_} _.
 
-(** Term-level generic-region semantics.  This exactly mirrors the legacy
-    module interface below, but all semantic dependencies are explicit
+(** Term-level generic-region semantics.  This exactly mirrors the module
+    interface [Semantics] below, but all semantic dependencies are explicit
     values. *)
 Module TermSemantics.
 Section WithModel.
