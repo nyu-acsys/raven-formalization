@@ -822,7 +822,7 @@ Fixpoint elaborate_expr {Γ} (variables : named_context Γ)
           | SBNe => elaborate_equality true left' right'
           end
       end
-  | SEField _ _ => inl EEUnsupportedExpression
+  | SEField _ _ | SECall _ _ => inl EEUnsupportedExpression
   end.
 
 Fixpoint elaborate_expr_list {Γ} (variables : named_context Γ)
@@ -1005,55 +1005,43 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
               inr (TSpawn (signature_identity procedure) arguments')
           end
       end
-  | SSUnfold invariant_name arguments =>
-      match lookup_invariant invariant_name
-              (elaboration_invariants environment) with
-      | None => inl (EEUnknownInvariant invariant_name)
-      | Some invariant =>
+  | SSUnfold name arguments =>
+      match lookup_invariant name (elaboration_invariants environment),
+            lookup_predicate name (elaboration_predicates environment) with
+      | Some invariant, _ =>
           match elaborate_expr_list variables
                   (Logic.invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
               inr (TUnfold (invariant_identity invariant) arguments')
           end
+      | None, Some predicate =>
+          match elaborate_expr_list variables
+                  (Logic.predicate_args (predicate_identity predicate)) arguments with
+          | inl error => inl error
+          | inr arguments' =>
+              inr (TPredicateUnfold (predicate_identity predicate) arguments')
+          end
+      | None, None => inl (EEUnknownInvariant name)
       end
-  | SSFold invariant_name arguments =>
-      match lookup_invariant invariant_name
-              (elaboration_invariants environment) with
-      | None => inl (EEUnknownInvariant invariant_name)
-      | Some invariant =>
+  | SSFold name arguments =>
+      match lookup_invariant name (elaboration_invariants environment),
+            lookup_predicate name (elaboration_predicates environment) with
+      | Some invariant, _ =>
           match elaborate_expr_list variables
                   (Logic.invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
               inr (TFold (invariant_identity invariant) arguments')
           end
-      end
-  | SSPredicateUnfold predicate_name arguments =>
-      match lookup_predicate predicate_name
-              (elaboration_predicates environment) with
-      | None => inl EEUnsupportedStatement
-      | Some predicate =>
+      | None, Some predicate =>
           match elaborate_expr_list variables
                   (Logic.predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
-              inr (TPredicateUnfold (predicate_identity predicate)
-                arguments')
+              inr (TPredicateFold (predicate_identity predicate) arguments')
           end
-      end
-  | SSPredicateFold predicate_name arguments =>
-      match lookup_predicate predicate_name
-              (elaboration_predicates environment) with
-      | None => inl EEUnsupportedStatement
-      | Some predicate =>
-          match elaborate_expr_list variables
-                  (Logic.predicate_args (predicate_identity predicate)) arguments with
-          | inl error => inl error
-          | inr arguments' =>
-              inr (TPredicateFold (predicate_identity predicate)
-                arguments')
-          end
+      | None, None => inl (EEUnknownInvariant name)
       end
   | SSSeq first second =>
       match elaborate_stmt environment variables first with

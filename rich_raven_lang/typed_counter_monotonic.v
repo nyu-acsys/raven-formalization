@@ -219,7 +219,7 @@ Definition read_source : source_stmt :=
 Definition cas_source : source_stmt :=
   raven_stmt {{
     v2 := x . c;
-    if v2 == v1 {
+    if (v2 == v1) {
       x . c := new_v1;
       res := true
     } else {
@@ -252,14 +252,14 @@ Definition incr_source_branch_local_close : source_stmt :=
     unfold counterInv(x);
     atomic {
       v2 := x . c;
-      if v2 == v1 {
+      if (v2 == v1) {
         x . c := new_v1;
         res := true
       } else {
         res := false
       }
     };
-    if ! res {
+    if (! res) {
       fold counterInv(x);
       incr(x)
     } else {
@@ -285,23 +285,19 @@ Definition incr_source : source_stmt :=
     unfold counterInv(x);
     (atomic {
        v2 := x . c;
-       if v2 == v1 {
+       if (v2 == v1) {
          x . c := new_v1;
          res := true
        } else {
          res := false
        }
      };
-     if res {
+     if (res) {
        fpu(x . h, v1, v1 + 1)
-     } else {
-       done
      });
     fold counterInv(x);
-    if ! res {
+    if (! res) {
       incr(x)
-    } else {
-      done
     };
     ret := tt
   }}.

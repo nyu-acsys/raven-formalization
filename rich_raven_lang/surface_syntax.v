@@ -6,7 +6,29 @@ Open Scope Z_scope.
 
 (** A lightweight, named surface language for writing examples in a form
     close to Raven source.  Names are deliberately strings here: this is the
-    input to elaboration, not the binding representation of the typed core. *)
+    input to elaboration, not the binding representation of the typed core.
+
+    Notation reference.  Programs are written [raven_stmt {{ ... }}],
+    assertions [raven_assert {{ ... }}], expressions [raven_expr {{ ... }}].
+
+    - Expressions: variables and literals, [x . f] (field access), [!e],
+      [-e], [* / % + -], [< <= > >= == !=], [&&], [||].
+    - Statements: [x := e]; [x := y . f] (field read); [x . f := e]
+      (field write); [x := new(f: e, ...)]; [x := p(args)] and [p(args)]
+      (calls); [spawn p(args)]; [fpu(x . f, old, new)]; [unfold p(args)] and
+      [fold p(args)] (invariant or predicate, resolved by name);
+      [atomic { s }]; [if (e) { s } else { s }] and [if (e) { s }];
+      [assert e]; [s1; s2]; [done].
+    - Assertions: [true], [false], [pure(e)], [own(x . f, v, q)] (heap
+      field with fraction [q]), [own(x . f, v)] (ghost field), [p(args)]
+      (invariant or predicate), [a && b].
+
+    Deviations from Raven's concrete syntax: field access needs spaces
+    ([x . f]) because Rocq lexes [x.f] as a qualified name; [done] (the
+    empty continuation) has no Raven spelling; local variables and procedure
+    headers ([var], [proc ... requires ... ensures]) are not part of this
+    notation and are given as typed declarations instead; and assertions are
+    not yet elaborated into the typed core. *)
 Module SurfaceSyntax.
 
 Definition source_name := string.
@@ -40,15 +62,22 @@ Inductive source_expr :=
 | SEVal (v : source_value)
 | SEUnOp (op : source_unop) (e : source_expr)
 | SEBinOp (op : source_binop) (e1 e2 : source_expr)
-| SEField (base : source_expr) (field : source_name).
+| SEField (base : source_expr) (field : source_name)
+(** A procedure call.  Calls are statements, but [x := p(args)] is parsed
+    through the expression grammar (see [source_assign]); a call anywhere
+    else in an expression is rejected by the elaborator. *)
+| SECall (procedure : source_name) (args : list source_expr).
 
 Inductive source_assertion :=
 | SATrue
 | SAFalse
 | SAPure (e : source_expr)
-| SAPointsTo (location chunk : source_expr)
+(** [own(x.f, v, q)] for a heap field (with fraction [q]) and [own(x.f, v)]
+    for a ghost field, as in Raven. *)
+| SAOwn (location chunk : source_expr) (fraction : option source_expr)
+(** An invariant or predicate instance [p(args)]; which one is resolved by
+    name. *)
 | SAPredicate (predicate : source_name) (args : list source_expr)
-| SAInvariant (invariant : source_name) (args : list source_expr)
 | SAExists (binder : source_name) (binder_type : source_typ)
     (body : source_assertion)
 | SAForall (binder : source_name) (binder_type : source_typ)
@@ -71,10 +100,10 @@ Inductive source_stmt :=
 | SSSpawn (procedure : source_name) (args : list source_expr)
 | SSIf (condition : source_expr) (then_branch else_branch : source_stmt)
 | SSSeq (first second : source_stmt)
-| SSUnfold (invariant : source_name) (args : list source_expr)
-| SSFold (invariant : source_name) (args : list source_expr)
-| SSPredicateUnfold (predicate : source_name) (args : list source_expr)
-| SSPredicateFold (predicate : source_name) (args : list source_expr)
+(** [unfold p(args)] / [fold p(args)] for an invariant or a predicate; the
+    elaborator resolves [p] by name. *)
+| SSUnfold (name : source_name) (args : list source_expr)
+| SSFold (name : source_name) (args : list source_expr)
 | SSAtomic (body : source_stmt).
 
 Record source_var_decl := SourceVarDecl {
@@ -112,6 +141,15 @@ Global Instance unit_into_expr : IntoSourceExpr unit :=
 Definition source_atom {A : Type} `{IntoSourceExpr A} (x : A) : source_expr :=
   into_source_expr x.
 
+(** [x := e] is a call when [e] is a call expression and an assignment
+    otherwise; this lets both share the [x :=] prefix in the grammar. *)
+Definition source_assign (target : source_name) (value : source_expr) :
+    source_stmt :=
+  match value with
+  | SECall procedure args => SSCall (Some target) procedure args
+  | _ => SSAssign target value
+  end.
+
 Declare Custom Entry raven_expr.
 Declare Custom Entry raven_exprs.
 Declare Custom Entry raven_assert.
@@ -135,6 +173,11 @@ Notation "'(' e ')'" := e
 Notation "e . f" := (SEField e f)
   (in custom raven_expr at level 1, left associativity,
    e custom raven_expr, f constr at level 0).
+Notation "p '(' ')'" := (SECall p [])
+  (in custom raven_expr at level 0, p constr at level 0).
+Notation "p '(' args ')'" := (SECall p args)
+  (in custom raven_expr at level 0, p constr at level 0,
+   args custom raven_exprs at level 1).
 Notation "'!' e" := (SEUnOp SUNot e)
   (in custom raven_expr at level 35, right associativity,
    e custom raven_expr at level 35).
@@ -198,14 +241,13 @@ Notation "p '(' ')'" := (SAPredicate p [])
 Notation "p '(' args ')'" := (SAPredicate p args)
   (in custom raven_assert at level 0, p constr at level 0,
    args custom raven_exprs at level 1).
-Notation "'inv' p '(' ')'" := (SAInvariant p [])
-  (in custom raven_assert at level 0, p constr at level 0).
-Notation "'inv' p '(' args ')'" := (SAInvariant p args)
-  (in custom raven_assert at level 0, p constr at level 0,
-   args custom raven_exprs at level 1).
-Notation "'own' '(' e ',' chunk ')'" := (SAPointsTo e chunk)
+Notation "'own' '(' e ',' chunk ')'" := (SAOwn e chunk None)
   (in custom raven_assert at level 30,
    e custom raven_expr at level 99, chunk custom raven_expr at level 99).
+Notation "'own' '(' e ',' chunk ',' q ')'" := (SAOwn e chunk (Some q))
+  (in custom raven_assert at level 30,
+   e custom raven_expr at level 99, chunk custom raven_expr at level 99,
+   q custom raven_expr at level 99).
 Notation "a '&&' b" := (SAAnd a b)
   (in custom raven_assert at level 80, right associativity,
    a custom raven_assert, b custom raven_assert at level 80).
@@ -216,9 +258,16 @@ Notation "'(' a ')'" := a
 Notation "'done'" := SSDone (in custom raven_stmt at level 10).
 Notation "'assert' e" := (SSAssert e)
   (in custom raven_stmt at level 10, e custom raven_expr at level 99).
-Notation "x ':=' e" := (SSAssign x e)
+Notation "x ':=' e" := (source_assign x e)
   (in custom raven_stmt at level 10, x constr at level 0,
    e custom raven_expr at level 99).
+Notation "x ':=' p '(' ')'" := (SSCall (Some x) p [])
+  (in custom raven_stmt at level 10,
+   x constr at level 0, p constr at level 0, only printing).
+Notation "x ':=' p '(' args ')'" := (SSCall (Some x) p args)
+  (in custom raven_stmt at level 10,
+   x constr at level 0, p constr at level 0,
+   args custom raven_exprs at level 1, only printing).
 Notation "base . f ':=' value" :=
   (SSFieldWrite (source_atom base) f value)
   (in custom raven_stmt at level 10,
@@ -247,13 +296,6 @@ Notation "p '(' ')'" := (SSCall None p [])
 Notation "p '(' args ')'" := (SSCall None p args)
   (in custom raven_stmt at level 10, p constr at level 0,
    args custom raven_exprs at level 1).
-Notation "'call' x ':=' p '(' ')'" := (SSCall (Some x) p [])
-  (in custom raven_stmt at level 10,
-   x constr at level 0, p constr at level 0).
-Notation "'call' x ':=' p '(' args ')'" := (SSCall (Some x) p args)
-  (in custom raven_stmt at level 10,
-   x constr at level 0, p constr at level 0,
-   args custom raven_exprs at level 1).
 Notation "'spawn' p '(' ')'" := (SSSpawn p [])
   (in custom raven_stmt at level 10, p constr at level 0).
 Notation "'spawn' p '(' args ')'" := (SSSpawn p args)
@@ -269,20 +311,15 @@ Notation "'fold' p '(' ')'" := (SSFold p [])
 Notation "'fold' p '(' args ')'" := (SSFold p args)
   (in custom raven_stmt at level 10, p constr at level 0,
    args custom raven_exprs at level 1).
-Notation "'unfold_pred' p '(' ')'" := (SSPredicateUnfold p [])
-  (in custom raven_stmt at level 10, p constr at level 0).
-Notation "'unfold_pred' p '(' args ')'" := (SSPredicateUnfold p args)
-  (in custom raven_stmt at level 10, p constr at level 0,
-   args custom raven_exprs at level 1).
-Notation "'fold_pred' p '(' ')'" := (SSPredicateFold p [])
-  (in custom raven_stmt at level 10, p constr at level 0).
-Notation "'fold_pred' p '(' args ')'" := (SSPredicateFold p args)
-  (in custom raven_stmt at level 10, p constr at level 0,
-   args custom raven_exprs at level 1).
 Notation "'atomic' '{' body '}'" := (SSAtomic body)
   (in custom raven_stmt at level 10,
    body custom raven_stmt at level 99).
-Notation "'if' condition '{' then_branch '}' 'else' '{' else_branch '}'" :=
+Notation "'if' '(' condition ')' '{' then_branch '}'" :=
+  (SSIf condition then_branch SSDone)
+  (in custom raven_stmt at level 10,
+   condition custom raven_expr at level 99,
+   then_branch custom raven_stmt at level 99).
+Notation "'if' '(' condition ')' '{' then_branch '}' 'else' '{' else_branch '}'" :=
   (SSIf condition then_branch else_branch)
   (in custom raven_stmt at level 10,
    condition custom raven_expr at level 99,
@@ -310,7 +347,7 @@ Definition arithmetic_example : source_expr :=
   raven_expr {{ v + 1 }}.
 
 Definition assertion_example : source_assertion :=
-  raven_assert {{ own(c . value, v) }}.
+  raven_assert {{ own(c . value, v, 1) && counter(c) }}.
 
 Definition ghost_update_example : source_stmt :=
   raven_stmt {{ fpu(c . value, v, v + 1) }}.
@@ -323,5 +360,26 @@ Definition statement_example : source_stmt :=
     c := new(value: v);
     fold counter(c)
   }}.
+
+(** The notations build the intended surface terms. *)
+Example assign_is_assignment :
+  raven_stmt {{ v := v + 1 }} = SSAssign v (SEBinOp SBAdd (SEVar v) (SEVal (SVInt 1))).
+Proof. reflexivity. Qed.
+
+Example assign_of_call_is_call :
+  raven_stmt {{ v := counter(c) }} = SSCall (Some v) counter [SEVar c].
+Proof. reflexivity. Qed.
+
+Example if_without_else :
+  raven_stmt {{ if (v == 0) { v := 1 } }} =
+    SSIf (SEBinOp SBEq (SEVar v) (SEVal (SVInt 0)))
+      (SSAssign v (SEVal (SVInt 1))) SSDone.
+Proof. reflexivity. Qed.
+
+Example heap_and_ghost_ownership :
+  raven_assert {{ own(c . value, v, 1) && own(c . value, v) }} =
+    SAAnd (SAOwn (SEField (SEVar c) value) (SEVar v) (Some (SEVal (SVInt 1))))
+      (SAOwn (SEField (SEVar c) value) (SEVar v) None).
+Proof. reflexivity. Qed.
 
 End SurfaceSyntaxExamples.
