@@ -29,6 +29,8 @@ Module ViewSyntax <: TypedAnalysisView.ANALYSIS_SYNTAX.
     | TSeq _ first second => TypedAnalysisView.ViewSequence first second
     | TIf _ _ then_branch else_branch =>
         TypedAnalysisView.ViewConditional then_branch else_branch
+    | TInvAccess invariant _ body =>
+        TypedAnalysisView.ViewStructuredAccess invariant body
     | TAtomic _ body => TypedAnalysisView.ViewAtomic body
     | _ => TypedAnalysisView.ViewLeaf
     end.
@@ -62,6 +64,7 @@ Module ViewSyntax <: TypedAnalysisView.ANALYSIS_SYNTAX.
     size body < size statement.
   Proof. destruct statement; cbn; intros Hview; try discriminate.
     inversion Hview; subst. lia. Qed.
+
 End ViewSyntax.
 
 Module ViewAnalysis := TypedAnalysisView.Analysis ViewSyntax.
@@ -77,6 +80,7 @@ Inductive analysis_error :=
 | SecondAtomicStep
 | NonAtomicWhileOpen
 | AtomicBlockLeaksAccess
+| StructuredAccessRequiresCertificate
 | IncompatibleBranches.
 
 Record analysis_state := AnalysisState {
@@ -159,6 +163,7 @@ Fixpoint analyze {Γ} (cost : cost_model) (state : analysis_state)
           else inl IncompatibleBranches
       | inl error, _ | _, inl error => inl error
       end
+  | TInvAccess _ _ _ => inl StructuredAccessRequiresCertificate
   | TAtomic _ body =>
       match take_step AtomicStep state with
       | inl error => inl error
@@ -185,7 +190,7 @@ Definition analysis_succeeds {Γ} (cost : cost_model)
 Definition cost_leaf {Γ} (statement : stmt Γ) : bool :=
   match statement with
   | TUnfold _ _ _ | TFold _ _ _ | TIf _ _ _ _ | TSeq _ _ _
-  | TAtomic _ _ => false
+  | TInvAccess _ _ _ | TAtomic _ _ => false
   | _ => true
   end.
 
@@ -274,6 +279,16 @@ Proof.
   - apply bool_decide_eq_true in Hmask. exact Hmask.
 Qed.
 
+Lemma open_invariant_preserves_in_atomic invariant state exit :
+  open_invariant invariant state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  unfold open_invariant.
+  destruct (bool_decide (invariant ∈ analysis_open state)); try discriminate.
+  destruct (bool_decide (invariant ∈ analysis_mask state)); try discriminate.
+  intros Hinr. inversion Hinr. reflexivity.
+Qed.
+
 Lemma fold_open_invariant_removes invariant state :
   invariant ∈ analysis_open state ->
   analysis_open (fold_invariant invariant state) =
@@ -349,6 +364,7 @@ Proof.
     end.
   - eapply open_invariant_preserves_wf; eauto.
   - inversion Hanalyze; subst exit. apply fold_invariant_preserves_wf. exact Hwf.
+  - discriminate.
   - destruct (analyze cost state statement1) as [error|then_state] eqn:Hthen;
       try discriminate.
     destruct (analyze cost state statement2) as [error|else_state] eqn:Helse;
@@ -409,6 +425,7 @@ Proof.
     try (eapply CertLeaf; [reflexivity|exact Hanalyze]).
   - eapply CertUnfold. exact Hanalyze.
   - inversion Hanalyze; subst exit. apply CertFold.
+  - discriminate.
   - destruct (analyze cost state statement1) as [error|then_exit] eqn:Hthen;
       try discriminate.
     destruct (analyze cost state statement2) as [error|else_exit] eqn:Helse;

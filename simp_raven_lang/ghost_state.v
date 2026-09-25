@@ -43,11 +43,11 @@ Definition heapUR : ucmra :=
 Definition stackUR :=
   gmapUR stack_id (exclR stack_frame).
 
-(* Purely a freshness-tracking resource for rich_raven_lang's ghost heap
-   (see Wghost in rrl_lang.v): grown by wp_alloc in lockstep with the real
-   heap, at the very same fresh_loc, so that rrl_lang.v's own standing
-   ghost-naming invariant can prove a freshly-allocated location's ghost
-   keys were never claimed before -- via plain exclusivity here -- without
+(* Purely a freshness-tracking resource for a client's ghost heap: grown by
+   wp_alloc in lockstep with the real heap, at the very same fresh_loc, so
+   that a client's standing ghost-naming invariant can prove a
+   freshly-allocated location's ghost keys were never claimed before -- via
+   plain exclusivity here -- without
    needing to know anything about RAs, Γ, or ghost values at all (those
    stay entirely at the rich_raven_lang layer). *)
 Definition ghost_domUR : ucmra :=
@@ -138,7 +138,7 @@ Section definitions.
   Context `{!heapG Σ}.
 
   Definition to_heap_cellR (v: val) : heap_cellR := (1%Qp, to_agree v).
-  
+
   Global Instance heap_addr_finmap : FinMap heap_addr (gmap heap_addr).
   Proof. apply gmap_finmap. Qed.
 
@@ -150,7 +150,7 @@ Section definitions.
   own heap_heap_name (● (to_heapUR h)).
 
   Definition proc_tbl_interp (proc_tbl : gmap proc_name proc) : iProp Σ :=
-    ghost_map_auth heap_proctbl_name 1 proc_tbl. 
+    ghost_map_auth heap_proctbl_name 1 proc_tbl.
 
   Definition to_stackR (s : gmap stack_id stack_frame) : stackUR :=
     fmap (λ frm, Excl frm) s.
@@ -190,8 +190,25 @@ Section definitions.
   Definition heap_maps_to (l : loc) (fld : fld_name) (q : Qp) (v : val) :=
     own heap_heap_name (◯ {[(heap_addr_constr l fld) := (q, to_agree v)]}).
 
-  Definition stack_frame_own (stk_id : stack_id) (stk_frm : stack_frame)  := 
+  Definition stack_frame_own (stk_id : stack_id) (stk_frm : stack_frame)  :=
     own heap_stack_name (◯ (to_stackR ({[stk_id := stk_frm]} ))).
+
+  (** A runtime thread owns its local stack frame exclusively.  In
+      particular, two [AStack] interpretations for the same runtime stack ID
+      cannot be composed, even when their symbolic stores describe the same
+      concrete frame. *)
+  Lemma stack_frame_own_exclusive stk_id stk_frm1 stk_frm2 :
+    stack_frame_own stk_id stk_frm1 -∗
+    stack_frame_own stk_id stk_frm2 -∗ False.
+  Proof.
+    rewrite /stack_frame_own /to_stackR /=.
+    iIntros "H1 H2".
+    iDestruct (own_valid_2 with "H1 H2") as %Hvalid.
+    apply auth_frag_valid_1 in Hvalid.
+    simpl in Hvalid.
+    rewrite !fmap_insert !fmap_empty in Hvalid.
+    rewrite singleton_op singleton_valid in Hvalid. done.
+  Qed.
 
   (* Persistent (discarded-fraction) read-only fragment, not the default
      full-ownership points-to: the proc table is a static, never-changing
@@ -221,9 +238,9 @@ Section definitions.
   Qed.
 
 
-  
+
   Lemma stack_interp_agreement σ stk_id stk_frm : (stack_interp (stack σ)) -∗ stack_frame_own stk_id stk_frm -∗ ⌜stack σ !! stk_id = Some stk_frm⌝.
-  Proof. 
+  Proof.
     iIntros "Hstack Hstk".
     unfold stack_interp.
     unfold stack_frame_own.
@@ -237,7 +254,7 @@ Section definitions.
 
     rewrite !lookup_fmap in Hi1. cbn in Hi1. rewrite lookup_insert in Hi1. cbn in Hi1.
     destruct (stack σ !! stk_id); try done.
-    -  cbn in Hi1. rewrite Excl_included in Hi1. 
+    -  cbn in Hi1. rewrite Excl_included in Hi1.
     apply leibniz_equiv in Hi1. by subst s.
 
     - cbn in Hi1. exfalso. rewrite option_included in Hi1.
@@ -273,8 +290,8 @@ Section definitions.
       (heap_addr_constr l f) (global_heap σ))) eqn:Hlp; try done.
 
     2 : { simpl in *. destruct H3 as [x Hx]. simpl in Hx. discriminate. }
-    
-    rewrite Hlp.  
+
+    rewrite Hlp.
     simpl in *.
     apply Some_pair_included in Hi1 as [_ Heq].
 
@@ -381,7 +398,7 @@ Section updates.
   Qed.
 
 
-  Lemma heap_l_upd σ l fld v v' : 
+  Lemma heap_l_upd σ l fld v v' :
     l#fld ↦{1%Qp } v ∗ heap_interp (global_heap σ) ==∗
     l#fld ↦{1%Qp } v' ∗ heap_interp (global_heap (update_heap σ l fld v')).
   Proof.
@@ -432,7 +449,7 @@ Section updates.
   (* Grows the ghost-domain reservation set by one fresh key per name in
      gfs, all at the just-picked l -- mirrors heap_alloc_valid's own
      structure exactly, but keyed by field name alone (no value payload:
-     this resource exists purely to let rrl_lang.v's Wghost invariant
+     this resource exists purely to let a client's ghost-heap invariant
      prove freshness, see the comment on ghost_domUR above). *)
   Lemma ghost_dom_alloc_valid :
     ∀ (gfs : list fld_name) (D : gset heap_addr) (l : loc) (h : heap),

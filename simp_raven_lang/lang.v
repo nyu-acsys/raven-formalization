@@ -168,27 +168,6 @@ Proof. destruct t; simpl; done. Qed.
 
 End expr.
 
-Inductive stmt :=
-| Seq (s1 s2 : stmt)
-(* | Return (e : expr) *)
-| IfS (e : expr) (s1 s2 : stmt)
-| Assign (v : var) (e : expr)
-(* | Free (e : expr) *)
-| SkipS
-| StuckS (* stuck statement *)
-(* | ExprS (e : expr) *)
-| Call (v : var) (proc : proc_name) (args : list expr)
-| FldWr (v : var) (fld : fld_name) (e2 : expr) 
-| FldRd (v : var) (e : expr) (fld : fld_name)
-| CAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr)
-| Alloc (v : var) (fs: list (fld_name * val))
-| Spawn (proc : proc_name) (args : list expr)
-.
-
-Definition stmt_append (s1 s2 : stmt) : stmt :=
-  Seq s1 s2.
-
-
 Section state.
 
 Inductive heap_addr :=
@@ -226,6 +205,31 @@ Record stack_frame := StackFrame {
 
 Definition stack_map := gmap stack_id stack_frame.
 
+(** A trusted atomic operation may update the heap and thread-local stacks,
+    but not the immutable procedure table.  The relation itself is supplied
+    by the Raven runtime configuration and is carried opaquely by the
+    statement; it is not required to correspond to a built-in primitive. *)
+Definition trusted_atomic_transition : Type :=
+  heap -> stack_map -> Z -> heap -> stack_map -> Z -> Prop.
+
+Inductive stmt :=
+| Seq (s1 s2 : stmt)
+| IfS (e : expr) (s1 s2 : stmt)
+| Assign (v : var) (e : expr)
+| SkipS
+| DoneS
+| StuckS
+| Call (v : var) (proc : proc_name) (args : list expr)
+| CallNoStore (proc : proc_name) (args : list expr)
+| FldWr (v : var) (fld : fld_name) (e2 : expr)
+| FldRd (v : var) (e : expr) (fld : fld_name)
+| CAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr)
+| Alloc (v : var) (fs: list (fld_name * val))
+| Spawn (proc : proc_name) (args : list expr)
+| TrustedAtomic (transition : trusted_atomic_transition).
+
+Definition stmt_append (s1 s2 : stmt) : stmt := Seq s1 s2.
+
 Record proc := Proc {
   proc_name_val : proc_name;
   proc_args : list (var * typ);
@@ -261,7 +265,7 @@ Definition update_heap (σ : state) (l : loc) (f : fld_name) (v : val) : state :
 Definition lookup_heap (σ : state) (l : loc) (f : fld_name) : option val :=
   σ.(global_heap) !! (heap_addr_constr l f).
 
-  
+
 Definition update_frame_lvar (frame : stack_frame) (x : var) (v : val) : stack_frame :=
   StackFrame (<[x := v]> frame.(locals)) .
 
@@ -310,14 +314,18 @@ Fixpoint subst_stmt (s : stmt) (subst : list (var * expr)) : stmt :=
   | Assign v e => Assign v (subst_expr e subst)
   (* | Free e => Free (subst_expr e subst) *)
   | SkipS => SkipS
+  | DoneS => DoneS
   | StuckS => StuckS
   (* | ExprS e => ExprS (subst_expr e subst) *)
   | Call v proc args => Call v proc (map (λ e, subst_expr e subst) args)
+  | CallNoStore proc args =>
+      CallNoStore proc (map (λ e, subst_expr e subst) args)
   | FldWr v f e2 => FldWr v f (subst_expr e2 subst)
   | FldRd v e f => FldRd v e f
   | CAS vr e1 f e2 e3 => CAS vr (subst_expr e1 subst) f (subst_expr e2 subst) (subst_expr e3 subst)
   | Alloc v fs => Alloc v fs
   | Spawn proc args => Spawn proc (map (λ e, subst_expr e subst) args)
+  | TrustedAtomic transition => TrustedAtomic transition
   end.
 End state.
 
@@ -336,7 +344,7 @@ Inductive runtime_stmt :=
 | RTStuckS
 | RTVal (v : val)
 | RTCall (v : var) (proc : proc_name) (args : list expr) (stk_id : stack_id)
-| RTActiveCall (v : var) (s : runtime_stmt) (callee_stk_id : stack_id) (caller_stk_id : stack_id) 
+| RTActiveCall (v : var) (s : runtime_stmt) (callee_stk_id : stack_id) (caller_stk_id : stack_id)
 (** A call whose return value is intentionally not stored.  Keeping this
     distinct from [RTCall] prevents void/discard calls from manufacturing a
     reserved caller-local destination. *)
@@ -347,6 +355,7 @@ Inductive runtime_stmt :=
 | RTCAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr) (stk_id : stack_id)
 | RTAlloc (v : var) (fs : list (fld_name * expr)) (stk_id : stack_id)
 | RTSpawn (proc : proc_name) (args : list expr) (stk_id : stack_id)
+| RTTrustedAtomic (transition : trusted_atomic_transition) (stk_id : stack_id)
 .
 
 Definition of_val v := RTVal v.
@@ -381,17 +390,91 @@ match s with
 | Assign v e => RTAssign v e stk_id
 (* | Free (e : expr) *)
 | SkipS => RTSkipS stk_id
+| DoneS => RTVal LitUnit
 | StuckS => RTStuckS (* stuck statement *)
 (* | ExprS (e : expr) *)
-| Call v proc args => RTCall v proc args stk_id 
+| Call v proc args => RTCall v proc args stk_id
+| CallNoStore proc args => RTCallNoStore proc args stk_id
 | FldWr v fld e => RTFldWr (Var v) fld e stk_id
 | FldRd v e fld => RTFldRd v e fld stk_id
 | CAS v e1 fld e2 e3 => RTCAS v e1 fld e2 e3 stk_id
 | Alloc v fs => RTAlloc v (map (fun '(field, value) => (field, Val value)) fs)
     stk_id
 | Spawn proc args => RTSpawn proc args stk_id
+| TrustedAtomic transition => RTTrustedAtomic transition stk_id
 end
 .
+
+(** Partial reification of a runtime statement as a source statement at a
+    fixed stack identifier.  This is used only at the procedure-registration
+    boundary.  Active-call states are deliberately not reifiable, and the
+    older source syntax restricts field writes to variable bases and
+    allocation initializers to literal values. *)
+Fixpoint reify_runtime_fields
+    (fields : list (fld_name * expr)) : option (list (fld_name * val)) :=
+  match fields with
+  | [] => Some []
+  | (field, Val value) :: fields' =>
+      match reify_runtime_fields fields' with
+      | Some result => Some ((field, value) :: result)
+      | None => None
+      end
+  | _ => None
+  end.
+
+Fixpoint reify_runtime_stmt (stk_id : stack_id) (runtime : runtime_stmt) :
+    option stmt :=
+  let same_stack actual := bool_decide (actual = stk_id) in
+  match runtime with
+  | RTSeq first second =>
+      match reify_runtime_stmt stk_id first,
+            reify_runtime_stmt stk_id second with
+      | Some first', Some second' => Some (Seq first' second')
+      | _, _ => None
+      end
+  | RTIfS condition then_branch else_branch actual =>
+      if same_stack actual then
+        match reify_runtime_stmt stk_id then_branch,
+              reify_runtime_stmt stk_id else_branch with
+        | Some then_branch', Some else_branch' =>
+            Some (IfS condition then_branch' else_branch')
+        | _, _ => None
+        end
+      else None
+  | RTAssign variable value actual =>
+      if same_stack actual then Some (Assign variable value) else None
+  | RTSkipS actual => if same_stack actual then Some SkipS else None
+  | RTStuckS => Some StuckS
+  | RTVal LitUnit => Some DoneS
+  | RTVal _ => None
+  | RTCall variable procedure arguments actual =>
+      if same_stack actual then Some (Call variable procedure arguments)
+      else None
+  | RTCallNoStore procedure arguments actual =>
+      if same_stack actual then Some (CallNoStore procedure arguments)
+      else None
+  | RTActiveCall _ _ _ _ | RTActiveCallNoStore _ _ => None
+  | RTFldWr (Var variable) field value actual =>
+      if same_stack actual then Some (FldWr variable field value) else None
+  | RTFldWr _ _ _ _ => None
+  | RTFldRd variable base field actual =>
+      if same_stack actual then Some (FldRd variable base field) else None
+  | RTCAS variable base field old_value new_value actual =>
+      if same_stack actual then
+        Some (CAS variable base field old_value new_value)
+      else None
+  | RTAlloc variable fields actual =>
+      if same_stack actual then
+        match reify_runtime_fields fields with
+        | Some fields' => Some (Alloc variable fields')
+        | None => None
+        end
+      else None
+  | RTSpawn procedure arguments actual =>
+      if same_stack actual then Some (Spawn procedure arguments) else None
+  | RTTrustedAtomic transition actual =>
+      if same_stack actual then Some (TrustedAtomic transition) else None
+  end.
 
 Definition un_op_eval (op : un_op) (v : val) : option val :=
   match op, v with
@@ -522,7 +605,7 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   (* prim_step s2 σ [] s_next σ' ls -> *)
   runtime_step (RTIfS e s1 s2 stk_id) σ [] s_next σ' efs
 
-| RTIfValStep σ stk_id stk_frm e s1 s2 b: 
+| RTIfValStep σ stk_id stk_frm e s1 s2 b:
   σ.(stack) !! stk_id = Some stk_frm ->
   expr_step e stk_frm (Val (LitBool b)) ->
   (match b, s1, s2 with
@@ -531,7 +614,7 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   | _, _, _ => False
   end) ->
   runtime_step (RTIfS e s1 s2 stk_id) σ [] (if b then s1 else s2) σ []
-  
+
 (* | RTIfSStep σ stk_id stk_frm e s1 s2 b :
   σ.(stack) !! stk_id = Some stk_frm ->
   expr_step e stk_frm (Val (LitBool b)) ->
@@ -660,6 +743,12 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   σ.(stack) !! callee_stk_id = Some callee_stack ->
   runtime_step (RTActiveCallNoStore (RTVal value) callee_stk_id) σ []
     (RTVal LitUnit) σ []
+
+| TrustedAtomicStep transition stk_id σ heap' stack' max_stack_id' :
+  transition σ.(global_heap) σ.(stack) σ.(max_stack_id)
+    heap' stack' max_stack_id' ->
+  runtime_step (RTTrustedAtomic transition stk_id) σ [] (RTVal LitUnit)
+    (State heap' σ.(procs) stack' max_stack_id') []
 
   .
 
@@ -836,25 +925,25 @@ Qed.
 Lemma fill_not_if e1 e0 s e s1 s2 stk_id:
   fill e1 (fill_item e0 s) <> (RTIfS e s1 s2 stk_id).
 Proof.
-    revert e0 s. 
+    revert e0 s.
     induction e1.
     - intros. destruct e0; try discriminate; try contradiction.
     - simpl in *. intros. apply IHe1.
-Qed. 
+Qed.
 
 Lemma fill_if_empty K e1' e s1 s2 stk_id:
   RTIfS e s1 s2 stk_id = fill K e1' -> K = [].
 Proof.
   intros.
   destruct K; try done.
-  simpl in *. 
+  simpl in *.
   pose proof (fill_not_if K e0 e1' e s1 s2 stk_id). symmetry in H. contradiction.
 Qed.
 
 Lemma fill_not_val e1 e0 s v1:
     fill e1 (fill_item e0 s) <> (RTVal v1).
   Proof.
-      revert e0 s. 
+      revert e0 s.
       induction e1.
       - intros. destruct e0; try discriminate; try contradiction.
       - simpl in *. intros. apply IHe1.
@@ -865,7 +954,7 @@ Lemma fill_val_empty K e1' v:
 Proof.
   intros.
   destruct K; try done.
-  simpl in *. 
+  simpl in *.
   pose proof (fill_not_val K e e1' v). symmetry in H. contradiction.
 Qed.
 
@@ -879,14 +968,15 @@ Definition is_atomic_redex (r : runtime_stmt) : Prop :=
   | RTCAS _ _ _ _ _ _ => True
   | RTAlloc _ _ _ => True
   | RTSpawn _ _ _ => True
+  | RTTrustedAtomic _ _ => True
   | _ => False
   end.
 
 Lemma fill_not_atomic e1 e0 s r:
   is_atomic_redex r ->
   fill e1 (fill_item e0 s) <> r.
-Proof. 
-  revert e0 s. 
+Proof.
+  revert e0 s.
   induction e1.
   - intros. destruct e0; destruct r; simpl in *; try discriminate; try contradiction.
   - simpl in *. intros. apply IHe1. apply H.
@@ -898,7 +988,7 @@ Lemma fill_atomic_empty K e1 r:
 Proof.
   intros.
   destruct K; try done.
-  simpl in *. 
+  simpl in *.
   pose proof (fill_not_atomic K e e1 r H). symmetry in H0. contradiction.
 Qed.
 
@@ -1055,6 +1145,21 @@ Proof.
     pose proof (fill_not_atomic K e e1' (RTSpawn proc args stk_id)).
     simpl in H3.
     specialize (H3 I).
+    symmetry in H0. contradiction.
+Qed.
+
+Lemma atomic_trusted_atomic transition stk_id :
+  Atomic WeaklyAtomic (RTTrustedAtomic transition stk_id).
+Proof.
+  unfold Atomic. intros.
+  inversion H.
+  destruct K.
+  - simpl in *; subst. inversion H2.
+    apply val_irreducible. simpl. done.
+  - simpl in *.
+    pose proof (fill_not_atomic K e e1'
+      (RTTrustedAtomic transition stk_id)) as Hnot.
+    simpl in Hnot. specialize (Hnot I).
     symmetry in H0. contradiction.
 Qed.
 

@@ -26,7 +26,8 @@ Module rrl_lang := raven_iris.rich_raven_lang.rrl_lang.Make RAs.
 Module lifting := rrl_lang.lifting.
 Module ghost_state := rrl_lang.ghost_state.
 Module lang := rrl_lang.lang.
-Import lang ghost_state lifting rrl_lang.
+Module tokens := rrl_lang.tokens.
+Import lang ghost_state lifting rrl_lang tokens.
 Local Notation comp := ra_base.comp.
 Local Notation valid := ra_base.valid.
 Local Notation fpuValid := ra_base.fpuValid.

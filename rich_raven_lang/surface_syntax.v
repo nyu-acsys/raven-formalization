@@ -213,7 +213,7 @@ Notation "'(' a ')'" := a
   (in custom raven_assert at level 0, a custom raven_assert at level 99).
 
 (* Statements. *)
-Notation "'skip'" := SSSkip (in custom raven_stmt at level 0).
+Notation "'skip'" := SSSkip (in custom raven_stmt at level 10).
 Notation "'assert' e" := (SSAssert e)
   (in custom raven_stmt at level 10, e custom raven_expr at level 99).
 Notation "x ':=' e" := (SSAssign x e)
@@ -292,7 +292,7 @@ Notation "first ; second" := (SSSeq first second)
   (in custom raven_stmt at level 90, right associativity,
    first custom raven_stmt, second custom raven_stmt at level 90).
 Notation "'(' s ')'" := s
-  (in custom raven_stmt at level 0, s custom raven_stmt at level 99).
+  (in custom raven_stmt at level 10, s custom raven_stmt at level 99).
 
 End SurfaceSyntax.
 

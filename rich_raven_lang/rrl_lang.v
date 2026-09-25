@@ -19,6 +19,7 @@ From iris.proofmode Require Import tactics.
 
 From raven_iris.simp_raven_lang Require Export lang lifting ghost_state.
 From raven_iris.simp_raven_lang Require Import ghost_state.
+From raven_iris.simp_raven_lang Require Import inv_tokens.
 
 From Coq.Program Require Import Wf.
 Require Import Coq.Logic.FunctionalExtensionality.
@@ -27,10 +28,18 @@ Require Import Coq.Program.Equality.
 Require Import Coq.Init.Datatypes.
 
 Module Make (RAs : RA_CONFIG).
-Module lifting := raven_iris.simp_raven_lang.lifting.Make RAs.
-Module ghost_state := lifting.ghost_state.
+(* The runtime lifting stack and the invariant-token ghost state come from a
+   single application of [InvTokens.Make], which is also what the live
+   development applies; [Include] re-exports its declarations here so that
+   this module's own clients keep seeing them under their existing names. *)
+Module tokens := raven_iris.simp_raven_lang.inv_tokens.InvTokens.Make RAs.
+Module lifting := tokens.lifting.
+Module ghost_state := tokens.ghost_state.
 Module lang := ghost_state.lang.
 Import lang ghost_state lifting.
+(* Imported after [lang] so that [val] and the invariant-token names refer to
+   the assertion-level ones rather than to [lang]'s own [val]. *)
+Import tokens.
 
 (* "All", not "Type": Coq's "Type" default still tries to minimize which
    section variables each proof closes over, and that minimization gets
@@ -79,16 +88,6 @@ Context `{!inGs Σ Gs}.
    sharing is entirely delegated back to the RA itself, same as before. *)
 Context `{!inG Σ (authR (gmapUR heap_addr (agreeR gnameO)))}.
 
-(* Layer 0: the ghost-heap's own inG requirement, isolated as a
-   subG-derivable capability. Unlike
-   heapG/invTokenG it doesn't bundle any gname alongside the inG evidence,
-   so no separate GpreS/GS split is needed here -- just this one fact,
-   combined into ravenΣ below. *)
-Definition ghostHeapInGΣ : gFunctors := #[ GFunctor (authR (gmapUR heap_addr (agreeR gnameO))) ].
-
-Global Instance subG_ghostHeapInG Σ' : subG ghostHeapInGΣ Σ' → inG Σ' (authR (gmapUR heap_addr (agreeR gnameO))).
-Proof. solve_inG. Qed.
-
 Context `{!simpLangG Σ}.
 
 Definition lvar := string.
@@ -96,8 +95,6 @@ Definition lvar := string.
 Definition proc_name := string.
 
 Definition pred_name := string.
-
-Definition inv_name := string.
 
 (* ResourceAlgebra/RA_Pack/ra_name/ra_map/ra_elem live in
    simp_raven_lang/lang.v (re-exported here via `Require Export lang`
@@ -117,45 +114,6 @@ Record fld := Fld { fld_name_val : fld_name; fld_typ : typ }.
    still lives at that freshly-minted gname via a bare own, exactly as in
    the original design, so FPURule's update never touches this map at
    all. *)
-
-(* val mirrors lang.val exactly (see trnsl_lval/trnsl_val below), including
-   its LitRAElem case, so that isomorphism extends to RA elements too. *)
-Inductive val :=
-| LitBool (b: bool) | LitInt (i: Z) | LitUnit | LitLoc (l: loc)
-| LitRAElem (p : ra_elem).
-
-(* EqDecision val is needed already by val_beq right below (interp_lexpr's
-   EqOp/NeOp cases use val_beq, and interp_lexpr comes before LExpr's other
-   infrastructure), so it's placed here rather than alongside LExpr's own
-   infrastructure further down (after interp_lexpr/lexpr_subst). *)
-Global Instance val_eq : EqDecision val.
-Proof.
-  refine (fun x y =>
-    match x, y with
-    | LitBool b1, LitBool b2 => cast_if (decide (b1 = b2))
-    | LitInt i1, LitInt i2 => cast_if (decide (i1 = i2))
-    | LitUnit, LitUnit => left eq_refl
-    | LitLoc l1, LitLoc l2 => cast_if (decide (l1 = l2))
-    | LitRAElem p1, LitRAElem p2 => cast_if (decide (p1 = p2))
-    | _, _ => right _
-    end).
-  all: try by f_equal.
-  all: try intros Heq; inversion Heq; auto.
-Qed.
-
-(* Hand-rolled in place of `Scheme Equality for val`: that command can't
-   derive a comparator for the LitRAElem case (its argument type ra_elem is
-   a sigma type, not something Scheme Equality's generator recognizes).
-   val_beq/internal_val_dec_bl/internal_val_dec_lb keep the exact names and
-   statement shapes Scheme Equality would have produced, since ~30 sites in
-   this file and trnsl.v already depend on them under these names. *)
-Definition val_beq (v1 v2 : val) : bool := bool_decide (v1 = v2).
-
-Lemma internal_val_dec_bl : forall v1 v2 : val, val_beq v1 v2 = true -> v1 = v2.
-Proof. intros v1 v2 H. unfold val_beq in H. by apply bool_decide_eq_true in H. Qed.
-
-Lemma internal_val_dec_lb : forall v1 v2 : val, v1 = v2 -> val_beq v1 v2 = true.
-Proof. intros v1 v2 H. unfold val_beq. by apply bool_decide_eq_true. Qed.
 
 Inductive LExpr :=
 | LVar (x : lvar)
@@ -631,26 +589,6 @@ Proof.
   - exact IH.
 Qed.
 
-Global Instance val_countable : Countable val.
-Proof.
-  refine (inj_countable'
-    (λ v : val, match v with
-      | LitBool b => inl b
-      | LitInt i  => inr (inl i)
-      | LitUnit   => inr (inr (inl tt))
-      | LitLoc l  => inr (inr (inr (inl l)))
-      | LitRAElem p => inr (inr (inr (inr p)))
-    end)
-    (λ x : bool + (Z + (unit + (loc + ra_elem))), match x with
-      | inl b             => LitBool b
-      | inr (inl i)       => LitInt i
-      | inr (inr (inl _)) => LitUnit
-      | inr (inr (inr (inl l))) => LitLoc l
-      | inr (inr (inr (inr p))) => LitRAElem p
-    end) _).
-  intro v; destruct v; done.
-Qed.
-
 Global Instance LExpr_Eq : EqDecision LExpr.
 Proof. solve_decision. Qed.
 
@@ -708,66 +646,6 @@ Proof.
   - rewrite IHe1; rewrite IHe2. done.
   - rewrite IHe1; rewrite IHe2; rewrite IHe3. done.
 Qed.
-
-(* Ghost state backing [LInv]: an invariant assertion is a *nominal* fact, a
-   fragment recording that the invariant was established at a concrete argument
-   vector.  The carrier is discrete (a plain gset of value lists), so the
-   fragment is Timeless -- which is what lets an invariant be opened without a
-   later (see [Winv_open] below). Access exclusivity is provided by Iris's
-   mask-changing atomic accessor, not by a client-owned ghost lock token. *)
-Definition inv_argsUR : ucmra := gsetUR (list val).
-
-Class invTokenG (Σ : gFunctors) := InvTokenG {
-  invtoken_inG :: inG Σ (authR inv_argsUR);
-  invtoken_names : inv_name -> gname;
-}.
-
-(* Layer 0: the camera capability invTokenG needs, without the concrete
-   invtoken_names assignment --
-   mirrors ghost_state.v's own heapGpreS/heapG split (invTokenG bundles a
-   concrete gname-valued function together with the inG evidence, so a
-   full invTokenG instance can't be derived from subG alone; only this
-   "pre" half can. Producing invtoken_names itself is own_alloc work,
-   done once per invariant name a program actually declares -- belongs to
-   the adequacy wrapper, not here). *)
-Class invTokenGpreS (Σ : gFunctors) := InvTokenGpreS {
-  invtoken_pre_inG :: inG Σ (authR inv_argsUR);
-}.
-
-Definition invTokenGΣ : gFunctors := #[ GFunctor (authR inv_argsUR) ].
-
-Global Instance subG_invTokenGpreS Σ' : subG invTokenGΣ Σ' → invTokenGpreS Σ'.
-Proof. solve_inG. Qed.
-
-(* Combined Layer 0 capability list: everything a caller of the adequacy
-   wrapper (raven_soundness, trnsl.v)
-   needs from a single subG hypothesis to build the instances its own
-   Context expects -- except inGs Σ Gs (inherently RA/program-specific,
-   picked per the one ra_name being verified, not a fixed capability) and
-   simpLangG itself (bundles concrete gnames, not just inG evidence, so it
-   needs own_alloc/wp_adequacy work a caller does separately -- heapGΣ and
-   invΣ below only cover the "pre" half of what building one requires).
-   subG's own transitivity through gFunctors append (#[...]) lets
-   subG_heapGpreS/subG_invTokenGpreS/subG_ghostHeapInG (this file) and
-   Iris's own subG_invΣ each fire straight off "subG ravenΣ Σ'" via
-   solve_inG, without restating any of them here -- checked directly below,
-   not just assumed, since invGpreS (unlike the other three) needed an
-   explicit "apply subG_invΣ" first: solve_inG alone doesn't chase through
-   invΣ's own name to find it. *)
-Definition ravenΣ : gFunctors := #[ heapGΣ; invTokenGΣ; ghostHeapInGΣ; invΣ ].
-
-Lemma ravenΣ_subG_heapGpreS Σ' `{!subG ravenΣ Σ'} : heapGpreS Σ'.
-Proof. solve_inG. Qed.
-
-Lemma ravenΣ_subG_invTokenGpreS Σ' `{!subG ravenΣ Σ'} : invTokenGpreS Σ'.
-Proof. solve_inG. Qed.
-
-Lemma ravenΣ_subG_ghostHeapInG Σ' `{!subG ravenΣ Σ'} :
-  inG Σ' (authR (gmapUR heap_addr (agreeR gnameO))).
-Proof. solve_inG. Qed.
-
-Lemma ravenΣ_subG_invGpreS Σ' `{!subG ravenΣ Σ'} : invGpreS Σ'.
-Proof. apply subG_invΣ. solve_inG. Qed.
 
 Context `{!invTokenG Σ}.
 

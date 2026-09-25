@@ -27,7 +27,8 @@ Module rrl_lang := trnsl.rrl_lang.
 Module lifting := trnsl.lifting.
 Module ghost_state := trnsl.ghost_state.
 Module lang := trnsl.lang.
-Import lang ghost_state lifting rrl_lang trnsl.
+Module tokens := trnsl.tokens.
+Import lang ghost_state lifting rrl_lang trnsl tokens.
 
 Set Default Proof Using "All".
 

@@ -1,4 +1,5 @@
-From Coq Require Import String ZArith List PArith Program.Equality.
+From Coq Require Import String ZArith List PArith Program.Equality
+  Logic.FunctionalExtensionality.
 From stdpp Require Import base countable.
 
 From raven_iris.rich_raven_lang Require Import surface_syntax.
@@ -6,9 +7,7 @@ From raven_iris.rich_raven_lang Require Import surface_syntax.
 Import ListNotations.
 Open Scope list_scope.
 
-(** Typed foundations for the elaborated Raven verification IR.  This module
-    is intentionally independent of the existing [rrl_lang] while the new
-    representation is validated. *)
+(** Typed foundations for the elaborated Raven verification IR. *)
 Module TypedCore.
 
 Inductive typ :=
@@ -76,25 +75,63 @@ Fixpoint member_index {Γ t} (variable : member Γ t) : nat :=
   | MThere variable' => S (member_index variable')
   end.
 
-(** Stable symbolic identities allocated by elaboration.  [atom t] is a
-    genuinely distinct record type at each [t], even though its compact
-    runtime payload is just a positive identifier.  Entry/result/proof origin
-    information belongs in the elaboration and presentation tables rather
-    than in the semantic identity itself. *)
-Record atom (t : typ) := Atom {
-  atom_id : positive;
-}.
+Lemma member_index_here {Γ t} :
+  member_index (@MHere Γ t) = O.
+Proof. reflexivity. Qed.
+
+Lemma member_index_there {Γ head t} (variable : member Γ t) :
+  member_index (@MThere Γ t head variable) = S (member_index variable).
+Proof. reflexivity. Qed.
+
+Lemma member_index_injective {Γ t} (left right : member Γ t) :
+  member_index left = member_index right -> left = right.
+Proof.
+  revert right. induction left; intros right Heq; dependent destruction right;
+    cbn [member_index] in Heq; try discriminate.
+  - reflexivity.
+  - f_equal. apply IHleft. lia.
+Qed.
+
+Lemma member_index_sig_injective {Γ}
+    (left right : { t : typ & member Γ t }) :
+  member_index (projT2 left) = member_index (projT2 right) -> left = right.
+Proof.
+  destruct left as [left_type left], right as [right_type right].
+  revert right_type right. induction left; intros right_type right Heq;
+    dependent destruction right; cbn [member_index] in Heq; try discriminate.
+  - reflexivity.
+  - specialize (IHleft _ right (Nat.succ_inj _ _ Heq)).
+    inversion IHleft. reflexivity.
+Qed.
+
+(** Stable symbolic identities.  Statement-result atoms retain their compact
+    positive identifier, while procedure-entry atoms are generated from the
+    procedure and frame slot.  Keeping the origins disjoint makes canonical
+    entry stores collision-free by construction. *)
+Inductive atom (t : typ) :=
+| Atom (id : positive)
+| ProcedureEntryAtom (procedure : proc_id) (slot : nat).
 
 Arguments Atom {_} _.
-Arguments atom_id {_} _.
+Arguments ProcedureEntryAtom {_} _ _.
 
 Global Instance atom_eq_dec t : EqDecision (atom t).
 Proof. solve_decision. Defined.
 
 Global Instance atom_countable t : Countable (atom t).
 Proof.
-  refine (inj_countable atom_id (fun id => Some (Atom id)) _).
-  intros [id]. reflexivity.
+  refine (inj_countable'
+    (fun symbolic : atom t =>
+      match symbolic with
+      | Atom id => inl id
+      | ProcedureEntryAtom procedure slot => inr (procedure, slot)
+      end)
+    (fun encoded =>
+      match encoded with
+      | inl id => Atom id
+      | inr (procedure, slot) => ProcedureEntryAtom procedure slot
+      end) _).
+  intros []; reflexivity.
 Qed.
 
 (** Resource-algebra carriers remain supplied by the program's RA
@@ -104,6 +141,10 @@ Module Type RA_VALUE_CONFIG.
   Parameter ra_eqb : forall r, ra_carrier r -> ra_carrier r -> bool.
   Parameter ra_eqb_eq : forall r (left right : ra_carrier r),
     ra_eqb r left right = true <-> left = right.
+  Parameter ra_id : forall r, ra_carrier r.
+  Parameter ra_of_int : forall r, Z -> ra_carrier r.
+  Parameter ra_valid : forall r, ra_carrier r -> Prop.
+  Parameter ra_fpu_allowed : forall r, ra_carrier r -> ra_carrier r -> Prop.
 End RA_VALUE_CONFIG.
 
 Module Make (RAs : RA_VALUE_CONFIG).
@@ -116,6 +157,21 @@ Inductive tval : typ -> Type :=
 | VRA r (value : RAs.ra_carrier r) : tval (TRA r).
 
 Arguments VRA {_} _.
+
+(** Raven's value sorts denote inhabited SMT sorts.  Keep the corresponding
+    language-level witness explicit: proof transformations may need a witness
+    for a logical binder on a branch where that binder is otherwise unused. *)
+Definition default_tval (t : typ) : tval t :=
+  match t as result return tval result with
+  | TBool => VBool false
+  | TInt => VInt 0
+  | TRef => VRef 0
+  | TUnit => VUnit
+  | TRA r => VRA (RAs.ra_id r)
+  end.
+
+Global Instance tval_inhabited (t : typ) : Inhabited (tval t) :=
+  populate (default_tval t).
 
 Definition tval_eqb (t : typ) (left right : tval t) : bool.
 Proof.
@@ -146,6 +202,26 @@ Proof.
       exact H1.
 Qed.
 
+Definition tval_fpu_allowed {t : typ} (old_value new_value : tval t) : Prop.
+Proof.
+  destruct t; dependent destruction old_value; dependent destruction new_value.
+  - exact False.
+  - exact False.
+  - exact False.
+  - exact False.
+  - exact (RAs.ra_fpu_allowed resource_algebra value value0).
+Defined.
+
+Definition tval_ra_valid {t : typ} (value : tval t) : Prop.
+Proof.
+  destruct t; dependent destruction value.
+  - exact True.
+  - exact True.
+  - exact True.
+  - exact True.
+  - exact (RAs.ra_valid resource_algebra value).
+Defined.
+
 (** References available to a symbolic store or typed logical expression.
     Each namespace has a distinct constructor, so formal substitution,
     binder weakening, and atom renaming cannot interfere with one another. *)
@@ -160,7 +236,8 @@ Arguments RefAtom {_ _ _} _.
 
 Inductive unop : typ -> typ -> Type :=
 | UNot : unop TBool TBool
-| UNeg : unop TInt TInt.
+| UNeg : unop TInt TInt
+| URAOfInt r : unop TInt (TRA r).
 
 Inductive binop : typ -> typ -> typ -> Type :=
 | BAdd : binop TInt TInt TInt
@@ -190,11 +267,343 @@ Arguments EVal {_ _ _} _.
 Arguments EUnOp {_ _ _ _} _ _.
 Arguments EBinOp {_ _ _ _ _} _ _ _.
 
+Definition default_expr {F Δ} (t : typ) : expr F Δ t :=
+  EVal (default_tval t).
+
+(* ------------------------------------------------------------------ *)
+(** ** Decidable equality for typed expressions.
+
+    The normalization layer's access-argument side condition is a
+    syntactic equality between symbolized invariant arguments, so a
+    producer that recognizes a matched invariant access has to *decide*
+    it rather than assume it.
+
+    Comparison is defined heterogeneously -- [expr F Δ t1] against
+    [expr F Δ t2] -- so that the definitions themselves need no
+    dependent transports.  Only [member] is special: its context is an
+    index rather than a parameter, so a two-way [match] cannot refine
+    both sides at once, and it is compared through [member_index]
+    instead.  Nothing here needs an axiom: every index is a [typ], and
+    [typ] already has decidable equality. *)
+
+Definition source_name_eqb (left right : source_name) : bool :=
+  if String.string_dec left right then true else false.
+
+Lemma source_name_eqb_refl name : source_name_eqb name name = true.
+Proof.
+  unfold source_name_eqb. destruct (String.string_dec name name) as [_ | Hne].
+  - reflexivity.
+  - exact (match Hne eq_refl with end).
+Qed.
+
+Lemma source_name_eqb_eq left right :
+  source_name_eqb left right = true -> left = right.
+Proof.
+  unfold source_name_eqb. destruct (String.string_dec left right) as [Heq | _].
+  - intros _. exact Heq.
+  - discriminate.
+Qed.
+
+Definition typ_eqb (left right : typ) : bool :=
+  if typ_eq_dec left right then true else false.
+
+Lemma typ_eqb_refl t : typ_eqb t t = true.
+Proof.
+  unfold typ_eqb. destruct (typ_eq_dec t t) as [_ | Hne].
+  - reflexivity.
+  - exact (match Hne eq_refl with end).
+Qed.
+
+Lemma typ_eqb_eq left right : typ_eqb left right = true -> left = right.
+Proof.
+  unfold typ_eqb. destruct (typ_eq_dec left right) as [Heq | _].
+  - intros _. exact Heq.
+  - discriminate.
+Qed.
+
+Definition member_eqb {Γ t1} (x : member Γ t1) {t2} (y : member Γ t2) : bool :=
+  Nat.eqb (member_index x) (member_index y).
+
+Lemma member_eqb_refl {Γ t} (x : member Γ t) : member_eqb x x = true.
+Proof. unfold member_eqb. apply Nat.eqb_refl. Qed.
+
+Lemma member_eqb_eq {Γ t} (x y : member Γ t) : member_eqb x y = true -> x = y.
+Proof.
+  revert y. induction x; intros y; dependent destruction y;
+    unfold member_eqb in *; simpl; try (intros Hbad; discriminate).
+  - reflexivity.
+  - intros Heq. f_equal. exact (IHx y Heq).
+Qed.
+
+Global Instance member_eq_dec Γ t : EqDecision (member Γ t).
+Proof.
+  intros x y. destruct (member_eqb x y) eqn:Heq.
+  - left. exact (member_eqb_eq x y Heq).
+  - right. intros ->. rewrite member_eqb_refl in Heq. discriminate.
+Defined.
+
+Definition atom_eqb {t1} (left : atom t1) {t2} (right : atom t2) : bool :=
+  match left, right with
+  | Atom left_id, Atom right_id => Pos.eqb left_id right_id
+  | ProcedureEntryAtom left_procedure left_slot,
+      ProcedureEntryAtom right_procedure right_slot =>
+      Pos.eqb left_procedure right_procedure && Nat.eqb left_slot right_slot
+  | _, _ => false
+  end.
+
+Lemma atom_eqb_refl t (symbolic : atom t) : atom_eqb symbolic symbolic = true.
+Proof. destruct symbolic; simpl; now rewrite ?Pos.eqb_refl, ?Nat.eqb_refl. Qed.
+
+Lemma atom_eqb_eq t (left right : atom t) :
+  atom_eqb left right = true -> left = right.
+Proof.
+  destruct left, right; simpl; try discriminate.
+  - intros Heq. apply Pos.eqb_eq in Heq. now subst.
+  - rewrite andb_true_iff, Pos.eqb_eq, Nat.eqb_eq.
+    intros [-> ->]. reflexivity.
+Qed.
+
+Definition value_ref_eqb {F Δ t1} (r1 : value_ref F Δ t1)
+    {t2} (r2 : value_ref F Δ t2) : bool :=
+  match r1, r2 with
+  | RefFormal x, RefFormal y => member_eqb x y
+  | RefBound x, RefBound y => member_eqb x y
+  | RefAtom x, RefAtom y => atom_eqb x y
+  | _, _ => false
+  end.
+
+Lemma value_ref_eqb_refl {F Δ t} (r : value_ref F Δ t) :
+  value_ref_eqb r r = true.
+Proof.
+  dependent destruction r; simpl.
+  - exact (member_eqb_refl x).
+  - exact (member_eqb_refl x).
+  - exact (atom_eqb_refl _ x).
+Qed.
+
+Lemma value_ref_eqb_eq {F Δ t} (r1 r2 : value_ref F Δ t) :
+  value_ref_eqb r1 r2 = true -> r1 = r2.
+Proof.
+  dependent destruction r1; dependent destruction r2; simpl;
+    try (intros Hbad; discriminate).
+  - intros Heq. f_equal. exact (member_eqb_eq _ _ Heq).
+  - intros Heq. f_equal. exact (member_eqb_eq _ _ Heq).
+  - intros Heq. f_equal. exact (atom_eqb_eq _ _ _ Heq).
+Qed.
+
+Global Instance value_ref_eq_dec F Δ t : EqDecision (value_ref F Δ t).
+Proof.
+  intros r1 r2. destruct (value_ref_eqb r1 r2) eqn:Heq.
+  - left. exact (value_ref_eqb_eq r1 r2 Heq).
+  - right. intros ->. rewrite value_ref_eqb_refl in Heq. discriminate.
+Defined.
+
+(** A heterogeneous comparison for values, so that [expr]'s [EVal] case
+    needs no transport. *)
+Definition tval_eqb_het {t1} (v1 : tval t1) {t2} (v2 : tval t2) : bool :=
+  match v1, v2 with
+  | VBool b1, VBool b2 => Bool.eqb b1 b2
+  | VInt z1, VInt z2 => Z.eqb z1 z2
+  | VRef l1, VRef l2 => Z.eqb l1 l2
+  | VUnit, VUnit => true
+  | @VRA r1 w1, @VRA r2 w2 =>
+      match String.string_dec r1 r2 with
+      | left equality =>
+          RAs.ra_eqb r2 (eq_rect r1 RAs.ra_carrier w1 r2 equality) w2
+      | right _ => false
+      end
+  | _, _ => false
+  end.
+
+Lemma tval_eqb_het_refl {t} (v : tval t) : tval_eqb_het v v = true.
+Proof.
+  dependent destruction v; simpl.
+  - exact (Bool.eqb_reflx b).
+  - exact (Z.eqb_refl z).
+  - exact (Z.eqb_refl location).
+  - reflexivity.
+  - destruct (String.string_dec r r) as [equality | Hne];
+      [| exact (match Hne eq_refl with end)].
+    rewrite (Eqdep_dec.UIP_dec String.string_dec equality eq_refl). simpl.
+    apply RAs.ra_eqb_eq. reflexivity.
+Qed.
+
+Lemma tval_eqb_het_eq {t} (v1 v2 : tval t) :
+  tval_eqb_het v1 v2 = true -> v1 = v2.
+Proof.
+  dependent destruction v1; dependent destruction v2; simpl;
+    try (intros Hbad; discriminate).
+  - intros Heq. apply Bool.eqb_prop in Heq. subst b0. reflexivity.
+  - intros Heq. apply Z.eqb_eq in Heq. subst z0. reflexivity.
+  - intros Heq. apply Z.eqb_eq in Heq. subst location0. reflexivity.
+  - intros _. reflexivity.
+  - destruct (String.string_dec r r) as [equality | Hne];
+      [| intros Hbad; discriminate].
+    rewrite (Eqdep_dec.UIP_dec String.string_dec equality eq_refl). simpl.
+    intros Heq. apply RAs.ra_eqb_eq in Heq. subst value0. reflexivity.
+Qed.
+
+(** [unop] and [binop] are small enough to compare directly; both
+    comparisons are heterogeneous in the operand types. *)
+Definition unop_eqb {input1 output1} (op1 : unop input1 output1)
+    {input2 output2} (op2 : unop input2 output2) : bool :=
+  match op1, op2 with
+  | UNot, UNot => true
+  | UNeg, UNeg => true
+  | URAOfInt r1, URAOfInt r2 => source_name_eqb r1 r2
+  | _, _ => false
+  end.
+
+Definition binop_eqb {left1 right1 output1} (op1 : binop left1 right1 output1)
+    {left2 right2 output2} (op2 : binop left2 right2 output2) : bool :=
+  match op1, op2 with
+  | BAdd, BAdd | BSub, BSub | BMul, BMul | BDiv, BDiv | BMod, BMod
+  | BLt, BLt | BLe, BLe | BGt, BGt | BGe, BGe
+  | BAnd, BAnd | BOr, BOr => true
+  | BEq t1, BEq t2 => typ_eqb t1 t2
+  | BNe t1, BNe t2 => typ_eqb t1 t2
+  | _, _ => false
+  end.
+
+Lemma unop_eqb_refl {input output} (op : unop input output) :
+  unop_eqb op op = true.
+Proof.
+  destruct op; simpl; [reflexivity | reflexivity | apply source_name_eqb_refl].
+Qed.
+
+Lemma binop_eqb_refl {left right output} (op : binop left right output) :
+  binop_eqb op op = true.
+Proof. destruct op; simpl; try reflexivity; apply typ_eqb_refl. Qed.
+
+Lemma unop_eqb_input {input1 input2 output} (op1 : unop input1 output)
+    (op2 : unop input2 output) : unop_eqb op1 op2 = true -> input1 = input2.
+Proof.
+  destruct op1; dependent destruction op2; simpl;
+    try (intros Hbad; discriminate); intros _; reflexivity.
+Qed.
+
+Lemma unop_eqb_eq {input output} (op1 op2 : unop input output) :
+  unop_eqb op1 op2 = true -> op1 = op2.
+Proof.
+  dependent destruction op1; dependent destruction op2; simpl;
+    try (intros Hbad; discriminate); intros _; reflexivity.
+Qed.
+
+Lemma binop_eqb_operands {left1 right1 left2 right2 output}
+    (op1 : binop left1 right1 output) (op2 : binop left2 right2 output) :
+  binop_eqb op1 op2 = true -> left1 = left2 /\ right1 = right2.
+Proof.
+  destruct op1; dependent destruction op2; simpl;
+    try (intros Hbad; discriminate);
+    try (intros _; split; reflexivity);
+    intros Heq; apply typ_eqb_eq in Heq; subst; split; reflexivity.
+Qed.
+
+Lemma binop_eqb_eq {left right output} (op1 op2 : binop left right output) :
+  binop_eqb op1 op2 = true -> op1 = op2.
+Proof.
+  dependent destruction op1; dependent destruction op2; simpl;
+    try (intros Hbad; discriminate); intros _; reflexivity.
+Qed.
+
+Fixpoint expr_eqb {F Δ t1} (e1 : expr F Δ t1) {t2} (e2 : expr F Δ t2)
+    {struct e1} : bool :=
+  match e1, e2 with
+  | ERef r1, ERef r2 => value_ref_eqb r1 r2
+  | EVal v1, EVal v2 => tval_eqb_het v1 v2
+  | EUnOp op1 operand1, EUnOp op2 operand2 =>
+      unop_eqb op1 op2 && expr_eqb operand1 operand2
+  | EBinOp op1 first1 second1, EBinOp op2 first2 second2 =>
+      binop_eqb op1 op2 && expr_eqb first1 first2 && expr_eqb second1 second2
+  | _, _ => false
+  end.
+
+Lemma expr_eqb_refl {F Δ t} (e : expr F Δ t) : expr_eqb e e = true.
+Proof.
+  induction e; simpl.
+  - exact (value_ref_eqb_refl reference).
+  - exact (tval_eqb_het_refl value).
+  - rewrite unop_eqb_refl. exact IHe.
+  - rewrite binop_eqb_refl. rewrite IHe1. exact IHe2.
+Qed.
+
+Lemma expr_eqb_eq {F Δ} : forall {t} (e1 e2 : expr F Δ t),
+  expr_eqb e1 e2 = true -> e1 = e2.
+Proof.
+  intros t e1. induction e1; intros e2; dependent destruction e2; simpl;
+    try (intros Hbad; discriminate).
+  - intros Heq. f_equal. exact (value_ref_eqb_eq _ _ Heq).
+  - intros Heq. f_equal. exact (tval_eqb_het_eq _ _ Heq).
+  - intros Heq. apply andb_prop in Heq as [Hop Hoperand].
+    pose proof (unop_eqb_input op op0 Hop) as Hinput. subst input0.
+    rewrite (unop_eqb_eq op op0 Hop). f_equal. exact (IHe1 _ Hoperand).
+  - intros Heq. apply andb_prop in Heq as [Heq Hsecond].
+    apply andb_prop in Heq as [Hop Hfirst].
+    pose proof (binop_eqb_operands op op0 Hop) as [Hleft Hright].
+    subst left0. subst right0.
+    rewrite (binop_eqb_eq op op0 Hop). f_equal.
+    + exact (IHe1_1 _ Hfirst).
+    + exact (IHe1_2 _ Hsecond).
+Qed.
+
+Global Instance expr_eq_dec F Δ t : EqDecision (expr F Δ t).
+Proof.
+  intros e1 e2. destruct (expr_eqb e1 e2) eqn:Heq.
+  - left. exact (expr_eqb_eq e1 e2 Heq).
+  - right. intros ->. rewrite expr_eqb_refl in Heq. discriminate.
+Defined.
+
 (** Typed environments need no analogue of [env_typ_well_defined]. *)
 Definition formal_env (F : context) := forall t, formal F t -> tval t.
 Definition binder_env (Δ : context) := forall t, bvar Δ t -> tval t.
 
 Definition atom_env := forall t, atom t -> tval t.
+
+(** Procedure-entry atoms are generated by the verifier and interpreted
+    afresh at every call.  Environments that agree on ordinary atoms may
+    therefore differ on these call-local placeholders. *)
+Definition stable_atoms_agree (left right : atom_env) : Prop :=
+  forall t (symbolic : atom t),
+    match symbolic with
+    | Atom _ => left t symbolic = right t symbolic
+    | ProcedureEntryAtom _ _ => True
+    end.
+
+Definition stable_atom_env (environment : atom_env) : atom_env :=
+  fun t symbolic =>
+    match symbolic with
+    | Atom id => environment t (Atom id)
+    | ProcedureEntryAtom _ _ => default_tval t
+    end.
+
+Lemma stable_atom_env_agree left right :
+  stable_atoms_agree left right ->
+  stable_atom_env left = stable_atom_env right.
+Proof.
+  intros Hagree. apply functional_extensionality_dep. intros t.
+  apply functional_extensionality. intros symbolic.
+  destruct symbolic as [id | procedure slot]; simpl;
+    first exact (Hagree _ (Atom id)).
+  reflexivity.
+Qed.
+
+Definition atom_stable {t} (symbolic : atom t) : Prop :=
+  match symbolic with Atom _ => True | ProcedureEntryAtom _ _ => False end.
+
+Definition ref_entry_free {F Δ t} (reference : value_ref F Δ t) : Prop :=
+  match reference with
+  | RefAtom symbolic => atom_stable symbolic
+  | _ => True
+  end.
+
+Fixpoint expr_entry_free {F Δ t} (expression : expr F Δ t) : Prop :=
+  match expression with
+  | ERef reference => ref_entry_free reference
+  | EVal _ => True
+  | EUnOp _ operand => expr_entry_free operand
+  | EBinOp _ first second =>
+      expr_entry_free first /\ expr_entry_free second
+  end.
 
 Definition interp_ref {F Δ t}
     (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
@@ -212,6 +621,8 @@ Definition interp_unop {input output} (op : unop input output) :
       match value with VBool b => VBool (negb b) end
   | UNeg => fun value =>
       match value with VInt z => VInt (-z) end
+  | URAOfInt r => fun value =>
+      match value with VInt z => VRA (RAs.ra_of_int r z) end
   end.
 
 (** Typed binary operations follow Raven's operational semantics.  In
@@ -267,6 +678,42 @@ Fixpoint interp_expr {F Δ t}
       | _, _ => None
       end
   end.
+
+Lemma interp_ref_stable_atoms {F Δ t}
+    (formals : formal_env F) (binders : binder_env Δ)
+    (left right : atom_env) (reference : value_ref F Δ t) :
+  stable_atoms_agree left right -> ref_entry_free reference ->
+  interp_ref formals binders left reference =
+    interp_ref formals binders right reference.
+Proof.
+  intros Hagree Hfree. destruct reference; simpl; try reflexivity.
+  destruct x as [id | procedure slot].
+  - exact (Hagree _ (Atom id)).
+  - contradiction.
+Qed.
+
+Lemma interp_expr_stable_atoms {F Δ t}
+    (formals : formal_env F) (binders : binder_env Δ)
+    (left right : atom_env) (expression : expr F Δ t) :
+  stable_atoms_agree left right -> expr_entry_free expression ->
+  interp_expr formals binders left expression =
+  interp_expr formals binders right expression.
+Proof.
+  intros Hagree. induction expression; intros Hfree.
+  - cbn [expr_entry_free interp_expr] in Hfree |-.
+    destruct reference; simpl in Hfree |-; try reflexivity.
+    destruct x as [id | procedure slot].
+    + change (Some (left t (Atom id)) = Some (right t (Atom id))).
+      apply f_equal. exact (Hagree _ (Atom id)).
+    + contradiction.
+  - reflexivity.
+  - cbn [expr_entry_free] in Hfree.
+    cbn [interp_expr]. rewrite (IHexpression Hfree). reflexivity.
+  - cbn [expr_entry_free] in Hfree. destruct Hfree as [Hleft Hright].
+    cbn [interp_expr].
+    rewrite (IHexpression1 Hleft), (IHexpression2 Hright).
+    reflexivity.
+Qed.
 
 Lemma interp_expr_total {F Δ t} (formals : formal_env F)
     (binders : binder_env Δ) (atoms : atom_env) (expression : expr F Δ t) :
@@ -329,6 +776,10 @@ Module UnitRA <: TypedCore.RA_VALUE_CONFIG.
   Lemma ra_eqb_eq r (left right : unit) :
     ra_eqb r left right = true <-> left = right.
   Proof. destruct left, right. split; reflexivity. Qed.
+  Definition ra_id (_ : source_name) : unit := tt.
+  Definition ra_of_int (_ : source_name) (_ : Z) : unit := tt.
+  Definition ra_valid (_ : source_name) (_ : unit) : Prop := True.
+  Definition ra_fpu_allowed (_ : source_name) (_ _ : unit) : Prop := True.
 End UnitRA.
 
 Module Core := TypedCore.Make UnitRA.
