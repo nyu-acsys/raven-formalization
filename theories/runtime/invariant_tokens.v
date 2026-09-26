@@ -20,11 +20,13 @@ From raven Require Import runtime.ghost_state.
     logic states or proves such a fact. *)
 Module InvTokens.
 
-Module Make (RAs : RA_CONFIG).
-Module lifting := raven.runtime.lifting.Make RAs.
+Module lifting := raven.runtime.lifting.
 Module ghost_state := lifting.ghost_state.
 Module lang := ghost_state.lang.
 Import lang ghost_state lifting.
+
+Section WithRAs.
+Context {RAs : RAConfig}.
 
 Set Default Proof Using "Type".
 
@@ -154,6 +156,6 @@ Proof. solve_inG. Qed.
 Lemma ravenΣ_subG_invGpreS Σ' `{!subG ravenΣ Σ'} : invGpreS Σ'.
 Proof. apply subG_invΣ. solve_inG. Qed.
 
-End Make.
+End WithRAs.
 
 End InvTokens.

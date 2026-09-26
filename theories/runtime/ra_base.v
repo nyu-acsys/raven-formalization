@@ -42,6 +42,7 @@ Global Instance ra_carrier_countable_instance (r : RA_Pack) : Countable (RA_carr
 Global Instance ra_inst_instance (r : RA_Pack) : ResourceAlgebra (RA_carrier r) :=
   RA_inst r.
 
-Module Type RA_CONFIG.
-  Parameter ra_map : ra_name -> RA_Pack.
-End RA_CONFIG.
+(** The resource algebras a program uses, looked up by name. *)
+Class RAConfig := RAConfigData {
+  ra_config_map : ra_name -> RA_Pack;
+}.

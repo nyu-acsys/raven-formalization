@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The development now lives under the single `raven` logical root, organized
   into surface, verification, analysis, runtime, soundness, and example
   namespaces.
+- Configuration is supplied through type classes and section parameters
+  rather than a deeply nested hierarchy of generative functors; client
+  developments no longer pay a large per-program instantiation cost.
+- Certificates derive leaf costs from the active analysis environment rather
+  than carrying a redundant cost index.
+- The soundness development is split by responsibility into rule validity,
+  procedure validity, and adequacy modules, with elaboration, erasure, and
+  structured certificates likewise separated from their former aggregate
+  modules.
 
 ### Removed
 

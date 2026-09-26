@@ -2,21 +2,17 @@ From Coq Require Import ClassicalEpsilon FunctionalExtensionality Lia
   Program.Equality.
 From stdpp Require Import gmap sets.
 
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model.
+From raven Require Import runtime.erasure analysis.structured_certificates verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model.
 
 (** Certified source-to-source normalization for typed Raven programs. *)
-Module TypedNormalizationBase.
+Module NormalizationBase.
 
-Module Make (RuntimeRAs : ra_base.RA_CONFIG)
-    (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Runtime := TypedRuntime.Make RuntimeRAs Logic.
 Module Hoare := Runtime.Validation.Hoare.
 Module Assertions := Runtime.Translation.Assertions.
 Module Core := Runtime.Core.
 Module IR := Runtime.IR.
 Module GenericRegions := Runtime.GenericRegions.
-Module StructuredCertificates := Runtime.StructuredCertificates.
-Import TypedCore TypedIR Runtime IR Core Runtime.Translation.
+Import Core IR Runtime IR Core Runtime.Translation.
 Import StructuredCertificates.
 
 Notation pexpr_dependencies :=
@@ -25,6 +21,10 @@ Notation pexpr_list_dependencies :=
   Hoare.ResourceHoare.pexpr_list_dependencies.
 Notation statement_writes := Hoare.ResourceHoare.statement_writes.
 
+Section WithSignature.
+Context {RAs : ra_base.RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
+
 (** Proof-facing certificate that the invariant instance named at a closing
     fold is the one named when the access was opened.  The baseline
     normalizer obtains this from syntactic stability.  A future preprocessing
@@ -32,7 +32,7 @@ Notation statement_writes := Hoare.ResourceHoare.statement_writes.
     prove the same interface after replacing both annotations by the snapshot.
     Nothing below depends on how the certificate was obtained. *)
 Record access_argument_stability {Γ F Δ invariant}
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ) : Prop := {
   stable_symbolized_arguments :
     IR.symbolize_expr_list closing_store arguments =
@@ -45,7 +45,7 @@ Record access_argument_stability {Γ F Δ invariant}
     pass targets exactly this interface. *)
 Record access_argument_compatibility {Γ F Δ invariant}
     (opening_arguments closing_arguments :
-      pexpr_list Γ (Logic.invariant_args invariant))
+      pexpr_list Γ (Assertion.invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ) : Prop := {
   compatible_symbolized_arguments :
     IR.symbolize_expr_list closing_store closing_arguments =
@@ -53,7 +53,7 @@ Record access_argument_compatibility {Γ F Δ invariant}
 }.
 
 Definition access_argument_compatibility_of_stability {Γ F Δ invariant}
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ)
     (stable : access_argument_stability arguments opening_store closing_store) :
     access_argument_compatibility arguments arguments opening_store
@@ -64,7 +64,7 @@ Proof.
 Defined.
 
 Definition access_argument_stability_of_equality {Γ F Δ invariant}
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ)
     (Heq : IR.symbolize_expr_list closing_store arguments =
       IR.symbolize_expr_list opening_store arguments) :
@@ -72,7 +72,7 @@ Definition access_argument_stability_of_equality {Γ F Δ invariant}
   {| stable_symbolized_arguments := Heq |}.
 
 Definition syntactic_access_argument_stability {Γ F Δ invariant}
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (store : symbolic_store Γ F Δ) :
     access_argument_stability arguments store store :=
   {| stable_symbolized_arguments := eq_refl |}.
@@ -744,7 +744,7 @@ Lemma stack_arguments_agree_under_weaken_reflect_chosen
     (arguments : pexpr_list Γ ts) (expected : Assertions.expr_list F Θ ts)
     (formula : Assertions.assertion Γ F Δ) :
   stack_arguments_agree_under (extend_bound_subst substitution witness)
-    arguments expected (@Assertions.weaken_assertion Γ F Δ u formula) ->
+    arguments expected (@Assertions.weaken_assertion _ _ Γ F Δ u formula) ->
   stack_arguments_agree_under substitution arguments expected formula.
 Proof.
   intro Hagree.
@@ -789,7 +789,7 @@ Lemma witness_aware_stack_arguments_agree_current_exists {Γ F Δ ts t}
     (body : Assertions.assertion Γ F (t :: Δ)) :
   witness_aware_stack_arguments_agree arguments expected body ->
   witness_aware_stack_arguments_agree arguments expected
-    (@Assertions.weaken_assertion Γ F Δ t
+    (@Assertions.weaken_assertion _ _ Γ F Δ t
       (Assertions.AExists t body)).
 Proof.
   intros Hagree.
@@ -1068,8 +1068,8 @@ Lemma stack_arguments_agree_weaken {Γ F Δ ts u}
     (formula : Assertions.assertion Γ F Δ) :
   stack_arguments_agree arguments expected formula ->
   stack_arguments_agree arguments
-    (@Assertions.weaken_expr_list F Δ ts u expected)
-    (@Assertions.weaken_assertion Γ F Δ u formula).
+    (@Assertions.weaken_expr_list _ F Δ ts u expected)
+    (@Assertions.weaken_assertion _ _ Γ F Δ u formula).
 Proof.
   intro Hagree.
   unfold Assertions.weaken_assertion.
@@ -1181,8 +1181,8 @@ Lemma stack_arguments_agree_weaken_reflect {Γ F Δ ts u}
     (arguments : pexpr_list Γ ts) (expected : Assertions.expr_list F Δ ts)
     (formula : Assertions.assertion Γ F Δ) :
   stack_arguments_agree arguments
-    (@Assertions.weaken_expr_list F Δ ts u expected)
-    (@Assertions.weaken_assertion Γ F Δ u formula) ->
+    (@Assertions.weaken_expr_list _ F Δ ts u expected)
+    (@Assertions.weaken_assertion _ _ Γ F Δ u formula) ->
   stack_arguments_agree arguments expected formula.
 Proof.
   unfold Assertions.weaken_assertion.
@@ -1336,7 +1336,7 @@ Qed.
 
 Definition restricted_access_boundary_check {Γ invariant}
     (opening_arguments closing_arguments :
-      pexpr_list Γ (Logic.invariant_args invariant))
+      pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) : bool :=
   restricted_pexpr_list_eqb opening_arguments closing_arguments &&
     bool_decide (pexpr_list_dependencies opening_arguments ##
@@ -1344,7 +1344,7 @@ Definition restricted_access_boundary_check {Γ invariant}
 
 Lemma restricted_access_boundary_check_sound {Γ invariant}
     (opening_arguments closing_arguments :
-      pexpr_list Γ (Logic.invariant_args invariant)) body :
+      pexpr_list Γ (Assertion.invariant_args invariant)) body :
   restricted_access_boundary_check opening_arguments closing_arguments body =
     true ->
   opening_arguments = closing_arguments /\
@@ -1373,7 +1373,7 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
           | left Heq =>
               restricted_access_boundary_check opening_arguments
                 (eq_rect _ (fun invariant =>
-                  pexpr_list Γ (Logic.invariant_args invariant))
+                  pexpr_list Γ (Assertion.invariant_args invariant))
                   closing_arguments _ (eq_sym Heq)) body
           | right _ => false
           end
@@ -1384,7 +1384,7 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
           | left Heq =>
               restricted_access_boundary_check opening_arguments
                 (eq_rect _ (fun invariant =>
-                  pexpr_list Γ (Logic.invariant_args invariant))
+                  pexpr_list Γ (Assertion.invariant_args invariant))
                   closing_arguments _ (eq_sym Heq)) body &&
                 restricted_access_effect_check work
           | right _ => false
@@ -1449,7 +1449,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
                     (eq_rect _ (fun invariant =>
-                      pexpr_list Γ (Logic.invariant_args invariant))
+                      pexpr_list Γ (Assertion.invariant_args invariant))
                       closing_arguments _ (eq_sym Heq)) body
                   then Some (TInvAccess opening_invariant opening_arguments body)
                   else None
@@ -1462,7 +1462,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
                     (eq_rect _ (fun invariant =>
-                      pexpr_list Γ (Logic.invariant_args invariant))
+                      pexpr_list Γ (Assertion.invariant_args invariant))
                       closing_arguments _ (eq_sym Heq)) body
                   then
                     match restricted_normalize_statement_fuel fuel' work with
@@ -1712,7 +1712,7 @@ Qed.
 
 Lemma restricted_normalize_terminal_access {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel (S fuel)
@@ -1729,7 +1729,7 @@ Qed.
 
 Lemma restricted_normalize_continued_access {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel fuel work = Some normalized_work ->
@@ -1750,7 +1750,7 @@ Qed.
 
 Lemma restricted_terminal_access_accepted_inv {Γ}
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) :
   restricted_fragment_accepted
     (TSeq (TUnfold invariant arguments)
@@ -1772,7 +1772,7 @@ Qed.
 
 Lemma restricted_continued_access_accepted_inv {Γ}
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work : stmt Γ) :
   restricted_fragment_accepted
     (TSeq (TUnfold invariant arguments)
@@ -2005,9 +2005,9 @@ Qed.
     is particularly useful for trusted atomic bodies: their analyzer
     certificates may remain opaque while their lack of invariant operations
     determines the stack behavior completely. *)
-Lemma access_neutral_lifo {cost Γ entry statement exit}
+Lemma access_neutral_lifo {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) stack :
+      Γ entry statement exit) stack :
   access_neutral statement ->
   GenericRegions.Atomicity.lifo_certificate certificate stack stack.
 Proof.
@@ -2031,9 +2031,9 @@ Proof.
     split; [apply IHcertificate | reflexivity]. exact Hneutral.
 Qed.
 
-Lemma access_neutral_preserves_open {cost Γ entry statement exit}
+Lemma access_neutral_preserves_open {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) :
+      Γ entry statement exit) :
   access_neutral statement ->
   GenericRegions.Atomicity.analysis_open exit =
     GenericRegions.Atomicity.analysis_open entry.
@@ -2060,9 +2060,9 @@ Qed.
     balanced.  Raw folds are deliberately allowed here: at a closed entry
     they are invariant allocation, hence leave both the analyzer open set
     and the auxiliary access stack unchanged. *)
-Lemma unfold_free_closed_lifo {cost Γ entry statement exit}
+Lemma unfold_free_closed_lifo {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) :
+      Γ entry statement exit) :
   unfold_free statement ->
   GenericRegions.Atomicity.analysis_open entry = ∅ ->
   GenericRegions.Atomicity.lifo_certificate certificate [] [] /\
@@ -2099,8 +2099,8 @@ Proof.
     split; [split; [exact Hlifo|reflexivity]|exact Hinner].
 Qed.
 
-Lemma structured_certificate_unfold_free {cost Γ entry statement exit}
-    (certificate : structured_certificate cost Γ entry statement exit) :
+Lemma structured_certificate_unfold_free {Γ entry statement exit}
+    (certificate : structured_certificate Γ entry statement exit) :
     unfold_free statement.
 Proof.
   induction certificate; simpl; intuition.
@@ -2111,18 +2111,18 @@ Qed.
     regions may contain trusted atomic blocks, but may not themselves occur
     inside one. *)
 Fixpoint structured_accesses_outside_atomic
-    {cost Γ entry statement exit}
-    (certificate : structured_certificate cost Γ entry statement exit) : Prop :=
+    {Γ entry statement exit}
+    (certificate : structured_certificate Γ entry statement exit) : Prop :=
   match certificate with
-  | StructuredSequence _ _ _ _ _ _ _ first second =>
+  | StructuredSequence _ _ _ _ _ _ first second =>
       structured_accesses_outside_atomic first /\
       structured_accesses_outside_atomic second
-  | StructuredConditional _ _ _ _ _ _ _ _ then_branch else_branch _ _ =>
+  | StructuredConditional _ _ _ _ _ _ _ then_branch else_branch _ _ =>
       structured_accesses_outside_atomic then_branch /\
       structured_accesses_outside_atomic else_branch
-  | StructuredAtomic _ _ _ _ _ _ _ body _ =>
+  | StructuredAtomic _ _ _ _ _ _ body _ =>
       structured_accesses_outside_atomic body
-  | StructuredInvAccess _ _ access_entry _ _ _ _ _ _ body _ =>
+  | StructuredInvAccess _ access_entry _ _ _ _ _ _ body _ =>
       GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
       structured_accesses_outside_atomic body
   | _ => True
@@ -2131,9 +2131,9 @@ Fixpoint structured_accesses_outside_atomic
 (** Without an unfold, the LIFO machine can only preserve or pop its input
     stack.  These two small facts let the focused normalizer recognize an
     ordinary, stack-preserving prefix without reconstructing an access trace. *)
-Lemma unfold_free_lifo_length_le {cost Γ entry statement exit}
+Lemma unfold_free_lifo_length_le {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) stack_in stack_out :
+      Γ entry statement exit) stack_in stack_out :
   unfold_free statement ->
   GenericRegions.Atomicity.lifo_certificate certificate stack_in stack_out ->
   length stack_out <= length stack_in.
@@ -2157,9 +2157,9 @@ Proof.
     cbn in Hfree. destruct Hlifo as [Hbody ->]. eauto.
 Qed.
 
-Lemma unfold_free_lifo_same_length {cost Γ entry statement exit}
+Lemma unfold_free_lifo_same_length {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) stack_in stack_out :
+      Γ entry statement exit) stack_in stack_out :
   unfold_free statement ->
   GenericRegions.Atomicity.lifo_certificate certificate stack_in stack_out ->
   length stack_out = length stack_in ->
@@ -2192,10 +2192,10 @@ Proof.
 Qed.
 
 Definition choose_lifo_sequence_middle
-    {cost Γ entry statement first middle second exit view
+    {Γ entry statement first middle second exit view
       first_certificate second_certificate stack_in stack_out}
     (Hlifo : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertSequence cost Γ entry statement first
+      (GenericRegions.Atomicity.CertSequence Γ entry statement first
         middle second exit view first_certificate second_certificate)
       stack_in stack_out) :
   { stack_middle : list GenericRegions.Atomicity.access_marker |
@@ -2213,13 +2213,13 @@ Defined.
     existential LIFO midpoint is forced back to [[]]. *)
 Lemma baseline_normalizable_empty_output {Γ} (statement : stmt Γ)
     (Hbaseline : baseline_normalizable statement) :
-  forall cost entry exit
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+  forall entry exit
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit) stack_out,
     GenericRegions.Atomicity.lifo_certificate certificate [] stack_out ->
     stack_out = [].
 Proof.
-  induction Hbaseline; intros cost entry exit certificate stack_out Hlifo.
+  induction Hbaseline; intros entry exit certificate stack_out Hlifo.
   - pose proof (unfold_free_lifo_length_le certificate [] stack_out u Hlifo)
       as Hlength.
     destruct stack_out; [reflexivity|simpl in Hlength; lia].
@@ -2244,16 +2244,16 @@ Proof.
     cbn in e. inversion e; subst.
     destruct Hlifo as [Hthen _]. eauto.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & Hopen & Htail).
     destruct Htail as (body_stack & Hbody & Hfold).
@@ -2278,23 +2278,23 @@ Proof.
           apply elem_of_union_l; apply elem_of_singleton_2; reflexivity
       end.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     match goal with
     | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ _ (TFold _ _) _ |- _ =>
+        _ _ (TFold _ _) _ |- _ =>
         dependent destruction Hfold_certificate
     end; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & Hopen & Htail).
     destruct Htail as (body_stack & Hbody & Hfold_work).
@@ -2328,14 +2328,14 @@ Qed.
     state so that an unmatched raw fold is correctly treated as allocation. *)
 Lemma baseline_normalizable_closed_lifo {Γ} (statement : stmt Γ)
     (Hbaseline : baseline_normalizable statement) :
-  forall cost entry exit
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+  forall entry exit
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit),
     GenericRegions.Atomicity.analysis_open entry = ∅ ->
     GenericRegions.Atomicity.lifo_certificate certificate [] [] /\
       GenericRegions.Atomicity.analysis_open exit = ∅.
 Proof.
-  induction Hbaseline; intros cost entry exit certificate Hentry.
+  induction Hbaseline; intros entry exit certificate Hentry.
   - now apply unfold_free_closed_lifo.
   - dependent destruction certificate; try discriminate.
     cbn in e. inversion e; subst.
@@ -2344,29 +2344,29 @@ Proof.
     { apply access_neutral_lifo. exact a. }
     assert (Hmiddle : GenericRegions.Atomicity.analysis_open middle = ∅).
     { rewrite (access_neutral_preserves_open certificate1 a). exact Hentry. }
-    destruct (IHHbaseline _ _ _ certificate2 Hmiddle) as [Hsecond Hexit].
+    destruct (IHHbaseline _ _ certificate2 Hmiddle) as [Hsecond Hexit].
     split; [eexists; split; eassumption|exact Hexit].
   - dependent destruction certificate; try discriminate.
     cbn in e. inversion e; subst.
-    destruct (IHHbaseline1 _ _ _ certificate1 Hentry) as [Hfirst Hmiddle].
-    destruct (IHHbaseline2 _ _ _ certificate2 Hmiddle) as [Hsecond Hexit].
+    destruct (IHHbaseline1 _ _ certificate1 Hentry) as [Hfirst Hmiddle].
+    destruct (IHHbaseline2 _ _ certificate2 Hmiddle) as [Hsecond Hexit].
     split; [eexists; split; eassumption|exact Hexit].
   - dependent destruction certificate; try discriminate.
     cbn in e. inversion e; subst.
-    destruct (IHHbaseline1 _ _ _ certificate1 Hentry) as [Hthen Hthen_exit].
-    destruct (IHHbaseline2 _ _ _ certificate2 Hentry) as [Helse Helse_exit].
+    destruct (IHHbaseline1 _ _ certificate1 Hentry) as [Hthen Hthen_exit].
+    destruct (IHHbaseline2 _ _ certificate2 Hentry) as [Helse Helse_exit].
     split; [split; assumption|exact Hthen_exit].
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     pose proof (GenericRegions.Atomicity.open_invariant_success _ _ _ e0)
       as (Hfresh & _ & _ & Hopened).
@@ -2378,7 +2378,7 @@ Proof.
       {[invariant]} ∪ GenericRegions.Atomicity.analysis_open state).
     { rewrite (access_neutral_preserves_open certificate2_1 a). exact Hopened. }
     assert (Hfold : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertFold cost Γ state1
+      (GenericRegions.Atomicity.CertFold Γ state1
         (TFold invariant closing_arguments) invariant e3)
       [(invariant, GenericRegions.Atomicity.analysis_open state)] []).
     { left. exists (GenericRegions.Atomicity.analysis_open state).
@@ -2396,23 +2396,23 @@ Proof.
       * rewrite Hclosed, Hbody_open, Hentry.
         set_solver.
   - dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     match goal with
     | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ _ (TFold _ _) _ |- _ =>
+        _ _ (TFold _ _) _ |- _ =>
         dependent destruction Hfold_certificate
     end; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     pose proof (GenericRegions.Atomicity.open_invariant_success _ _ _ e0)
       as (Hfresh & _ & _ & Hopened).
@@ -2424,7 +2424,7 @@ Proof.
       {[invariant]} ∪ GenericRegions.Atomicity.analysis_open state).
     { rewrite (access_neutral_preserves_open certificate2_1 a). exact Hopened. }
     assert (Hfold : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertFold cost Γ state1
+      (GenericRegions.Atomicity.CertFold Γ state1
         (TFold invariant closing_arguments) invariant e3)
       [(invariant, GenericRegions.Atomicity.analysis_open state)] []).
     { left. exists (GenericRegions.Atomicity.analysis_open state).
@@ -2440,7 +2440,7 @@ Proof.
       - rewrite Hbody_open. apply elem_of_union_l, elem_of_singleton_2.
         reflexivity.
       - rewrite Hclosed, Hbody_open, Hentry. set_solver. }
-    destruct (IHHbaseline _ _ _ certificate2_2_2 Hclosed_middle)
+    destruct (IHHbaseline _ _ certificate2_2_2 Hclosed_middle)
       as [Hwork Hexit].
     split.
     + eexists. split; [reflexivity|]. eexists. split; [exact Hbody|].
@@ -2454,10 +2454,10 @@ Qed.
     by the recursive normalizer; in particular, callers never inspect the
     implementation of [lifo_certificate] or redo its length arithmetic. *)
 Lemma unfold_free_lifo_sequence_middle_boundary
-    {cost Γ entry first middle second exit marker tail stack_middle}
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    {Γ entry first middle second exit marker tail stack_middle}
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry first middle)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       middle second exit)
     (Hfirst_free : unfold_free first)
     (Hsecond_free : unfold_free second)
@@ -2485,11 +2485,11 @@ Qed.
 (** A fold that shortens the focused stack is necessarily the matching fold,
     not the fresh-invariant-allocation alternative of the analyzer rule. *)
 Lemma lifo_fold_consumes_focused_marker
-    {cost Γ state invariant arguments}
+    {Γ state invariant arguments}
     {focused : inv_id} {outer_open : gset inv_id}
     {tail : list GenericRegions.Atomicity.access_marker}
     (Hlifo : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertFold cost Γ state
+      (GenericRegions.Atomicity.CertFold Γ state
         (TFold invariant arguments) invariant eq_refl)
       ((focused, outer_open) :: tail) tail) :
   invariant = focused.
@@ -2501,12 +2501,12 @@ Proof.
   - apply (f_equal (@length _)) in Hstack. simpl in Hstack. lia.
 Qed.
 
-Lemma unfold_free_balanced_structured {cost Γ entry statement exit}
+Lemma unfold_free_balanced_structured {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) stack :
+      Γ entry statement exit) stack :
   unfold_free statement ->
   GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
-  structured_certificate cost Γ entry statement exit.
+  structured_certificate Γ entry statement exit.
 Proof.
   revert stack.
   induction certificate; intros stack Hfree Hlifo; simpl in *.
@@ -2547,11 +2547,11 @@ Qed.
 (** Footprint-preserving form used by the public dispatcher.  The older
     projection above remains useful to low-level callers that need only a
     structured certificate. *)
-Record balanced_structured_result {cost Γ entry statement exit}
+Record balanced_structured_result {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) : Type := {
+      Γ entry statement exit) : Type := {
   balanced_structured_certificate :
-    structured_certificate cost Γ entry statement exit;
+    structured_certificate Γ entry statement exit;
   balanced_structured_footprint :
     structured_certificate_footprint balanced_structured_certificate ⊆
     GenericRegions.Atomicity.certificate_footprint certificate;
@@ -2559,25 +2559,25 @@ Record balanced_structured_result {cost Γ entry statement exit}
     structured_accesses_outside_atomic balanced_structured_certificate;
 }.
 
-Arguments balanced_structured_certificate {_ _ _ _ _ _} _.
-Arguments balanced_structured_footprint {_ _ _ _ _ _} _ _ _.
-Arguments balanced_structured_safe {_ _ _ _ _ _} _.
+#[global] Arguments balanced_structured_certificate {_ _ _ _ _} _.
+#[global] Arguments balanced_structured_footprint {_ _ _ _ _} _ _ _.
+#[global] Arguments balanced_structured_safe {_ _ _ _ _} _.
 
 Lemma unfold_free_balanced_structured_result
-    {cost Γ entry statement exit}
+    {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) stack :
+      Γ entry statement exit) stack :
   unfold_free statement ->
   GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
   balanced_structured_result certificate.
 Proof.
   revert stack.
   induction certificate; intros stack Hfree Hlifo; simpl in *.
-  - refine {| balanced_structured_certificate := StructuredLeaf cost Γ state
+  - refine {| balanced_structured_certificate := StructuredLeaf Γ state
         statement exit e e0 |}.
     intros invariant Hmember. exact Hmember.
     exact I.
-  - refine {| balanced_structured_certificate := StructuredDone cost Γ state
+  - refine {| balanced_structured_certificate := StructuredDone Γ state
         statement e |}.
     intros invariant Hmember. exact Hmember.
     exact I.
@@ -2592,7 +2592,7 @@ Proof.
       * apply (f_equal (@length _)) in Hcons. simpl in Hcons. lia.
       * exact (Hnot_member Hmember).
     + refine {| balanced_structured_certificate :=
-          StructuredFreshFold cost Γ state invariant arguments Hfresh |}.
+          StructuredFreshFold Γ state invariant arguments Hfresh |}.
       intros candidate Hcandidate. exact Hcandidate.
       exact I.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
@@ -2610,7 +2610,7 @@ Proof.
     pose (first_result := IHcertificate1 stack Hfirst_free Hfirst).
     pose (second_result := IHcertificate2 stack Hsecond_free Hsecond).
     refine {| balanced_structured_certificate :=
-        StructuredSequence cost Γ state first middle second exit
+        StructuredSequence Γ state first middle second exit
           first_result.(balanced_structured_certificate)
           second_result.(balanced_structured_certificate) |}.
     intros invariant Hmember.
@@ -2628,7 +2628,7 @@ Proof.
     pose (then_result := IHcertificate1 stack Hthen_free (proj1 Hlifo)).
     pose (else_result := IHcertificate2 stack Helse_free (proj2 Hlifo)).
     refine {| balanced_structured_certificate :=
-        StructuredConditional cost Γ state condition then_branch else_branch
+        StructuredConditional Γ state condition then_branch else_branch
           then_exit else_exit then_result.(balanced_structured_certificate)
           else_result.(balanced_structured_certificate) e0 e1 |}.
     intros invariant Hmember.
@@ -2645,7 +2645,7 @@ Proof.
     cbn in Hfree.
     pose (body_result := IHcertificate stack Hfree (proj1 Hlifo)).
     refine {| balanced_structured_certificate :=
-        StructuredAtomic cost Γ state body outer inner e0
+        StructuredAtomic Γ state body outer inner e0
           body_result.(balanced_structured_certificate) e1 |}.
     intros invariant Hmember.
     simpl in Hmember |- *.
@@ -2662,5 +2662,5 @@ Proof.
     + exact body_result.(balanced_structured_safe).
 Defined.
 
-End Make.
-End TypedNormalizationBase.
+End WithSignature.
+End NormalizationBase.

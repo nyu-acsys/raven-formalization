@@ -6,8 +6,8 @@ From iris.algebra Require Import auth gset.
 From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants ghost_map.
 
-From raven Require Import runtime.lang runtime.ghost_state runtime.invariant_tokens.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics.
+From raven Require Import runtime.lang runtime.ghost_state runtime.invariant_tokens runtime.erasure.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics analysis.structured_certificates.
 
 Import ListNotations.
 Import weakestpre.
@@ -15,287 +15,77 @@ Open Scope list_scope.
 
 (** Concrete connection between the typed assertion semantics and Raven's
     existing Iris ghost state. *)
-Module TypedRuntime.
+Module Runtime.
 
-Module Make (RuntimeRAs : ra_base.RA_CONFIG)
-    (Logic : TypedAssertion.LOGIC_SIGNATURE).
-
-Module RuntimeModel := InvTokens.Make RuntimeRAs.
+Module RuntimeModel := InvTokens.
 Module RuntimeLifting := RuntimeModel.lifting.
 Module RuntimeGhost := RuntimeLifting.ghost_state.
 Module RuntimeLang := RuntimeLifting.lang.
+Import RuntimeErasure.
 
-Module TypedRAs <: TypedCore.RA_VALUE_CONFIG.
-  Definition ra_carrier name :=
-    ra_base.RA_carrier (RuntimeRAs.ra_map name).
-
-  Definition ra_eqb name
-      (left right : ra_carrier name) : bool := bool_decide (left = right).
-
-  Lemma ra_eqb_eq name (left right : ra_carrier name) :
-    ra_eqb name left right = true <-> left = right.
-  Proof. apply bool_decide_eq_true. Qed.
-
-  Definition ra_id name : ra_carrier name :=
-    @ra_base.ra_id (ra_base.RA_carrier (RuntimeRAs.ra_map name))
-      (ra_base.ra_inst_instance (RuntimeRAs.ra_map name)).
-
-  Definition ra_of_int name (value : Z) : ra_carrier name :=
-    @ra_base.ra_of_int (ra_base.RA_carrier (RuntimeRAs.ra_map name))
-      (ra_base.ra_inst_instance (RuntimeRAs.ra_map name)) value.
-
-  Definition ra_valid name (value : ra_carrier name) : Prop :=
-    @ra_base.valid _ (ra_base.ra_inst_instance (RuntimeRAs.ra_map name)) value.
-
-  Definition ra_fpu_allowed name (old_value new_value : ra_carrier name) : Prop :=
-    @ra_base.fpuValid _ (ra_base.ra_inst_instance (RuntimeRAs.ra_map name))
-      old_value new_value.
-End TypedRAs.
-
-Module Validation := TypedValidity.Make TypedRAs Logic.
+Module Validation := Validity.
 Module Translation := Validation.Translation.
 Module IR := Translation.IR.
 Module Assertions := Translation.Assertions.
 Module Core := Translation.Core.
-Import TypedCore TypedIR Core IR Translation.
+Import Core IR Core IR Translation.
 
-(** Runtime representation of Raven's trusted atomic-block primitive.
-
-    Atomic blocks are declarations about the modeled hardware substrate, not
-    obligations attached to individual programs.  The framework therefore
-    supplies their opaque transition uniformly.  Its semantic content is the
-    global [term_trusted_atomic_runtime_refinement] assumption at the
-    certified Iris boundary; examples neither define this relation nor prove
-    a separate progress condition for it. *)
-Axiom trusted_atomic_transition : forall {Γ},
-  stmt Γ -> RuntimeLang.trusted_atomic_transition.
-
-Module RegionSyntax <: TypedAnalysisView.ANALYSIS_SYNTAX.
-  Definition statement := IR.stmt.
-  Definition view {Γ} (statement : statement Γ) :=
-    match statement with
-    | TUnfold invariant _ => TypedAnalysisView.ViewUnfold invariant
-    | TFold invariant _ => TypedAnalysisView.ViewFold invariant
-    | TSeq first second => TypedAnalysisView.ViewSequence first second
-    | TIf _ then_branch else_branch =>
-        TypedAnalysisView.ViewConditional then_branch else_branch
-    | TInvAccess invariant _ body =>
-        TypedAnalysisView.ViewStructuredAccess invariant body
-    | TAtomic body => TypedAnalysisView.ViewAtomic body
-    | TDone => TypedAnalysisView.ViewDone
-    | _ => TypedAnalysisView.ViewLeaf
-    end.
-  Fixpoint size {Γ} (statement : statement Γ) : nat :=
-    match statement with
-    | TSeq first second | TIf _ first second => S (size first + size second)
-    | TAtomic body => S (size body)
-    | _ => 1
-    end.
-  Lemma size_positive Γ (statement : statement Γ) : 0 < size statement.
-  Proof. induction statement; simpl; lia. Qed.
-  Lemma sequence_children_smaller (Γ : context)
-      (statement first second : statement Γ) :
-    view statement = TypedAnalysisView.ViewSequence first second ->
-    size first < size statement /\ size second < size statement.
-  Proof. destruct statement; cbn; intros Hview; try discriminate.
-    inversion Hview; subst. lia. Qed.
-  Lemma conditional_children_smaller (Γ : context)
-      (statement then_branch else_branch : statement Γ) :
-    view statement = TypedAnalysisView.ViewConditional then_branch else_branch ->
-    size then_branch < size statement /\ size else_branch < size statement.
-  Proof. destruct statement; cbn; intros Hview; try discriminate.
-    inversion Hview; subst. lia. Qed.
-  Lemma atomic_body_smaller (Γ : context) (statement body : statement Γ) :
-    view statement = TypedAnalysisView.ViewAtomic body ->
-    size body < size statement.
-  Proof. destruct statement; cbn; intros Hview; try discriminate.
-    inversion Hview; subst. lia. Qed.
-End RegionSyntax.
-
-Module GenericRegions := TypedRegion.Generic RegionSyntax.
+Module GenericRegions := Region.
 
 (** Public projection of analyzer-certificate uniqueness for clients of this
-    instantiated runtime module. *)
+    runtime module. *)
 Module CertificateFacts.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
 Lemma analysis_certificate_unique
-    {Γ cost entry statement exit}
+    {Γ entry statement exit}
     (certificate1 certificate2 : GenericRegions.Atomicity.analysis_certificate
-      cost Γ entry statement exit) :
+      Γ entry statement exit) :
   certificate1 = certificate2.
 Proof.
-  apply GenericRegions.analysis_certificate_unique.
+  apply GenericRegions.Atomicity.analysis_certificate_unique.
 Qed.
+End WithSignature.
 End CertificateFacts.
 
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
 Definition tval_ghost_valid {t} (value : tval t) : Prop.
 Proof.
   exact (tval_ra_valid value).
 Defined.
 
 Definition ghost_chunk_valid (field : field_id)
-    (value : tval (Logic.field_type field)) : Prop :=
+    (value : tval (Assertion.field_type field)) : Prop :=
   tval_ghost_valid value.
 
-(** Certificate for normalization output.  There is deliberately no raw
-    unfold constructor.  A raw fold is admitted only when it allocates a
-    fresh invariant; a fold that closes an open invariant must instead be
-    represented by [StructuredInvAccess].  This is static evidence, not an
-    operational or Iris interpretation.  The certificate lives in the
-    shared runtime result so downstream modules use this runtime's single
-    non-generative IR and analysis instances. *)
-Module StructuredCertificates.
-
-Inductive structured_certificate (cost : GenericRegions.Atomicity.cost_model) :
-    forall Γ, GenericRegions.Atomicity.analysis_state -> stmt Γ ->
-      GenericRegions.Atomicity.analysis_state -> Type :=
-| StructuredLeaf Γ entry statement exit :
-    RegionSyntax.view statement = TypedAnalysisView.ViewLeaf ->
-    GenericRegions.Atomicity.take_step (cost Γ statement) entry = inr exit ->
-    structured_certificate cost Γ entry statement exit
-| StructuredDone Γ entry statement :
-    RegionSyntax.view statement = TypedAnalysisView.ViewDone ->
-    structured_certificate cost Γ entry statement entry
-| StructuredFreshFold Γ entry invariant arguments :
-    invariant ∉ GenericRegions.Atomicity.analysis_open entry ->
-    structured_certificate cost Γ entry (TFold invariant arguments)
-      (GenericRegions.Atomicity.fold_invariant invariant entry)
-| StructuredSequence Γ entry first middle second exit :
-    structured_certificate cost Γ entry first middle ->
-    structured_certificate cost Γ middle second exit ->
-    structured_certificate cost Γ entry (TSeq first second) exit
-| StructuredConditional Γ entry condition then_branch else_branch
-    then_exit else_exit :
-    structured_certificate cost Γ entry then_branch then_exit ->
-    structured_certificate cost Γ entry else_branch else_exit ->
-    GenericRegions.Atomicity.analysis_open then_exit =
-      GenericRegions.Atomicity.analysis_open else_exit ->
-    GenericRegions.Atomicity.analysis_in_atomic then_exit =
-      GenericRegions.Atomicity.analysis_in_atomic else_exit ->
-    structured_certificate cost Γ entry
-      (TIf condition then_branch else_branch)
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
-| StructuredAtomic Γ entry body outer inner :
-    GenericRegions.Atomicity.take_step GenericRegions.Atomicity.AtomicStep entry =
-      inr outer ->
-    structured_certificate cost Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask outer)
-        (GenericRegions.Atomicity.analysis_open outer)
-        (GenericRegions.Atomicity.analysis_step_taken outer) true)
-      body inner ->
-    GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open outer ->
-    structured_certificate cost Γ entry (TAtomic body)
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask inner)
-        (GenericRegions.Atomicity.analysis_open inner)
-        (GenericRegions.Atomicity.analysis_step_taken outer ||
-          GenericRegions.Atomicity.analysis_step_taken inner)
-        (GenericRegions.Atomicity.analysis_in_atomic outer))
-| StructuredInvAccess Γ entry invariant arguments body opened inner :
-    GenericRegions.Atomicity.open_invariant invariant entry = inr opened ->
-    structured_certificate cost Γ opened body inner ->
-    GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened ->
-    structured_certificate cost Γ entry (TInvAccess invariant arguments body)
-      (GenericRegions.Atomicity.fold_invariant invariant inner).
-
-(** Logical Raven masks that may be needed while interpreting a structured
-    certificate.  The footprint keeps both the masks and open sets at the
-    certificate boundary, and exposes the footprints of every recursively
-    certified child. *)
-Fixpoint structured_certificate_footprint
-    {cost Γ entry statement exit}
-    (certificate : structured_certificate cost Γ entry statement exit) :
-    gset inv_id :=
-  GenericRegions.Atomicity.analysis_mask entry ∪
-  GenericRegions.Atomicity.analysis_open entry ∪
-  GenericRegions.Atomicity.analysis_mask exit ∪
-  GenericRegions.Atomicity.analysis_open exit ∪
-  match certificate with
-  | StructuredSequence _ _ _ _ _ _ _ first_certificate second_certificate =>
-      structured_certificate_footprint first_certificate ∪
-      structured_certificate_footprint second_certificate
-  | StructuredConditional _ _ _ _ _ _ _ _
-      then_certificate else_certificate _ _ =>
-      structured_certificate_footprint then_certificate ∪
-      structured_certificate_footprint else_certificate
-  | StructuredAtomic _ _ _ _ _ _ _ body_certificate _ =>
-      structured_certificate_footprint body_certificate
-  | StructuredInvAccess _ _ _ _ _ _ _ _ _ body_certificate _ =>
-      structured_certificate_footprint body_certificate
-  | _ => ∅
-  end.
-
-Lemma structured_certificate_entry_subset_footprint
-    {cost Γ entry statement exit}
-    (certificate : structured_certificate cost Γ entry statement exit) :
-  GenericRegions.Atomicity.analysis_mask entry ⊆
-    structured_certificate_footprint certificate.
-Proof.
-  destruct certificate; simpl; intros candidate Hin.
-  all: repeat rewrite elem_of_union; tauto.
-Qed.
-
-Lemma structured_certificate_exit_subset_footprint
-    {cost Γ entry statement exit}
-    (certificate : structured_certificate cost Γ entry statement exit) :
-  GenericRegions.Atomicity.analysis_mask exit ⊆
-    structured_certificate_footprint certificate.
-Proof.
-  destruct certificate; simpl; intros candidate Hin.
-  all: repeat rewrite elem_of_union; tauto.
-Qed.
-
-End StructuredCertificates.
+End WithSignature.
 
 (** Canonical pairing used by certified-region soundness.  Unlike the generic
-    pairing in [certificate_semantics], every component below refers to this runtime's
-    single non-generative IR instance.  The explicit LIFO boundary stacks let
+    pairing in [certificate_semantics], every component below is stated over
+    the runtime IR.  The explicit LIFO boundary stacks let
     the semantic induction split sequences without losing an accessor that
     was opened by the first component and is closed by the second. *)
-Module CertifiedRegions
-    (Contracts : Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
+Module CertifiedRegions.
 Module Atomicity := GenericRegions.Atomicity.
 
+Section WithContracts.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Contracts : Hoare.ResourceHoare.ResourceContractEnv}.
 (** Procedure masks, inferred from the contracts as in Raven: a procedure
     requires the invariants its precondition depends on and grants those its
     postcondition depends on in addition.  This is the only definition of
     the masks; everything else refers to it. *)
 Definition required_mask (procedure : proc_id) : gset inv_id :=
-  Hoare.ResourceHoare.contract_invariants Contracts.predicate_body
-    Contracts.declared_predicates (Contracts.contract_pre procedure).
+  Hoare.ResourceHoare.contract_invariants Hoare.ResourceHoare.predicate_body
+    Hoare.ResourceHoare.declared_predicates (Hoare.ResourceHoare.contract_pre procedure).
 
 Definition granted_mask (procedure : proc_id) : gset inv_id :=
-  Hoare.ResourceHoare.contract_invariants Contracts.predicate_body
-    Contracts.declared_predicates (Contracts.contract_post procedure) ∖
+  Hoare.ResourceHoare.contract_invariants Hoare.ResourceHoare.predicate_body
+    Hoare.ResourceHoare.declared_predicates (Hoare.ResourceHoare.contract_post procedure) ∖
   required_mask procedure.
-
-(** The analyzer-selected effect of procedure leaves agrees with the contract
-    environment used by the Hoare and runtime layers. *)
-Definition procedure_cost_model_sound (cost : Atomicity.cost_model) : Prop :=
-  forall Γ (statement : stmt Γ),
-  match statement with
-  | TCall procedure _ _ =>
-      cost Γ statement = Atomicity.ProcedureCallStep
-        (required_mask procedure)
-        (granted_mask procedure)
-  | TSpawn procedure _ =>
-      cost Γ statement =
-        Atomicity.ProcedureSpawnStep (required_mask procedure)
-  | _ =>
-      match cost Γ statement with
-      | Atomicity.ProcedureCallStep _ _
-      | Atomicity.ProcedureSpawnStep _ => False
-      | _ => True
-      end
-  end.
 
 (** The cost of every leaf is determined by the language and the contract
     environment, so no program supplies a cost model.  Proof-only leaves
@@ -303,7 +93,7 @@ Definition procedure_cost_model_sound (cost : Atomicity.cost_model) : Prop :=
     runtime language; calls and spawns take the effect declared by the
     callee's contract.  Structural statements are analyzed structurally and
     never consult this function. *)
-Definition contract_cost_model : Atomicity.cost_model :=
+Definition contract_cost_model : forall Γ, stmt Γ -> Atomicity.step_cost :=
   fun Γ statement =>
     match statement with
     | TAssign _ _ | TFieldRead _ _ _ | TFieldWrite _ _ _ | TAlloc _ _ =>
@@ -316,17 +106,40 @@ Definition contract_cost_model : Atomicity.cost_model :=
     | _ => Atomicity.NoStep
     end.
 
+#[local] Instance leaf_costs : AnalysisView.LeafCost :=
+  AnalysisView.LeafCostData contract_cost_model.
+
+(** The analyzer-selected effect of procedure leaves agrees with the contract
+    environment used by the Hoare and runtime layers. *)
+Definition procedure_cost_model_sound : Prop :=
+  forall Γ (statement : stmt Γ),
+  match statement with
+  | TCall procedure _ _ =>
+      AnalysisView.leaf_cost Γ statement = Atomicity.ProcedureCallStep
+        (required_mask procedure)
+        (granted_mask procedure)
+  | TSpawn procedure _ =>
+      AnalysisView.leaf_cost Γ statement =
+        Atomicity.ProcedureSpawnStep (required_mask procedure)
+  | _ =>
+      match AnalysisView.leaf_cost Γ statement with
+      | Atomicity.ProcedureCallStep _ _
+      | Atomicity.ProcedureSpawnStep _ => False
+      | _ => True
+      end
+  end.
+
 Lemma contract_cost_model_procedure_sound :
-  procedure_cost_model_sound contract_cost_model.
+  procedure_cost_model_sound.
 Proof. intros Γ statement. destruct statement; exact I || reflexivity. Qed.
 
-Lemma certified_call_step_effect cost
-    (Hcost : procedure_cost_model_sound cost)
+Lemma certified_call_step_effect
+    (Hcost : procedure_cost_model_sound)
     Γ procedure
-    (arguments : pexpr_list Γ (Logic.procedure_args procedure))
-    (target : call_target Γ (Logic.procedure_return procedure)) entry exit :
+    (arguments : pexpr_list Γ (Assertion.procedure_args procedure))
+    (target : call_target Γ (Assertion.procedure_return procedure)) entry exit :
   Atomicity.take_step
-      (cost Γ (@TCall Γ procedure arguments target))
+      (AnalysisView.leaf_cost Γ (@TCall _ _ Γ procedure arguments target))
       entry = inr exit ->
   required_mask procedure ⊆ Atomicity.analysis_mask entry /\
   granted_mask procedure ## Atomicity.analysis_open entry /\
@@ -334,35 +147,28 @@ Lemma certified_call_step_effect cost
     granted_mask procedure /\
   Atomicity.analysis_open exit = Atomicity.analysis_open entry.
 Proof.
-  intros Hstep. specialize (Hcost Γ
-    (@TCall Γ procedure arguments target)).
-  simpl in Hcost. rewrite Hcost in Hstep.
-  exact (Atomicity.procedure_call_step_success _ _ _ _ Hstep).
+  intros Hstep. exact (Atomicity.procedure_call_step_success _ _ _ _ Hstep).
 Qed.
 
-Lemma certified_spawn_step_effect cost
-    (Hcost : procedure_cost_model_sound cost)
+Lemma certified_spawn_step_effect
+    (Hcost : procedure_cost_model_sound)
     Γ procedure
-    (arguments : pexpr_list Γ (Logic.procedure_args procedure)) entry exit :
+    (arguments : pexpr_list Γ (Assertion.procedure_args procedure)) entry exit :
   Atomicity.take_step
-      (cost Γ (@TSpawn Γ procedure arguments)) entry = inr exit ->
+      (AnalysisView.leaf_cost Γ (@TSpawn _ _ Γ procedure arguments)) entry = inr exit ->
   required_mask procedure ⊆ Atomicity.analysis_mask entry /\
   Atomicity.analysis_mask exit = Atomicity.analysis_mask entry /\
   Atomicity.analysis_open exit = Atomicity.analysis_open entry.
 Proof.
-  intros Hstep. specialize (Hcost Γ
-    (@TSpawn Γ procedure arguments)).
-  simpl in Hcost. rewrite Hcost in Hstep.
-  exact (Atomicity.procedure_spawn_step_success _ _ _ Hstep).
+  intros Hstep. exact (Atomicity.procedure_spawn_step_success _ _ _ Hstep).
 Qed.
-
 
 Lemma unfold_analysis_mask {Γ : context} {entry : Atomicity.analysis_state}
     {invariant : inv_id}
-    {arguments : pexpr_list Γ (Logic.invariant_args invariant)}
+    {arguments : pexpr_list Γ (Assertion.invariant_args invariant)}
     {exit : Atomicity.analysis_state}
     (view : RegionSyntax.view (TUnfold invariant arguments) =
-      TypedAnalysisView.ViewUnfold invariant)
+      AnalysisView.ViewUnfold invariant)
     (step : Atomicity.open_invariant invariant entry = inr exit) :
   Atomicity.analysis_mask exit =
     Atomicity.analysis_mask entry ∖ {[invariant]}.
@@ -405,50 +211,36 @@ Proof.
   simpl. rewrite then_mask else_mask. set_solver.
 Qed.
 
-
+End WithContracts.
 End CertifiedRegions.
+#[global] Existing Instance CertifiedRegions.leaf_costs.
+#[global] Opaque CertifiedRegions.leaf_costs.
 
-(** Resource-independent program configuration.  These choices are fixed by
-    the Raven program and remain meaningful before Iris allocates any ghost
-    names. *)
-Module Type RUNTIME_CONFIGURATION.
-  Parameter field_name : field_id -> RuntimeLang.fld_name.
-  Parameter field_name_injective : Inj (=) (=) field_name.
-  Parameter invariant_name : inv_id -> RuntimeModel.inv_name.
-  Parameter invariant_name_injective : Inj (=) (=) invariant_name.
-  Parameter invariant_namespace : inv_id -> namespace.
-  Parameter invariant_namespaces_disjoint : forall left right,
-    left ≠ right ->
-    (↑(invariant_namespace left) : coPset) ## ↑(invariant_namespace right).
-  Parameter ghost_heap_namespace : namespace.
-  Parameter invariant_ghost_namespace_disjoint : forall invariant,
-    (↑(invariant_namespace invariant) : coPset) ## ↑ghost_heap_namespace.
-  Parameter procedure_name : proc_id -> RuntimeLang.proc_name.
-  Parameter procedure_name_injective : Inj (=) (=) procedure_name.
-End RUNTIME_CONFIGURATION.
-
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
 Definition runtime_ghost_alloc_spec {Σ : gFunctors}
     (simpLangG0 : RuntimeLifting.simpLangG Σ) (ghost_namespace : namespace)
     (ghost_own : forall field,
-      tval TRef -> tval (Logic.field_type field) -> iProp Σ) : Prop :=
+      tval TRef -> tval (Assertion.field_type field) -> iProp Σ) : Prop :=
   forall E field resource_name field_name address chunk
-    (Hfield : Logic.field_type field = TRA resource_name),
+    (Hfield : Assertion.field_type field = TRA resource_name),
     (↑ghost_namespace : coPset) ⊆ E ->
-    @ra_base.valid _ (ra_base.RA_inst (RuntimeRAs.ra_map resource_name)) chunk ->
-    (⊢ @RuntimeGhost.ghost_dom_frag Σ
-          (@RuntimeLifting.simpLangG_gen_heapG Σ simpLangG0)
+    @ra_base.valid _ (ra_base.RA_inst (RuntimeLang.ra_map resource_name)) chunk ->
+    (⊢ @RuntimeGhost.ghost_dom_frag _ Σ
+          (@RuntimeLifting.simpLangG_gen_heapG _ Σ simpLangG0)
           {[RuntimeLang.heap_addr_constr (RuntimeLang.Loc address) field_name]} -∗
         @fupd (iPropI Σ)
           (@bi_fupd_fupd _ (@uPred_bi_fupd HasLc Σ
-            (@RuntimeLifting.simpLangG_invG Σ simpLangG0))) E E
+            (@RuntimeLifting.simpLangG_invG _ Σ simpLangG0))) E E
           (ghost_own field (VRef address)
             (eq_rect (TRA resource_name) tval (VRA chunk)
-              (Logic.field_type field) (eq_sym Hfield))))%I.
+              (Assertion.field_type field) (eq_sym Hfield))))%I.
 
 Definition runtime_ghost_update_spec {Σ : gFunctors}
     (simpLangG0 : RuntimeLifting.simpLangG Σ)
     (ghost_own : forall field,
-      tval TRef -> tval (Logic.field_type field) -> iProp Σ) : Prop :=
+      tval TRef -> tval (Assertion.field_type field) -> iProp Σ) : Prop :=
   forall E field location old_chunk new_chunk,
     tval_fpu_allowed old_chunk new_chunk ->
     ghost_own field location old_chunk ⊢
@@ -462,7 +254,7 @@ Class runtimeG (Σ : gFunctors) := RuntimeG {
   runtime_invTokenG : RuntimeModel.invTokenG Σ;
   runtime_ghost_namespace : namespace;
   runtime_ghost_own : forall field,
-    tval TRef -> tval (Logic.field_type field) -> iProp Σ;
+    tval TRef -> tval (Assertion.field_type field) -> iProp Σ;
   runtime_ghost_own_timeless : forall field location chunk,
     Timeless (runtime_ghost_own field location chunk);
   runtime_ghost_alloc : runtime_ghost_alloc_spec runtime_simpLangG
@@ -484,7 +276,7 @@ Record runtime_ghost_resource_factory (Σ : gFunctors) `{!FUpd (iPropI Σ)}
     runtime_ghost_resource : RuntimeLifting.simpLangG Σ -> Type;
     runtime_ghost_resource_own : forall simpLangG0,
       runtime_ghost_resource simpLangG0 -> forall field,
-      tval TRef -> tval (Logic.field_type field) -> iProp Σ;
+      tval TRef -> tval (Assertion.field_type field) -> iProp Σ;
     runtime_ghost_resource_own_timeless : forall simpLangG0 resource field
         location chunk,
       Timeless (runtime_ghost_resource_own simpLangG0 resource field location chunk);
@@ -600,16 +392,16 @@ Lemma initialized_state_resources_alloc
   (⊢ |={⊤}=> ∃ heap_name stack_name procedure_name ghost_domain_name,
     let heapG0 := initialized_heapG heap_name stack_name procedure_name
       ghost_domain_name in
-    @RuntimeGhost.state_interp Σ heapG0 initial_state ∗
+    @RuntimeGhost.state_interp _ Σ heapG0 initial_state ∗
     ([∗ map] name ↦ procedure ∈ initial_state.(RuntimeLang.procs),
-      @RuntimeGhost.proc_tbl_chunk Σ heapG0 name procedure))%I.
+      @RuntimeGhost.proc_tbl_chunk _ Σ heapG0 name procedure))%I.
 Proof.
   iMod (own_alloc (● RuntimeGhost.to_heapUR
     initial_state.(RuntimeLang.global_heap))) as (heap_name) "Hheap".
   { apply auth_auth_valid. intros address.
     rewrite /RuntimeGhost.to_heapUR lookup_fmap.
     destruct (initial_state.(RuntimeLang.global_heap) !! address) eqn:Haddress;
-      rewrite Haddress; simpl.
+      try rewrite Haddress; simpl.
     - rewrite Some_valid pair_valid. split; [apply frac_valid_1|done].
     - exact I. }
   iMod (own_alloc (● RuntimeGhost.to_stackR initial_state.(RuntimeLang.stack)))
@@ -656,9 +448,9 @@ Lemma initialized_runtime_resources_alloc
     let simpLangG0 := initialized_simpLangG heap_name stack_name procedure_name
       ghost_domain_name in
     ∃ ghost_resource : runtime_ghost_resource _ _ factory simpLangG0,
-      @RuntimeGhost.state_interp Σ heapG0 initial_state ∗
+      @RuntimeGhost.state_interp _ Σ heapG0 initial_state ∗
       ([∗ map] name ↦ procedure ∈ initial_state.(RuntimeLang.procs),
-        @RuntimeGhost.proc_tbl_chunk Σ heapG0 name procedure) ∗
+        @RuntimeGhost.proc_tbl_chunk _ Σ heapG0 name procedure) ∗
       ([∗ list] token_name ∈ token_names,
         @own Σ (authR RuntimeModel.inv_argsUR) RuntimeModel.invtoken_pre_inG token_name
           (● (∅ : RuntimeModel.inv_argsUR))))%I.
@@ -680,1236 +472,17 @@ Qed.
 
 End RuntimeInitialization.
 
-(** The implementation is parameterized only by the static program naming
-    configuration.  Iris resources are ordinary Section parameters, so this
-    module can be applied to a [runtimeG] value assembled after [own_alloc]. *)
-(** *** The runtime erasure, extracted
-
-    Everything from the typed program to the machine program it runs:
-    expressions, field initializers, and the total statement erasure
-    [runtime_stmt].  It is split out of [ConcreteModelCore] because
-    that module is *generative* -- it declares records and an inductive --
-    so a client that needs only the erasure cannot apply it a second time
-    without creating incompatible copies of those types.  Nothing here
-    declares a type, so this functor may be applied freely: a contract
-    environment, which must be constructed before any semantic module,
-    can reach [runtime_stmt] through it. *)
-Module RuntimeErasure (Config : RUNTIME_CONFIGURATION).
-
-(** The fixed Iris mask envelope in which a certified region executes. *)
-Definition ambient_mask : Type := coPset.
-
-Definition tval_to_val {t} (value : tval t) : RuntimeLang.val :=
-  match value with
-  | VBool boolean => RuntimeLang.LitBool boolean
-  | VInt integer => RuntimeLang.LitInt integer
-  | VRef location => RuntimeLang.LitLoc (RuntimeLang.Loc location)
-  | VUnit => RuntimeLang.LitUnit
-  | VRA resource => RuntimeLang.LitRAElem
-      (@existT string
-        (fun name => ra_base.RA_carrier (RuntimeRAs.ra_map name))
-        _ resource)
-  end.
-
-Definition runtime_type (t : TypedCore.typ) : RuntimeLang.typ :=
-  match t with
-  | TBool => RuntimeLang.TpBool
-  | TInt => RuntimeLang.TpInt
-  | TRef => RuntimeLang.TpLoc
-  | TUnit => RuntimeLang.TpUnit
-  | TRA resource => RuntimeLang.TpRA resource
-  end.
-
-(** Every dynamically typed runtime value has a typed representative.  This
-    is the bridge used when a freshly-created procedure frame determines the
-    interpretation of that invocation's canonical entry atoms. *)
-Lemma val_has_typ_tval {t} (value : RuntimeLang.val) :
-  RuntimeLang.val_has_typ value (runtime_type t) ->
-  exists typed_value : tval t, tval_to_val typed_value = value.
-Proof.
-  destruct t; destruct value; simpl; intros Htype;
-    try contradiction; try (destruct p; contradiction).
-  - eexists (VBool _). reflexivity.
-  - eexists (VInt _). reflexivity.
-  - destruct l. eexists (VRef _). reflexivity.
-  - eexists VUnit. reflexivity.
-  - destruct p as [resource value]. simpl in Htype.
-    subst resource.
-    eexists (VRA value). reflexivity.
-Qed.
-
-Fixpoint runtime_variables {Γ} (names : named_context Γ) :
-    list RuntimeLang.var :=
-  match names with
-  | NCNil => []
-  | NCCons source_name _ tail => source_name :: runtime_variables tail
-  end.
-
-Definition runtime_variable {Γ t} (names : named_context Γ)
-    (variable : pvar Γ t) : RuntimeLang.var :=
-  default "" (runtime_variables names !! member_index variable).
-
-(** Runtime procedure frames reserve a fixed return name, but the slot is
-    still the procedure's distinguished typed variable.  Rename that one
-    decoration in the naming context so body translation and frame ownership
-    use exactly the same key as the runtime call machinery. *)
-Fixpoint rename_named_context_at {Γ} (names : named_context Γ)
-    (replacement : string) (index : nat) : named_context Γ :=
-  match names with
-  | NCNil => NCNil
-  | NCCons name u tail =>
-      match index with
-      | 0 => NCCons replacement u tail
-      | S tail_index =>
-          NCCons name u (rename_named_context_at tail replacement tail_index)
-      end
-  end.
-
-Definition runtime_procedure_names {Γ F}
-    (procedure : typed_procedure Γ F) : named_context Γ :=
-  rename_named_context_at (procedure_variables _ _ procedure) "#ret_val"
-    (member_index (procedure_return_variable _ _ procedure)).
-
-Lemma runtime_variables_rename_named_context_at_member {Γ}
-    (names : named_context Γ) replacement index name :
-  In name (runtime_variables
-    (rename_named_context_at names replacement index)) ->
-  name = replacement \/ In name (runtime_variables names).
-Proof.
-  revert index. induction names; intros [|index]; simpl.
-  - tauto.
-  - tauto.
-  - intros [-> | Hin]; [left; reflexivity | right; now right].
-  - intros [-> | Hin].
-    + right. now left.
-    + destruct (IHnames index Hin); [now left | right; now right].
-Qed.
-
-Lemma runtime_variables_rename_named_context_at_lookup {Γ}
-    (names : named_context Γ) replacement index :
-  index < length (runtime_variables names) ->
-  runtime_variables (rename_named_context_at names replacement index) !! index =
-    Some replacement.
-Proof.
-  revert index. induction names; intros [|index] Hindex; simpl in *.
-  - lia.
-  - lia.
-  - reflexivity.
-  - apply IHnames. lia.
-Qed.
-
-Lemma runtime_variables_rename_named_context_at_lookup_other {Γ}
-    (names : named_context Γ) replacement index query :
-  not (query = index) ->
-  runtime_variables (rename_named_context_at names replacement index) !! query =
-    runtime_variables names !! query.
-Proof.
-  revert index query. induction names; intros [|index] [|query] Hother;
-    simpl in *; try contradiction; try reflexivity.
-  apply IHnames. lia.
-Qed.
-
-Lemma runtime_variable_rename_named_context_at_other {Γ t}
-    (names : named_context Γ) replacement index (variable : pvar Γ t) :
-  not (member_index variable = index) ->
-  runtime_variable (rename_named_context_at names replacement index) variable =
-    runtime_variable names variable.
-Proof.
-  revert names index. induction variable; intros names index Hother;
-    dependent destruction names; destruct index;
-    cbn [member_index rename_named_context_at runtime_variable] in *;
-    try contradiction; try reflexivity.
-  apply IHvariable. lia.
-Qed.
-
-Lemma runtime_variables_rename_named_context_at_nodup {Γ}
-    (names : named_context Γ) replacement index :
-  NoDup (runtime_variables names) ->
-  ~ In replacement (runtime_variables names) ->
-  NoDup (runtime_variables
-    (rename_named_context_at names replacement index)).
-Proof.
-  revert index. induction names; intros [|index] Hnames Hfresh; simpl in *.
-  - constructor.
-  - constructor.
-  - inversion Hnames as [|? ? Hhead Htail]. constructor.
-    + intros Hin. apply elem_of_list_In in Hin.
-      apply Hfresh. right; exact Hin.
-    + exact Htail.
-  - inversion Hnames as [|? ? Hhead Htail]. constructor.
-    + intros Hin.
-      apply elem_of_list_In in Hin.
-      destruct (runtime_variables_rename_named_context_at_member
-        names replacement index name Hin) as [Heq | Hin'].
-      * apply Hfresh. left. exact Heq.
-      * apply Hhead. apply elem_of_list_In. exact Hin'.
-    + apply IHnames; [exact Htail|].
-      intros Hin. apply Hfresh. right.
-      exact Hin.
-Qed.
-
-Lemma runtime_procedure_names_nodup {Γ F}
-    (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  ~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure)) ->
-  NoDup (runtime_variables (runtime_procedure_names procedure)).
-Proof.
-  intros Hwf Hfresh. apply runtime_variables_rename_named_context_at_nodup.
-  - change (NoDup
-      (named_context_names (procedure_variables _ _ procedure))).
-    apply NoDup_ListNoDup. exact (procedure_variable_names_unique _ Hwf).
-  - change (~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure))).
-    exact Hfresh.
-Qed.
-
-(** The runtime procedure record uses untyped declaration lists.  These
-    projections are nevertheless generated from the intrinsic frame layout,
-    so an argument declaration always names a body slot of the same type. *)
-Fixpoint runtime_formal_declarations {Γ F} (names : named_context Γ)
-    (variables : pvar_list Γ F) : list (RuntimeLang.var * RuntimeLang.typ) :=
-  match variables with
-  | PVNil => []
-  | @PVCons _ tail t variable variables' =>
-      (runtime_variable names variable, runtime_type t) ::
-        runtime_formal_declarations names variables'
-  end.
-
-Lemma runtime_formal_declarations_rename_other {Γ F}
-    (names : named_context Γ) (variables : pvar_list Γ F)
-    replacement index :
-  ~ In index (pvar_list_indices variables) ->
-  runtime_formal_declarations
-      (rename_named_context_at names replacement index) variables =
-    runtime_formal_declarations names variables.
-Proof.
-  intros Hnot. induction variables; simpl in *; first reflexivity.
-  f_equal.
-  - rewrite runtime_variable_rename_named_context_at_other.
-    + reflexivity.
-    + intros Heq. apply Hnot. left. exact Heq.
-  - apply IHvariables. intros Hin. apply Hnot. now right.
-Qed.
-
-Fixpoint runtime_local_declarations_from {Γ} (names : named_context Γ)
-    (formal_indices : list nat) (return_index index : nat) :
-    list (RuntimeLang.var * RuntimeLang.typ) :=
-  match names with
-  | NCNil => []
-  | NCCons name t tail =>
-      let tail_declarations := runtime_local_declarations_from tail
-        formal_indices return_index (S index) in
-      if existsb (Nat.eqb index) formal_indices then tail_declarations
-      else
-        let runtime_name :=
-          if Nat.eqb index return_index then "#ret_val" else name in
-        (runtime_name, runtime_type t) :: tail_declarations
-  end.
-
-Definition procedure_return_index {Γ F} (procedure : typed_procedure Γ F) :
-    nat :=
-  member_index (procedure_return_variable _ _ procedure).
-
-Definition runtime_procedure_arguments {Γ F}
-    (procedure : typed_procedure Γ F) :
-    list (RuntimeLang.var * RuntimeLang.typ) :=
-  runtime_formal_declarations (procedure_variables _ _ procedure)
-    (procedure_formal_variables _ _ procedure).
-
-Definition runtime_procedure_locals {Γ F}
-    (procedure : typed_procedure Γ F) :
-    list (RuntimeLang.var * RuntimeLang.typ) :=
-  runtime_local_declarations_from
-    (procedure_variables _ _ procedure)
-    (pvar_list_indices (procedure_formal_variables _ _ procedure))
-    (procedure_return_index procedure) 0.
-
-Definition runtime_local_name {Γ t} (names : named_context Γ)
-    (return_index index : nat) (variable : pvar Γ t) : RuntimeLang.var :=
-  if Nat.eqb (index + member_index variable) return_index then "#ret_val"
-  else runtime_variable names variable.
-
-Lemma runtime_local_declarations_from_variable {Γ}
-    (names : named_context Γ) (formal_indices : list nat)
-    (return_index index : nat) t (variable : pvar Γ t) :
-  ~ In (index + member_index variable) formal_indices ->
-  In (runtime_local_name names return_index index variable, runtime_type t)
-    (runtime_local_declarations_from names formal_indices return_index index).
-Proof.
-  revert index names. induction variable; intros index names Hnot;
-    dependent destruction names; cbn [runtime_local_name member_index] in *.
-  - replace (index + 0) with index in Hnot by lia.
-    destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-    + exfalso. apply Hnot. apply existsb_exists in Hformal.
-      destruct Hformal as (candidate & Hin & Heq).
-      apply Nat.eqb_eq in Heq. subst candidate.
-      exact Hin.
-    + cbn [runtime_local_declarations_from]. rewrite Hformal.
-      unfold runtime_local_name.
-      cbn [member_index runtime_variable].
-      replace (index + 0) with index by lia.
-      assert (Hhead : runtime_variable (NCCons name t names) MHere = name)
-        by reflexivity.
-      rewrite Hhead.
-      destruct (Nat.eqb index return_index); apply in_eq.
-  - destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-    + cbn [runtime_local_declarations_from]. rewrite Hformal.
-      assert (Hname : runtime_local_name (NCCons name u names) return_index
-          index (MThere variable) =
-          runtime_local_name names return_index (S index) variable).
-      { unfold runtime_local_name. cbn [member_index runtime_variable].
-        replace (index + S (member_index variable)) with
-          (S index + member_index variable) by lia. reflexivity. }
-      rewrite Hname.
-      apply IHvariable.
-      replace (index + S (member_index variable)) with
-        (S index + member_index variable) in Hnot by lia. exact Hnot.
-    + cbn [runtime_local_declarations_from]. rewrite Hformal.
-      assert (Hname : runtime_local_name (NCCons name u names) return_index
-          index (MThere variable) =
-          runtime_local_name names return_index (S index) variable).
-      { unfold runtime_local_name. cbn [member_index runtime_variable].
-        replace (index + S (member_index variable)) with
-          (S index + member_index variable) by lia. reflexivity. }
-      rewrite Hname.
-      apply in_cons. apply IHvariable.
-      replace (index + S (member_index variable)) with
-        (S index + member_index variable) in Hnot by lia. exact Hnot.
-Qed.
-
-Lemma runtime_local_name_at_result {Γ t u} (names : named_context Γ)
-    (result : pvar Γ u) (variable : pvar Γ t) :
-  runtime_local_name names (member_index result) 0 variable =
-  runtime_variable
-    (rename_named_context_at names "#ret_val" (member_index result)) variable.
-Proof.
-  revert t variable u result.
-  induction names as [| Γ name head_type names IH];
-    intros value_type variable result_type result;
-    dependent destruction variable; dependent destruction result;
-    cbn [runtime_local_name rename_named_context_at runtime_variable].
-  - unfold runtime_local_name, runtime_variable,
-      Equality.simplification_heq.
-    rewrite !member_index_here.
-    reflexivity.
-  - unfold runtime_local_name.
-    rewrite member_index_here. rewrite member_index_there. reflexivity.
-  - unfold runtime_local_name.
-    rewrite member_index_there. rewrite member_index_here. reflexivity.
-  - unfold runtime_local_name.
-    rewrite !member_index_there. apply IH.
-  all: try reflexivity.
-Qed.
-
-Lemma runtime_local_name_procedure {Γ F} (procedure : typed_procedure Γ F)
-    t (variable : pvar Γ t) :
-  runtime_local_name (procedure_variables _ _ procedure)
-      (procedure_return_index procedure) 0 variable =
-  runtime_variable (runtime_procedure_names procedure) variable.
-Proof. apply runtime_local_name_at_result. Qed.
-
-Lemma runtime_procedure_local_declaration {Γ F}
-    (procedure : typed_procedure Γ F) t (variable : pvar Γ t) :
-  ~ In (member_index variable)
-      (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
-  In (runtime_variable (runtime_procedure_names procedure) variable,
-      runtime_type t) (runtime_procedure_locals procedure).
-Proof.
-  intros Hnot. unfold runtime_procedure_locals.
-  rewrite <- runtime_local_name_procedure.
-  apply runtime_local_declarations_from_variable.
-  simpl. exact Hnot.
-Qed.
-
-Definition entry_atom_realizes {Γ} (identity : proc_id)
-    (names : named_context Γ) (formal_indices : list nat)
-    (frame : RuntimeLang.stack_frame) {t} (symbolic : atom t)
-    (value : tval t) : Prop :=
-  forall variable : pvar Γ t,
-    symbolic = ProcedureEntryAtom identity (member_index variable) ->
-    ~ In (member_index variable) formal_indices ->
-    frame.(RuntimeLang.locals) !! runtime_variable names variable =
-      Some (tval_to_val value).
-
-Definition frame_entry_atoms {Γ} (caller_atoms : atom_env)
-    (identity : proc_id) (names : named_context Γ)
-    (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
-    (Hrealizable : forall t (symbolic : atom t),
-      exists value : tval t,
-        entry_atom_realizes identity names formal_indices frame symbolic value)
-    : atom_env :=
-  fun t symbolic =>
-    match symbolic as selected return tval _ with
-    | Atom id => caller_atoms _ (Atom id)
-    | ProcedureEntryAtom procedure slot =>
-        epsilon (inhabits (default_tval t))
-          (entry_atom_realizes identity names formal_indices frame
-            (ProcedureEntryAtom procedure slot))
-    end.
-
-Lemma frame_entry_atoms_stable {Γ} (caller_atoms : atom_env)
-    (identity : proc_id) (names : named_context Γ)
-    (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
-    Hrealizable :
-  stable_atoms_agree caller_atoms
-    (frame_entry_atoms caller_atoms identity names formal_indices frame
-      Hrealizable).
-Proof. intros t symbolic. destruct symbolic; simpl; reflexivity. Qed.
-
-Lemma frame_entry_atoms_realize {Γ} (caller_atoms : atom_env)
-    (identity : proc_id) (names : named_context Γ)
-    (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
-  Hrealizable t (symbolic : atom t) :
-  entry_atom_realizes identity names formal_indices frame symbolic
-    (frame_entry_atoms caller_atoms identity names formal_indices frame
-      Hrealizable t symbolic).
-Proof.
-  destruct symbolic as [id | procedure slot].
-  - intros variable Hbad _. discriminate Hbad.
-  - unfold frame_entry_atoms. simpl. apply epsilon_spec. exact (Hrealizable _
-      (ProcedureEntryAtom procedure slot)).
-Qed.
-
-Lemma frame_entry_atoms_exist {Γ} (caller_atoms : atom_env)
-    (identity : proc_id) (names : named_context Γ)
-    (formal_indices : list nat) (frame : RuntimeLang.stack_frame) :
-  (forall t (variable : pvar Γ t),
-    ~ In (member_index variable) formal_indices ->
-    exists value : tval t,
-      frame.(RuntimeLang.locals) !! runtime_variable names variable =
-        Some (tval_to_val value)) ->
-  exists callee_atoms : atom_env,
-    stable_atoms_agree caller_atoms callee_atoms /\
-    forall t (variable : pvar Γ t),
-      ~ In (member_index variable) formal_indices ->
-      frame.(RuntimeLang.locals) !! runtime_variable names variable =
-        Some (tval_to_val
-          (callee_atoms t
-            (ProcedureEntryAtom identity (member_index variable)))).
-Proof.
-  intros Htyped.
-  assert (Hrealizable : forall t (symbolic : atom t),
-      exists value : tval t,
-        entry_atom_realizes identity names formal_indices frame symbolic value).
-  { intros t symbolic.
-    destruct (classic (exists variable : pvar Γ t,
-      symbolic = ProcedureEntryAtom identity (member_index variable) /\
-      ~ In (member_index variable) formal_indices)) as [Hexists | Hnone].
-    - destruct Hexists as (variable & Hsymbolic & Hnot).
-      destruct (Htyped t variable Hnot) as (value & Hvalue).
-      exists value. intros other Hother Hother_not.
-      have Hindices : member_index variable = member_index other.
-      { rewrite Hsymbolic in Hother. inversion Hother. reflexivity. }
-      have -> : other = variable.
-      { apply member_index_injective. symmetry. exact Hindices. }
-      exact Hvalue.
-    - exists (default_tval t). intros variable Hsymbolic Hnot.
-      exfalso. apply Hnone. exists variable. auto.
-  }
-  exists (frame_entry_atoms caller_atoms identity names formal_indices frame
-    Hrealizable). split.
-  - apply frame_entry_atoms_stable.
-  - intros t variable Hnot.
-    apply (frame_entry_atoms_realize caller_atoms identity names formal_indices
-      frame Hrealizable t
-      (ProcedureEntryAtom identity (member_index variable)) variable
-      eq_refl Hnot).
-Qed.
-
-Lemma procedure_frame_entry_atoms_exist {Γ F}
-    (caller_atoms : atom_env) (procedure : typed_procedure Γ F)
-    (frame : RuntimeLang.stack_frame) :
-  (forall variable type,
-    (variable, type) ∈ runtime_procedure_locals procedure ->
-    exists value,
-      frame.(RuntimeLang.locals) !! variable = Some value /\
-      RuntimeLang.val_has_typ value type) ->
-  exists callee_atoms : atom_env,
-    stable_atoms_agree caller_atoms callee_atoms /\
-    forall t (variable : pvar Γ t),
-      ~ In (member_index variable)
-        (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
-      frame.(RuntimeLang.locals) !!
-          runtime_variable (runtime_procedure_names procedure) variable =
-        Some (tval_to_val
-          (callee_atoms t (ProcedureEntryAtom F (member_index variable)))).
-Proof.
-  intros Hlocals. apply frame_entry_atoms_exist.
-  intros t variable Hnot.
-  pose proof (runtime_procedure_local_declaration procedure t variable Hnot)
-    as Hdeclaration.
-  destruct (Hlocals
-      (runtime_variable (runtime_procedure_names procedure) variable)
-      (runtime_type t) (ltac:(apply elem_of_list_In; exact Hdeclaration)))
-    as (raw & Hlookup & Htype).
-  destruct (val_has_typ_tval raw Htype) as (value & <-).
-  exists value. exact Hlookup.
-Qed.
-
-Lemma runtime_formal_declarations_length {Γ F} (names : named_context Γ)
-    (variables : pvar_list Γ F) :
-  length (runtime_formal_declarations names variables) = length F.
-Proof. induction variables; simpl; congruence. Qed.
-
-Lemma runtime_formal_declarations_lookup {Γ F}
-    (names : named_context Γ) (variables : pvar_list Γ F) t
-    (formal_variable : formal F t) :
-  In (runtime_variable names (lookup_pvar_list variables formal_variable),
-      runtime_type t) (runtime_formal_declarations names variables).
-Proof.
-  induction variables; dependent destruction formal_variable.
-  - rewrite lookup_pvar_list_here. simpl. left. reflexivity.
-  - rewrite lookup_pvar_list_there. simpl. right. apply IHvariables.
-Qed.
-
-Lemma runtime_procedure_arguments_length {Γ F}
-    (procedure : typed_procedure Γ F) :
-  length (runtime_procedure_arguments procedure) =
-    length (Logic.procedure_args F).
-Proof. apply runtime_formal_declarations_length. Qed.
-
-Lemma runtime_variables_length {Γ} (names : named_context Γ) :
-  length (runtime_variables names) = length Γ.
-Proof. induction names; simpl; congruence. Qed.
-
-Lemma member_index_lt {Γ t} (variable : pvar Γ t) :
-  member_index variable < length Γ.
-Proof. induction variable; simpl; lia. Qed.
-
-Lemma runtime_procedure_return_name {Γ F}
-    (procedure : typed_procedure Γ F) :
-  runtime_variable (runtime_procedure_names procedure)
-    (procedure_return_variable _ _ procedure) = "#ret_val".
-Proof.
-  unfold runtime_variable, runtime_procedure_names.
-  rewrite runtime_variables_rename_named_context_at_lookup.
-  - reflexivity.
-  - rewrite runtime_variables_length. apply member_index_lt.
-Qed.
-
-Lemma runtime_variable_member {Γ} (names : named_context Γ) t
-    (variable : pvar Γ t) :
-  runtime_variable names variable ∈ runtime_variables names.
-Proof.
-  unfold runtime_variable.
-  have Hlookup : is_Some (runtime_variables names !! member_index variable).
-  { apply lookup_lt_is_Some_2. rewrite runtime_variables_length.
-    apply member_index_lt. }
-  destruct (runtime_variables names !! member_index variable) as [name|]
-    eqn:Hname.
-  - simpl. apply elem_of_list_lookup. exists (member_index variable). exact Hname.
-  - destruct Hlookup as [name Hsome]. congruence.
-Qed.
-
-Lemma runtime_variable_member_inv {Γ} (names : named_context Γ) name :
-  In name (runtime_variables names) ->
-  exists t (variable : pvar Γ t), runtime_variable names variable = name.
-Proof.
-  induction names; simpl; first tauto.
-  intros [<- | Hin].
-  - exists t, MHere. reflexivity.
-  - destruct (IHnames Hin) as (u & variable & Hvariable).
-    exists u, (MThere variable). exact Hvariable.
-Qed.
-
-Lemma runtime_variables_are_names {Γ} (names : named_context Γ) :
-  runtime_variables names = named_context_names names.
-Proof. induction names; simpl; [reflexivity | f_equal; assumption]. Qed.
-
-Lemma runtime_variable_lookup {Γ t} (names : named_context Γ)
-    (variable : pvar Γ t) :
-  runtime_variables names !! member_index variable =
-    Some (runtime_variable names variable).
-Proof.
-  unfold runtime_variable.
-  destruct (runtime_variables names !! member_index variable) as [name|]
-    eqn:Hlookup; [reflexivity |].
-  exfalso. apply lookup_ge_None_1 in Hlookup.
-  rewrite runtime_variables_length in Hlookup.
-  pose proof (member_index_lt variable). lia.
-Qed.
-
-Lemma runtime_variable_injective {Γ t u} (names : named_context Γ)
-    (left : pvar Γ t) (right : pvar Γ u) :
-  List.NoDup (named_context_names names) ->
-  runtime_variable names left = runtime_variable names right ->
-  member_index left = member_index right.
-Proof.
-  intros Hnames Heq.
-  rewrite <- runtime_variables_are_names in Hnames.
-  eapply NoDup_lookup;
-    [apply NoDup_ListNoDup; exact Hnames | apply runtime_variable_lookup |].
-  rewrite Heq. apply runtime_variable_lookup.
-Qed.
-
-Lemma runtime_formal_name_index {Γ F} (names : named_context Γ)
-    (variables : pvar_list Γ F) name :
-  List.In name (runtime_formal_declarations names variables).*1 ->
-  exists index, List.In index (pvar_list_indices variables) /\
-    runtime_variables names !! index = Some name.
-Proof.
-  induction variables as [| F t variable variables IH]; simpl.
-  - intros Hin. inversion Hin.
-  - intros [Heq | Hin].
-    + subst name. exists (member_index variable). split; [left; reflexivity |].
-      apply runtime_variable_lookup.
-    + destruct (IH Hin) as (index & Hindex & Hlookup).
-      exists index. split; [right; exact Hindex | exact Hlookup].
-Qed.
-
-Lemma runtime_formal_names_nodup {Γ F} (names : named_context Γ)
-    (variables : pvar_list Γ F) :
-  List.NoDup (named_context_names names) ->
-  List.NoDup (pvar_list_indices variables) ->
-  List.NoDup (runtime_formal_declarations names variables).*1.
-Proof.
-  intros Hnames Hindices. induction variables as [| F t variable variables IH];
-    simpl in *; [constructor |].
-  inversion Hindices as [| index indices Hfresh Htail]. constructor.
-  - intros Hin. destruct (runtime_formal_name_index names variables _ Hin)
-      as (other & Hother & Hlookup).
-    apply Hfresh. enough (member_index variable = other) by congruence.
-    rewrite <- runtime_variables_are_names in Hnames.
-    eapply NoDup_lookup;
-      [apply NoDup_ListNoDup; exact Hnames | apply runtime_variable_lookup |].
-    exact Hlookup.
-  - apply IH; assumption.
-Qed.
-
-Lemma runtime_procedure_argument_names_nodup {Γ F}
-    (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  List.NoDup (runtime_procedure_arguments procedure).*1.
-Proof.
-  intros Hwf. apply runtime_formal_names_nodup.
-  - exact (procedure_variable_names_unique _ Hwf).
-  - exact (procedure_formal_slots_unique _ Hwf).
-Qed.
-
-Lemma runtime_local_declarations_from_source_index {Γ}
-    (names : named_context Γ) (formal_indices : list nat)
-    (return_index index : nat) name :
-  In name (runtime_local_declarations_from names formal_indices return_index
-    index).*1 ->
-  name = "#ret_val" \/
-  exists local_index,
-    runtime_variables names !! local_index = Some name /\
-    ~ In (index + local_index) formal_indices /\
-    not ((index + local_index)%nat = return_index).
-Proof.
-  revert index.
-  induction names as [| Γ name0 t names IH]; intros index; simpl.
-  - intros Hin. inversion Hin.
-  - destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-    + intros Hin. destruct (IH (S index) Hin) as [Hret | Hsource].
-      * left; exact Hret.
-      * right. destruct Hsource as (local_index & Hlookup & Hnot & Hreturn).
-        exists (S local_index). split.
-        { rewrite lookup_cons. simpl. exact Hlookup. }
-        split; replace (index + S local_index) with (S index + local_index)
-          by lia; assumption.
-    + intros Hin. destruct (Nat.eqb index return_index) eqn:Hsame.
-      * simpl in Hin. destruct Hin as [Hin | Hin].
-        -- left. symmetry. exact Hin.
-        -- destruct (IH (S index) Hin) as [Hret | Hsource].
-           ++ left; exact Hret.
-           ++ right. destruct Hsource as
-                (local_index & Hlookup & Hnot & Hreturn).
-              exists (S local_index). split.
-              { rewrite lookup_cons. simpl. exact Hlookup. }
-              split; replace (index + S local_index) with
-                (S index + local_index) by lia; assumption.
-      * simpl in Hin. destruct Hin as [Hin | Hin].
-        -- subst name. right. exists 0. split; [simpl; reflexivity|]. split.
-           ++ intro Hinformal.
-              rewrite Nat.add_0_r in Hinformal.
-              have Htrue : existsb (Nat.eqb index) formal_indices = true.
-              { apply (proj2 (existsb_exists (Nat.eqb index)
-                    formal_indices)).
-                exists index. split; [exact Hinformal|apply Nat.eqb_refl]. }
-              congruence.
-           ++ rewrite Nat.add_0_r. apply Nat.eqb_neq in Hsame. exact Hsame.
-        -- destruct (IH (S index) Hin) as [Hret | Hsource].
-           ++ left; exact Hret.
-           ++ right. destruct Hsource as
-                (local_index & Hlookup & Hnot & Hreturn).
-              exists (S local_index). split.
-              { rewrite lookup_cons. simpl. exact Hlookup. }
-              split; replace (index + S local_index) with
-                (S index + local_index) by lia; assumption.
-Qed.
-
-Lemma runtime_local_declarations_from_no_return_name {Γ}
-    (names : named_context Γ) (formal_indices : list nat)
-    (return_index index : nat) :
-  ~ List.In "#ret_val" (named_context_names names) ->
-  return_index < index ->
-  ~ List.In "#ret_val"
-    (runtime_local_declarations_from names formal_indices return_index index).*1.
-Proof.
-  revert index.
-  induction names as [| Γ name t names IH]; intros index; simpl.
-  - intros _ _ Hin. inversion Hin.
-  - intros Hfresh Hbound.
-    have Hhead : ~ "#ret_val" = name.
-    { intros Heq. subst name. apply Hfresh. simpl. now left. }
-    have Htail : ~ List.In "#ret_val" (named_context_names names).
-    { intros Hin. apply Hfresh. simpl. now right. }
-    destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-    + apply IH; [exact Htail|lia].
-    + destruct (Nat.eqb index return_index) eqn:Hsame.
-      * apply Nat.eqb_eq in Hsame. subst return_index. lia.
-      * intros Hin. simpl in Hin. destruct Hin as [Hin | Hin].
-        -- apply Hhead. symmetry. exact Hin.
-        -- apply (IH (S index) Htail); [lia|exact Hin].
-Qed.
-
-Lemma runtime_local_declarations_from_nodup {Γ}
-    (names : named_context Γ) (formal_indices : list nat)
-    (return_index index : nat) :
-  List.NoDup (named_context_names names) ->
-  ~ List.In "#ret_val" (named_context_names names) ->
-  NoDup
-    (runtime_local_declarations_from names formal_indices return_index index).*1.
-Proof.
-  revert index.
-  induction names as [| Γ name t names IH]; intros index; simpl.
-  - constructor.
-  - intros Hnames Hfresh.
-    inversion Hnames as [| ? ? Hhead Htail].
-    have Hfresh_tail : ~ List.In "#ret_val" (named_context_names names).
-    { intros Hin. apply Hfresh. simpl. now right. }
-    destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-    + apply IH; [exact Htail|exact Hfresh_tail].
-    + constructor.
-      * intros Hin. destruct (Nat.eqb index return_index) eqn:Hsame.
-        -- apply Nat.eqb_eq in Hsame. subst return_index.
-           apply (runtime_local_declarations_from_no_return_name names
-              formal_indices index (S index) Hfresh_tail); [lia|].
-           apply elem_of_list_In. exact Hin.
-        -- simpl in Hin. destruct (runtime_local_declarations_from_source_index
-             names formal_indices return_index (S index) name
-             (ltac:(apply elem_of_list_In; exact Hin)))
-             as [Hret | Hsource].
-           ++ apply Hfresh. left. exact Hret.
-           ++ destruct Hsource as (local_index & Hlookup & Hnot & Hreturn).
-              apply Hhead. rewrite <- runtime_variables_are_names.
-              apply elem_of_list_In. apply elem_of_list_lookup. exists local_index.
-              exact Hlookup.
-      * apply IH; [exact Htail|exact Hfresh_tail].
-Qed.
-
-Lemma runtime_local_declarations_from_contains_return {Γ}
-    (names : named_context Γ) (formal_indices : list nat)
-    (result index : nat) :
-  index <= result -> result < index + length (runtime_variables names) ->
-  ~ In result formal_indices ->
-  "#ret_val" ∈
-    (runtime_local_declarations_from names formal_indices result index).*1.
-Proof.
-  revert index.
-  induction names as [| Γ name t names IH]; intros index; simpl.
-  - intros Hle Hlt _. change (result < index + 0) in Hlt. lia.
-  - intros Hle Hlt Hnot.
-    destruct (Nat.eqb index result) eqn:Hsame.
-    + apply Nat.eqb_eq in Hsame; subst result.
-      destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-      * exfalso. apply Hnot.
-        apply existsb_exists in Hformal.
-        destruct Hformal as (candidate & Hin & Heq).
-        apply Nat.eqb_eq in Heq. subst candidate. exact Hin.
-      * simpl. apply elem_of_cons. left. reflexivity.
-    + apply Nat.eqb_neq in Hsame.
-      assert (Hlt_index : index < result) by lia.
-      destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
-      * apply IH; [lia|lia|exact Hnot].
-      * simpl. right. apply IH; [lia|lia|exact Hnot].
-Qed.
-
-Lemma runtime_procedure_locals_nodup {Γ F} (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  ~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure)) ->
-  NoDup (runtime_procedure_locals procedure).*1.
-Proof.
-  intros Hwf Hfresh.
-  unfold runtime_procedure_locals.
-  apply runtime_local_declarations_from_nodup.
-  - exact (procedure_variable_names_unique _ Hwf).
-  - exact Hfresh.
-Qed.
-
-Lemma runtime_procedure_local_source_index {Γ F}
-    (procedure : typed_procedure Γ F) name :
-  In name (runtime_procedure_locals procedure).*1 ->
-  name = "#ret_val" \/
-  exists local_index,
-    runtime_variables (procedure_variables _ _ procedure) !! local_index =
-      Some name /\
-    ~ In local_index (pvar_list_indices (procedure_formal_variables _ _ procedure)) /\
-    not (local_index = procedure_return_index procedure).
-Proof.
-  unfold runtime_procedure_locals.
-  intros Hin. apply runtime_local_declarations_from_source_index in Hin.
-  destruct Hin as [Hret | (local_index & Hlookup & Hnot & Hreturn)].
-  - left; exact Hret.
-  - right. exists local_index. split; [exact Hlookup|].
-    split; simpl in *; assumption.
-Qed.
-
-Lemma runtime_procedure_return_local {Γ F} (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  ~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure)) ->
-  "#ret_val" ∈ (runtime_procedure_locals procedure).*1.
-Proof.
-  intros Hwf Hfresh. apply runtime_local_declarations_from_contains_return.
-  - lia.
-  - rewrite runtime_variables_length. apply member_index_lt.
-  - exact (procedure_return_slot_local _ Hwf).
-Qed.
-
-Lemma runtime_procedure_arguments_locals_disjoint {Γ F}
-    (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  ~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure)) ->
-  (runtime_procedure_arguments procedure).*1 ##
-    (runtime_procedure_locals procedure).*1.
-Proof.
-  intros Hwf Hfresh name Hargument Hlocal.
-  apply elem_of_list_In in Hargument.
-  apply elem_of_list_In in Hlocal.
-  destruct (runtime_formal_name_index
-      (procedure_variables _ _ procedure)
-      (procedure_formal_variables _ _ procedure) name Hargument)
-    as (formal_index & Hformal_index & Hformal_lookup).
-  destruct (runtime_procedure_local_source_index procedure name Hlocal)
-    as [Hreturn |
-      (local_index & Hlocal_lookup & Hlocal_not_formal & Hlocal_not_return)].
-  - subst name. apply Hfresh. rewrite <- runtime_variables_are_names.
-    apply elem_of_list_In. apply elem_of_list_lookup.
-    exists formal_index. exact Hformal_lookup.
-  - have Hindices : formal_index = local_index.
-    { have Hnames := procedure_variable_names_unique _ Hwf.
-      rewrite <- runtime_variables_are_names in Hnames.
-      eapply NoDup_lookup;
-        [apply NoDup_ListNoDup; exact Hnames | exact Hformal_lookup |].
-      exact Hlocal_lookup. }
-    apply Hlocal_not_formal. rewrite <- Hindices. exact Hformal_index.
-Qed.
-
-Lemma runtime_procedure_declaration_names_cover {Γ F}
-    (procedure : typed_procedure Γ F) :
-  procedure_wf procedure ->
-  (list_to_set (runtime_procedure_arguments procedure).*1 :
-      gset RuntimeLang.var) ∪
-      (list_to_set (runtime_procedure_locals procedure).*1 :
-        gset RuntimeLang.var) =
-    (list_to_set (runtime_variables (runtime_procedure_names procedure)) :
-      gset RuntimeLang.var).
-Proof.
-  intros Hwf. apply set_eq. intro name.
-  rewrite elem_of_union. rewrite !elem_of_list_to_set.
-  split.
-  - intros [Hargument | Hlocal].
-    + apply elem_of_list_In in Hargument.
-      destruct (runtime_formal_name_index
-        (procedure_variables _ _ procedure)
-        (procedure_formal_variables _ _ procedure) name Hargument)
-        as (index & Hformal & Hlookup).
-      apply elem_of_list_lookup. exists index.
-      unfold runtime_procedure_names.
-      rewrite runtime_variables_rename_named_context_at_lookup_other.
-      * exact Hlookup.
-      * intros Heq. subst index.
-        exact (procedure_return_slot_local _ Hwf Hformal).
-    + apply elem_of_list_In in Hlocal.
-      destruct (runtime_procedure_local_source_index procedure name Hlocal)
-        as [-> | (index & Hlookup & Hnotformal & Hnotreturn)].
-      * rewrite <- (runtime_procedure_return_name procedure).
-        apply runtime_variable_member.
-      * apply elem_of_list_lookup. exists index.
-        unfold runtime_procedure_names.
-        rewrite runtime_variables_rename_named_context_at_lookup_other;
-          assumption.
-  - intros Hname.
-    apply elem_of_list_In in Hname.
-    destruct (runtime_variable_member_inv
-      (runtime_procedure_names procedure) name Hname)
-      as (t & variable & <-).
-    destruct (in_dec Nat.eq_dec (member_index variable)
-      (pvar_list_indices (procedure_formal_variables _ _ procedure)))
-      as [Hformal | Hlocal].
-    + left. apply elem_of_list_In.
-      destruct (pvar_list_index_member
-        (procedure_formal_variables _ _ procedure) variable Hformal)
-        as (formal_variable & Hvariable).
-      subst variable. apply in_map_iff.
-      exists (runtime_variable (procedure_variables _ _ procedure)
-        (lookup_pvar_list (procedure_formal_variables _ _ procedure)
-          formal_variable), runtime_type t). split.
-      * simpl. unfold runtime_procedure_names.
-        rewrite runtime_variable_rename_named_context_at_other; first reflexivity.
-        intros Heq. apply (procedure_return_slot_local _ Hwf).
-        rewrite <- Heq. exact Hformal.
-      * apply runtime_formal_declarations_lookup.
-    + right. apply elem_of_list_In. apply in_map_iff.
-      exists (runtime_variable (runtime_procedure_names procedure) variable,
-        runtime_type t). split; first reflexivity.
-      apply runtime_procedure_local_declaration. exact Hlocal.
-Qed.
-
-Definition runtime_unop {input output} (op : unop input output) :
-    un_op :=
-  match op with
-  | UNot => NotBoolOp
-  | UNeg => NegOp
-  | URAOfInt resource => RAOfIntOp resource
-  end.
-
-Definition runtime_binop {left right output}
-    (op : binop left right output) : bin_op :=
-  match op with
-  | BAdd => AddOp | BSub => SubOp
-  | BMul => MulOp | BDiv => DivOp
-  | BMod => ModOp | BLt => LtOp
-  | BLe => LeOp | BGt => GtOp
-  | BGe => GeOp | BEq _ => EqOp
-  | BNe _ => NeOp | BAnd => AndOp
-  | BOr => OrOp
-  end.
-
-Lemma tval_to_val_injective t : Inj (=) (=) (@tval_to_val t).
-Proof.
-  intros left right Heq.
-  destruct t; dependent destruction left; dependent destruction right;
-    simpl in Heq; inversion Heq; try reflexivity.
-  apply (Eqdep_dec.inj_pair2_eq_dec string String.string_dec) in H0.
-  subst. reflexivity.
-Qed.
-
-Lemma runtime_unop_sound {input output} (op : unop input output)
-    (value : tval input) :
-  RuntimeLang.un_op_eval (runtime_unop op) (tval_to_val value) =
-    Some (tval_to_val (interp_unop op value)).
-Proof. destruct op; dependent destruction value; reflexivity. Qed.
-
-Lemma runtime_eqb_sound t (left right : tval t) :
-  bool_decide (tval_to_val left = tval_to_val right) =
-    tval_eqb t left right.
-Proof.
-  destruct (bool_decide (tval_to_val left = tval_to_val right)) eqn:Hvalues_equal,
-    (tval_eqb t left right) eqn:Htyped; try reflexivity.
-  - apply bool_decide_eq_true in Hvalues_equal.
-    apply tval_to_val_injective in Hvalues_equal. subst.
-    assert (tval_eqb t right right = true) as Heq.
-    { apply Core.tval_eqb_eq. reflexivity. }
-    congruence.
-  - apply Core.tval_eqb_eq in Htyped. subst.
-    assert (bool_decide (tval_to_val right = tval_to_val right) = true) as Heq.
-    { apply bool_decide_eq_true. reflexivity. }
-    congruence.
-Qed.
-
-Lemma runtime_neqb_sound t (left right : tval t) :
-  bool_decide (not (tval_to_val left = tval_to_val right)) =
-    negb (tval_eqb t left right).
-Proof.
-  destruct (tval_eqb t left right) eqn:Htyped.
-  - apply Core.tval_eqb_eq in Htyped. subst. simpl.
-    apply bool_decide_eq_false. intros Hneq. apply Hneq. reflexivity.
-  - simpl. apply bool_decide_eq_true. intros Heq.
-    apply tval_to_val_injective in Heq. subst.
-    assert (tval_eqb t right right = true) as Hrefl.
-    { apply Core.tval_eqb_eq. reflexivity. }
-    congruence.
-Qed.
-
-Lemma runtime_binop_sound {left right output}
-    (op : binop left right output) (value1 : tval left)
-    (value2 : tval right) (result : tval output) :
-  interp_binop op value1 value2 = Some result ->
-  RuntimeLang.bin_op_eval (runtime_binop op)
-    (tval_to_val value1) (tval_to_val value2) = Some (tval_to_val result).
-Proof.
-  destruct op.
-  all: try solve [simpl; rewrite runtime_eqb_sound;
-    intros Heq; inversion Heq; reflexivity].
-  all: try solve [simpl; rewrite runtime_neqb_sound;
-    intros Heq; inversion Heq; reflexivity].
-  all: dependent destruction value1; dependent destruction value2;
-    simpl; intros Heq; inversion Heq; subst; reflexivity.
-Qed.
-
-Fixpoint runtime_expr {Γ t} (names : named_context Γ)
-    (expression : pexpr Γ t) : RuntimeLang.expr :=
-  match expression with
-  | PEVar variable => RuntimeLang.Var (runtime_variable names variable)
-  | PEVal value => RuntimeLang.Val (tval_to_val value)
-  | PEUnOp op operand =>
-      RuntimeLang.UnOp (runtime_unop op) (runtime_expr names operand)
-  | PEBinOp op operand1 operand2 =>
-      RuntimeLang.BinOp (runtime_binop op)
-        (runtime_expr names operand1) (runtime_expr names operand2)
-  end.
-
-(** A runtime stack frame represents a symbolic typed store when each typed
-    program variable is bound to the interpretation of its symbolic value.
-    Keeping this relation extensional avoids dependent transports in the
-    operational simulation proofs. *)
-Definition stack_corresponds {Γ F Δ}
-    (names : named_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
-    (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame) : Prop :=
-  forall t (variable : pvar Γ t),
-    frame.(RuntimeLang.locals) !! runtime_variable names variable =
-      Some (tval_to_val
-        (interp_ref formals binders atoms (lookup_store store t variable))).
-
-Lemma runtime_expr_sound {Γ F Δ t} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-    (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame)
-    (expression : pexpr Γ t) (value : tval t) :
-  stack_corresponds names formals binders atoms store frame ->
-  interp_program_expr formals binders atoms store expression = Some value ->
-  RuntimeLang.expr_step (runtime_expr names expression) frame
-    (RuntimeLang.Val (tval_to_val value)).
-Proof.
-  intros Hstack. unfold interp_program_expr. induction expression; simpl.
-  - intros Heq. inversion Heq. subst. apply RuntimeLang.VarStep.
-    apply Hstack.
-  - intros Heq. inversion Heq. subst. apply RuntimeLang.ExprRefl.
-  - destruct (interp_expr formals binders atoms
-        (IR.symbolize_expr store expression))
-      as [operand_value|] eqn:Hoperand; simpl; [|discriminate].
-    intros Heq. inversion Heq. subst. eapply RuntimeLang.UnOpStep.
-    + apply IHexpression. reflexivity.
-    + apply runtime_unop_sound.
-  - destruct (interp_expr formals binders atoms
-        (IR.symbolize_expr store expression1))
-      as [value1|] eqn:Hvalue1; simpl; [|discriminate].
-    destruct (interp_expr formals binders atoms
-        (IR.symbolize_expr store expression2))
-      as [value2|] eqn:Hvalue2; simpl; [|discriminate].
-    intros Heq. eapply RuntimeLang.BinOpStep.
-    + apply IHexpression1. reflexivity.
-    + apply IHexpression2. reflexivity.
-    + eapply runtime_binop_sound. exact Heq.
-Qed.
-
-Fixpoint runtime_expr_list {Γ ts} (names : named_context Γ)
-    (expressions : pexpr_list Γ ts) : list RuntimeLang.expr :=
-  match expressions with
-  | PENil => []
-  | PECons expression expressions' =>
-      runtime_expr names expression :: runtime_expr_list names expressions'
-  end.
-
-Lemma runtime_expr_list_length {Γ ts} (names : named_context Γ)
-    (expressions : pexpr_list Γ ts) :
-  length (runtime_expr_list names expressions) = length ts.
-Proof. induction expressions; simpl; congruence. Qed.
-
-Fixpoint runtime_field_initializers {Γ} (names : named_context Γ)
-    (fields : list (field_init Γ)) :
-    list (RuntimeLang.fld_name * RuntimeLang.expr) :=
-  match fields with
-  | [] => []
-  | FieldInit field value :: fields' =>
-      (Config.field_name field, runtime_expr names value) ::
-      runtime_field_initializers names fields'
-  end.
-
-Definition runtime_physical_field_initializers {Γ} (names : named_context Γ)
-    (fields : list (field_init Γ)) :
-    list (RuntimeLang.fld_name * RuntimeLang.expr) :=
-  runtime_field_initializers names (physical_field_initializers fields).
-
-Definition runtime_packed_ghost_field_names {Γ}
-    (fields : list (ghost_field_init Γ)) : list RuntimeLang.fld_name :=
-  map (fun initialization => match initialization with
-    | GhostFieldInit _ field _ _ => Config.field_name field
-    end) fields.
-
-Definition runtime_ghost_field_names {Γ} (fields : list (field_init Γ)) :
-    list RuntimeLang.fld_name :=
-  runtime_packed_ghost_field_names (ghost_field_initializers fields).
-
-(** The runtime terminal statement.  Erasure maps the empty continuation
-    and every proof-only statement to it; it takes no physical step. *)
-Definition runtime_noop : RuntimeLang.runtime_stmt :=
-  RuntimeLang.RTVal RuntimeLang.LitUnit.
-
-Definition runtime_is_noop (statement : RuntimeLang.runtime_stmt) : bool :=
-  match statement with
-  | RuntimeLang.RTVal RuntimeLang.LitUnit => true
-  | _ => false
-  end.
-
-Lemma runtime_is_noop_spec statement :
-  runtime_is_noop statement = true <-> statement = runtime_noop.
-Proof.
-  split.
-  - destruct statement; try discriminate.
-    match goal with v : RuntimeLang.val |- _ => destruct v end;
-      try discriminate; reflexivity.
-  - intros ->. reflexivity.
-Qed.
-
-(** Sequencing that drops a terminal operand, so erased proof-only
-    statements never contribute an [RTSeq] (and hence a physical step). *)
-Definition runtime_seq (first second : RuntimeLang.runtime_stmt) :
-    RuntimeLang.runtime_stmt :=
-  if runtime_is_noop first then second
-  else if runtime_is_noop second then first
-  else RuntimeLang.RTSeq first second.
-
-(** A conditional whose arms both erase to the terminal statement is itself
-    proof-only: evaluating its pure condition is not observable. *)
-Definition runtime_if (condition : RuntimeLang.expr)
-    (then_branch else_branch : RuntimeLang.runtime_stmt)
-    (stack : RuntimeLang.stack_id) : RuntimeLang.runtime_stmt :=
-  if runtime_is_noop then_branch && runtime_is_noop else_branch
-  then runtime_noop
-  else RuntimeLang.RTIfS condition then_branch else_branch stack.
-
-Lemma runtime_seq_noop_l statement :
-  runtime_seq runtime_noop statement = statement.
-Proof. reflexivity. Qed.
-
-Lemma runtime_seq_physical first second :
-  runtime_is_noop first = false -> runtime_is_noop second = false ->
-  runtime_seq first second = RuntimeLang.RTSeq first second.
-Proof. intros Hfirst Hsecond. unfold runtime_seq. rewrite Hfirst Hsecond. reflexivity. Qed.
-
-(** Case analysis on the smart constructor, stated for an arbitrary
-    predicate so clients can [apply] it without rewriting. *)
-Lemma runtime_seq_ind (P : RuntimeLang.runtime_stmt -> Prop) first second :
-  (first = runtime_noop -> P second) ->
-  (second = runtime_noop -> P first) ->
-  (runtime_is_noop first = false -> runtime_is_noop second = false ->
-    P (RuntimeLang.RTSeq first second)) ->
-  P (runtime_seq first second).
-Proof.
-  intros Hfirst Hsecond Hboth. unfold runtime_seq.
-  destruct (runtime_is_noop first) eqn:Hfirst_noop.
-  { apply Hfirst. apply runtime_is_noop_spec. exact Hfirst_noop. }
-  destruct (runtime_is_noop second) eqn:Hsecond_noop.
-  { apply Hsecond. apply runtime_is_noop_spec. exact Hsecond_noop. }
-  apply Hboth; reflexivity.
-Qed.
-
-(** Case analysis on the conditional smart constructor. *)
-Lemma runtime_if_ind (P : RuntimeLang.runtime_stmt -> Prop)
-    condition then_branch else_branch stack :
-  (then_branch = runtime_noop -> else_branch = runtime_noop ->
-    P runtime_noop) ->
-  (runtime_is_noop then_branch && runtime_is_noop else_branch = false ->
-    P (RuntimeLang.RTIfS condition then_branch else_branch stack)) ->
-  P (runtime_if condition then_branch else_branch stack).
-Proof.
-  intros Hnoop Hphysical. unfold runtime_if.
-  destruct (runtime_is_noop then_branch) eqn:Hthen;
-    destruct (runtime_is_noop else_branch) eqn:Helse; simpl;
-    [apply Hnoop; apply runtime_is_noop_spec; assumption
-    |apply Hphysical; reflexivity ..].
-Qed.
-
-Lemma runtime_seq_noop_r statement :
-  runtime_seq statement runtime_noop = statement.
-Proof.
-  unfold runtime_seq. destruct (runtime_is_noop statement) eqn:Hnoop;
-    [symmetry; apply runtime_is_noop_spec; exact Hnoop | reflexivity].
-Qed.
-
-Fixpoint runtime_stmt {Γ} (names : named_context Γ)
-    (stack : RuntimeLang.stack_id) (statement : stmt Γ) :
-    RuntimeLang.runtime_stmt :=
-  match statement with
-  | TDone => runtime_noop
-  | TAssert _ => runtime_noop
-  | TAssign target value =>
-      RuntimeLang.RTAssign (runtime_variable names target)
-        (runtime_expr names value) stack
-  | TFieldRead field target base =>
-      RuntimeLang.RTFldRd (runtime_variable names target)
-        (runtime_expr names base) (Config.field_name field) stack
-  | TFieldWrite field base value =>
-      RuntimeLang.RTFldWr (runtime_expr names base)
-        (Config.field_name field) (runtime_expr names value) stack
-  | TAlloc target fields =>
-      RuntimeLang.RTAlloc (runtime_variable names target)
-        (runtime_field_initializers names
-          (physical_field_initializers fields)) stack
-  | TGhostUpdate _ _ _ _ => runtime_noop
-  | TCall procedure arguments target =>
-      match target with
-      | CTStore target' =>
-          RuntimeLang.RTCall (runtime_variable names target')
-            (Config.procedure_name procedure)
-            (runtime_expr_list names arguments) stack
-      | CTDiscard =>
-          RuntimeLang.RTCallNoStore
-            (Config.procedure_name procedure)
-            (runtime_expr_list names arguments) stack
-      end
-  | TSpawn procedure arguments =>
-      RuntimeLang.RTSpawn (Config.procedure_name procedure)
-        (runtime_expr_list names arguments) stack
-  | TUnfold _ _ | TFold _ _
-  | TPredicateUnfold _ _ | TPredicateFold _ _ => runtime_noop
-  | TInvAccess _ _ body => runtime_stmt names stack body
-  | TIf condition then_branch else_branch =>
-      runtime_if (runtime_expr names condition)
-        (runtime_stmt names stack then_branch)
-        (runtime_stmt names stack else_branch) stack
-  | TSeq first second =>
-      runtime_seq (runtime_stmt names stack first)
-        (runtime_stmt names stack second)
-  | TAtomic body =>
-      RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack
-  end.
-
-(** The trusted substrate observes an atomic block only through its runtime
-    behavior.  Consequently, proof-only rewrites with identical erasure
-    select the same opaque hardware transition.  Like the refinement law,
-    this is a framework property, never a program-specific obligation. *)
-Axiom trusted_atomic_transition_runtime_erasure : forall {Γ}
-    (body body' : stmt Γ),
-  (forall (names : named_context Γ) (stack : RuntimeLang.stack_id),
-    runtime_stmt names stack body = runtime_stmt names stack body') ->
-  trusted_atomic_transition body = trusted_atomic_transition body'.
-
-Lemma runtime_stmt_atomic {Γ} (names : named_context Γ) stack
-    (body : stmt Γ) :
-  runtime_stmt names stack (TAtomic body) =
-    RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack.
-Proof. reflexivity. Qed.
-
-(** The point of the refactor: a proof-only rewrite of an atomic body
-    cannot change the program.  No hypothesis about the transition is
-    needed -- it simply cannot see the difference. *)
-Lemma runtime_stmt_atomic_congruence {Γ} (names : named_context Γ) stack
-    (body body' : stmt Γ) :
-  (forall (names : named_context Γ) (stack : RuntimeLang.stack_id),
-    runtime_stmt names stack body = runtime_stmt names stack body') ->
-  runtime_stmt names stack (TAtomic body) =
-    runtime_stmt names stack (TAtomic body').
-Proof.
-  intros Herasure.
-  rewrite !runtime_stmt_atomic.
-  rewrite (trusted_atomic_transition_runtime_erasure body body' Herasure).
-  reflexivity.
-Qed.
-
-End RuntimeErasure.
-
-Module ConcreteModelCore (Config : RUNTIME_CONFIGURATION).
-Include RuntimeErasure Config.
-
-
+End WithSignature.
+
+(** The implementation depends only on the static program naming
+    configuration.  Iris resources are ordinary section variables, so its
+    definitions apply to a [runtimeG] value assembled after [own_alloc]. *)
+Module ConcreteModelCore.
+Import RuntimeErasure.
+
+Section WithConfiguration.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
 (** Proof-only statements may be distributed across a conditional without
     changing the generated runtime program.  The operational refinement uses
     this equality for an invariant unfold/fold pair: branch selection happens
@@ -1946,7 +519,6 @@ Corollary runtime_stmt_distribute_unfold_before_if {Γ}
 Proof.
   apply runtime_stmt_distribute_erased_before_if. reflexivity.
 Qed.
-
 
 Lemma runtime_stmt_distribute_erased_around_if {Γ}
     (names : named_context Γ) stack
@@ -1989,18 +561,17 @@ Proof.
   apply runtime_stmt_distribute_erased_around_if; reflexivity.
 Qed.
 
-(** Soundness condition for the user-selected atomicity cost model at the
-    concrete runtime boundary.  Proof-only leaves must erase to the terminal
+(** Soundness condition for the leaf costs at the concrete runtime
+    boundary.  Proof-only leaves must erase to the terminal
     statement; a leaf classified as one atomic step must translate to an
     Iris-atomic runtime statement.  Non-atomic leaves need no additional witness because the
     analysis already rejects them while an invariant is open.  Trusted
     [TAtomic] blocks are structural certificates rather than leaves and are
     handled by their separate module refinement assumption. *)
-Definition runtime_cost_model_sound
-    (cost : GenericRegions.Atomicity.cost_model) : Prop :=
+Definition runtime_cost_model_sound : Prop :=
   forall Γ (names : named_context Γ) stack (statement : stmt Γ),
-    RegionSyntax.view statement = TypedAnalysisView.ViewLeaf ->
-    match cost Γ statement with
+    RegionSyntax.view statement = AnalysisView.ViewLeaf ->
+    match AnalysisView.leaf_cost Γ statement with
     | GenericRegions.Atomicity.NoStep =>
         runtime_stmt names stack statement = runtime_noop
     | GenericRegions.Atomicity.AtomicStep =>
@@ -2020,7 +591,7 @@ Record runtime_procedure_registration {Γ F}
     (procedure : typed_procedure Γ F) (entry : RuntimeLang.proc) : Prop := {
   registered_procedure_name :
     RuntimeLang.proc_name_val entry =
-      Config.procedure_name (procedure_identity _ _ procedure);
+      procedure_name (procedure_identity _ _ procedure);
   registered_procedure_arguments :
     RuntimeLang.proc_args entry = runtime_procedure_arguments procedure;
   registered_procedure_locals :
@@ -2077,7 +648,7 @@ Qed.
 
 Theorem procedure_entry_frame_corresponds {Γ F}
     (caller_atoms : atom_env) (procedure : typed_procedure Γ F)
-    (values : tval_list (Logic.procedure_args F))
+    (values : tval_list (Assertion.procedure_args F))
     (frame : RuntimeLang.stack_frame) :
   procedure_wf procedure ->
   Forall2 (fun variable value =>
@@ -2160,7 +731,7 @@ Definition tval_to_rich_val {t} (value : tval t) : RuntimeModel.val :=
   | VUnit => RuntimeModel.LitUnit
   | VRA resource => RuntimeModel.LitRAElem
       (@existT string
-        (fun name => ra_base.RA_carrier (RuntimeRAs.ra_map name))
+        (fun name => ra_base.RA_carrier (RuntimeLang.ra_map name))
         _ resource)
   end.
 
@@ -2237,9 +808,9 @@ Qed.
 
 Lemma concrete_procedure_return_lookup {Γ F Δ}
     (procedure : typed_procedure Γ F)
-    (formals : formal_env (Logic.procedure_args F))
+    (formals : formal_env (Assertion.procedure_args F))
     (binders : binder_env Δ) (atoms : atom_env)
-    (store : symbolic_store Γ (Logic.procedure_args F) Δ) :
+    (store : symbolic_store Γ (Assertion.procedure_args F) Δ) :
   NoDup (runtime_variables (runtime_procedure_names procedure)) ->
   concrete_locals (runtime_procedure_names procedure)
       (interp_store formals binders atoms store) !! "#ret_val" =
@@ -2370,7 +941,7 @@ Definition empty_stack_context : stack_context [].
 Proof. refine (StackContext [] 0%Z NCNil _). constructor. Defined.
 
 Section WithRuntime.
-Context {Σ : gFunctors} `{RG : runtimeG Σ}.
+Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 
 Local Instance core_simpLangG : RuntimeLifting.simpLangG Σ :=
   runtime_simpLangG.
@@ -2382,7 +953,7 @@ Local Instance core_irisG : irisGS RuntimeLang.simp_lang Σ :=
   RuntimeLifting.simpLang_irisG.
 Local Existing Instance weakestpre.wp'.
 Local Instance core_invtoken_inG : inG Σ (authR RuntimeModel.inv_argsUR) :=
-  @RuntimeModel.invtoken_inG Σ core_invTokenG.
+  @RuntimeModel.invtoken_inG _ Σ core_invTokenG.
 
 Definition core_stack_own Γ (runtime : stack_context Γ)
     (store : concrete_store Γ) : iProp Σ :=
@@ -2417,16 +988,16 @@ Proof.
 Qed.
 
 Definition core_field_own field
-    (location : tval TRef) (chunk : tval (Logic.field_type field)) :
+    (location : tval TRef) (chunk : tval (Assertion.field_type field)) :
     iProp Σ :=
   match location with
   | VRef address =>
       RuntimeGhost.heap_maps_to (RuntimeLang.Loc address)
-        (Config.field_name field) 1 (tval_to_val chunk)
+        (field_name field) 1 (tval_to_val chunk)
   end.
 
 Definition core_ghost_own field
-    (location : tval TRef) (chunk : tval (Logic.field_type field)) :
+    (location : tval TRef) (chunk : tval (Assertion.field_type field)) :
     iProp Σ :=
   runtime_ghost_own field location chunk.
 
@@ -2435,9 +1006,9 @@ Global Instance ghost_own_timeless field location chunk :
   runtime_ghost_own_timeless field location chunk.
 
 Definition core_invariant_own invariant
-    (values : tval_list (Logic.invariant_args invariant)) : iProp Σ :=
+    (values : tval_list (Assertion.invariant_args invariant)) : iProp Σ :=
   @own Σ (authR RuntimeModel.inv_argsUR) core_invtoken_inG
-    (RuntimeModel.invtoken_names (Config.invariant_name invariant))
+    (RuntimeModel.invtoken_names (invariant_name invariant))
     (◯ ({[tval_list_to_rich_list values]} : gset (list RuntimeModel.val))).
 
 Local Notation field_own := core_field_own.
@@ -2452,10 +1023,10 @@ Definition runtime_wp (mask : coPset) (statement : RuntimeLang.runtime_stmt)
 
 Definition invariant_mask (mask : Hoare.mask) : coPset :=
   set_fold (fun invariant result =>
-    result ∪ ↑(Config.invariant_namespace invariant)) ∅ mask.
+    result ∪ ↑(invariant_namespace invariant)) ∅ mask.
 
 Definition runtime_mask (mask : Hoare.mask) : coPset :=
-  invariant_mask mask ∪ ↑Config.ghost_heap_namespace.
+  invariant_mask mask ∪ ↑ghost_heap_namespace.
 
 (** The physical Iris mask at a certificate state.  Raven masks record
     logical permissions; only invariants recorded as open are disabled in
@@ -2472,22 +1043,22 @@ Proof. apply set_fold_empty. Qed.
 
 Lemma invariant_mask_union_singleton invariant (mask : Hoare.mask) :
   invariant_mask ({[invariant]} ∪ mask) =
-    ↑(Config.invariant_namespace invariant) ∪ invariant_mask mask.
+    ↑(invariant_namespace invariant) ∪ invariant_mask mask.
 Proof.
   unfold invariant_mask.
   rewrite (set_fold_union_strong (=)
     (fun invariant result =>
-      result ∪ ↑(Config.invariant_namespace invariant)) ∅
+      result ∪ ↑(invariant_namespace invariant)) ∅
     ({[invariant]} : Hoare.mask) mask).
   - rewrite set_fold_singleton.
-    replace (∅ ∪ ↑Config.invariant_namespace invariant) with
+    replace (∅ ∪ ↑invariant_namespace invariant) with
       ((fun result : coPset =>
-          ↑Config.invariant_namespace invariant ∪ result) ∅)
+          ↑invariant_namespace invariant ∪ result) ∅)
       by set_solver.
     rewrite (set_fold_comm_acc
       (fun invariant' result =>
-        result ∪ ↑(Config.invariant_namespace invariant'))
-      (fun result => ↑Config.invariant_namespace invariant ∪ result)
+        result ∪ ↑(invariant_namespace invariant'))
+      (fun result => ↑invariant_namespace invariant ∪ result)
       ∅ mask); last (intros; set_solver).
     reflexivity.
   - intros invariant' result _. set_solver.
@@ -2502,7 +1073,7 @@ Lemma active_runtime_mask_open ambient invariant outer state :
         (GenericRegions.Atomicity.analysis_mask state) outer
         (GenericRegions.Atomicity.analysis_step_taken state)
         (GenericRegions.Atomicity.analysis_in_atomic state)) ∖
-      ↑(Config.invariant_namespace invariant).
+      ↑(invariant_namespace invariant).
 Proof.
   intros Hopen. unfold active_runtime_mask, enabled_runtime_mask. simpl. rewrite Hopen.
   rewrite invariant_mask_union_singleton. set_solver.
@@ -2524,23 +1095,21 @@ Qed.
 
 Lemma invariant_mask_disjoint invariant (mask : Hoare.mask) :
   invariant ∉ mask ->
-  (↑(Config.invariant_namespace invariant) : coPset) ##
+  (↑(invariant_namespace invariant) : coPset) ##
     invariant_mask mask.
 Proof.
   induction mask using set_ind_L.
   - rewrite invariant_mask_empty. set_solver.
   - intros Hnotin. rewrite invariant_mask_union_singleton.
     have Hneq : invariant ≠ x by set_solver.
-    have Hleft : (↑Config.invariant_namespace invariant : coPset) ##
-        ↑Config.invariant_namespace x :=
-      Config.invariant_namespaces_disjoint invariant x Hneq.
+    pose proof (invariant_namespaces_disjoint invariant x Hneq) as Hleft.
     have Hright := IHmask ltac:(set_solver).
     exact (proj2 (disjoint_union_r _ _ _) (conj Hleft Hright)).
 Qed.
 
 Lemma invariant_namespace_subset_runtime_mask invariant (mask : Hoare.mask) :
   invariant ∈ mask ->
-  ↑(Config.invariant_namespace invariant) ⊆ runtime_mask mask.
+  ↑(invariant_namespace invariant) ⊆ runtime_mask mask.
 Proof.
   intros Hmember.
   have Hmask : mask = {[invariant]} ∪ (mask ∖ {[invariant]}).
@@ -2566,12 +1135,12 @@ Proof.
 Qed.
 
 Lemma ghost_namespace_disjoint_invariant_mask (mask : Hoare.mask) :
-  (↑Config.ghost_heap_namespace : coPset) ## invariant_mask mask.
+  (↑ghost_heap_namespace : coPset) ## invariant_mask mask.
 Proof.
   induction mask using set_ind_L.
   - rewrite invariant_mask_empty. apply disjoint_empty_r.
   - rewrite invariant_mask_union_singleton. apply disjoint_union_r. split.
-    + symmetry. apply Config.invariant_ghost_namespace_disjoint.
+    + symmetry. apply invariant_ghost_namespace_disjoint.
     + exact IHmask.
 Qed.
 
@@ -2587,7 +1156,7 @@ Proof.
       (GenericRegions.Atomicity.analysis_mask state) ##
       invariant_mask (GenericRegions.Atomicity.analysis_open state).
   { apply invariant_masks_disjoint. symmetry. exact Hwf. }
-  have Hghost : (↑Config.ghost_heap_namespace : coPset) ##
+  have Hghost : (↑ghost_heap_namespace : coPset) ##
       invariant_mask (GenericRegions.Atomicity.analysis_open state).
   { apply ghost_namespace_disjoint_invariant_mask. }
   unfold runtime_mask in Henvelope |-*.
@@ -2599,7 +1168,7 @@ Lemma runtime_mask_delete invariant (mask : Hoare.mask) :
   invariant ∈ mask ->
   runtime_mask (mask ∖ {[invariant]}) =
     runtime_mask mask ∖
-      ↑(Config.invariant_namespace invariant).
+      ↑(invariant_namespace invariant).
 Proof.
   intros Hin. unfold runtime_mask.
   have Hmask : mask = {[invariant]} ∪ (mask ∖ {[invariant]}).
@@ -2609,7 +1178,7 @@ Proof.
     - intros Hother. destruct (decide (other = invariant)); [left|right]; done.
     - intros [->|[Hother _]]; assumption. }
   have Hfold : invariant_mask mask =
-      ↑(Config.invariant_namespace invariant) ∪
+      ↑(invariant_namespace invariant) ∪
         invariant_mask (mask ∖ {[invariant]}).
   { exact (eq_trans (f_equal invariant_mask Hmask)
       (invariant_mask_union_singleton invariant
@@ -2617,13 +1186,13 @@ Proof.
   rewrite Hfold.
   have Hinv := invariant_mask_disjoint invariant (mask ∖ {[invariant]})
     ltac:(set_solver).
-  have Hghost := Config.invariant_ghost_namespace_disjoint invariant.
+  have Hghost := invariant_ghost_namespace_disjoint invariant.
   rewrite !difference_union_distr_l_L difference_diag_L.
   rewrite (difference_disjoint_L (invariant_mask (mask ∖ {[invariant]}))
-    (↑(Config.invariant_namespace invariant) : coPset)); last by symmetry.
+    (↑(invariant_namespace invariant) : coPset)); last by symmetry.
   rewrite (difference_disjoint_L
-    (↑Config.ghost_heap_namespace : coPset)
-    (↑(Config.invariant_namespace invariant) : coPset));
+    (↑ghost_heap_namespace : coPset)
+    (↑(invariant_namespace invariant) : coPset));
     last by symmetry.
   rewrite (left_id_L _ _). reflexivity.
 Qed.
@@ -2631,14 +1200,14 @@ Qed.
 Lemma runtime_mask_insert invariant (mask : Hoare.mask) :
   runtime_mask (mask ∪ {[invariant]}) =
     runtime_mask mask ∪
-      ↑(Config.invariant_namespace invariant).
+      ↑(invariant_namespace invariant).
 Proof.
   unfold runtime_mask.
   have Hcomm : mask ∪ {[invariant]} = {[invariant]} ∪ mask.
   { apply set_eq. intros other. rewrite !elem_of_union !elem_of_singleton.
     tauto. }
   have Hfold : invariant_mask (mask ∪ {[invariant]}) =
-      ↑(Config.invariant_namespace invariant) ∪ invariant_mask mask.
+      ↑(invariant_namespace invariant) ∪ invariant_mask mask.
   { exact (eq_trans (f_equal invariant_mask Hcomm)
       (invariant_mask_union_singleton invariant mask)). }
   rewrite Hfold. apply set_eq. intros name. rewrite !elem_of_union. tauto.
@@ -2646,12 +1215,12 @@ Qed.
 
 Lemma invariant_namespace_disjoint_runtime_mask invariant (mask : Hoare.mask) :
   invariant ∉ mask ->
-  (↑(Config.invariant_namespace invariant) : coPset) ## runtime_mask mask.
+  (↑(invariant_namespace invariant) : coPset) ## runtime_mask mask.
 Proof.
   intros Hnotin. unfold runtime_mask.
   apply disjoint_union_r. split.
   - apply invariant_mask_disjoint. exact Hnotin.
-  - apply Config.invariant_ghost_namespace_disjoint.
+  - apply invariant_ghost_namespace_disjoint.
 Qed.
 
 Lemma runtime_mask_mono (left right : Hoare.mask) :
@@ -2711,15 +1280,15 @@ Qed.
 Lemma runtime_field_write_wp {Γ F Δ} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
     (store : symbolic_store Γ F Δ) field (base : pexpr Γ TRef)
-    (expression : pexpr Γ (Logic.field_type field))
-    (location : tval TRef) (old_value : tval (Logic.field_type field))
+    (expression : pexpr Γ (Assertion.field_type field))
+    (location : tval TRef) (old_value : tval (Assertion.field_type field))
     (mask : coPset) :
   interp_program_expr formals binders atoms store base = Some location ->
   stack_own Γ runtime (interp_store formals binders atoms store) ∗
     field_own field location old_value ⊢
   runtime_wp mask
     (RuntimeLang.RTFldWr (runtime_expr (runtime_names _ runtime) base)
-      (Config.field_name field)
+      (field_name field)
       (runtime_expr (runtime_names _ runtime) expression)
       (runtime_stack_id _ runtime))
     (fun result =>
@@ -2746,7 +1315,7 @@ Proof.
     (runtime_expr (runtime_names _ runtime) base)
     (runtime_expr (runtime_names _ runtime) expression)
     (tval_to_val new_value) (RuntimeLang.Loc location)
-    (Config.field_name field) (tval_to_val old_value) mask
+    (field_name field) (tval_to_val old_value) mask
     with "[Hstack Hfield]").
   { iFrame. iPureIntro. split.
     - exact (runtime_expr_sound (runtime_names _ runtime) formals binders atoms
@@ -2765,8 +1334,8 @@ Qed.
 Lemma runtime_field_read_wp {Γ F Δ} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
     (store : symbolic_store Γ F Δ) field
-    (target : pvar Γ (Logic.field_type field)) (base : pexpr Γ TRef)
-    (location : tval TRef) (chunk : tval (Logic.field_type field))
+    (target : pvar Γ (Assertion.field_type field)) (base : pexpr Γ TRef)
+    (location : tval TRef) (chunk : tval (Assertion.field_type field))
     (mask : coPset) :
   interp_program_expr formals binders atoms store base = Some location ->
   stack_own Γ runtime (interp_store formals binders atoms store) ∗
@@ -2775,7 +1344,7 @@ Lemma runtime_field_read_wp {Γ F Δ} (runtime : stack_context Γ)
     (RuntimeLang.RTFldRd
       (runtime_variable (runtime_names _ runtime) target)
       (runtime_expr (runtime_names _ runtime) base)
-      (Config.field_name field) (runtime_stack_id _ runtime))
+      (field_name field) (runtime_stack_id _ runtime))
     (fun result =>
       (⌜result = RuntimeLang.LitUnit⌝ ∗
        ∃ value,
@@ -2793,7 +1362,7 @@ Proof.
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
         (interp_store formals binders atoms store)))
-    (Config.field_name field)
+    (field_name field)
     (runtime_expr (runtime_names _ runtime) base)
     (tval_to_val chunk) (RuntimeLang.Loc location)
     (runtime_variable (runtime_names _ runtime) target) mask 1%Qp
@@ -2831,12 +1400,12 @@ Fixpoint allocated_ghost_fields_own {Γ F Δ} (runtime : stack_context Γ)
   match fields with
   | [] => True%I
   | GhostFieldInit resource field Hfield expression :: fields' =>
-      (∃ value : TypedRAs.ra_carrier resource,
+      (∃ value : RAValues.ra_carrier resource,
         ⌜interp_program_expr formals binders atoms store expression =
           Some (VRA value)⌝ ∗
         ghost_own field location
           (eq_rect (TRA resource) tval (VRA value)
-            (Logic.field_type field) (eq_sym Hfield)) ∗
+            (Assertion.field_type field) (eq_sym Hfield)) ∗
         allocated_ghost_fields_own runtime formals binders atoms store location
           fields')%I
   end.
@@ -2858,7 +1427,7 @@ Definition ghost_initializers_semantically_valid {Γ F Δ}
     | GhostFieldInit resource _ _ expression => forall value,
         interp_program_expr formals binders atoms store expression =
           Some (VRA value) ->
-        @ra_base.valid _ (ra_base.RA_inst (RuntimeRAs.ra_map resource)) value
+        @ra_base.valid _ (ra_base.RA_inst (RuntimeLang.ra_map resource)) value
     end) fields.
 
 Lemma ghost_dom_frag_names_cons address field names :
@@ -2882,7 +1451,7 @@ Lemma allocated_ghost_fields_alloc {Γ F Δ} (runtime : stack_context Γ)
   NoDup (runtime_packed_ghost_field_names fields) ->
   ghost_initializers_semantically_valid formals binders atoms store fields ->
   (↑runtime_ghost_namespace : coPset) ⊆ E ->
-  @RuntimeGhost.ghost_dom_frag Σ core_heapG
+  @RuntimeGhost.ghost_dom_frag _ Σ core_heapG
     (list_to_set (map (RuntimeLang.heap_addr_constr (RuntimeLang.Loc address))
       (runtime_packed_ghost_field_names fields))) -∗
   |={E}=> allocated_ghost_fields_own runtime formals binders atoms store
@@ -2898,14 +1467,14 @@ Proof.
       (IR.symbolize_expr store expression)) as [value Hvalue].
     dependent destruction value.
     iIntros "Hdomain".
-    iEval (rewrite (ghost_dom_frag_names_cons address (Config.field_name field)
+    iEval (rewrite (ghost_dom_frag_names_cons address (field_name field)
       (runtime_packed_ghost_field_names fields) Hfresh)) in "Hdomain".
     iDestruct "Hdomain" as "[Hone Htail]".
     iMod (IH Hnames' Hvalid' with "Htail") as "Htail".
     have Hchunk_valid : @ra_base.valid _
-        (ra_base.RA_inst (RuntimeRAs.ra_map resource)) value.
+        (ra_base.RA_inst (RuntimeLang.ra_map resource)) value.
     { apply (Hhead_valid value). exact Hvalue. }
-    iMod (runtime_ghost_alloc E field resource (Config.field_name field)
+    iMod (runtime_ghost_alloc E field resource (field_name field)
       address value Hfield Hmask Hchunk_valid with "Hone") as "Hown".
     iModIntro. iExists value. iFrame. iPureIntro. exact Hvalue.
 Qed.
@@ -2920,7 +1489,7 @@ Inductive field_values_match {Γ F Δ}
     field_values_match formals binders atoms store fields values ->
     field_values_match formals binders atoms store
       (FieldInit field expression :: fields)
-      ((Config.field_name field, tval_to_val value) :: values).
+      ((field_name field, tval_to_val value) :: values).
 
 Lemma field_values_match_exists {Γ F Δ} (formals : formal_env F)
     (binders : binder_env Δ) (atoms : atom_env)
@@ -2932,7 +1501,7 @@ Proof.
   - destruct IH as [values Hvalues].
     destruct (interp_expr_total formals binders atoms
       (IR.symbolize_expr store expression)) as [value Hvalue].
-    exists ((Config.field_name field, tval_to_val value) :: values).
+    exists ((field_name field, tval_to_val value) :: values).
     constructor; [exact Hvalue|exact Hvalues].
 Qed.
 
@@ -2960,7 +1529,7 @@ Lemma field_values_match_names {Γ F Δ} formals binders atoms
     (store : symbolic_store Γ F Δ) fields values :
   field_values_match formals binders atoms store fields values ->
   values.*1 = map (fun initialization =>
-    Config.field_name (field_init_id initialization)) fields.
+    field_name (field_init_id initialization)) fields.
 Proof.
   intros Hmatch. induction Hmatch; simpl.
   - reflexivity.
@@ -2970,14 +1539,14 @@ Qed.
 Lemma runtime_field_names_nodup {Γ} (fields : list (field_init Γ)) :
   NoDup (map field_init_id fields) ->
   NoDup (map (fun initialization =>
-    Config.field_name (field_init_id initialization)) fields).
+    field_name (field_init_id initialization)) fields).
 Proof.
   induction fields as [|initialization fields IH]; simpl; intros Hnodup.
   - constructor.
   - inversion Hnodup as [|? ? Hfresh Htail]. constructor.
     + intros Hmember. apply elem_of_list_fmap in Hmember.
       destruct Hmember as [other [Heq Hother]].
-      apply Config.field_name_injective in Heq. apply Hfresh.
+      apply field_name_injective in Heq. apply Hfresh.
       apply elem_of_list_fmap. exists other. split; assumption.
     + apply IH. exact Htail.
 Qed.
@@ -3015,7 +1584,7 @@ Proof.
       [other [Heq Hother]].
       destruct other as [other_resource other_field other_type other_expression].
       simpl in Heq, Hother.
-      apply Config.field_name_injective in Heq. subst other_field. apply Hfresh.
+      apply field_name_injective in Heq. subst other_field. apply Hfresh.
       apply elem_of_list_fmap.
       exists (GhostFieldInit other_resource field other_type other_expression).
       split; [reflexivity | exact Hother].
@@ -3143,17 +1712,19 @@ Definition core_semantic_data : Translation.semantic_config_data (iPropI Σ) := 
 |}.
 
 End WithRuntime.
+End WithConfiguration.
 End ConcreteModelCore.
 
-
-(** Term-level operation interfaces for an initialized runtime.  These are the
-    dynamic counterparts of the two module types above: a proof may construct
-    either record after choosing its [runtimeG] names. *)
+(** Term-level operation interfaces for an initialized runtime.  A proof may
+    construct either record after choosing its [runtimeG] names. *)
 Module TermControlOperations.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
 Section WithModel.
 Context {PROP : bi} (Model : Translation.semantic_config_data PROP).
 Let term_bi_affine : BiAffine PROP :=
-  @Translation.data_bi_affine PROP Model.
+  @Translation.data_bi_affine _ _ PROP Model.
 Local Existing Instance term_bi_affine.
 Local Notation iProp := (bi_car PROP).
 
@@ -3189,27 +1760,31 @@ Record control_operations_data := ControlOperationsData {
     P ⊢ term_atomic_wp Γ runtime body mask_pre mask_post P
 }.
 End WithModel.
+End WithSignature.
 End TermControlOperations.
 
-(** Concrete term-level operation model.  [Config] is static while [RG] is an
-    ordinary Section value, so [control_operations] can be formed after the
+(** Concrete term-level operation model.  The configuration is static while
+    [RG] is an ordinary section variable, so [control_operations] can be formed after the
     adequacy proof has allocated all required ghost names. *)
-Module ConcreteControlCore (Config : RUNTIME_CONFIGURATION).
-Module Model := ConcreteModelCore Config.
+Module ConcreteControlCore.
+Module Model := ConcreteModelCore.
+Section WithConfiguration.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
 Section WithRuntime.
-Context {Σ : gFunctors} `{RG : runtimeG Σ}.
+Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 Local Instance core_simpLangG : RuntimeLifting.simpLangG Σ :=
   runtime_simpLangG.
 Local Instance core_invTokenG : RuntimeModel.invTokenG Σ := runtime_invTokenG.
 Local Instance core_heapG : RuntimeGhost.heapG Σ :=
   RuntimeLifting.simpLangG_gen_heapG.
 Local Instance core_irisG : irisGS RuntimeLang.simp_lang Σ :=
-  @Model.core_irisG Σ RG.
+  @Model.core_irisG _ _ Σ RG.
 Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (iProp Σ).
 
 Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
-  @Model.core_semantic_data Σ RG.
+  @Model.core_semantic_data _ _ _ Σ RG.
 
 Definition procedure_wp {Γ} (runtime : Model.stack_context Γ)
     (statement : stmt Γ) (mask_pre mask_post : Hoare.mask)
@@ -3217,7 +1792,7 @@ Definition procedure_wp {Γ} (runtime : Model.stack_context Γ)
   match statement with
   | TCall _ _ _ | TSpawn _ _ =>
       Model.runtime_wp (Model.runtime_mask mask_pre)
-        (Model.runtime_stmt (Model.runtime_names _ runtime)
+        (RuntimeErasure.runtime_stmt (Model.runtime_names _ runtime)
           (Model.runtime_stack_id _ runtime) statement)
         (fun result =>
           (⌜result = RuntimeLang.LitUnit⌝ ∗
@@ -3257,13 +1832,13 @@ Proof.
 Qed.
 
 Definition procedure_operations :
-    @TermControlOperations.procedure_operations_data (iPropI Σ)
+    @TermControlOperations.procedure_operations_data _ _ (iPropI Σ)
       semantic_data :=
-  @TermControlOperations.ProcedureOperationsData (iPropI Σ) semantic_data
+  @TermControlOperations.ProcedureOperationsData _ _ (iPropI Σ) semantic_data
     (@procedure_wp) procedure_mono procedure_frame.
 
 Definition operation_wp {Γ} (Procedures :
-    @TermControlOperations.procedure_operations_data (iPropI Σ)
+    @TermControlOperations.procedure_operations_data _ _ (iPropI Σ)
       semantic_data) (runtime : Model.stack_context Γ)
     (statement : stmt Γ) (mask_pre mask_post : Hoare.mask)
     (post : iProp) : iProp :=
@@ -3315,27 +1890,28 @@ Lemma atomic_intro Γ runtime body mask_pre mask_post P :
 Proof. reflexivity. Qed.
 
 Definition control_operations (Procedures :
-    @TermControlOperations.procedure_operations_data (iPropI Σ)
+    @TermControlOperations.procedure_operations_data _ _ (iPropI Σ)
       semantic_data) :
-    @TermControlOperations.control_operations_data (iPropI Σ)
+    @TermControlOperations.control_operations_data _ _ (iPropI Σ)
       semantic_data :=
-  @TermControlOperations.ControlOperationsData (iPropI Σ) semantic_data
+  @TermControlOperations.ControlOperationsData _ _ (iPropI Σ) semantic_data
     (fun Γ => @operation_wp Γ Procedures) (operation_mono Procedures)
     (operation_frame Procedures) (@atomic_wp) atomic_mono atomic_frame
     atomic_intro.
 
 Definition concrete_control_operations :
-    @TermControlOperations.control_operations_data (iPropI Σ)
+    @TermControlOperations.control_operations_data _ _ (iPropI Σ)
       semantic_data := control_operations procedure_operations.
 End WithRuntime.
+End WithConfiguration.
 End ConcreteControlCore.
 
-
 Import Translation.Assertions.
-
-Module TermSemanticLeafContracts
-    (Contracts : Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
-Module RI := Hoare.ResourceHoare.ContractInstances Contracts.
+Module TermSemanticLeafContracts.
+Module RI := Hoare.ResourceHoare.
+Section WithContracts.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Contracts : Hoare.ResourceHoare.ResourceContractEnv}.
 Section WithModel.
 Context {PROP : bi} (Model : Translation.semantic_config_data PROP).
 Context `{!FUpd PROP}.
@@ -3358,7 +1934,7 @@ Record semantic_leaf_contracts_data := SemanticLeafContractsData {
       representation. *)
   term_predicate_instantiation_valid : forall {F Δ}
       (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-      predicate (expressions : expr_list F Δ (Logic.predicate_args predicate)),
+      predicate (expressions : expr_list F Δ (Assertion.predicate_args predicate)),
     Translation.TermSemantics.interp_core Model (term_predicates atoms)
       formals binders atoms
       (RI.instantiated_predicate predicate expressions) ≡
@@ -3367,12 +1943,16 @@ Record semantic_leaf_contracts_data := SemanticLeafContractsData {
       (Translation.Resource.CPredicate predicate expressions);
 }.
 End WithModel.
+End WithContracts.
 End TermSemanticLeafContracts.
 
 (** Term-level interface for the one region primitive whose implementation is
     specific to invariant transitions.  Keeping it separate lets adequacy
     construct it after allocating [runtimeG]. *)
 Module TermInvariantRegionOperations.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Cost : AnalysisView.LeafCost}.
 Section WithModel.
 Context {PROP : bi} (Model : GenericRegions.region_model_data PROP).
 Local Notation iProp := (bi_car PROP).
@@ -3392,21 +1972,24 @@ Record invariant_region_operations_data := InvariantRegionOperationsData {
       term_invariant_operation_wp Γ runtime ambient entry statement exit (P ∗ R)
 }.
 End WithModel.
+End WithSignature.
 End TermInvariantRegionOperations.
-
 
 (** Dynamic counterpart of [OperationalGenericRegionPrimitives].  It turns
     the term-level control and invariant-operation records into the generic
     certificate interpreter primitives. *)
-Module OperationalGenericRegionPrimitivesCore (Config : RUNTIME_CONFIGURATION).
-Module Control := ConcreteControlCore Config.
+Module OperationalGenericRegionPrimitivesCore.
+Module Control := ConcreteControlCore.
 Module Model := Control.Model.
 
-(** Construct a runtime stack context through the model's public alias.  Keep
-    this adapter at the functor boundary: clients must not rely on reduction
-    through the nested [Control.Model] alias. *)
+Section WithConfiguration.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
+(** Construct a runtime stack context through the model's public alias, so
+    clients need not rely on reduction through the nested [Control.Model]
+    alias. *)
 Definition make_stack_context {Γ} (stack_id : RuntimeLang.stack_id)
-    (names : named_context Γ) (Hnames : NoDup (Model.runtime_variables names)) :
+    (names : named_context Γ) (Hnames : NoDup (RuntimeErasure.runtime_variables names)) :
     Model.stack_context Γ :=
   @Model.StackContext Γ stack_id names Hnames.
 
@@ -3419,7 +2002,7 @@ Proof. apply Model.active_runtime_mask_same_open. Qed.
 
 Lemma invariant_mask_union_singleton invariant mask :
   Model.invariant_mask ({[invariant]} ∪ mask) =
-    ↑(Config.invariant_namespace invariant) ∪ Model.invariant_mask mask.
+    ↑(invariant_namespace invariant) ∪ Model.invariant_mask mask.
 Proof. apply Model.invariant_mask_union_singleton. Qed.
 
 Lemma active_runtime_mask_access ambient entry invariant opened inner :
@@ -3429,7 +2012,7 @@ Lemma active_runtime_mask_access ambient entry invariant opened inner :
     GenericRegions.Atomicity.analysis_open opened ->
   Model.active_runtime_mask ambient inner =
     Model.active_runtime_mask ambient entry ∖
-      ↑(Config.invariant_namespace invariant).
+      ↑(invariant_namespace invariant).
 Proof.
   intros Hopened Hinner.
   rewrite (Model.active_runtime_mask_same_open ambient inner opened Hinner).
@@ -3437,18 +2020,18 @@ Proof.
 Qed.
 
 Section WithRuntime.
-Context {Σ : gFunctors} `{RG : runtimeG Σ}.
+Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 Local Instance core_simpLangG : RuntimeLifting.simpLangG Σ := runtime_simpLangG.
 Local Instance core_invTokenG : RuntimeModel.invTokenG Σ := runtime_invTokenG.
 Local Instance core_heapG : RuntimeGhost.heapG Σ :=
   RuntimeLifting.simpLangG_gen_heapG.
 Local Instance core_irisG : irisGS RuntimeLang.simp_lang Σ :=
-  @Model.core_irisG Σ RG.
+  @Model.core_irisG _ _ Σ RG.
 Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (iProp Σ).
 
 Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
-  @Control.semantic_data Σ RG.
+  @Control.semantic_data _ _ _ Σ RG.
 
 Lemma semantic_stack_own_update {Γ F Δ t}
     (runtime : Model.stack_context Γ) (formals : formal_env F)
@@ -3459,8 +2042,8 @@ Lemma semantic_stack_own_update {Γ F Δ t}
         (IR.update_store_with_bound store target)) ⊣⊢
     RuntimeGhost.stack_frame_own (Model.runtime_stack_id _ runtime)
       (RuntimeLang.StackFrame
-        (<[Model.runtime_variable (Model.runtime_names _ runtime) target :=
-            Model.tval_to_val value]>
+        (<[RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target :=
+            RuntimeErasure.tval_to_val value]>
           (RuntimeLang.locals (RuntimeLang.StackFrame
             (Model.concrete_locals (Model.runtime_names _ runtime)
               (interp_store formals binders atoms store)))))).
@@ -3472,7 +2055,7 @@ Proof.
 Qed.
 Definition region_model : GenericRegions.region_model_data (iPropI Σ) :=
   @GenericRegions.RegionModelData (iPropI Σ)
-    (fun Γ => Model.stack_context Γ) Model.ambient_mask.
+    (fun Γ => Model.stack_context Γ) RuntimeErasure.ambient_mask.
 
 Lemma region_model_stack_context_eq Γ :
   GenericRegions.term_region_stack_context region_model Γ =
@@ -3480,7 +2063,7 @@ Lemma region_model_stack_context_eq Γ :
 Proof. reflexivity. Qed.
 
 Lemma region_model_ambient_mask_eq :
-  GenericRegions.term_region_ambient_mask region_model = Model.ambient_mask.
+  GenericRegions.term_region_ambient_mask region_model = RuntimeErasure.ambient_mask.
 Proof. reflexivity. Qed.
 
 Definition ambient_physical_leaf_wp {Γ} (runtime : Model.stack_context Γ)
@@ -3495,33 +2078,33 @@ Definition ambient_leaf_wp {Γ} (runtime : Model.stack_context Γ)
   match statement with
   | TCall _ _ _ | TSpawn _ _ =>
       ambient_physical_leaf_wp runtime ambient entry
-        (Model.runtime_stmt (Model.runtime_names _ runtime)
+        (RuntimeErasure.runtime_stmt (Model.runtime_names _ runtime)
           (Model.runtime_stack_id _ runtime) statement) post
   | TDone | TAssert _ => post
   | TAssign target expression =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTAssign
-          (Model.runtime_variable (Model.runtime_names _ runtime) target)
-          (Model.runtime_expr (Model.runtime_names _ runtime) expression)
+          (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)
+          (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) expression)
           (Model.runtime_stack_id _ runtime)) post
   | TFieldRead field target base =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTFldRd
-          (Model.runtime_variable (Model.runtime_names _ runtime) target)
-          (Model.runtime_expr (Model.runtime_names _ runtime) base)
-          (Config.field_name field) (Model.runtime_stack_id _ runtime)) post
+          (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)
+          (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) base)
+          (field_name field) (Model.runtime_stack_id _ runtime)) post
   | TFieldWrite field base expression =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTFldWr
-          (Model.runtime_expr (Model.runtime_names _ runtime) base)
-          (Config.field_name field)
-          (Model.runtime_expr (Model.runtime_names _ runtime) expression)
+          (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) base)
+          (field_name field)
+          (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) expression)
           (Model.runtime_stack_id _ runtime)) post
   | TAlloc target fields =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTAlloc
-          (Model.runtime_variable (Model.runtime_names _ runtime) target)
-          (Model.runtime_physical_field_initializers
+          (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)
+          (RuntimeErasure.runtime_physical_field_initializers
             (Model.runtime_names _ runtime) fields)
           (Model.runtime_stack_id _ runtime)) post
   | TGhostUpdate _ _ _ _ =>
@@ -3577,20 +2160,20 @@ Proof.
 Qed.
 
 Definition operation_wp {Γ}
-    (Operations : @TermControlOperations.control_operations_data (iPropI Σ)
+    (Operations : @TermControlOperations.control_operations_data _ _ (iPropI Σ)
       semantic_data)
     (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data (iPropI Σ)
+      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
         region_model)
-    (runtime : Model.stack_context Γ) (ambient : Model.ambient_mask)
+    (runtime : Model.stack_context Γ) (ambient : RuntimeErasure.ambient_mask)
     (entry : GenericRegions.Atomicity.analysis_state) (statement : stmt Γ)
     (exit : GenericRegions.Atomicity.analysis_state) (post : iProp) : iProp :=
   match RegionSyntax.view statement with
-  | TypedAnalysisView.ViewLeaf => ambient_leaf_wp runtime ambient entry statement post
-  | TypedAnalysisView.ViewUnfold _ | TypedAnalysisView.ViewFold _ =>
+  | AnalysisView.ViewLeaf => ambient_leaf_wp runtime ambient entry statement post
+  | AnalysisView.ViewUnfold _ | AnalysisView.ViewFold _ =>
       TermInvariantRegionOperations.term_invariant_operation_wp region_model
         InvariantOps Γ runtime ambient entry statement exit post
-  | TypedAnalysisView.ViewAtomic body =>
+  | AnalysisView.ViewAtomic body =>
       TermControlOperations.term_atomic_wp semantic_data Operations Γ runtime body
         (GenericRegions.Atomicity.analysis_mask entry)
         (GenericRegions.Atomicity.analysis_mask exit) post
@@ -3598,7 +2181,7 @@ Definition operation_wp {Γ}
   end.
 
 Definition branch_wp {Γ}
-    (runtime : Model.stack_context Γ) (_ : Model.ambient_mask)
+    (runtime : Model.stack_context Γ) (_ : RuntimeErasure.ambient_mask)
     (entry : GenericRegions.Atomicity.analysis_state) (statement : stmt Γ)
     (_ _ : GenericRegions.Atomicity.analysis_state) (then_wp else_wp : iProp) : iProp :=
   match statement with
@@ -3658,22 +2241,20 @@ Proof.
 Qed.
 
 Definition primitives (Operations :
-    @TermControlOperations.control_operations_data (iPropI Σ) semantic_data)
+    @TermControlOperations.control_operations_data _ _ (iPropI Σ) semantic_data)
     (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data (iPropI Σ)
+      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
         region_model) :
-    @GenericRegions.TermSemantics.region_primitives_data (iPropI Σ) region_model :=
-  @GenericRegions.TermSemantics.RegionPrimitivesData (iPropI Σ) region_model
+    @GenericRegions.TermSemantics.region_primitives_data _ (iPropI Σ) region_model :=
+  @GenericRegions.TermSemantics.RegionPrimitivesData _ (iPropI Σ) region_model
     (fun Γ => @operation_wp Γ Operations InvariantOps) (@branch_wp)
     (operation_mono Operations InvariantOps) (operation_frame Operations InvariantOps)
     branch_mono branch_frame.
 
-(** The combined interpreter owns a single instantiation of the model functor.
-    Rebuild the small fancy-update record at that exact model identity; Rocq
-    functor applications are generative, so the separately exported invariant
-    core cannot be used definitionally here. *)
+(** The fancy-update record for invariant operations, stated against the
+    interpreter's model. *)
 Definition concrete_invariant_operation_wp {Γ} (_ : Model.stack_context Γ)
-    (ambient : Model.ambient_mask) (entry : GenericRegions.Atomicity.analysis_state)
+    (ambient : RuntimeErasure.ambient_mask) (entry : GenericRegions.Atomicity.analysis_state)
     (statement : stmt Γ) (exit : GenericRegions.Atomicity.analysis_state)
     (post : iProp) : iProp :=
   match statement with
@@ -3703,37 +2284,40 @@ Proof.
 Qed.
 
 Definition concrete_invariant_operations :
-    @TermInvariantRegionOperations.invariant_region_operations_data (iPropI Σ)
+    @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
       region_model :=
-  @TermInvariantRegionOperations.InvariantRegionOperationsData (iPropI Σ)
+  @TermInvariantRegionOperations.InvariantRegionOperationsData _ _ (iPropI Σ)
     region_model (@concrete_invariant_operation_wp)
     concrete_invariant_operation_mono concrete_invariant_operation_frame.
 
 Definition interpreter (Operations :
-    @TermControlOperations.control_operations_data (iPropI Σ) semantic_data)
+    @TermControlOperations.control_operations_data _ _ (iPropI Σ) semantic_data)
     (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data (iPropI Σ)
+      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
         region_model) :
-    @GenericRegions.TermSemantics.interpreter_data (iPropI Σ) region_model :=
+    @GenericRegions.TermSemantics.interpreter_data _ _ (iPropI Σ) region_model :=
   GenericRegions.TermSemantics.interpreter region_model
     (primitives Operations InvariantOps).
 End WithRuntime.
+End WithConfiguration.
 End OperationalGenericRegionPrimitivesCore.
 
 (** Fully concrete dynamic generic-region interpreter, suitable for a
     proof-time allocated [runtimeG] instance. *)
-Module ConcreteGenericRegionExecutionCore (Config : RUNTIME_CONFIGURATION).
-Module Primitives := OperationalGenericRegionPrimitivesCore Config.
+Module ConcreteGenericRegionExecutionCore.
+Module Primitives := OperationalGenericRegionPrimitivesCore.
 Module Control := Primitives.Control.
+Section WithConfiguration.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
+  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
 Section WithRuntime.
-Context {Σ : gFunctors} `{RG : runtimeG Σ}.
+Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 
-Definition interpreter := @Primitives.interpreter Σ RG
-  (@Control.concrete_control_operations Σ RG)
-  (@Primitives.concrete_invariant_operations Σ RG).
+Definition interpreter := @Primitives.interpreter _ _ _ _ Σ RG
+  (@Control.concrete_control_operations _ _ _ Σ RG)
+  (@Primitives.concrete_invariant_operations _ _ _ Σ RG).
 End WithRuntime.
+End WithConfiguration.
 End ConcreteGenericRegionExecutionCore.
 
-
-End Make.
-End TypedRuntime.
+End Runtime.

@@ -10,10 +10,12 @@ Import weakestpre.
 
 From stdpp Require Import countable.
 
-Module Make (RAs : RA_CONFIG).
-Module ghost_state := raven.runtime.ghost_state.Make RAs.
+Module ghost_state := raven.runtime.ghost_state.
 Module lang := ghost_state.lang.
 Import lang ghost_state.
+
+Section WithRAs.
+Context {RAs : RAConfig}.
 
 Class simpLangG Σ := SimpLangG {
   simpLangG_invG : invGS Σ;
@@ -1116,7 +1118,7 @@ Section lifting.
 
       + pose proof HNoDup as HNoDup'. apply NoDup_cons_1_2 in HNoDup'. inversion Hlen. specialize (IH vs HNoDup' H0 ).
       apply NoDup_cons_1_1 in HNoDup.
-      eapply Forall2_impl; [|exact IH].
+      apply (Forall2_impl _ _ _ _ IH).
       intros y val Hlookup.
       rewrite lookup_insert_ne; [done|]. simpl. simpl in Hlookup.
       intros ->. apply HNoDup.
@@ -1143,7 +1145,7 @@ Section lifting.
       + split; [simpl; rewrite lookup_insert; done | exact Hty].
       + apply NoDup_cons_1_2 in Hnodup as Hnodup'.
         pose proof (IH Hnodup') as IH'.
-        eapply Forall2_impl; [| exact IH'].
+        apply (Forall2_impl _ _ _ _ IH').
         intros [v' tp'] val' [Hlookup Hty'].
         simpl in *. split; [| exact Hty'].
         rewrite lookup_insert_ne; [exact Hlookup |].
@@ -1326,7 +1328,7 @@ Section lifting.
         intro Hc. apply (Hdisjoint "#ret_val" Hc). exact Hrv_in. }
       rewrite list_to_map_app.
       split; [| split].
-      - eapply Forall2_impl; [| exact Hzip].
+      - apply (Forall2_impl _ _ _ _ Hzip).
         intros var val Hlookup. by apply lookup_union_Some_l.
       - intros vname tp Hin.
         have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
@@ -1519,7 +1521,7 @@ Section lifting.
         intro Hc. apply (Hdisjoint "#ret_val" Hc). exact Hrv_in. }
       rewrite list_to_map_app.
       split; [| split].
-      - eapply Forall2_impl; [| exact Hzip].
+      - apply (Forall2_impl _ _ _ _ Hzip).
         intros var val Hlookup. by apply lookup_union_Some_l.
       - intros vname tp Hin.
         have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
@@ -1659,7 +1661,7 @@ Section lifting.
             (proc_args proc_entry).*1 arg_vals HNoDup Hargs_len.
           rewrite list_to_map_app.
           split; [| split].
-          - eapply Forall2_impl; [| exact Hzip].
+          - apply (Forall2_impl _ _ _ _ Hzip).
             intros var val Hlookup. by apply lookup_union_Some_l.
           - intros vname tp Hin.
             have Hpresent := proc_locals_present_typed (proc_local_vars proc_entry)
@@ -1735,4 +1737,4 @@ Section lifting.
 
 End lifting.
 
-End Make.
+End WithRAs.

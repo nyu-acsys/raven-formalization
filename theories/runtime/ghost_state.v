@@ -15,9 +15,11 @@ From iris.proofmode Require Import proofmode.
 Set Default Proof Using "Type".
 Import uPred.
 
-Module Make (RAs : RA_CONFIG).
-Module lang := raven.runtime.lang.Make RAs.
+Module lang := raven.runtime.lang.
 Import lang.
+
+Section WithRAs.
+Context {RAs : RAConfig}.
 
 Inductive stackvar_addr :=
 | mk_stkvar_addr (stk_id : stack_id) (v : var).
@@ -291,7 +293,7 @@ Section definitions.
 
     2 : { simpl in *. destruct H3 as [x Hx]. simpl in Hx. discriminate. }
 
-    rewrite Hlp.
+    try rewrite Hlp.
     simpl in *.
     apply Some_pair_included in Hi1 as [_ Heq].
 
@@ -317,7 +319,6 @@ Notation " l # f  ↦{ q } v" := (heap_maps_to l f q v)
 
 Notation "'stack_own[' stk_id , frm ']' " := (stack_frame_own stk_id frm)
 (at level 20) : bi_scope.
-
 Section updates.
     Context `{!heapG Σ}.
   Lemma stack_upd_valid σ stk_id stk_frm v val
@@ -812,4 +813,10 @@ Section ra_cmra.
   Definition ra_cmra : cmra := discreteR A ra_cmra_mixin.
 End ra_cmra.
 
-End Make.
+End WithRAs.
+
+Notation " l # f  ↦{ q } v" := (heap_maps_to l f q v)
+(at level 20) : bi_scope.
+
+Notation "'stack_own[' stk_id , frm ']' " := (stack_frame_own stk_id frm)
+(at level 20) : bi_scope.

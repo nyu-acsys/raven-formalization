@@ -2,20 +2,22 @@ From Coq Require Import List Program.Equality ClassicalEpsilon.
 From stdpp Require Import sets.
 From iris.base_logic.lib Require Import iprop invariants fancy_updates.
 From iris.proofmode Require Import proofmode.
-From raven Require Import verification.expressions examples.counter_monotonic.
+From raven Require Import runtime.erasure analysis.structured_certificates verification.expressions soundness.runtime_model soundness.rule_validity soundness.procedure_validity soundness.adequacy examples.counter_monotonic.
 
 Import ListNotations.
 Open Scope list_scope.
 
 (** Downstream normalization-readiness and final program-packaging layer for
-    the typed monotonic-counter example.  The expensive runtime, normalization,
-    and soundness functors are instantiated once by [counter_monotonic]
-    and are only imported here. *)
-Module TypedCounterMonotonicPackaging.
+    the typed monotonic-counter example.  The counter's instances are declared
+    by [counter_monotonic] and only imported here. *)
+Module CounterMonotonicPackaging.
 
-Import TypedCounterMonotonic.
-Import TypedCore TypedCounterMonotonic.IR TypedCounterMonotonic.IR.Core
-  TypedCounterMonotonic.IR.Assertions.
+Import CounterMonotonic.
+Import Core CounterMonotonic.IR CounterMonotonic.IR.Core
+  CounterMonotonic.IR.Assertions.
+#[local] Existing Instances mono_nat_ra.CounterRAConfig.ra_config
+  CounterLogic.logic RuntimeConfiguration.config
+  CounterResourceContracts.contracts CounterProcedureContracts.coherence.
 
 (* ================================================================== *)
 (** * Instantiating the analyzed adequacy boundary
@@ -37,8 +39,8 @@ Context {Sigma : iris.base_logic.lib.iprop.gFunctors}.
 Context `{!invGS Sigma}.
 
 Definition counter_leaf (RG : Runtime.runtimeG Sigma) :
-  @CounterSoundness.TermLeaf.semantic_leaf_contracts_data
-    (iPropI Sigma) (@CounterSoundness.semantic_data Sigma RG).
+  @RuleValidity.TermLeaf.semantic_leaf_contracts_data _ _ _
+    (iPropI Sigma) (@RuleValidity.semantic_data _ _ _ Sigma RG).
 Proof.
   unshelve econstructor.
   { exact (fun _ _ _ => False%I). }
@@ -50,8 +52,9 @@ Proof.
      reindexing to discharge.  This example declares no predicate bodies, so
      both sides are [False]. *)
   - abstract (intros F Delta formals binders atoms predicate expressions;
-    unfold CounterSoundness.TermLeaf.RI.instantiated_predicate;
-    unfold CounterResourceContracts.predicate_body;
+    unfold RuleValidity.TermLeaf.RI.instantiated_predicate;
+    cbv [RuleValidity.Hoare.ResourceHoare.predicate_body
+      CounterResourceContracts.contracts CounterResourceContracts.predicate_body];
     cbn;
     iSplit; [iIntros "[]" | iIntros "H"; iDestruct "H" as (v) "[_ []]"]).
 Defined.
@@ -65,12 +68,12 @@ Defined.
     interpretation: its currently declared contracts are [CPure True], so
     the example does not yet rely on that exclusivity. *)
 Definition counter_ghost_own
-    (_ : Runtime.RuntimeLifting.simpLangG Sigma) (_ : unit)
-    (field : TypedCore.field_id)
-    (location : Runtime.IR.Core.tval TypedCore.TRef)
-    (chunk : Runtime.IR.Core.tval (CounterLogic.field_type field)) :
+    (_ : RuleValidity.RuntimeLifting.simpLangG Sigma) (_ : unit)
+    (field : Core.field_id)
+    (location : RuleValidity.IR.Core.tval Core.TRef)
+    (chunk : RuleValidity.IR.Core.tval (IR.Assertions.field_type field)) :
     iProp Sigma :=
-  (⌜Runtime.IR.Core.tval_ra_valid chunk⌝)%I.
+  (⌜RuleValidity.IR.Core.tval_ra_valid chunk⌝)%I.
 
 Definition counter_ghost_factory :
   Runtime.runtime_ghost_resource_factory Sigma
@@ -83,14 +86,14 @@ Proof.
   - abstract (intros simpLangG0 resource E field resource_name field_name
       address chunk Hfield HE Hvalid;
     iIntros "_"; iModIntro; unfold counter_ghost_own; iPureIntro;
-    set (t := CounterLogic.field_type field) in *; clearbody t;
+    set (t := IR.Assertions.field_type field) in *; clearbody t;
     generalize (eq_sym Hfield); clear Hfield; intro Heq; destruct Heq;
     exact Hvalid).
   - abstract (intros simpLangG0 resource E field location old_chunk new_chunk
       Hfpu;
     unfold counter_ghost_own; iIntros "_"; iModIntro; iPureIntro;
     revert Hfpu;
-    set (t := CounterLogic.field_type field) in *; clearbody t;
+    set (t := IR.Assertions.field_type field) in *; clearbody t;
     destruct t; dependent destruction old_chunk;
       dependent destruction new_chunk; cbn; try contradiction;
     intro Hfpu;
@@ -109,10 +112,10 @@ End CounterLeafContracts.
 Definition counter_analyzed_bodies packed
     (Hin : List.In packed
       (procedure_entries CounterProcedureContracts.procedures)) :
-    CounterSoundness.packed_analyzed_body packed.
+    ProcedureValidity.packed_analyzed_body packed.
 Proof.
   assert (Hexists : exists
-      _ : CounterSoundness.packed_analyzed_body packed, True).
+      _ : ProcedureValidity.packed_analyzed_body packed, True).
   { simpl in Hin.
     destruct Hin as [Hin | [Hin | [Hin | []]]].
     - dependent destruction Hin. exists read_analyzed_body. exact I.
@@ -132,21 +135,21 @@ Lemma counter_analyzed_registered
     Gamma identity (procedure : IR.typed_procedure Gamma identity)
     (Hin : List.In (pack_typed_procedure procedure)
       (procedure_entries CounterProcedureContracts.procedures)) :
-  Runtime.GenericRegions.Atomicity.certificate_footprint
-    (CounterSoundness.CertifiedNormalization.analyzed_certificate
-      (CounterSoundness.analyzed_body_triple _ _
+  RuleValidity.GenericRegions.Atomicity.certificate_footprint
+    (RuleValidity.CertifiedNormalization.analyzed_certificate
+      (ProcedureValidity.analyzed_body_triple _ _
         (counter_analyzed_bodies (pack_typed_procedure procedure) Hin)))
-  ⊆ CounterSoundness.term_registered_invariants
+  ⊆ RuleValidity.term_registered_invariants
       counter_program_registration .
 Proof.
   set (body := counter_analyzed_bodies (pack_typed_procedure procedure) Hin).
   etrans.
   - eapply
-      Runtime.GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-    + exact (CounterSoundness.analyzed_body_conditionals _ _ body).
-    + exact (CounterSoundness.analyzed_body_exit_closed _ _ body).
-  - rewrite (CounterSoundness.analyzed_body_exit_mask _ _ body).
-    unfold CounterSoundness.term_registered_invariants,
+      RuleValidity.GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
+    + exact (ProcedureValidity.analyzed_body_conditionals _ _ body).
+    + exact (ProcedureValidity.analyzed_body_exit_closed _ _ body).
+  - rewrite (ProcedureValidity.analyzed_body_exit_mask _ _ body).
+    unfold RuleValidity.term_registered_invariants,
       counter_program_registration. simpl.
     clearbody body. clear body.
     simpl in Hin. destruct Hin as [Hin | [Hin | [Hin | []]]];
@@ -154,7 +157,7 @@ Proof.
 Qed.
 
 Definition counter_analyzed_program (RG : Runtime.runtimeG Sigma) :
-  CounterSoundness.analyzed_program counter_program_registration.
+  ProcedureValidity.analyzed_program counter_program_registration.
 Proof.
   unshelve econstructor.
   { exact counter_analyzed_bodies. }
@@ -172,14 +175,14 @@ End CounterAnalyzedProgram.
 Section CounterLibrarySoundness.
 Context {Sigma : iris.base_logic.lib.iprop.gFunctors}.
 Context `{!invGS Sigma}.
-Context `{!Runtime.RuntimeGhost.heapGpreS Sigma}.
-Context `{!Runtime.RuntimeModel.invTokenGpreS Sigma}.
+Context `{!RuleValidity.RuntimeGhost.heapGpreS Sigma}.
+Context `{!RuleValidity.RuntimeModel.invTokenGpreS Sigma}.
 Definition counter_library_soundness :=
-  CounterSoundness.raven_analyzed_library_soundness
+  Adequacy.raven_analyzed_library_soundness
     counter_program_registration counter_ghost_factory counter_leaf
-    CounterSoundness.analyzed_normalization_complete_from_raw_access_cut
+    ProcedureValidity.analyzed_normalization_complete_from_raw_access_cut
     counter_analyzed_program.
 
 End CounterLibrarySoundness.
 
-End TypedCounterMonotonicPackaging.
+End CounterMonotonicPackaging.

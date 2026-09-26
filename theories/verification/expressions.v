@@ -8,7 +8,7 @@ Import ListNotations.
 Open Scope list_scope.
 
 (** Typed foundations for the elaborated Raven verification IR. *)
-Module TypedCore.
+Module Core.
 
 Inductive typ :=
 | TBool
@@ -133,29 +133,32 @@ Proof.
   intros []; reflexivity.
 Qed.
 
-(** Resource-algebra carriers remain supplied by the program's RA
-    configuration.  All non-RA values are intrinsically typed here. *)
-Module Type RA_VALUE_CONFIG.
-  Parameter ra_carrier : source_name -> Type.
-  Parameter ra_eqb : forall r, ra_carrier r -> ra_carrier r -> bool.
-  Parameter ra_eqb_eq : forall r (left right : ra_carrier r),
-    ra_eqb r left right = true <-> left = right.
-  Parameter ra_id : forall r, ra_carrier r.
-  Parameter ra_of_int : forall r, Z -> ra_carrier r.
-  Parameter ra_valid : forall r, ra_carrier r -> Prop.
-  Parameter ra_fpu_allowed : forall r, ra_carrier r -> ra_carrier r -> Prop.
-End RA_VALUE_CONFIG.
+(** Resource-algebra carriers are supplied by the program's configuration;
+    the definitions below are parameterized by an instance. *)
+Class RAValueConfig := RAValueConfigData {
+  ra_carrier : source_name -> Type;
+  ra_eqb : forall r, ra_carrier r -> ra_carrier r -> bool;
+  ra_eqb_eq : forall r (left right : ra_carrier r),
+    ra_eqb r left right = true <-> left = right;
+  ra_id : forall r, ra_carrier r;
+  ra_of_int : forall r, Z -> ra_carrier r;
+  ra_valid : forall r, ra_carrier r -> Prop;
+  ra_fpu_allowed : forall r, ra_carrier r -> ra_carrier r -> Prop;
+}.
 
-Module Make (RAs : RA_VALUE_CONFIG).
+
+
+Section WithRAs.
+Context {RAs : RAValueConfig}.
 
 Inductive tval : typ -> Type :=
 | VBool (b : bool) : tval TBool
 | VInt (z : Z) : tval TInt
 | VRef (location : Z) : tval TRef
 | VUnit : tval TUnit
-| VRA r (value : RAs.ra_carrier r) : tval (TRA r).
+| VRA r (value : ra_carrier r) : tval (TRA r).
 
-Arguments VRA {_} _.
+#[global] Arguments VRA {_} _.
 
 (** Raven's value sorts denote inhabited SMT sorts.  Keep the corresponding
     language-level witness explicit: proof transformations may need a witness
@@ -166,7 +169,7 @@ Definition default_tval (t : typ) : tval t :=
   | TInt => VInt 0
   | TRef => VRef 0
   | TUnit => VUnit
-  | TRA r => VRA (RAs.ra_id r)
+  | TRA r => VRA (ra_id r)
   end.
 
 Global Instance tval_inhabited (t : typ) : Inhabited (tval t) :=
@@ -181,7 +184,7 @@ Proof.
   - exact (Z.eqb z z0).
   - exact (Z.eqb location location0).
   - exact true.
-  - exact (RAs.ra_eqb resource_algebra value value0).
+  - exact (ra_eqb resource_algebra value value0).
 Defined.
 
 Lemma tval_eqb_eq t (left right : tval t) :
@@ -192,9 +195,9 @@ Proof.
   - rewrite Z.eqb_eq. split; intro H; [subst | inversion H]; reflexivity.
   - rewrite Z.eqb_eq. split; intro H; [subst | inversion H]; reflexivity.
   - split; intros; reflexivity.
-  - change (RAs.ra_eqb resource_algebra value value0 = true <->
+  - change (ra_eqb resource_algebra value value0 = true <->
       VRA value = VRA value0).
-    rewrite RAs.ra_eqb_eq. split.
+    rewrite ra_eqb_eq. split.
     + intros ->. reflexivity.
     + intros H. inversion H.
       apply (Eqdep_dec.inj_pair2_eq_dec string String.string_dec) in H1.
@@ -208,7 +211,7 @@ Proof.
   - exact False.
   - exact False.
   - exact False.
-  - exact (RAs.ra_fpu_allowed resource_algebra value value0).
+  - exact (ra_fpu_allowed resource_algebra value value0).
 Defined.
 
 Definition tval_ra_valid {t : typ} (value : tval t) : Prop.
@@ -218,7 +221,7 @@ Proof.
   - exact True.
   - exact True.
   - exact True.
-  - exact (RAs.ra_valid resource_algebra value).
+  - exact (ra_valid resource_algebra value).
 Defined.
 
 (** References available to a symbolic store or typed logical expression.
@@ -229,9 +232,9 @@ Inductive value_ref (F Δ : context) : typ -> Type :=
 | RefBound t (x : bvar Δ t) : value_ref F Δ t
 | RefAtom t (x : atom t) : value_ref F Δ t.
 
-Arguments RefFormal {_ _ _} _.
-Arguments RefBound {_ _ _} _.
-Arguments RefAtom {_ _ _} _.
+#[global] Arguments RefFormal {_ _ _} _.
+#[global] Arguments RefBound {_ _ _} _.
+#[global] Arguments RefAtom {_ _ _} _.
 
 Inductive unop : typ -> typ -> Type :=
 | UNot : unop TBool TBool
@@ -261,10 +264,10 @@ Inductive expr (F Δ : context) : typ -> Type :=
 | EBinOp left right output (op : binop left right output)
     (operand1 : expr F Δ left) (operand2 : expr F Δ right) : expr F Δ output.
 
-Arguments ERef {_ _ _} _.
-Arguments EVal {_ _ _} _.
-Arguments EUnOp {_ _ _ _} _ _.
-Arguments EBinOp {_ _ _ _ _} _ _ _.
+#[global] Arguments ERef {_ _ _} _.
+#[global] Arguments EVal {_ _ _} _.
+#[global] Arguments EUnOp {_ _ _ _} _ _.
+#[global] Arguments EBinOp {_ _ _ _ _} _ _ _.
 
 Definition default_expr {F Δ} (t : typ) : expr F Δ t :=
   EVal (default_tval t).
@@ -408,7 +411,7 @@ Definition tval_eqb_het {t1} (v1 : tval t1) {t2} (v2 : tval t2) : bool :=
   | @VRA r1 w1, @VRA r2 w2 =>
       match String.string_dec r1 r2 with
       | left equality =>
-          RAs.ra_eqb r2 (eq_rect r1 RAs.ra_carrier w1 r2 equality) w2
+          ra_eqb r2 (eq_rect r1 ra_carrier w1 r2 equality) w2
       | right _ => false
       end
   | _, _ => false
@@ -424,7 +427,7 @@ Proof.
   - destruct (String.string_dec r r) as [equality | Hne];
       [| exact (match Hne eq_refl with end)].
     rewrite (Eqdep_dec.UIP_dec String.string_dec equality eq_refl). simpl.
-    apply RAs.ra_eqb_eq. reflexivity.
+    apply ra_eqb_eq. reflexivity.
 Qed.
 
 Lemma tval_eqb_het_eq {t} (v1 v2 : tval t) :
@@ -439,7 +442,7 @@ Proof.
   - destruct (String.string_dec r r) as [equality | Hne];
       [| intros Hbad; discriminate].
     rewrite (Eqdep_dec.UIP_dec String.string_dec equality eq_refl). simpl.
-    intros Heq. apply RAs.ra_eqb_eq in Heq. subst value0. reflexivity.
+    intros Heq. apply ra_eqb_eq in Heq. subst value0. reflexivity.
 Qed.
 
 (** [unop] and [binop] are small enough to compare directly; both
@@ -621,7 +624,7 @@ Definition interp_unop {input output} (op : unop input output) :
   | UNeg => fun value =>
       match value with VInt z => VInt (-z) end
   | URAOfInt r => fun value =>
-      match value with VInt z => VRA (RAs.ra_of_int r z) end
+      match value with VInt z => VRA (ra_of_int r z) end
   end.
 
 (** Typed binary operations follow Raven's operational semantics.  In
@@ -737,8 +740,8 @@ Inductive store_data (F Δ : context) : context -> Type :=
 | StoreCons t Γ : value_ref F Δ t -> store_data F Δ Γ ->
     store_data F Δ (t :: Γ).
 
-Arguments StoreNil {_ _}.
-Arguments StoreCons {_ _ _ _} _ _.
+#[global] Arguments StoreNil {_ _}.
+#[global] Arguments StoreCons {_ _ _ _} _ _.
 
 Definition symbolic_store (Γ F Δ : context) := store_data F Δ Γ.
 
@@ -763,13 +766,13 @@ Fixpoint weaken_member_right {Γ t} (x : member Γ t) (suffix : context) :
   | MThere x' => MThere (weaken_member_right x' suffix)
   end.
 
-End Make.
-End TypedCore.
+End WithRAs.
+End Core.
 
 (** Executable examples for the typed expression layer. *)
-Module TypedCoreExamples.
+Module CoreExamples.
 
-Module UnitRA <: TypedCore.RA_VALUE_CONFIG.
+Module UnitRA.
   Definition ra_carrier (_ : source_name) : Type := unit.
   Definition ra_eqb (_ : source_name) (_ _ : unit) : bool := true.
   Lemma ra_eqb_eq r (left right : unit) :
@@ -779,10 +782,13 @@ Module UnitRA <: TypedCore.RA_VALUE_CONFIG.
   Definition ra_of_int (_ : source_name) (_ : Z) : unit := tt.
   Definition ra_valid (_ : source_name) (_ : unit) : Prop := True.
   Definition ra_fpu_allowed (_ : source_name) (_ _ : unit) : Prop := True.
+  Definition ra_values : Core.RAValueConfig :=
+    Core.RAValueConfigData ra_carrier ra_eqb ra_eqb_eq ra_id ra_of_int
+      ra_valid ra_fpu_allowed.
 End UnitRA.
 
-Module Core := TypedCore.Make UnitRA.
-Import TypedCore Core.
+#[local] Existing Instance UnitRA.ra_values.
+Import Core.
 
 Definition empty_formals : formal_env [] :=
   fun t variable => match variable with end.
@@ -811,4 +817,4 @@ Proof. reflexivity. Qed.
 Definition ill_typed_addition_cannot_be_constructed : Type :=
   expr [] [] TInt.
 
-End TypedCoreExamples.
+End CoreExamples.

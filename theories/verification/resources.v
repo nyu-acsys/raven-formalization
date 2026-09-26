@@ -33,13 +33,14 @@ Open Scope list_scope.
     representation and its laws stand on their own, before the rules that
     use them. *)
 
-Module TypedResource.
+Module Resource.
 
-Module Make (RAs : TypedCore.RA_VALUE_CONFIG)
-    (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Assertions := TypedAssertion.Make RAs Logic.
-Module Core := Assertions.Core.
-Import TypedCore Core Assertions.
+Module Core := Core.
+Module Assertions := Assertion.
+Import Core Assertions.
+
+Section WithSignature.
+Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 
 (* ------------------------------------------------------------------ *)
 (** ** 1. Syntax *)
@@ -49,9 +50,9 @@ Inductive core_assertion (F Δ : context) : Type :=
 | CExpr (condition : expr F Δ TBool)
 | CPure (proposition : Prop)
 | COwn (field : field_id) (location : expr F Δ TRef)
-    (chunk : expr F Δ (Logic.field_type field))
+    (chunk : expr F Δ (field_type field))
 | CGhostOwn (field : field_id) (location : expr F Δ TRef)
-    (chunk : expr F Δ (Logic.field_type field))
+    (chunk : expr F Δ (field_type field))
 | CFpuAllowed t (old_chunk new_chunk : expr F Δ t)
 | CRAValid t (chunk : expr F Δ t)
 | CExists t (body : core_assertion F (t :: Δ))
@@ -59,23 +60,23 @@ Inductive core_assertion (F Δ : context) : Type :=
 | CIte (condition : expr F Δ TBool)
     (then_branch else_branch : core_assertion F Δ)
 | CInvariant (invariant : inv_id)
-    (args : expr_list F Δ (Logic.invariant_args invariant))
+    (args : expr_list F Δ (invariant_args invariant))
 | CPredicate (predicate : pred_id)
-    (args : expr_list F Δ (Logic.predicate_args predicate))
+    (args : expr_list F Δ (predicate_args predicate))
 | CAnd (left right : core_assertion F Δ).
 
-Arguments CExpr {_ _} _.
-Arguments CPure {_ _} _.
-Arguments COwn {_ _} _ _ _.
-Arguments CGhostOwn {_ _} _ _ _.
-Arguments CFpuAllowed {_ _} _ _ _.
-Arguments CRAValid {_ _} _ _.
-Arguments CExists {_ _} _ _.
-Arguments CForall {_ _} _ _.
-Arguments CIte {_ _} _ _ _.
-Arguments CInvariant {_ _} _ _.
-Arguments CPredicate {_ _} _ _.
-Arguments CAnd {_ _} _ _.
+#[global] Arguments CExpr {_ _} _.
+#[global] Arguments CPure {_ _} _.
+#[global] Arguments COwn {_ _} _ _ _.
+#[global] Arguments CGhostOwn {_ _} _ _ _.
+#[global] Arguments CFpuAllowed {_ _} _ _ _.
+#[global] Arguments CRAValid {_ _} _ _.
+#[global] Arguments CExists {_ _} _ _.
+#[global] Arguments CForall {_ _} _ _.
+#[global] Arguments CIte {_ _} _ _ _.
+#[global] Arguments CInvariant {_ _} _ _.
+#[global] Arguments CPredicate {_ _} _ _.
+#[global] Arguments CAnd {_ _} _ _.
 
 (** User-facing resource assertions cannot observe verifier-generated
     procedure-entry atoms.  This is what permits each invocation to choose
@@ -106,9 +107,9 @@ Record resource_assertion (Γ F Δ : context) : Type := ResourceState {
   resource_body : core_assertion F Δ;
 }.
 
-Arguments ResourceState {_ _ _} _ _.
-Arguments resource_stack {_ _ _} _.
-Arguments resource_body {_ _ _} _.
+#[global] Arguments ResourceState {_ _ _} _ _.
+#[global] Arguments resource_stack {_ _ _} _.
+#[global] Arguments resource_body {_ _ _} _.
 
 (** Binders that may occur in the symbolic stack live outside the pair.
     Ordinary existentials whose variable occurs only in [resource_body]
@@ -121,8 +122,8 @@ Inductive resource_prenex (Γ F : context) : context -> Type :=
     (rest : resource_prenex Γ F (t :: Δ)) :
     resource_prenex Γ F Δ.
 
-Arguments ResourceBody {_ _ _} _.
-Arguments ResourceExists {_ _ _} _ _.
+#[global] Arguments ResourceBody {_ _ _} _.
+#[global] Arguments ResourceExists {_ _ _} _ _.
 
 Definition RState {Γ F Δ} (store : symbolic_store Γ F Δ)
     (body : core_assertion F Δ) : resource_prenex Γ F Δ :=
@@ -176,8 +177,8 @@ Inductive core_existential_prenex (F Δ : context) : Type :=
 | CorePrenexBody (body : core_assertion F Δ)
 | CorePrenexExists t (body : core_existential_prenex F (t :: Δ)).
 
-Arguments CorePrenexBody {_ _} _.
-Arguments CorePrenexExists {_ _} _ _.
+#[global] Arguments CorePrenexBody {_ _} _.
+#[global] Arguments CorePrenexExists {_ _} _ _.
 
 Fixpoint interp_core_existential_prenex {F Δ}
     (prenex : core_existential_prenex F Δ) : core_assertion F Δ :=
@@ -353,11 +354,11 @@ Definition instantiate_bound_core {F Δ t} (witness : expr F Δ t)
   subst_bound_core (head_bound_subst witness) body.
 
 (** Lifting a closed contract body into the caller's binder context.  This
-    replaces the [subst_bound_assertion (@empty_bound_subst args Δ)] stage
+    replaces the [subst_bound_assertion (@empty_bound_subst _ args Δ)] stage
     of [CONTRACT_ENV.instantiated_definition], and cannot fail. *)
 Definition weaken_core_to {F} (Δ : context) (formula : core_assertion F []) :
     core_assertion F Δ :=
-  subst_bound_core (@empty_bound_subst F Δ) formula.
+  subst_bound_core (@empty_bound_subst _ F Δ) formula.
 
 Fixpoint subst_formals_core {F F' Δ} (substitution : formal_subst F F' Δ)
     (formula : core_assertion F Δ) : core_assertion F' Δ :=
@@ -522,9 +523,9 @@ Qed.
     two act on disjoint parts of an expression. *)
 Lemma weaken_subst_formals_expr {F F' Δ u t}
     (substitution : formal_subst F F' Δ) (expression : expr F Δ t) :
-  @weaken_expr F' Δ t u (subst_formals_expr substitution expression) =
+  @weaken_expr _ F' Δ t u (subst_formals_expr substitution expression) =
     subst_formals_expr (lift_formal_subst substitution)
-      (@weaken_expr F Δ t u expression).
+      (@weaken_expr _ F Δ t u expression).
 Proof.
   induction expression; cbn [weaken_expr subst_formals_expr];
     try congruence.
@@ -533,9 +534,9 @@ Qed.
 
 Lemma weaken_subst_formals_expr_list {F F' Δ u ts}
     (substitution : formal_subst F F' Δ) (expressions : expr_list F Δ ts) :
-  @weaken_expr_list F' Δ ts u (subst_formals_expr_list substitution expressions)
+  @weaken_expr_list _ F' Δ ts u (subst_formals_expr_list substitution expressions)
     = subst_formals_expr_list (lift_formal_subst substitution)
-        (@weaken_expr_list F Δ ts u expressions).
+        (@weaken_expr_list _ F Δ ts u expressions).
 Proof.
   induction expressions as [| t ts head tail IH];
     cbn [weaken_expr_list subst_formals_expr_list]; [reflexivity |].
@@ -543,7 +544,7 @@ Proof.
 Qed.
 
 Lemma lift_identity_formal_subst {F Δ u} :
-  @lift_formal_subst F F Δ u identity_formal_subst = identity_formal_subst.
+  @lift_formal_subst _ F F Δ u identity_formal_subst = identity_formal_subst.
 Proof.
   apply functional_extensionality_dep; intro t.
   apply functional_extensionality; intro variable. reflexivity.
@@ -551,7 +552,7 @@ Qed.
 
 Lemma lift_formal_subst_compose {F1 F2 F3 Δ u}
     (outer : formal_subst F2 F3 Δ) (inner : formal_subst F1 F2 Δ) :
-  @lift_formal_subst F1 F3 Δ u (compose_formal_subst outer inner) =
+  @lift_formal_subst _ F1 F3 Δ u (compose_formal_subst outer inner) =
     compose_formal_subst (lift_formal_subst outer) (lift_formal_subst inner).
 Proof.
   apply functional_extensionality_dep; intro t.
@@ -926,5 +927,5 @@ Proof.
     apply IH.
 Qed.
 
-End Make.
-End TypedResource.
+End WithSignature.
+End Resource.

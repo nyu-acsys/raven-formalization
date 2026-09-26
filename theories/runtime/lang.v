@@ -27,9 +27,12 @@ Inductive un_op : Set :=
    layer. Naming RAs (rather than embedding RA_Pack values inline in
    typ/val) is what makes equality of RA-typed values decidable: ra_name is
    just a string, whereas RA_Pack bundles an arbitrary Type that isn't. *)
-Module Make (RAs : RA_CONFIG).
 
-Definition ra_map : ra_name -> RA_Pack := RAs.ra_map.
+
+Section WithRAs.
+Context {RAs : RAConfig}.
+
+Definition ra_map : ra_name -> RA_Pack := ra_config_map.
 
 (* A concrete element of some named RA, its name bundled alongside it --
    the payload of val's LitRAElem case below. *)
@@ -188,7 +191,8 @@ Definition heap_addr_loc (a : heap_addr) : loc :=
   match a with heap_addr_constr l _ => l end.
 
 (* Heap maps locations to field-value pairs *)
-Definition heap := gmap heap_addr val.
+Local Notation heap := (gmap heap_addr val).
+
 
 (* Stack frame contains local variables and current statement *)
 
@@ -203,7 +207,9 @@ Record stack_frame := StackFrame {
   (* ret_stack := stack_id; *)
 }.
 
-Definition stack_map := gmap stack_id stack_frame.
+Local Notation stack_map := (gmap stack_id stack_frame).
+
+
 
 (** A trusted atomic operation may update the heap and thread-local stacks,
     but not the immutable procedure table.  The relation itself is supplied
@@ -326,6 +332,9 @@ Fixpoint subst_stmt (s : stmt) (subst : list (var * expr)) : stmt :=
   | TrustedAtomic transition => TrustedAtomic transition
   end.
 End state.
+
+Local Notation heap := (gmap heap_addr val).
+Local Notation stack_map := (gmap stack_id stack_frame).
 
 Definition fresh_loc (h : heap) : loc :=
   Loc (Z.of_nat (size h)).
@@ -1154,4 +1163,7 @@ Proof.
   destruct H1; done.
 Qed.
 
-End Make.
+End WithRAs.
+
+Notation heap := (gmap heap_addr val).
+Notation stack_map := (gmap stack_id stack_frame).

@@ -6,30 +6,15 @@ From raven Require Import verification.expressions analysis.atomicity verificati
     analyzer.  An unfold wraps the complete remaining continuation, so its
     linear Iris close capability can flow to a later fold without appearing
     in Raven assertions or escaping the certified region. *)
-Module TypedRegion.
+Module Region.
 
-Import TypedCore TypedIR.
+Import Core IR.
 
-Module Generic (Syntax : TypedAnalysisView.ANALYSIS_SYNTAX).
-Module Atomicity := TypedAnalysisView.Analysis Syntax.
+Module Atomicity := AnalysisView.
 Import Atomicity.
 
-(** Expose certificate proof irrelevance through the generic-region module.
-    Rocq does not project declarations of the local [Atomicity] module alias
-    through an applied functor path, while clients do share its certificate
-    type through that path. *)
-Lemma analysis_certificate_unique
-    {Γ cost entry statement exit}
-    (certificate1 certificate2 :
-      Atomicity.analysis_certificate cost Γ entry statement exit) :
-  certificate1 = certificate2.
-Proof.
-  apply Atomicity.analysis_certificate_unique.
-Qed.
-
 (** The region model, as a term.  A value of this record can be assembled
-    after an adequacy proof has allocated the runtime ghost names, unlike a
-    module-functor argument. *)
+    after an adequacy proof has allocated the runtime ghost names. *)
 Record region_model_data (PROP : bi) : Type := RegionModelData {
   term_region_stack_context : context -> Type;
   term_region_ambient_mask : Type;
@@ -41,16 +26,18 @@ Arguments term_region_ambient_mask {_} _.
 (** Generic-region semantics, with all semantic dependencies explicit
     values. *)
 Module TermSemantics.
+Section WithSyntax.
+Context {Syntax : AnalysisSyntax} {Cost : LeafCost}.
 Section WithModel.
 Context {PROP : bi} (Model : region_model_data PROP).
 Local Notation iProp := (bi_car PROP).
 
 Record region_primitives_data := RegionPrimitivesData {
   term_region_operation_wp : forall Γ, term_region_stack_context Model Γ ->
-    term_region_ambient_mask Model -> analysis_state -> Syntax.statement Γ ->
+    term_region_ambient_mask Model -> analysis_state -> syntax_statement Γ ->
     analysis_state -> iProp -> iProp;
   term_region_branch_wp : forall Γ, term_region_stack_context Model Γ ->
-    term_region_ambient_mask Model -> analysis_state -> Syntax.statement Γ ->
+    term_region_ambient_mask Model -> analysis_state -> syntax_statement Γ ->
     analysis_state -> analysis_state -> iProp -> iProp -> iProp;
   term_region_operation_mono : forall Γ runtime ambient entry statement exit P Q,
     (P ⊢ Q) ->
@@ -72,37 +59,37 @@ Record region_primitives_data := RegionPrimitivesData {
 
 Context (Primitives : region_primitives_data).
 
-Fixpoint region_wp {Γ entry statement exit} {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+Fixpoint region_wp {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
     term_region_stack_context Model Γ -> term_region_ambient_mask Model ->
       iProp -> iProp :=
-  match certificate in analysis_certificate _ Γ' entry' statement' exit'
+  match certificate in analysis_certificate Γ' entry' statement' exit'
       return term_region_stack_context Model Γ' ->
         term_region_ambient_mask Model -> iProp -> iProp with
-  | @CertLeaf _ Γ' entry' statement' exit' _ _ =>
+  | @CertLeaf _ _ Γ' entry' statement' exit' _ _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement' exit' post
   (* The empty continuation performs no operation: its meaning is the
      postcondition itself, not an operation that happens to do nothing. *)
-  | @CertDone _ _ _ _ _ =>
+  | @CertDone _ _ _ _ _ _ =>
       fun _ _ post => post
-  | @CertUnfold _ Γ' entry' statement' _ exit' _ _ =>
+  | @CertUnfold _ _ Γ' entry' statement' _ exit' _ _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement' exit' post
-  | @CertFold _ Γ' entry' statement' invariant _ =>
+  | @CertFold _ _ Γ' entry' statement' invariant _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement'
           (fold_invariant invariant entry') post
-  | @CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | @CertSequence _ _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       fun runtime ambient post => region_wp first_certificate runtime ambient
         (region_wp second_certificate runtime ambient post)
-  | @CertConditional _ Γ' entry' statement' _ _ then_exit else_exit _
+  | @CertConditional _ _ Γ' entry' statement' _ _ then_exit else_exit _
       then_certificate else_certificate _ _ =>
       fun runtime ambient post =>
         term_region_branch_wp Primitives Γ' runtime ambient entry' statement' then_exit
           else_exit (region_wp then_certificate runtime ambient post)
           (region_wp else_certificate runtime ambient post)
-  | @CertAtomic _ Γ' entry' statement' _ outer inner _ _ body_certificate _ =>
+  | @CertAtomic _ _ Γ' entry' statement' _ outer inner _ _ body_certificate _ =>
       fun runtime ambient post =>
         term_region_operation_wp Primitives Γ' runtime ambient entry' statement'
           (AnalysisState (analysis_mask inner) (analysis_open inner)
@@ -113,8 +100,8 @@ Fixpoint region_wp {Γ entry statement exit} {cost : cost_model}
 
 Lemma region_wp_mono {Γ entry statement exit}
     (runtime : term_region_stack_context Model Γ)
-    (ambient : term_region_ambient_mask Model) {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) P Q :
+    (ambient : term_region_ambient_mask Model)
+    (certificate : analysis_certificate Γ entry statement exit) P Q :
   (P ⊢ Q) ->
   region_wp certificate runtime ambient P ⊢ region_wp certificate runtime ambient Q.
 Proof.
@@ -131,8 +118,8 @@ Qed.
 
 Lemma region_wp_frame {Γ entry statement exit}
     (runtime : term_region_stack_context Model Γ)
-    (ambient : term_region_ambient_mask Model) {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) P R :
+    (ambient : term_region_ambient_mask Model)
+    (certificate : analysis_certificate Γ entry statement exit) P R :
   region_wp certificate runtime ambient P ∗ R ⊢
     region_wp certificate runtime ambient (P ∗ R).
 Proof.
@@ -153,20 +140,20 @@ Proof.
 Qed.
 
 Record interpreter_data := RegionInterpreterData {
-  term_region_wp : forall {Γ entry statement exit} {cost : cost_model},
-    analysis_certificate cost Γ entry statement exit ->
+  term_region_wp : forall {Γ entry statement exit},
+    analysis_certificate Γ entry statement exit ->
     term_region_stack_context Model Γ -> term_region_ambient_mask Model ->
       iProp -> iProp;
   term_region_wp_mono : forall {Γ entry statement exit}
       (runtime : term_region_stack_context Model Γ)
-      (ambient : term_region_ambient_mask Model) {cost : cost_model}
-      (certificate : analysis_certificate cost Γ entry statement exit) P Q,
+      (ambient : term_region_ambient_mask Model)
+      (certificate : analysis_certificate Γ entry statement exit) P Q,
     (P ⊢ Q) -> term_region_wp certificate runtime ambient P ⊢
       term_region_wp certificate runtime ambient Q;
   term_region_wp_frame : forall {Γ entry statement exit}
       (runtime : term_region_stack_context Model Γ)
-      (ambient : term_region_ambient_mask Model) {cost : cost_model}
-      (certificate : analysis_certificate cost Γ entry statement exit) P R,
+      (ambient : term_region_ambient_mask Model)
+      (certificate : analysis_certificate Γ entry statement exit) P R,
     term_region_wp certificate runtime ambient P ∗ R ⊢
       term_region_wp certificate runtime ambient (P ∗ R)
 }.
@@ -177,8 +164,8 @@ Definition interpreter : interpreter_data := {|
   term_region_wp_frame := @region_wp_frame;
 |}.
 End WithModel.
+End WithSyntax.
 End TermSemantics.
 
-End Generic.
 
-End TypedRegion.
+End Region.

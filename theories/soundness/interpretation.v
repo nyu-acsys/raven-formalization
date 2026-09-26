@@ -15,23 +15,24 @@ Open Scope list_scope.
     (physical heap ownership, invariant tokens, and predicate bodies) out of
     the syntax translation.  A concrete Raven model supplies that bridge;
     typed environments and binder extension are handled here. *)
-Module TypedTranslation.
+Module Translation.
 
-Import TypedCore TypedIR.
+Import Core IR.
 
-Module Make (RAs : RA_VALUE_CONFIG) (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Hoare := TypedHoare.Make RAs Logic.
+Module Hoare := Hoare.
 Module IR := Hoare.IR.
 Module Resource := IR.Resource.
 Module Core := IR.Core.
 Module Assertions := IR.Assertions.
 Import Core Assertions IR.
 
+Section WithSignature.
+Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 Inductive tval_list : context -> Type :=
 | TVNil : tval_list []
 | TVCons t ts : tval t -> tval_list ts -> tval_list (t :: ts).
 
-Arguments TVCons {_ _} _ _.
+#[global] Arguments TVCons {_ _} _ _.
 
 Fixpoint tval_list_append {left_types right_types}
     (left : tval_list left_types) (right : tval_list right_types) :
@@ -59,7 +60,7 @@ Inductive concrete_store : context -> Type :=
 | ConcreteNil : concrete_store []
 | ConcreteCons t Γ : tval t -> concrete_store Γ -> concrete_store (t :: Γ).
 
-Arguments ConcreteCons {_ _} _ _.
+#[global] Arguments ConcreteCons {_ _} _ _.
 
 Definition binder_cons {Δ t} (head : tval t) (tail : binder_env Δ) :
     binder_env (t :: Δ) :=
@@ -638,29 +639,32 @@ Record semantic_config_data (PROP : bi) : Type := SemanticConfigData {
     (left right : concrete_store Γ),
     data_stack_own Γ runtime left ∗ data_stack_own Γ runtime right ⊢ False;
   data_field_own : forall field,
-    tval TRef -> tval (Logic.field_type field) -> bi_car PROP;
+    tval TRef -> tval (field_type field) -> bi_car PROP;
   data_ghost_own : forall field,
-    tval TRef -> tval (Logic.field_type field) -> bi_car PROP;
+    tval TRef -> tval (field_type field) -> bi_car PROP;
   data_invariant_own : forall invariant,
-    tval_list (Logic.invariant_args invariant) -> bi_car PROP;
+    tval_list (invariant_args invariant) -> bi_car PROP;
 }.
 
-Arguments data_stack_context {_} _ _.
-Arguments data_empty_stack_context {_} _.
-Arguments data_stack_own {_} _ {_} _ _.
-Arguments data_stack_own_exclusive {_} _ {_} _ _ _.
-Arguments data_field_own {_} _ _ _ _.
-Arguments data_ghost_own {_} _ _ _ _.
-Arguments data_invariant_own {_} _ _ _.
+#[global] Arguments data_stack_context {_} _ _.
+#[global] Arguments data_empty_stack_context {_} _.
+#[global] Arguments data_stack_own {_} _ {_} _ _.
+#[global] Arguments data_stack_own_exclusive {_} _ {_} _ _ _.
+#[global] Arguments data_field_own {_} _ _ _ _.
+#[global] Arguments data_ghost_own {_} _ _ _ _.
+#[global] Arguments data_invariant_own {_} _ _ _.
 
+End WithSignature.
 Module TermSemantics.
+Section WithSignature.
+Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 Section WithModel.
 Context {PROP : bi} (Model : semantic_config_data PROP).
 Local Existing Instance data_bi_affine.
 Local Notation iProp := (bi_car PROP).
 
 Definition predicate_semantics := forall predicate,
-  tval_list (Logic.predicate_args predicate) -> iProp.
+  tval_list (predicate_args predicate) -> iProp.
 
 Fixpoint interp_assertion {Γ F Δ}
     (predicates : predicate_semantics)
@@ -1147,7 +1151,7 @@ Qed.
 Lemma interp_core_to_assertion {Γ F Δ} predicates runtime formals binders atoms
     (formula : Resource.core_assertion F Δ) :
   interp_assertion predicates runtime formals binders atoms
-      (@Resource.core_to_assertion Γ F Δ formula) ≡
+      (@Resource.core_to_assertion _ _ Γ F Δ formula) ≡
     interp_core predicates formals binders atoms formula.
 Proof.
   revert binders.
@@ -1593,7 +1597,7 @@ Proof.
 Qed.
 
 End WithModel.
+End WithSignature.
 End TermSemantics.
 
-End Make.
-End TypedTranslation.
+End Translation.

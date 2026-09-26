@@ -1,7 +1,5 @@
-; The whole development is one theory, [raven], with one qualified
-; sub-namespace per directory (raven.runtime, raven.verification, ...).
-; Library boundaries inside it are decided after the functor hierarchy is
-; flattened (Phase O of the cleanup plan).
+; One theory, [raven], with a qualified sub-namespace per directory
+; (raven.runtime, raven.verification, ...).
 
 (include_subdirs qualified)
 
@@ -14,7 +12,7 @@
 ; soundness theorem, without examples.
 (rule
  (alias soundness)
- (deps soundness/soundness.vo)
+ (deps soundness/adequacy.vo)
  (action (progn)))
 
 ; [dune build @examples]: the verified examples (and everything they need).

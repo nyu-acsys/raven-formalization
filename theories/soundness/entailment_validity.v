@@ -4,12 +4,11 @@ From iris.proofmode Require Import tactics.
 From raven Require Import verification.expressions verification.assertions verification.ir verification.procedures soundness.interpretation.
 
 (** Semantic validity of the typed entailment and Hoare calculi. *)
-Module TypedValidity.
+Module Validity.
 
-Import TypedCore TypedIR.
+Import Core IR.
 
-Module Make (RAs : RA_VALUE_CONFIG) (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Module Translation := TypedTranslation.Make RAs Logic.
+Module Translation := Translation.
 Module Hoare := Translation.Hoare.
 Module IR := Translation.IR.
 Module Core := Translation.Core.
@@ -20,10 +19,12 @@ Import Core Assertions IR Hoare Translation.
 (** Validity over a semantic model supplied as a term, so adequacy may
     construct [Model] after allocating Iris ghost names. *)
 Module TermSemantics.
+Section WithSignature.
+Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 Section WithModel.
 Context {PROP : bi} (Model : Translation.semantic_config_data PROP).
 Let term_bi_affine : BiAffine PROP :=
-  @Translation.data_bi_affine PROP Model.
+  @Translation.data_bi_affine _ _ PROP Model.
 Local Existing Instance term_bi_affine.
 Local Notation iProp := (bi_car PROP).
 Local Notation interp_assertion :=
@@ -36,7 +37,7 @@ Local Notation interp_resource_prenex :=
   (Translation.TermSemantics.interp_resource_prenex Model).
 
 Definition predicate_semantics := forall predicate,
-  Translation.tval_list (Logic.predicate_args predicate) -> iProp.
+  Translation.tval_list (predicate_args predicate) -> iProp.
 
 Section EntailmentValidity.
 Context (predicates : predicate_semantics).
@@ -620,7 +621,7 @@ End EntailmentValidity.
 
 End WithModel.
 
+End WithSignature.
 End TermSemantics.
 
-End Make.
-End TypedValidity.
+End Validity.

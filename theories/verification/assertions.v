@@ -7,24 +7,29 @@ Import ListNotations.
 Open Scope list_scope.
 
 (** Scoped assertions over the typed expression foundation. *)
-Module TypedAssertion.
+Module Assertion.
 
-Module Type LOGIC_SIGNATURE.
-  Parameter field_type : TypedCore.field_id -> TypedCore.typ.
-  Parameter predicate_args : TypedCore.pred_id -> TypedCore.context.
-  Parameter invariant_args : TypedCore.inv_id -> TypedCore.context.
+(** The logic signature of a program; the definitions below are
+    parameterized by an instance. *)
+Class LogicSignature := LogicSignatureData {
+  field_type : Core.field_id -> Core.typ;
+  predicate_args : Core.pred_id -> Core.context;
+  invariant_args : Core.inv_id -> Core.context;
   (** A procedure identifier determines its argument context and return
       type, exactly as an invariant or predicate identifier determines its
       argument context.  This lets [TCall] and [TSpawn] force arity the way
       [TUnfold] already does, and makes a table entry's formals
       definitionally the declared ones. *)
-  Parameter procedure_args : TypedCore.proc_id -> TypedCore.context.
-  Parameter procedure_return : TypedCore.proc_id -> TypedCore.typ.
-End LOGIC_SIGNATURE.
+  procedure_args : Core.proc_id -> Core.context;
+  procedure_return : Core.proc_id -> Core.typ;
+}.
 
-Module Make (RAs : TypedCore.RA_VALUE_CONFIG) (Logic : LOGIC_SIGNATURE).
-Module Core := TypedCore.Make RAs.
-Import TypedCore Core.
+
+
+Import Core.
+
+Section WithSignature.
+Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 
 (** A heterogeneous vector of expressions whose types are described by a
     declaration context. *)
@@ -32,8 +37,8 @@ Inductive expr_list (F Δ : context) : context -> Type :=
 | ExprNil : expr_list F Δ []
 | ExprCons t ts : expr F Δ t -> expr_list F Δ ts -> expr_list F Δ (t :: ts).
 
-Arguments ExprNil {_ _}.
-Arguments ExprCons {_ _ _ _} _ _.
+#[global] Arguments ExprNil {_ _}.
+#[global] Arguments ExprCons {_ _ _ _} _ _.
 
 Fixpoint expr_list_entry_free {F Δ ts}
     (expressions : expr_list F Δ ts) : Prop :=
@@ -113,9 +118,9 @@ Inductive assertion (Γ F Δ : context) : Type :=
 | AExpr (condition : expr F Δ TBool)
 | APure (proposition : Prop)
 | AOwn (field : field_id) (location : expr F Δ TRef)
-    (chunk : expr F Δ (Logic.field_type field))
+    (chunk : expr F Δ (field_type field))
 | AGhostOwn (field : field_id) (location : expr F Δ TRef)
-    (chunk : expr F Δ (Logic.field_type field))
+    (chunk : expr F Δ (field_type field))
 | AFpuAllowed t (old_chunk new_chunk : expr F Δ t)
 | ARAValid t (chunk : expr F Δ t)
 | AExists t (body : assertion Γ F (t :: Δ))
@@ -123,24 +128,24 @@ Inductive assertion (Γ F Δ : context) : Type :=
 | AIte (condition : expr F Δ TBool)
     (then_branch else_branch : assertion Γ F Δ)
 | AInvariant (invariant : inv_id)
-    (args : expr_list F Δ (Logic.invariant_args invariant))
+    (args : expr_list F Δ (invariant_args invariant))
 | APredicate (predicate : pred_id)
-    (args : expr_list F Δ (Logic.predicate_args predicate))
+    (args : expr_list F Δ (predicate_args predicate))
 | AAnd (left right : assertion Γ F Δ).
 
-Arguments AStack {_ _ _} _.
-Arguments AExpr {_ _ _} _.
-Arguments APure {_ _ _} _.
-Arguments AOwn {_ _ _} _ _ _.
-Arguments AGhostOwn {_ _ _} _ _ _.
-Arguments AFpuAllowed {_ _ _} _ _ _.
-Arguments ARAValid {_ _ _} _ _.
-Arguments AExists {_ _ _} _ _.
-Arguments AForall {_ _ _} _ _.
-Arguments AIte {_ _ _} _ _ _.
-Arguments AInvariant {_ _ _} _ _.
-Arguments APredicate {_ _ _} _ _.
-Arguments AAnd {_ _ _} _ _.
+#[global] Arguments AStack {_ _ _} _.
+#[global] Arguments AExpr {_ _ _} _.
+#[global] Arguments APure {_ _ _} _.
+#[global] Arguments AOwn {_ _ _} _ _ _.
+#[global] Arguments AGhostOwn {_ _ _} _ _ _.
+#[global] Arguments AFpuAllowed {_ _ _} _ _ _.
+#[global] Arguments ARAValid {_ _ _} _ _.
+#[global] Arguments AExists {_ _ _} _ _.
+#[global] Arguments AForall {_ _ _} _ _.
+#[global] Arguments AIte {_ _ _} _ _ _.
+#[global] Arguments AInvariant {_ _ _} _ _.
+#[global] Arguments APredicate {_ _ _} _ _.
+#[global] Arguments AAnd {_ _ _} _ _.
 
 Fixpoint store_entry_free {Γ F Δ}
     (store : symbolic_store Γ F Δ) : Prop :=
@@ -178,8 +183,8 @@ Inductive existential_prenex (Γ F Δ : context) : Type :=
 | PrenexBody (body : assertion Γ F Δ)
 | PrenexExists t (body : existential_prenex Γ F (t :: Δ)).
 
-Arguments PrenexBody {_ _ _} _.
-Arguments PrenexExists {_ _ _} _ _.
+#[global] Arguments PrenexBody {_ _ _} _.
+#[global] Arguments PrenexExists {_ _ _} _ _.
 
 Fixpoint interp_existential_prenex {Γ F Δ}
     (prenex : existential_prenex Γ F Δ) : assertion Γ F Δ :=
@@ -1499,7 +1504,7 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** ** Structural entailment on assertions
 
-    Moved here from [TypedHoare]: these rules mention only the assertion
+    Moved here from [Hoare]: these rules mention only the assertion
     grammar, which the Hoare calculus of [hoare_rules.v]
     needs. *)
 
@@ -1617,7 +1622,7 @@ Inductive entailment_step {Γ F Δ} :
       (AGhostOwn field location right_chunk)
 | ESInvariantArgumentsEqAssume invariant
     (left_arguments right_arguments :
-      expr_list F Δ (Logic.invariant_args invariant))
+      expr_list F Δ (invariant_args invariant))
     (condition : expr F Δ TBool) :
     expr_list_equal_assuming condition _ left_arguments right_arguments ->
     entailment_step
@@ -1625,7 +1630,7 @@ Inductive entailment_step {Γ F Δ} :
       (AInvariant invariant right_arguments)
 | ESPredicateArgumentsEqAssume predicate
     (left_arguments right_arguments :
-      expr_list F Δ (Logic.predicate_args predicate))
+      expr_list F Δ (predicate_args predicate))
     (condition : expr F Δ TBool) :
     expr_list_equal_assuming condition _ left_arguments right_arguments ->
     entailment_step
@@ -1713,27 +1718,30 @@ Inductive assertion_entails {Γ F} : forall {Δ},
     assertion_entails body body' ->
     assertion_entails (AForall t body) (AForall t body').
 
-End Make.
-End TypedAssertion.
+End WithSignature.
+End Assertion.
 
-Module TypedAssertionExamples.
+Module AssertionExamples.
 
-Module UnitRA := TypedCoreExamples.UnitRA.
+Module UnitRA := CoreExamples.UnitRA.
 
-Module TinyLogic <: TypedAssertion.LOGIC_SIGNATURE.
-  Definition field_type (_ : TypedCore.field_id) := TypedCore.TInt.
-  Definition predicate_args (_ : TypedCore.pred_id) :=
-    [TypedCore.TRef; TypedCore.TInt].
-  Definition invariant_args (_ : TypedCore.inv_id) :=
-    [TypedCore.TRef].
-  Definition procedure_args (_ : TypedCore.proc_id) : TypedCore.context :=
-    [TypedCore.TRef].
-  Definition procedure_return (_ : TypedCore.proc_id) : TypedCore.typ :=
-    TypedCore.TUnit.
+Module TinyLogic.
+  Definition field_type (_ : Core.field_id) := Core.TInt.
+  Definition predicate_args (_ : Core.pred_id) :=
+    [Core.TRef; Core.TInt].
+  Definition invariant_args (_ : Core.inv_id) :=
+    [Core.TRef].
+  Definition procedure_args (_ : Core.proc_id) : Core.context :=
+    [Core.TRef].
+  Definition procedure_return (_ : Core.proc_id) : Core.typ :=
+    Core.TUnit.
+  Definition logic : Assertion.LogicSignature :=
+    Assertion.LogicSignatureData field_type predicate_args invariant_args
+      procedure_args procedure_return.
 End TinyLogic.
 
-Module Assertions := TypedAssertion.Make UnitRA TinyLogic.
-Import TypedCore Assertions.Core Assertions.
+#[local] Existing Instances UnitRA.ra_values TinyLogic.logic.
+Import Core Assertion.
 
 Definition empty_store : symbolic_store [] [] [] :=
   StoreNil.
@@ -1749,4 +1757,4 @@ Example scoped_existential_is_stack_free :
   stack_free scoped_existential.
 Proof. repeat constructor. Qed.
 
-End TypedAssertionExamples.
+End AssertionExamples.

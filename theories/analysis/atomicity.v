@@ -3,22 +3,19 @@ From stdpp Require Import gmap.
 
 From raven Require Import verification.expressions.
 
-(** A small, non-generative boundary between an intrinsically typed statement
+(** A small boundary between an intrinsically typed statement
     family and the atomicity analyzer.  The analyzer never needs the payload
     of leaves, conditions, or invariant arguments; it needs only this control
     view while retaining the original statement opaquely. *)
-Module TypedAnalysisView.
+Module AnalysisView.
 
-Import TypedCore.
+Import Core.
 
-Module Type STATEMENT_FAMILY.
-  Parameter statement : context -> Type.
-End STATEMENT_FAMILY.
 
 Inductive statement_view (statement : context -> Type) (Γ : context) : Type :=
 | ViewLeaf
-(* The empty continuation.  Unlike a leaf it is never charged through the
-   cost model: it is the identity on the analysis state by construction. *)
+(* The empty continuation.  Unlike a leaf it is never charged a cost: it is
+   the identity on the analysis state by construction. *)
 | ViewDone
 | ViewUnfold (invariant : inv_id)
 | ViewFold (invariant : inv_id)
@@ -36,24 +33,31 @@ Arguments ViewConditional {_ _} _ _.
 Arguments ViewStructuredAccess {_ _} _ _.
 Arguments ViewAtomic {_ _} _.
 
-Module Type ANALYSIS_SYNTAX.
-  Include STATEMENT_FAMILY.
-  Parameter view : forall Γ, statement Γ -> statement_view statement Γ.
-  Parameter size : forall Γ, statement Γ -> nat.
-  Parameter size_positive : forall Γ (statement : statement Γ),
-    0 < size Γ statement.
-  Parameter sequence_children_smaller : forall Γ statement first second,
-    view Γ statement = ViewSequence first second ->
-    size Γ first < size Γ statement /\ size Γ second < size Γ statement.
-  Parameter conditional_children_smaller : forall Γ statement then_branch else_branch,
-    view Γ statement = ViewConditional then_branch else_branch ->
-    size Γ then_branch < size Γ statement /\
-    size Γ else_branch < size Γ statement.
-  Parameter atomic_body_smaller : forall Γ statement body,
-    view Γ statement = ViewAtomic body -> size Γ body < size Γ statement.
-End ANALYSIS_SYNTAX.
+(** A statement family together with its control view: the analyzer's
+    whole interface to a language. *)
+Class AnalysisSyntax := AnalysisSyntaxData {
+  syntax_statement : context -> Type;
+  syntax_view : forall Γ, syntax_statement Γ -> statement_view syntax_statement Γ;
+  syntax_size : forall Γ, syntax_statement Γ -> nat;
+  syntax_size_positive : forall Γ (statement : syntax_statement Γ),
+    0 < syntax_size Γ statement;
+  syntax_sequence_children_smaller : forall Γ statement first second,
+    syntax_view Γ statement = ViewSequence first second ->
+    syntax_size Γ first < syntax_size Γ statement /\
+    syntax_size Γ second < syntax_size Γ statement;
+  syntax_conditional_children_smaller :
+    forall Γ statement then_branch else_branch,
+    syntax_view Γ statement = ViewConditional then_branch else_branch ->
+    syntax_size Γ then_branch < syntax_size Γ statement /\
+    syntax_size Γ else_branch < syntax_size Γ statement;
+  syntax_atomic_body_smaller : forall Γ statement body,
+    syntax_view Γ statement = ViewAtomic body ->
+    syntax_size Γ body < syntax_size Γ statement;
+}.
 
-Module Analysis (Syntax : ANALYSIS_SYNTAX).
+
+Section WithSyntax.
+Context {Syntax : AnalysisSyntax}.
 
 Inductive step_cost :=
 | NoStep
@@ -84,8 +88,6 @@ Record analysis_state := AnalysisState {
 
 Definition state_wf state : Prop :=
   analysis_open state ## analysis_mask state.
-
-Definition cost_model := forall Γ, Syntax.statement Γ -> step_cost.
 
 Definition take_plain_step cost state : analysis_error + analysis_state :=
   if analysis_in_atomic state || bool_decide (analysis_open state = ∅) then
@@ -123,7 +125,7 @@ Definition take_step cost state : analysis_error + analysis_state :=
   | NoStep | AtomicStep | NonAtomicStep => take_plain_step cost state
   end.
 
-Arguments take_step : simpl never.
+#[global] Arguments take_step : simpl never.
 
 Definition open_invariant invariant state : analysis_error + analysis_state :=
   if bool_decide (invariant ∈ analysis_open state) then
@@ -368,25 +370,31 @@ Proof.
   exact (Hwf invariant Hopen Hmask).
 Qed.
 
-Fixpoint analyze_fuel {Γ} (fuel : nat) (cost : cost_model)
-    (state : analysis_state) (statement : Syntax.statement Γ) :
+(** The cost of each leaf, as the analyzer consults it. *)
+Class LeafCost := LeafCostData {
+  leaf_cost : forall Γ, syntax_statement Γ -> step_cost;
+}.
+Context {Cost : LeafCost}.
+
+Fixpoint analyze_fuel {Γ} (fuel : nat)
+    (state : analysis_state) (statement : syntax_statement Γ) :
     analysis_error + analysis_state :=
   match fuel with
   | 0 => inl FuelExhausted
   | S fuel' =>
-      match Syntax.view Γ statement with
-      | ViewLeaf => take_step (cost Γ statement) state
+      match syntax_view Γ statement with
+      | ViewLeaf => take_step (leaf_cost Γ statement) state
       | ViewDone => inr state
       | ViewUnfold invariant => open_invariant invariant state
       | ViewFold invariant => inr (fold_invariant invariant state)
       | ViewSequence first second =>
-          match analyze_fuel fuel' cost state first with
+          match analyze_fuel fuel' state first with
           | inl error => inl error
-          | inr middle => analyze_fuel fuel' cost middle second
+          | inr middle => analyze_fuel fuel' middle second
           end
       | ViewConditional then_branch else_branch =>
-          match analyze_fuel fuel' cost state then_branch,
-              analyze_fuel fuel' cost state else_branch with
+          match analyze_fuel fuel' state then_branch,
+              analyze_fuel fuel' state else_branch with
           | inr then_state, inr else_state =>
               if bool_decide
                   (analysis_open then_state = analysis_open else_state /\
@@ -406,7 +414,7 @@ Fixpoint analyze_fuel {Γ} (fuel : nat) (cost : cost_model)
           | inr outer =>
               let inner_entry := AnalysisState (analysis_mask outer)
                 (analysis_open outer) (analysis_step_taken outer) true in
-              match analyze_fuel fuel' cost inner_entry body with
+              match analyze_fuel fuel' inner_entry body with
               | inl error => inl error
               | inr inner =>
                   if bool_decide (analysis_open inner = analysis_open outer)
@@ -420,40 +428,40 @@ Fixpoint analyze_fuel {Γ} (fuel : nat) (cost : cost_model)
       end
   end.
 
-Definition analyze {Γ} cost state (statement : Syntax.statement Γ) :=
-  analyze_fuel (Syntax.size Γ statement) cost state statement.
+Definition analyze {Γ} state (statement : syntax_statement Γ) :=
+  analyze_fuel (syntax_size Γ statement) state statement.
 
 (** Executable branch-coherence check layered over the existing flat
     analyzer.  It follows the same recursive states but additionally requires
     equal branch masks at every conditional.  Keeping this as a separate pass
     preserves the current Raven analysis result while making the baseline
     normalizer's stronger acceptance criterion explicit and computable. *)
-Fixpoint check_conditional_masks_fuel {Γ} (fuel : nat) (cost : cost_model)
-    (state : analysis_state) (statement : Syntax.statement Γ) : bool :=
+Fixpoint check_conditional_masks_fuel {Γ} (fuel : nat)
+    (state : analysis_state) (statement : syntax_statement Γ) : bool :=
   match fuel with
   | 0 => false
   | S fuel' =>
-      match Syntax.view Γ statement with
+      match syntax_view Γ statement with
       | ViewSequence first second =>
-          match analyze_fuel fuel' cost state first with
+          match analyze_fuel fuel' state first with
           | inr middle =>
-              check_conditional_masks_fuel fuel' cost state first &&
-              check_conditional_masks_fuel fuel' cost middle second
+              check_conditional_masks_fuel fuel' state first &&
+              check_conditional_masks_fuel fuel' middle second
           | inl _ => false
           end
       | ViewConditional then_branch else_branch =>
-          match analyze_fuel fuel' cost state then_branch,
-              analyze_fuel fuel' cost state else_branch with
+          match analyze_fuel fuel' state then_branch,
+              analyze_fuel fuel' state else_branch with
           | inr then_exit, inr else_exit =>
-              check_conditional_masks_fuel fuel' cost state then_branch &&
-              check_conditional_masks_fuel fuel' cost state else_branch &&
+              check_conditional_masks_fuel fuel' state then_branch &&
+              check_conditional_masks_fuel fuel' state else_branch &&
               bool_decide (analysis_mask then_exit = analysis_mask else_exit)
           | _, _ => false
           end
       | ViewAtomic body =>
           match take_step AtomicStep state with
           | inr outer =>
-              check_conditional_masks_fuel fuel' cost
+              check_conditional_masks_fuel fuel'
                 (AnalysisState (analysis_mask outer) (analysis_open outer)
                   (analysis_step_taken outer) true) body
           | inl _ => false
@@ -463,16 +471,16 @@ Fixpoint check_conditional_masks_fuel {Γ} (fuel : nat) (cost : cost_model)
       end
   end.
 
-Definition check_conditional_masks {Γ} cost state
-    (statement : Syntax.statement Γ) : bool :=
-  check_conditional_masks_fuel (Syntax.size Γ statement) cost state statement.
+Definition check_conditional_masks {Γ} state
+    (statement : syntax_statement Γ) : bool :=
+  check_conditional_masks_fuel (syntax_size Γ statement) state statement.
 
-Definition analyze_coherent {Γ} cost state
-    (statement : Syntax.statement Γ) : analysis_error + analysis_state :=
-  match analyze cost state statement with
+Definition analyze_coherent {Γ} state
+    (statement : syntax_statement Γ) : analysis_error + analysis_state :=
+  match analyze state statement with
   | inl error => inl error
   | inr exit =>
-      if check_conditional_masks cost state statement
+      if check_conditional_masks state statement
       then inr exit else inl IncoherentConditionalMasks
   end.
 
@@ -521,57 +529,57 @@ Proof.
     exact (Hwf other Hother_open Hother_mask).
 Qed.
 
-Inductive analysis_certificate (cost : cost_model) :
-    forall Γ, analysis_state -> Syntax.statement Γ ->
+Inductive analysis_certificate :
+    forall Γ, analysis_state -> syntax_statement Γ ->
       analysis_state -> Type :=
 | CertLeaf Γ state statement exit :
-    Syntax.view Γ statement = ViewLeaf ->
-    take_step (cost Γ statement) state = inr exit ->
-    analysis_certificate cost Γ state statement exit
+    syntax_view Γ statement = ViewLeaf ->
+    take_step (leaf_cost Γ statement) state = inr exit ->
+    analysis_certificate Γ state statement exit
 | CertDone Γ state statement :
-    Syntax.view Γ statement = ViewDone ->
-    analysis_certificate cost Γ state statement state
+    syntax_view Γ statement = ViewDone ->
+    analysis_certificate Γ state statement state
 | CertUnfold Γ state statement invariant exit :
-    Syntax.view Γ statement = ViewUnfold invariant ->
+    syntax_view Γ statement = ViewUnfold invariant ->
     open_invariant invariant state = inr exit ->
-    analysis_certificate cost Γ state statement exit
+    analysis_certificate Γ state statement exit
 | CertFold Γ state statement invariant :
-    Syntax.view Γ statement = ViewFold invariant ->
-    analysis_certificate cost Γ state statement
+    syntax_view Γ statement = ViewFold invariant ->
+    analysis_certificate Γ state statement
       (fold_invariant invariant state)
 | CertSequence Γ state statement first middle second exit :
-    Syntax.view Γ statement = ViewSequence first second ->
-    analysis_certificate cost Γ state first middle ->
-    analysis_certificate cost Γ middle second exit ->
-    analysis_certificate cost Γ state statement exit
+    syntax_view Γ statement = ViewSequence first second ->
+    analysis_certificate Γ state first middle ->
+    analysis_certificate Γ middle second exit ->
+    analysis_certificate Γ state statement exit
 | CertConditional Γ state statement then_branch else_branch
     then_exit else_exit :
-    Syntax.view Γ statement = ViewConditional then_branch else_branch ->
-    analysis_certificate cost Γ state then_branch then_exit ->
-    analysis_certificate cost Γ state else_branch else_exit ->
+    syntax_view Γ statement = ViewConditional then_branch else_branch ->
+    analysis_certificate Γ state then_branch then_exit ->
+    analysis_certificate Γ state else_branch else_exit ->
     analysis_open then_exit = analysis_open else_exit ->
     analysis_in_atomic then_exit = analysis_in_atomic else_exit ->
-    analysis_certificate cost Γ state statement
+    analysis_certificate Γ state statement
       (AnalysisState
         (analysis_mask then_exit ∩ analysis_mask else_exit)
         (analysis_open then_exit)
         (analysis_step_taken then_exit || analysis_step_taken else_exit)
         (analysis_in_atomic then_exit))
 | CertAtomic Γ state statement body outer inner :
-    Syntax.view Γ statement = ViewAtomic body ->
+    syntax_view Γ statement = ViewAtomic body ->
     take_step AtomicStep state = inr outer ->
-    analysis_certificate cost Γ
+    analysis_certificate Γ
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body inner ->
     analysis_open inner = analysis_open outer ->
-    analysis_certificate cost Γ state statement
+    analysis_certificate Γ state statement
       (AnalysisState (analysis_mask inner) (analysis_open inner)
         (analysis_step_taken outer || analysis_step_taken inner)
         (analysis_in_atomic outer)).
 
 Lemma analysis_certificate_preserves_in_atomic
-    {cost Γ entry statement exit}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   analysis_in_atomic exit = analysis_in_atomic entry.
 Proof.
   induction certificate; simpl.
@@ -591,25 +599,25 @@ Qed.
     branch executes, the conditional has exactly the original branch exits
     and join state. *)
 Lemma certificate_push_unfold_into_conditional
-    {Γ cost state unfold_statement invariant opened
+    {Γ state unfold_statement invariant opened
       then_branch else_branch then_exit else_exit
       then_sequence else_sequence normalized_statement}
-    (Hunfold_view : Syntax.view Γ unfold_statement = ViewUnfold invariant)
+    (Hunfold_view : syntax_view Γ unfold_statement = ViewUnfold invariant)
     (Hopen : open_invariant invariant state = inr opened)
-    (Hthen : analysis_certificate cost Γ opened then_branch
+    (Hthen : analysis_certificate Γ opened then_branch
       then_exit)
-    (Helse : analysis_certificate cost Γ opened else_branch
+    (Helse : analysis_certificate Γ opened else_branch
       else_exit)
-    (Hthen_sequence : Syntax.view Γ then_sequence =
+    (Hthen_sequence : syntax_view Γ then_sequence =
       ViewSequence unfold_statement then_branch)
-    (Helse_sequence : Syntax.view Γ else_sequence =
+    (Helse_sequence : syntax_view Γ else_sequence =
       ViewSequence unfold_statement else_branch)
-    (Hnormalized : Syntax.view Γ normalized_statement =
+    (Hnormalized : syntax_view Γ normalized_statement =
       ViewConditional then_sequence else_sequence)
     (Hopen_equal : analysis_open then_exit = analysis_open else_exit)
     (Hatomic_equal : analysis_in_atomic then_exit =
       analysis_in_atomic else_exit) :
-  analysis_certificate cost Γ state normalized_statement
+  analysis_certificate Γ state normalized_statement
     (AnalysisState
       (analysis_mask then_exit ∩ analysis_mask else_exit)
       (analysis_open then_exit)
@@ -623,30 +631,30 @@ Proof.
     eapply CertUnfold; eauto.
 Qed.
 
-Definition statement_certificate {Γ} cost state
-    (statement : Syntax.statement Γ) exit :=
-  analysis_certificate cost Γ state statement exit.
+Definition statement_certificate {Γ} state
+    (statement : syntax_statement Γ) exit :=
+  analysis_certificate Γ state statement exit.
 
 (** Compositional builders for full statement certificates. *)
 Definition statement_certificate_sequence
-    {Γ cost state statement first middle second exit}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_certificate : statement_certificate cost state first middle)
-    (second_certificate : statement_certificate cost middle second exit) :
-  statement_certificate cost state statement exit.
+    {Γ state statement first middle second exit}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_certificate : statement_certificate state first middle)
+    (second_certificate : statement_certificate middle second exit) :
+  statement_certificate state statement exit.
 Proof.
   eapply CertSequence; eauto.
 Defined.
 
 Definition statement_certificate_conditional
-    {Γ cost state statement then_branch else_branch then_exit else_exit}
-    (view : Syntax.view Γ statement =
+    {Γ state statement then_branch else_branch then_exit else_exit}
+    (view : syntax_view Γ statement =
       ViewConditional then_branch else_branch)
-    (then_certificate : statement_certificate cost state then_branch then_exit)
-    (else_certificate : statement_certificate cost state else_branch else_exit)
+    (then_certificate : statement_certificate state then_branch then_exit)
+    (else_certificate : statement_certificate state else_branch else_exit)
     (Hopen : analysis_open then_exit = analysis_open else_exit)
     (Hatomic : analysis_in_atomic then_exit = analysis_in_atomic else_exit) :
-  statement_certificate cost state statement
+  statement_certificate state statement
     (AnalysisState
       (analysis_mask then_exit ∩ analysis_mask else_exit)
       (analysis_open then_exit)
@@ -657,14 +665,14 @@ Proof.
 Defined.
 
 Definition statement_certificate_atomic
-    {Γ cost state statement body outer inner}
-    (view : Syntax.view Γ statement = ViewAtomic body)
+    {Γ state statement body outer inner}
+    (view : syntax_view Γ statement = ViewAtomic body)
     (Hstep : take_step AtomicStep state = inr outer)
-    (body_certificate : statement_certificate cost
+    (body_certificate : statement_certificate
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body inner)
     (Hopen : analysis_open inner = analysis_open outer) :
-  statement_certificate cost state statement
+  statement_certificate state statement
     (AnalysisState
       (analysis_mask inner) (analysis_open inner)
       (analysis_step_taken outer || analysis_step_taken inner)
@@ -677,17 +685,17 @@ Defined.
     is the preferred interface for assembling large example certificates:
     intermediate states remain named by projections instead of being
     duplicated as expanded record expressions. *)
-Definition certified_run {Γ} (cost : cost_model) (entry : analysis_state)
-    (statement : Syntax.statement Γ) : Type :=
+Definition certified_run {Γ} (entry : analysis_state)
+    (statement : syntax_statement Γ) : Type :=
   { exit : analysis_state &
-    statement_certificate cost entry statement exit }.
+    statement_certificate entry statement exit }.
 
 Definition certified_run_sequence
-    {Γ cost entry statement first second}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_run : certified_run cost entry first)
-    (second_run : certified_run cost (projT1 first_run) second) :
-  certified_run cost entry statement.
+    {Γ entry statement first second}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_run : certified_run entry first)
+    (second_run : certified_run (projT1 first_run) second) :
+  certified_run entry statement.
 Proof.
   destruct first_run as [middle first_certificate].
   destruct second_run as [exit second_certificate].
@@ -697,16 +705,16 @@ Proof.
 Defined.
 
 Definition certified_run_conditional
-    {Γ cost entry statement then_branch else_branch}
-    (view : Syntax.view Γ statement =
+    {Γ entry statement then_branch else_branch}
+    (view : syntax_view Γ statement =
       ViewConditional then_branch else_branch)
-    (then_run : certified_run cost entry then_branch)
-    (else_run : certified_run cost entry else_branch)
+    (then_run : certified_run entry then_branch)
+    (else_run : certified_run entry else_branch)
     (Hopen : analysis_open (projT1 then_run) =
       analysis_open (projT1 else_run))
     (Hatomic : analysis_in_atomic (projT1 then_run) =
       analysis_in_atomic (projT1 else_run)) :
-  certified_run cost entry statement.
+  certified_run entry statement.
 Proof.
   destruct then_run as [then_exit then_certificate].
   destruct else_run as [else_exit else_certificate].
@@ -720,14 +728,14 @@ Proof.
 Defined.
 
 Definition certified_run_atomic
-    {Γ cost entry statement body outer}
-    (view : Syntax.view Γ statement = ViewAtomic body)
+    {Γ entry statement body outer}
+    (view : syntax_view Γ statement = ViewAtomic body)
     (Hstep : take_step AtomicStep entry = inr outer)
-    (body_run : certified_run cost
+    (body_run : certified_run
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body)
     (Hopen : analysis_open (projT1 body_run) = analysis_open outer) :
-  certified_run cost entry statement.
+  certified_run entry statement.
 Proof.
   destruct body_run as [inner body_certificate].
   exists (AnalysisState
@@ -745,30 +753,30 @@ Definition access_marker : Type := (inv_id * gset inv_id)%type.
     witnesses that one particular successful run is nevertheless properly
     nested, without baking that restriction into the source language or the
     analyzer result. *)
-Fixpoint lifo_certificate {Γ entry statement exit} {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+Fixpoint lifo_certificate {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit)
     (stack_in stack_out : list access_marker) : Prop :=
   match certificate with
-  | CertLeaf _ _ _ _ _ _ _ => stack_out = stack_in
-  | CertDone _ _ _ _ _ => stack_out = stack_in
-  | CertUnfold _ _ _ _ invariant _ _ _ =>
+  | CertLeaf _ _ _ _ _ _ => stack_out = stack_in
+  | CertDone _ _ _ _ => stack_out = stack_in
+  | CertUnfold _ _ _ invariant _ _ _ =>
       stack_out = (invariant, analysis_open entry) :: stack_in
-  | CertFold _ _ state _ invariant _ =>
+  | CertFold _ state _ invariant _ =>
       (exists outer_open,
        stack_in = (invariant, outer_open) :: stack_out /\
        invariant ∈ analysis_open state /\
        invariant ∉ outer_open /\
        analysis_open state = {[invariant]} ∪ outer_open) \/
       (stack_out = stack_in /\ invariant ∉ analysis_open state)
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       exists stack_middle,
         lifo_certificate first_certificate stack_in stack_middle /\
         lifo_certificate second_certificate stack_middle stack_out
-  | CertConditional _ _ _ _ _ _ _ _ _
+  | CertConditional _ _ _ _ _ _ _ _
       then_certificate else_certificate _ _ =>
       lifo_certificate then_certificate stack_in stack_out /\
       lifo_certificate else_certificate stack_in stack_out
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       lifo_certificate body_certificate stack_in stack_in /\
       stack_out = stack_in
   end.
@@ -779,15 +787,14 @@ Fixpoint lifo_certificate {Γ entry statement exit} {cost : cost_model}
     checks the equalities and membership facts occurring in
     [lifo_certificate]. *)
 Fixpoint replay_lifo_certificate {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    (certificate : analysis_certificate Γ entry statement exit)
     (stack_in : list access_marker) : option (list access_marker) :=
   match certificate with
-  | CertLeaf _ _ _ _ _ _ _ => Some stack_in
-  | CertDone _ _ _ _ _ => Some stack_in
-  | CertUnfold _ _ _ _ invariant _ _ _ =>
+  | CertLeaf _ _ _ _ _ _ => Some stack_in
+  | CertDone _ _ _ _ => Some stack_in
+  | CertUnfold _ _ _ invariant _ _ _ =>
       Some ((invariant, analysis_open entry) :: stack_in)
-  | CertFold _ _ state _ invariant _ =>
+  | CertFold _ state _ invariant _ =>
       match stack_in with
       | (candidate, outer_open) :: stack_out =>
           if decide (candidate = invariant /\
@@ -801,12 +808,12 @@ Fixpoint replay_lifo_certificate {Γ entry statement exit}
           if decide (invariant ∉ analysis_open state)
           then Some [] else None
       end
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       match replay_lifo_certificate first_certificate stack_in with
       | Some stack_middle => replay_lifo_certificate second_certificate stack_middle
       | None => None
       end
-  | CertConditional _ _ _ _ _ _ _ _ _
+  | CertConditional _ _ _ _ _ _ _ _
       then_certificate else_certificate _ _ =>
       match replay_lifo_certificate then_certificate stack_in,
           replay_lifo_certificate else_certificate stack_in with
@@ -814,7 +821,7 @@ Fixpoint replay_lifo_certificate {Γ entry statement exit}
           if decide (then_stack = else_stack) then Some then_stack else None
       | _, _ => None
       end
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       match replay_lifo_certificate body_certificate stack_in with
       | Some body_stack =>
           if decide (body_stack = stack_in) then Some stack_in else None
@@ -823,8 +830,7 @@ Fixpoint replay_lifo_certificate {Γ entry statement exit}
   end.
 
 Lemma replay_lifo_certificate_sound {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
   replay_lifo_certificate certificate stack_in = Some stack_out ->
   lifo_certificate certificate stack_in stack_out.
@@ -870,16 +876,16 @@ Qed.
     computation never unfolds the proof term returned by
     [analyze_builds_certificate].  Successful conditional nodes additionally
     retain equal masks, so the result subsumes [analyze_coherent]. *)
-Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat) (cost : cost_model)
+Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat)
     (state : analysis_state) (stack : list access_marker)
-    (statement : Syntax.statement Γ) :
+    (statement : syntax_statement Γ) :
     option (analysis_state * list access_marker) :=
   match fuel with
   | 0 => None
   | S fuel' =>
-      match Syntax.view Γ statement with
+      match syntax_view Γ statement with
       | ViewLeaf =>
-          match take_step (cost Γ statement) state with
+          match take_step (leaf_cost Γ statement) state with
           | inl _ => None
           | inr exit => Some (exit, stack)
           end
@@ -905,14 +911,14 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat) (cost : cost_model)
               then Some (exit, []) else None
           end
       | ViewSequence first second =>
-          match analyze_coherent_lifo_fuel fuel' cost state stack first with
+          match analyze_coherent_lifo_fuel fuel' state stack first with
           | Some (middle, stack_middle) =>
-              analyze_coherent_lifo_fuel fuel' cost middle stack_middle second
+              analyze_coherent_lifo_fuel fuel' middle stack_middle second
           | None => None
           end
       | ViewConditional then_branch else_branch =>
-          match analyze_coherent_lifo_fuel fuel' cost state stack then_branch,
-              analyze_coherent_lifo_fuel fuel' cost state stack else_branch with
+          match analyze_coherent_lifo_fuel fuel' state stack then_branch,
+              analyze_coherent_lifo_fuel fuel' state stack else_branch with
           | Some (then_exit, then_stack), Some (else_exit, else_stack) =>
               if decide
                   (analysis_open then_exit = analysis_open else_exit /\
@@ -934,7 +940,7 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat) (cost : cost_model)
           | inr outer =>
               let inner_entry := AnalysisState (analysis_mask outer)
                 (analysis_open outer) (analysis_step_taken outer) true in
-              match analyze_coherent_lifo_fuel fuel' cost inner_entry stack body with
+              match analyze_coherent_lifo_fuel fuel' inner_entry stack body with
               | Some (inner, body_stack) =>
                   if decide (analysis_open inner = analysis_open outer /\
                     body_stack = stack)
@@ -949,28 +955,28 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat) (cost : cost_model)
       end
   end.
 
-Definition analyze_coherent_lifo {Γ} (cost : cost_model)
-    (state : analysis_state) (statement : Syntax.statement Γ) :
+Definition analyze_coherent_lifo {Γ}
+    (state : analysis_state) (statement : syntax_statement Γ) :
     option analysis_state :=
-  match analyze_coherent_lifo_fuel (Syntax.size Γ statement) cost state []
+  match analyze_coherent_lifo_fuel (syntax_size Γ statement) state []
       statement with
   | Some (exit, []) => Some exit
   | _ => None
   end.
 
-Lemma analyze_coherent_lifo_fuel_projects {Γ} fuel (cost : cost_model)
+Lemma analyze_coherent_lifo_fuel_projects {Γ} fuel
     (state : analysis_state) (stack : list access_marker)
-    (statement : Syntax.statement Γ) exit stack_out :
-  analyze_coherent_lifo_fuel fuel cost state stack statement =
+    (statement : syntax_statement Γ) exit stack_out :
+  analyze_coherent_lifo_fuel fuel state stack statement =
     Some (exit, stack_out) ->
-  analyze_fuel fuel cost state statement = inr exit.
+  analyze_fuel fuel state statement = inr exit.
 Proof.
   revert Γ state stack statement exit stack_out.
   induction fuel as [|fuel IH];
     intros Γ state stack statement exit stack_out Hrun; simpl in Hrun;
     first discriminate.
-  destruct (Syntax.view Γ statement) eqn:Hview; simpl in Hrun.
-  - destruct (take_step (cost Γ statement) state) as [error|actual]
+  destruct (syntax_view Γ statement) eqn:Hview; simpl in Hrun.
+  - destruct (take_step (leaf_cost Γ statement) state) as [error|actual]
       eqn:Hstep; try discriminate.
     inversion Hrun; subst. simpl. rewrite Hview. exact Hstep.
   - inversion Hrun; subst. simpl. rewrite Hview. reflexivity.
@@ -986,14 +992,14 @@ Proof.
         try destruct (decide (invariant ∉ analysis_open state));
         try discriminate;
         inversion Hrun; subst; simpl; rewrite Hview; reflexivity.
-  - destruct (analyze_coherent_lifo_fuel fuel cost state stack first) as
+  - destruct (analyze_coherent_lifo_fuel fuel state stack first) as
       [[middle stack_middle]|] eqn:Hfirst; try discriminate.
     specialize (IH _ state stack first middle stack_middle Hfirst) as Hfirst'.
     specialize (IH _ middle stack_middle second exit stack_out Hrun) as Hsecond'.
     simpl. rewrite Hview, Hfirst'. exact Hsecond'.
-  - destruct (analyze_coherent_lifo_fuel fuel cost state stack then_branch) as
+  - destruct (analyze_coherent_lifo_fuel fuel state stack then_branch) as
       [[then_exit then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack else_branch) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack else_branch) as
       [[else_exit else_stack]|] eqn:Helse; try discriminate.
     destruct (decide
       (analysis_open then_exit = analysis_open else_exit /\
@@ -1011,7 +1017,7 @@ Proof.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer]
       eqn:Hstep; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel cost
+    destruct (analyze_coherent_lifo_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) stack body) as
       [[inner body_stack]|] eqn:Hbody; try discriminate.
@@ -1024,36 +1030,35 @@ Proof.
     rewrite bool_decide_true; [reflexivity|exact Hopen].
 Qed.
 
-Lemma analyze_coherent_lifo_fuel_conditional_masks {Γ} fuel
-    (cost : cost_model) (state : analysis_state)
-    (stack : list access_marker) (statement : Syntax.statement Γ)
+Lemma analyze_coherent_lifo_fuel_conditional_masks {Γ} fuel (state : analysis_state)
+    (stack : list access_marker) (statement : syntax_statement Γ)
     exit stack_out :
-  analyze_coherent_lifo_fuel fuel cost state stack statement =
+  analyze_coherent_lifo_fuel fuel state stack statement =
     Some (exit, stack_out) ->
-  check_conditional_masks_fuel fuel cost state statement = true.
+  check_conditional_masks_fuel fuel state statement = true.
 Proof.
   revert Γ state stack statement exit stack_out.
   induction fuel as [|fuel IH];
     intros Γ state stack statement exit stack_out Hrun; simpl in Hrun;
     first discriminate.
-  destruct (Syntax.view Γ statement) eqn:Hview; simpl.
+  destruct (syntax_view Γ statement) eqn:Hview; simpl.
   - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
   - rewrite Hview. reflexivity.
   - simpl in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack first) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack first) as
       [[middle stack_middle]|] eqn:Hfirst; try discriminate.
     pose proof (IH _ state stack first middle stack_middle Hfirst) as Hfirst'.
     pose proof (IH _ middle stack_middle second exit stack_out Hrun)
       as Hsecond'.
-    pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack first
+    pose proof (analyze_coherent_lifo_fuel_projects _ state stack first
       middle stack_middle Hfirst) as Hfirst_run.
     rewrite Hview, Hfirst_run, Hfirst', Hsecond'. reflexivity.
   - simpl in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack then_branch) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack then_branch) as
       [[then_exit then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack else_branch) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack else_branch) as
       [[else_exit else_stack]|] eqn:Helse; try discriminate.
     destruct (decide
       (analysis_open then_exit = analysis_open else_exit /\
@@ -1064,9 +1069,9 @@ Proof.
       as Hthen'.
     pose proof (IH _ state stack else_branch else_exit else_stack Helse)
       as Helse'.
-    pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack
+    pose proof (analyze_coherent_lifo_fuel_projects _ state stack
       then_branch then_exit then_stack Hthen) as Hthen_run.
-    pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack
+    pose proof (analyze_coherent_lifo_fuel_projects _ state stack
       else_branch else_exit else_stack Helse) as Helse_run.
     destruct Hjoin as [_ [_ [Hmasks _]]].
     rewrite Hview, Hthen_run, Helse_run, Hthen', Helse'.
@@ -1075,7 +1080,7 @@ Proof.
   - simpl in Hrun.
     destruct (take_step AtomicStep state) as [error|outer]
       eqn:Hstep; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel cost
+    destruct (analyze_coherent_lifo_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) stack body) as
       [[inner body_stack]|] eqn:Hbody; try discriminate.
@@ -1085,21 +1090,21 @@ Proof.
     rewrite Hview, Hbody'. reflexivity.
 Qed.
 
-Lemma analyze_coherent_lifo_projects {Γ} (cost : cost_model)
-    (state : analysis_state) (statement : Syntax.statement Γ) exit :
-  analyze_coherent_lifo cost state statement = Some exit ->
-  analyze_coherent cost state statement = inr exit.
+Lemma analyze_coherent_lifo_projects {Γ}
+    (state : analysis_state) (statement : syntax_statement Γ) exit :
+  analyze_coherent_lifo state statement = Some exit ->
+  analyze_coherent state statement = inr exit.
 Proof.
   unfold analyze_coherent_lifo.
-  destruct (analyze_coherent_lifo_fuel (Syntax.size Γ statement) cost state []
+  destruct (analyze_coherent_lifo_fuel (syntax_size Γ statement) state []
     statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
   destruct stack_out as [|marker stack_out]; try discriminate.
   intros Hsuccess. inversion Hsuccess; subst actual.
   unfold analyze_coherent, analyze.
-  rewrite (analyze_coherent_lifo_fuel_projects _ cost state [] statement
+  rewrite (analyze_coherent_lifo_fuel_projects _ state [] statement
     exit [] Hrun).
   unfold check_conditional_masks.
-  rewrite (analyze_coherent_lifo_fuel_conditional_masks _ cost state []
+  rewrite (analyze_coherent_lifo_fuel_conditional_masks _ state []
     statement exit [] Hrun).
   reflexivity.
 Qed.
@@ -1111,47 +1116,46 @@ Qed.
     [analysis_certificate] preserves the current executable analysis while
     allowing a future per-instance mask analysis to refine the compared key. *)
 Fixpoint conditional_masks_coherent {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    (certificate : analysis_certificate Γ entry statement exit) :
     Prop :=
   match certificate with
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       conditional_masks_coherent first_certificate /\
       conditional_masks_coherent second_certificate
-  | CertConditional _ _ _ _ _ _ then_exit else_exit _
+  | CertConditional _ _ _ _ _ then_exit else_exit _
       then_certificate else_certificate _ _ =>
       analysis_mask then_exit = analysis_mask else_exit /\
       conditional_masks_coherent then_certificate /\
       conditional_masks_coherent else_certificate
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       conditional_masks_coherent body_certificate
   | _ => True
   end.
 
 Lemma conditional_masks_coherent_sequence {Γ entry statement first middle
-    second exit cost}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_certificate : analysis_certificate cost Γ entry first middle)
-    (second_certificate : analysis_certificate cost Γ middle second exit) :
+    second exit}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_certificate : analysis_certificate Γ entry first middle)
+    (second_certificate : analysis_certificate Γ middle second exit) :
   conditional_masks_coherent
-      (CertSequence cost Γ entry statement first middle second exit view
+      (CertSequence Γ entry statement first middle second exit view
         first_certificate second_certificate) ->
   conditional_masks_coherent first_certificate /\
   conditional_masks_coherent second_certificate.
 Proof. exact (fun H => H). Qed.
 
 Lemma conditional_masks_coherent_conditional {Γ entry statement
-    then_branch else_branch then_exit else_exit cost}
-    (view : Syntax.view Γ statement =
+    then_branch else_branch then_exit else_exit}
+    (view : syntax_view Γ statement =
       ViewConditional then_branch else_branch)
-    (then_certificate : analysis_certificate cost Γ entry then_branch
+    (then_certificate : analysis_certificate Γ entry then_branch
       then_exit)
-    (else_certificate : analysis_certificate cost Γ entry else_branch
+    (else_certificate : analysis_certificate Γ entry else_branch
       else_exit)
     (Hopen : analysis_open then_exit = analysis_open else_exit)
     (Hatomic : analysis_in_atomic then_exit = analysis_in_atomic else_exit) :
   conditional_masks_coherent
-      (CertConditional cost Γ entry statement then_branch else_branch
+      (CertConditional Γ entry statement then_branch else_branch
         then_exit else_exit view then_certificate else_certificate Hopen
         Hatomic) ->
   analysis_mask then_exit = analysis_mask else_exit /\
@@ -1163,22 +1167,20 @@ Proof. exact (fun H => H). Qed.
     projects definitionally to the existing flat certificate, so all current
     LIFO and replay theorems remain reusable.  Later enrichment with
     per-instance keys is orthogonal to this branch-coherence component. *)
-Record coherent_analysis_certificate {Γ entry statement exit}
-    (cost : cost_model) : Type := {
+Record coherent_analysis_certificate {Γ entry statement exit} : Type := {
   coherent_flat_certificate :
-    analysis_certificate cost Γ entry statement exit;
+    analysis_certificate Γ entry statement exit;
   coherent_conditional_masks :
     conditional_masks_coherent coherent_flat_certificate;
 }.
 
-Definition coherent_statement_certificate {Γ} cost entry
-    (statement : Syntax.statement Γ) exit : Type :=
-  @coherent_analysis_certificate Γ entry statement exit cost.
+Definition coherent_statement_certificate {Γ} entry
+    (statement : syntax_statement Γ) exit : Type :=
+  @coherent_analysis_certificate Γ entry statement exit.
 
-Definition coherent_analysis_lifo {Γ entry statement exit cost}
-    (certificate : @coherent_analysis_certificate Γ entry statement exit
-      cost) stack_in stack_out : Prop :=
-  lifo_certificate (coherent_flat_certificate cost certificate)
+Definition coherent_analysis_lifo {Γ entry statement exit}
+    (certificate : @coherent_analysis_certificate Γ entry statement exit) stack_in stack_out : Prop :=
+  lifo_certificate (coherent_flat_certificate certificate)
     stack_in stack_out.
 
 (** [lifo_certificate] is deterministic: for one fixed certificate and input
@@ -1192,8 +1194,7 @@ Definition coherent_analysis_lifo {Γ entry statement exit cost}
     of the same branch) without re-deriving the underlying access-stack
     discipline from scratch. *)
 Lemma lifo_certificate_functional {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out1 stack_out2 :
   lifo_certificate certificate stack_in stack_out1 ->
   lifo_certificate certificate stack_in stack_out2 ->
@@ -1235,16 +1236,16 @@ Fixpoint access_stack_consistent
 (** An access segment is deliberately allowed to have different input and
     output stacks.  This is what lets a sequence join an [unfold] in one
     child to its matching [fold] in a later child. *)
-Record access_segment {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+Record access_segment {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit)
     (stack_in stack_out : list access_marker) : Prop := {
   access_segment_lifo : lifo_certificate certificate stack_in stack_out;
   access_segment_entry_consistent :
     access_stack_consistent (analysis_open entry) stack_in;
 }.
 
-Definition balanced_access_segment {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+Definition balanced_access_segment {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit)
     (stack : list access_marker) : Prop :=
   access_segment certificate stack stack.
 
@@ -1270,8 +1271,7 @@ Proof.
 Qed.
 
 Definition well_bracketed_certificate {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) : Prop :=
+    (certificate : analysis_certificate Γ entry statement exit) : Prop :=
   lifo_certificate certificate [] [].
 
 (** Logical Raven masks that may be available anywhere in a certified
@@ -1279,20 +1279,19 @@ Definition well_bracketed_certificate {Γ entry statement exit}
     Iris mask; individual Raven mask transitions do not themselves enlarge
     or shrink that ambient mask. *)
 Fixpoint certificate_footprint {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    (certificate : analysis_certificate Γ entry statement exit) :
     gset inv_id :=
   analysis_mask entry ∪ analysis_open entry ∪
   analysis_mask exit ∪ analysis_open exit ∪
   match certificate with
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       certificate_footprint first_certificate ∪
       certificate_footprint second_certificate
-  | CertConditional _ _ _ _ _ _ _ _ _
+  | CertConditional _ _ _ _ _ _ _ _
       then_certificate else_certificate _ _ =>
       certificate_footprint then_certificate ∪
       certificate_footprint else_certificate
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       certificate_footprint body_certificate
   | _ => ∅
   end.
@@ -1304,122 +1303,121 @@ Fixpoint certificate_footprint {Γ entry statement exit}
     Sequence and conditional nodes expose both children, while an atomic
     node exposes its body certificate. *)
 Fixpoint certificate_operational_footprint {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    (certificate : analysis_certificate Γ entry statement exit) :
     gset inv_id :=
   match certificate with
-  | CertUnfold _ _ _ _ invariant _ _ _ => {[invariant]}
-  | CertFold _ _ _ _ invariant _ => {[invariant]}
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertUnfold _ _ _ invariant _ _ _ => {[invariant]}
+  | CertFold _ _ _ invariant _ => {[invariant]}
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       certificate_operational_footprint first_certificate ∪
       certificate_operational_footprint second_certificate
-  | CertConditional _ _ _ _ _ _ _ _ _
+  | CertConditional _ _ _ _ _ _ _ _
       then_certificate else_certificate _ _ =>
       certificate_operational_footprint then_certificate ∪
       certificate_operational_footprint else_certificate
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       certificate_operational_footprint body_certificate
   | _ => ∅
   end.
 
 Lemma certificate_sequence_first_operational_footprint_subset
-    {Γ entry statement first middle second exit cost}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_certificate : analysis_certificate cost Γ entry first middle)
-    (second_certificate : analysis_certificate cost Γ middle second exit) :
+    {Γ entry statement first middle second exit}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_certificate : analysis_certificate Γ entry first middle)
+    (second_certificate : analysis_certificate Γ middle second exit) :
   certificate_operational_footprint first_certificate ⊆
     certificate_operational_footprint
-      (CertSequence cost Γ entry statement first middle second exit
+      (CertSequence Γ entry statement first middle second exit
         view first_certificate second_certificate).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_sequence_second_operational_footprint_subset
-    {Γ entry statement first middle second exit cost}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_certificate : analysis_certificate cost Γ entry first middle)
-    (second_certificate : analysis_certificate cost Γ middle second exit) :
+    {Γ entry statement first middle second exit}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_certificate : analysis_certificate Γ entry first middle)
+    (second_certificate : analysis_certificate Γ middle second exit) :
   certificate_operational_footprint second_certificate ⊆
     certificate_operational_footprint
-      (CertSequence cost Γ entry statement first middle second exit
+      (CertSequence Γ entry statement first middle second exit
         view first_certificate second_certificate).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_conditional_then_operational_footprint_subset
-    {Γ entry statement then_branch else_branch then_exit else_exit cost}
-    (view : Syntax.view Γ statement = ViewConditional then_branch else_branch)
-    (then_certificate : analysis_certificate cost Γ entry then_branch then_exit)
-    (else_certificate : analysis_certificate cost Γ entry else_branch else_exit)
+    {Γ entry statement then_branch else_branch then_exit else_exit}
+    (view : syntax_view Γ statement = ViewConditional then_branch else_branch)
+    (then_certificate : analysis_certificate Γ entry then_branch then_exit)
+    (else_certificate : analysis_certificate Γ entry else_branch else_exit)
     (open_equal : analysis_open then_exit = analysis_open else_exit)
     (atomic_equal : analysis_in_atomic then_exit = analysis_in_atomic else_exit) :
   certificate_operational_footprint then_certificate ⊆
     certificate_operational_footprint
-      (CertConditional cost Γ entry statement then_branch else_branch
+      (CertConditional Γ entry statement then_branch else_branch
         then_exit else_exit view then_certificate else_certificate
         open_equal atomic_equal).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_conditional_else_operational_footprint_subset
-    {Γ entry statement then_branch else_branch then_exit else_exit cost}
-    (view : Syntax.view Γ statement = ViewConditional then_branch else_branch)
-    (then_certificate : analysis_certificate cost Γ entry then_branch then_exit)
-    (else_certificate : analysis_certificate cost Γ entry else_branch else_exit)
+    {Γ entry statement then_branch else_branch then_exit else_exit}
+    (view : syntax_view Γ statement = ViewConditional then_branch else_branch)
+    (then_certificate : analysis_certificate Γ entry then_branch then_exit)
+    (else_certificate : analysis_certificate Γ entry else_branch else_exit)
     (open_equal : analysis_open then_exit = analysis_open else_exit)
     (atomic_equal : analysis_in_atomic then_exit = analysis_in_atomic else_exit) :
   certificate_operational_footprint else_certificate ⊆
     certificate_operational_footprint
-      (CertConditional cost Γ entry statement then_branch else_branch
+      (CertConditional Γ entry statement then_branch else_branch
         then_exit else_exit view then_certificate else_certificate
         open_equal atomic_equal).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_atomic_body_operational_footprint_subset
-    {Γ entry statement body outer inner cost}
-    (view : Syntax.view Γ statement = ViewAtomic body)
+    {Γ entry statement body outer inner}
+    (view : syntax_view Γ statement = ViewAtomic body)
     (step : take_step AtomicStep entry = inr outer)
-    (body_certificate : analysis_certificate cost Γ
+    (body_certificate : analysis_certificate Γ
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body inner)
     (open_equal : analysis_open inner = analysis_open outer) :
   certificate_operational_footprint body_certificate ⊆
     certificate_operational_footprint
-      (CertAtomic cost Γ entry statement body outer inner view step
+      (CertAtomic Γ entry statement body outer inner view step
         body_certificate open_equal).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_unfold_operational_footprint_mem
-    {Γ entry statement invariant exit cost}
-    (view : Syntax.view Γ statement = ViewUnfold invariant)
+    {Γ entry statement invariant exit}
+    (view : syntax_view Γ statement = ViewUnfold invariant)
     (step : open_invariant invariant entry = inr exit) :
   invariant ∈ certificate_operational_footprint
-    (CertUnfold cost Γ entry statement invariant exit view step).
+    (CertUnfold Γ entry statement invariant exit view step).
 Proof. simpl. set_solver. Qed.
 
 Lemma certificate_fold_operational_footprint_mem
-    {Γ entry statement invariant cost}
-    (view : Syntax.view Γ statement = ViewFold invariant) :
+    {Γ entry statement invariant}
+    (view : syntax_view Γ statement = ViewFold invariant) :
   invariant ∈ certificate_operational_footprint
-    (CertFold cost Γ entry statement invariant view).
+    (CertFold Γ entry statement invariant view).
 Proof. simpl. set_solver. Qed.
 
-Lemma certificate_entry_subset_footprint {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+Lemma certificate_entry_subset_footprint {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   analysis_mask entry ⊆ certificate_footprint certificate.
 Proof. destruct certificate; simpl; set_solver. Qed.
 
-Lemma certificate_exit_subset_footprint {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+Lemma certificate_exit_subset_footprint {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   analysis_mask exit ⊆ certificate_footprint certificate.
 Proof. destruct certificate; simpl; set_solver. Qed.
 
 Lemma certificate_entry_open_subset_footprint
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   analysis_open entry ⊆ certificate_footprint certificate.
 Proof. destruct certificate; simpl; set_solver. Qed.
 
 Lemma certificate_exit_open_subset_footprint
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   analysis_open exit ⊆ certificate_footprint certificate.
 Proof. destruct certificate; simpl; set_solver. Qed.
 
@@ -1427,8 +1425,8 @@ Proof. destruct certificate; simpl; set_solver. Qed.
     the old global footprint bound without consulting mask indices on a
     Hoare derivation. *)
 Lemma coherent_certificate_footprint_subset_exit_resources
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   conditional_masks_coherent certificate ->
   certificate_footprint certificate ⊆
     analysis_mask exit ∪ analysis_open exit.
@@ -1576,8 +1574,8 @@ Proof.
 Qed.
 
 Lemma closed_coherent_certificate_footprint_subset_exit_mask
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   conditional_masks_coherent certificate ->
   analysis_open exit = ∅ ->
   certificate_footprint certificate ⊆ analysis_mask exit.
@@ -1589,62 +1587,62 @@ Proof.
   tauto.
 Qed.
 
-Fixpoint certificate_height {Γ entry statement exit} {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) : nat :=
+Fixpoint certificate_height {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) : nat :=
   match certificate with
-  | CertLeaf _ _ _ _ _ _ _ => 1
-  | CertDone _ _ _ _ _ => 1
-  | CertUnfold _ _ _ _ _ _ _ _ => 1
-  | CertFold _ _ _ _ _ _ => 1
-  | CertSequence _ _ _ _ _ _ _ _ _ first_certificate second_certificate =>
+  | CertLeaf _ _ _ _ _ _ => 1
+  | CertDone _ _ _ _ => 1
+  | CertUnfold _ _ _ _ _ _ _ => 1
+  | CertFold _ _ _ _ _ => 1
+  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       S (Nat.max (certificate_height first_certificate)
         (certificate_height second_certificate))
-  | CertConditional _ _ _ _ _ _ _ _ _ then_certificate else_certificate _ _ =>
+  | CertConditional _ _ _ _ _ _ _ _ then_certificate else_certificate _ _ =>
       S (Nat.max (certificate_height then_certificate)
         (certificate_height else_certificate))
-  | CertAtomic _ _ _ _ _ _ _ _ _ body_certificate _ =>
+  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       S (certificate_height body_certificate)
   end.
 
-Lemma analyze_fuel_succ {Γ fuel} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
-  analyze_fuel fuel cost state statement = inr exit ->
-  analyze_fuel (S fuel) cost state statement = inr exit.
+Lemma analyze_fuel_succ {Γ fuel} state
+    (statement : syntax_statement Γ) exit :
+  analyze_fuel fuel state statement = inr exit ->
+  analyze_fuel (S fuel) state statement = inr exit.
 Proof.
   revert Γ state statement exit.
   induction fuel as [|fuel IH]; intros Γ state statement exit Hrun;
     simpl in Hrun |- *; first discriminate.
-  destruct (Syntax.view Γ statement) eqn:Hview; simpl in Hrun |- *.
+  destruct (syntax_view Γ statement) eqn:Hview; simpl in Hrun |- *.
   - exact Hrun.
   - exact Hrun.
   - exact Hrun.
   - exact Hrun.
-  - destruct (analyze_fuel fuel cost state first) as [error|middle]
+  - destruct (analyze_fuel fuel state first) as [error|middle]
       eqn:Hfirst; try discriminate.
     eapply IH in Hfirst.
     eapply IH in Hrun.
-    change (analyze_fuel (S fuel) cost state first = inr middle) in Hfirst.
-    change (analyze_fuel (S fuel) cost middle second = inr exit) in Hrun.
-    change (match analyze_fuel (S fuel) cost state first with
+    change (analyze_fuel (S fuel) state first = inr middle) in Hfirst.
+    change (analyze_fuel (S fuel) middle second = inr exit) in Hrun.
+    change (match analyze_fuel (S fuel) state first with
       | inl error => inl error
-      | inr middle => analyze_fuel (S fuel) cost middle second
+      | inr middle => analyze_fuel (S fuel) middle second
       end = inr exit).
     rewrite Hfirst. exact Hrun.
-  - destruct (analyze_fuel fuel cost state then_branch) as [error|then_exit]
+  - destruct (analyze_fuel fuel state then_branch) as [error|then_exit]
       eqn:Hthen; try discriminate.
-    destruct (analyze_fuel fuel cost state else_branch) as [error|else_exit]
+    destruct (analyze_fuel fuel state else_branch) as [error|else_exit]
       eqn:Helse; try discriminate.
     destruct (bool_decide
       (analysis_open then_exit = analysis_open else_exit /\
        analysis_in_atomic then_exit = analysis_in_atomic else_exit)) eqn:Hjoin;
       try discriminate.
     eapply IH in Hthen. eapply IH in Helse.
-    change (analyze_fuel (S fuel) cost state then_branch = inr then_exit)
+    change (analyze_fuel (S fuel) state then_branch = inr then_exit)
       in Hthen.
-    change (analyze_fuel (S fuel) cost state else_branch = inr else_exit)
+    change (analyze_fuel (S fuel) state else_branch = inr else_exit)
       in Helse.
-    change (match analyze_fuel (S fuel) cost state then_branch,
-      analyze_fuel (S fuel) cost state else_branch with
+    change (match analyze_fuel (S fuel) state then_branch,
+      analyze_fuel (S fuel) state else_branch with
       | inr then_state, inr else_state =>
           if bool_decide
             (analysis_open then_state = analysis_open else_state /\
@@ -1661,17 +1659,17 @@ Proof.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
-    destruct (analyze_fuel fuel cost
+    destruct (analyze_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body) as [error|inner]
       eqn:Hbody; try discriminate.
     destruct (bool_decide (analysis_open inner = analysis_open outer)) eqn:Hclose;
       try discriminate.
     eapply IH in Hbody.
-    change (analyze_fuel (S fuel) cost
+    change (analyze_fuel (S fuel)
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body = inr inner) in Hbody.
-    change (match analyze_fuel (S fuel) cost
+    change (match analyze_fuel (S fuel)
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body with
       | inl error => inl error
@@ -1686,11 +1684,11 @@ Proof.
     rewrite Hbody, Hclose. exact Hrun.
 Qed.
 
-Lemma analyze_fuel_monotone {Γ fuel target} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
+Lemma analyze_fuel_monotone {Γ fuel target} state
+    (statement : syntax_statement Γ) exit :
   fuel <= target ->
-  analyze_fuel fuel cost state statement = inr exit ->
-  analyze_fuel target cost state statement = inr exit.
+  analyze_fuel fuel state statement = inr exit ->
+  analyze_fuel target state statement = inr exit.
 Proof.
   intros Hle Hrun. induction Hle.
   - exact Hrun.
@@ -1698,9 +1696,8 @@ Proof.
 Qed.
 
 Lemma certificate_replays_height {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
-  analyze_fuel (certificate_height certificate) cost entry statement = inr exit.
+    (certificate : analysis_certificate Γ entry statement exit) :
+  analyze_fuel (certificate_height certificate) entry statement = inr exit.
 Proof.
   induction certificate; simpl.
   - rewrite e. exact e0.
@@ -1708,14 +1705,14 @@ Proof.
   - rewrite e. exact e0.
   - rewrite e. reflexivity.
   - rewrite e.
-    rewrite (analyze_fuel_monotone cost _ _ _
+    rewrite (analyze_fuel_monotone _ _ _
       (Nat.le_max_l _ _) IHcertificate1).
-    exact (analyze_fuel_monotone cost _ _ _
+    exact (analyze_fuel_monotone _ _ _
       (Nat.le_max_r _ _) IHcertificate2).
   - rewrite e.
-    rewrite (analyze_fuel_monotone cost _ _ _
+    rewrite (analyze_fuel_monotone _ _ _
       (Nat.le_max_l _ _) IHcertificate1).
-    rewrite (analyze_fuel_monotone cost _ _ _
+    rewrite (analyze_fuel_monotone _ _ _
       (Nat.le_max_r _ _) IHcertificate2).
     rewrite bool_decide_true; [reflexivity|]. split; assumption.
   - rewrite e, e0.
@@ -1724,68 +1721,66 @@ Proof.
 Qed.
 
 Lemma certificate_height_le_size {Γ entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
-  certificate_height certificate <= Syntax.size Γ statement.
+    (certificate : analysis_certificate Γ entry statement exit) :
+  certificate_height certificate <= syntax_size Γ statement.
 Proof.
   induction certificate; simpl.
-  - pose proof (Syntax.size_positive Γ statement). lia.
-  - pose proof (Syntax.size_positive Γ statement). lia.
-  - pose proof (Syntax.size_positive Γ statement). lia.
-  - pose proof (Syntax.size_positive Γ statement). lia.
-  - pose proof (Syntax.sequence_children_smaller Γ statement first second e)
+  - pose proof (syntax_size_positive Γ statement). lia.
+  - pose proof (syntax_size_positive Γ statement). lia.
+  - pose proof (syntax_size_positive Γ statement). lia.
+  - pose proof (syntax_size_positive Γ statement). lia.
+  - pose proof (syntax_sequence_children_smaller Γ statement first second e)
       as [Hfirst Hsecond].
     lia.
-  - pose proof (Syntax.conditional_children_smaller Γ statement then_branch
+  - pose proof (syntax_conditional_children_smaller Γ statement then_branch
       else_branch e) as [Hthen Helse].
     lia.
-  - pose proof (Syntax.atomic_body_smaller Γ statement body e) as Hbody.
+  - pose proof (syntax_atomic_body_smaller Γ statement body e) as Hbody.
     lia.
 Qed.
 
-Theorem certificate_replays {Γ} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
-  analysis_certificate cost Γ state statement exit ->
-  analyze cost state statement = inr exit.
+Theorem certificate_replays {Γ} state
+    (statement : syntax_statement Γ) exit :
+  analysis_certificate Γ state statement exit ->
+  analyze state statement = inr exit.
 Proof.
   intros certificate. unfold analyze.
   eapply analyze_fuel_monotone;
-    [exact (certificate_height_le_size (cost := cost) certificate)|].
+    [exact (certificate_height_le_size certificate)|].
   exact (certificate_replays_height certificate).
 Qed.
 
 Lemma analysis_certificate_exit_unique
-    {Γ cost entry statement exit1 exit2}
-    (certificate1 : analysis_certificate cost Γ entry statement exit1)
-    (certificate2 : analysis_certificate cost Γ entry statement exit2) :
+    {Γ entry statement exit1 exit2}
+    (certificate1 : analysis_certificate Γ entry statement exit1)
+    (certificate2 : analysis_certificate Γ entry statement exit2) :
   exit1 = exit2.
 Proof.
-  pose proof (certificate_replays cost entry statement exit1 certificate1)
+  pose proof (certificate_replays entry statement exit1 certificate1)
     as Hreplay1.
-  pose proof (certificate_replays cost entry statement exit2 certificate2)
+  pose proof (certificate_replays entry statement exit2 certificate2)
     as Hreplay2.
   congruence.
 Qed.
 
-Lemma analyze_fuel_certificate_exit {Γ fuel cost entry statement actual expected} :
-  analyze_fuel fuel cost entry statement = inr actual ->
-  analysis_certificate cost Γ entry statement expected ->
+Lemma analyze_fuel_certificate_exit {Γ fuel entry statement actual expected} :
+  analyze_fuel fuel entry statement = inr actual ->
+  analysis_certificate Γ entry statement expected ->
   actual = expected.
 Proof.
   intros Hrun certificate.
-  pose proof (analyze_fuel_monotone cost entry statement actual
+  pose proof (analyze_fuel_monotone entry statement actual
     (Nat.le_max_l fuel (certificate_height certificate)) Hrun) as Hactual.
-  pose proof (analyze_fuel_monotone cost entry statement expected
+  pose proof (analyze_fuel_monotone entry statement expected
     (Nat.le_max_r fuel (certificate_height certificate))
     (certificate_replays_height certificate)) as Hexpected.
   congruence.
 Qed.
 
 Lemma analyze_coherent_lifo_fuel_replays {Γ fuel entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
-  analyze_coherent_lifo_fuel fuel cost entry stack_in statement =
+  analyze_coherent_lifo_fuel fuel entry stack_in statement =
     Some (exit, stack_out) ->
   replay_lifo_certificate certificate stack_in = Some stack_out.
 Proof.
@@ -1818,10 +1813,10 @@ Proof.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
     rewrite e in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack_in first) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack_in first) as
       [[actual_middle stack_middle]|] eqn:Hfirst; try discriminate.
     assert (Hmiddle : actual_middle = middle).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack_in
+    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
         first actual_middle stack_middle Hfirst) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate1). }
     subst actual_middle.
@@ -1831,16 +1826,16 @@ Proof.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
     rewrite e in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack_in then_branch) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack_in then_branch) as
       [[actual_then then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel cost state stack_in else_branch) as
+    destruct (analyze_coherent_lifo_fuel fuel state stack_in else_branch) as
       [[actual_else else_stack]|] eqn:Helse; try discriminate.
     assert (Hthen_exit : actual_then = then_exit).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack_in
+    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
         then_branch actual_then then_stack Hthen) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate1). }
     assert (Helse_exit : actual_else = else_exit).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ cost state stack_in
+    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
         else_branch actual_else else_stack Helse) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate2). }
     subst actual_then. subst actual_else.
@@ -1864,12 +1859,12 @@ Proof.
     assert (Houter : actual_outer = outer).
     { rewrite e0 in Hstep. congruence. }
     subst actual_outer.
-    destruct (analyze_coherent_lifo_fuel fuel cost
+    destruct (analyze_coherent_lifo_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) stack_in body) as
       [[actual_inner body_stack]|] eqn:Hbody; try discriminate.
     assert (Hinner : actual_inner = inner).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ cost
+    { pose proof (analyze_coherent_lifo_fuel_projects _
         (AnalysisState (analysis_mask outer) (analysis_open outer)
           (analysis_step_taken outer) true) stack_in body actual_inner
         body_stack Hbody) as Hactual.
@@ -1884,10 +1879,9 @@ Proof.
 Qed.
 
 Lemma analyze_coherent_lifo_fuel_sound {Γ fuel entry statement exit}
-    {cost : cost_model}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
-  analyze_coherent_lifo_fuel fuel cost entry stack_in statement =
+  analyze_coherent_lifo_fuel fuel entry stack_in statement =
     Some (exit, stack_out) ->
   lifo_certificate certificate stack_in stack_out.
 Proof.
@@ -1897,10 +1891,10 @@ Proof.
 Qed.
 
 Lemma check_conditional_masks_fuel_sound
-    {Γ fuel entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ fuel entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   certificate_height certificate <= fuel ->
-  check_conditional_masks_fuel fuel cost entry statement = true ->
+  check_conditional_masks_fuel fuel entry statement = true ->
   conditional_masks_coherent certificate.
 Proof.
   revert fuel.
@@ -1911,9 +1905,9 @@ Proof.
   - exact I.
   - destruct fuel as [|fuel]; [lia|].
     cbn in Hcheck. rewrite e in Hcheck.
-    assert (Hfirst_run : analyze_fuel fuel cost state first = inr middle).
+    assert (Hfirst_run : analyze_fuel fuel state first = inr middle).
     { apply (analyze_fuel_monotone (fuel := certificate_height certificate1)
-        (target := fuel) cost state first middle); [lia|].
+        (target := fuel) state first middle); [lia|].
       exact (certificate_replays_height certificate1). }
     rewrite Hfirst_run in Hcheck.
     apply andb_true_iff in Hcheck as [Hfirst Hsecond].
@@ -1921,13 +1915,13 @@ Proof.
       lia || assumption.
   - destruct fuel as [|fuel]; [lia|].
     cbn in Hcheck. rewrite e in Hcheck.
-    assert (Hthen_run : analyze_fuel fuel cost state then_branch = inr then_exit).
+    assert (Hthen_run : analyze_fuel fuel state then_branch = inr then_exit).
     { apply (analyze_fuel_monotone (fuel := certificate_height certificate1)
-        (target := fuel) cost state then_branch then_exit); [lia|].
+        (target := fuel) state then_branch then_exit); [lia|].
       exact (certificate_replays_height certificate1). }
-    assert (Helse_run : analyze_fuel fuel cost state else_branch = inr else_exit).
+    assert (Helse_run : analyze_fuel fuel state else_branch = inr else_exit).
     { apply (analyze_fuel_monotone (fuel := certificate_height certificate2)
-        (target := fuel) cost state else_branch else_exit); [lia|].
+        (target := fuel) state else_branch else_exit); [lia|].
       exact (certificate_replays_height certificate2). }
     rewrite Hthen_run, Helse_run in Hcheck.
     apply andb_true_iff in Hcheck as [Hbranches Hmask].
@@ -1942,23 +1936,22 @@ Proof.
 Qed.
 
 Definition coherent_analysis_certificate_of_success
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit)
-    (Hcoherent : check_conditional_masks_fuel (Syntax.size Γ statement)
-      cost entry statement = true) :
-    @coherent_analysis_certificate Γ entry statement exit cost :=
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit)
+    (Hcoherent : check_conditional_masks_fuel (syntax_size Γ statement)
+      entry statement = true) :
+    @coherent_analysis_certificate Γ entry statement exit :=
   {| coherent_flat_certificate := certificate;
      coherent_conditional_masks :=
        check_conditional_masks_fuel_sound certificate
          (certificate_height_le_size certificate) Hcoherent |}.
 
-Lemma coherent_certificate_replays {Γ entry statement exit cost}
-    (certificate : @coherent_analysis_certificate Γ entry statement exit
-      cost) :
-  analyze cost entry statement = inr exit.
+Lemma coherent_certificate_replays {Γ entry statement exit}
+    (certificate : @coherent_analysis_certificate Γ entry statement exit) :
+  analyze entry statement = inr exit.
 Proof.
   apply certificate_replays.
-  exact (coherent_flat_certificate cost certificate).
+  exact (coherent_flat_certificate certificate).
 Qed.
 
 (** For fixed public indices, successful analyzer certificates carry no additional
@@ -1966,9 +1959,9 @@ Qed.
     canonical certificate construction without introducing a parallel plan
     object merely to remember its proof fields. *)
 Lemma analysis_certificate_unique
-    {Γ cost entry statement exit}
+    {Γ entry statement exit}
     (certificate1 certificate2 :
-      analysis_certificate cost Γ entry statement exit) :
+      analysis_certificate Γ entry statement exit) :
   certificate1 = certificate2.
 Proof.
   revert certificate2.
@@ -2007,10 +2000,10 @@ Proof.
     f_equal; apply proof_irrelevance.
 Qed.
 
-Theorem certificate_preserves_wf {Γ} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
+Theorem certificate_preserves_wf {Γ} state
+    (statement : syntax_statement Γ) exit :
   state_wf state ->
-  analysis_certificate cost Γ state statement exit ->
+  analysis_certificate Γ state statement exit ->
   state_wf exit.
 Proof.
   intros Hwf certificate. induction certificate.
@@ -2031,8 +2024,8 @@ Proof.
 Qed.
 
 Lemma lifo_preserves_access_stack_consistency
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit)
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
   state_wf entry ->
   lifo_certificate certificate stack_in stack_out ->
@@ -2078,15 +2071,15 @@ Proof.
 Qed.
 
 Lemma access_segment_sequence
-    {Γ state statement first middle second exit cost}
-    (view : Syntax.view Γ statement = ViewSequence first second)
-    (first_certificate : analysis_certificate cost Γ state first middle)
-    (second_certificate : analysis_certificate cost Γ middle second exit)
+    {Γ state statement first middle second exit}
+    (view : syntax_view Γ statement = ViewSequence first second)
+    (first_certificate : analysis_certificate Γ state first middle)
+    (second_certificate : analysis_certificate Γ middle second exit)
     stack_in stack_middle stack_out :
   access_segment first_certificate stack_in stack_middle ->
   access_segment second_certificate stack_middle stack_out ->
   access_segment
-    (CertSequence cost Γ state statement first middle second exit
+    (CertSequence Γ state statement first middle second exit
       view first_certificate second_certificate)
     stack_in stack_out.
 Proof.
@@ -2099,17 +2092,17 @@ Proof.
 Qed.
 
 Lemma access_segment_conditional
-    {Γ state statement then_branch else_branch then_exit else_exit cost}
-    (view : Syntax.view Γ statement = ViewConditional then_branch else_branch)
-    (then_certificate : analysis_certificate cost Γ state then_branch then_exit)
-    (else_certificate : analysis_certificate cost Γ state else_branch else_exit)
+    {Γ state statement then_branch else_branch then_exit else_exit}
+    (view : syntax_view Γ statement = ViewConditional then_branch else_branch)
+    (then_certificate : analysis_certificate Γ state then_branch then_exit)
+    (else_certificate : analysis_certificate Γ state else_branch else_exit)
     (open_equal : analysis_open then_exit = analysis_open else_exit)
     (atomic_equal : analysis_in_atomic then_exit = analysis_in_atomic else_exit)
     stack_in stack_out :
   access_segment then_certificate stack_in stack_out ->
   access_segment else_certificate stack_in stack_out ->
   access_segment
-    (CertConditional cost Γ state statement then_branch else_branch
+    (CertConditional Γ state statement then_branch else_branch
       then_exit else_exit view then_certificate else_certificate
       open_equal atomic_equal)
     stack_in stack_out.
@@ -2123,17 +2116,17 @@ Proof.
 Qed.
 
 Lemma access_segment_atomic
-    {Γ state statement body outer inner cost}
-    (view : Syntax.view Γ statement = ViewAtomic body)
+    {Γ state statement body outer inner}
+    (view : syntax_view Γ statement = ViewAtomic body)
     (step : take_step AtomicStep state = inr outer)
-    (body_certificate : analysis_certificate cost Γ
+    (body_certificate : analysis_certificate Γ
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body inner)
     (open_equal : analysis_open inner = analysis_open outer)
     stack :
   access_segment body_certificate stack stack ->
   access_segment
-    (CertAtomic cost Γ state statement body outer inner view step
+    (CertAtomic Γ state statement body outer inner view step
       body_certificate open_equal)
     stack stack.
 Proof.
@@ -2145,33 +2138,33 @@ Proof.
 Qed.
 
 Lemma access_segment_leaf
-    {Γ entry statement exit cost}
-    (view : Syntax.view Γ statement = ViewLeaf)
-    (step : take_step (cost Γ statement) entry = inr exit)
+    {Γ entry statement exit}
+    (view : syntax_view Γ statement = ViewLeaf)
+    (step : take_step (leaf_cost Γ statement) entry = inr exit)
     stack :
   access_stack_consistent (analysis_open entry) stack ->
   access_segment
-    (CertLeaf cost Γ entry statement exit view step) stack stack.
+    (CertLeaf Γ entry statement exit view step) stack stack.
 Proof.
   intros Hstack. constructor; [simpl; reflexivity|exact Hstack].
 Qed.
 
 Lemma access_segment_unfold
-    {Γ entry statement invariant exit cost}
-    (view : Syntax.view Γ statement = ViewUnfold invariant)
+    {Γ entry statement invariant exit}
+    (view : syntax_view Γ statement = ViewUnfold invariant)
     (step : open_invariant invariant entry = inr exit)
     stack :
   access_stack_consistent (analysis_open entry) stack ->
   access_segment
-    (CertUnfold cost Γ entry statement invariant exit view step)
+    (CertUnfold Γ entry statement invariant exit view step)
     stack ((invariant, analysis_open entry) :: stack).
 Proof.
   intros Hstack. constructor; [simpl; reflexivity|exact Hstack].
 Qed.
 
 Lemma access_segment_fold_matched
-    {Γ entry statement invariant cost}
-    (view : Syntax.view Γ statement = ViewFold invariant)
+    {Γ entry statement invariant}
+    (view : syntax_view Γ statement = ViewFold invariant)
     outer_open stack :
   invariant ∈ analysis_open entry ->
   invariant ∉ outer_open ->
@@ -2179,7 +2172,7 @@ Lemma access_segment_fold_matched
   access_stack_consistent (analysis_open entry)
     ((invariant, outer_open) :: stack) ->
   access_segment
-    (CertFold cost Γ entry statement invariant view)
+    (CertFold Γ entry statement invariant view)
     ((invariant, outer_open) :: stack) stack.
 Proof.
   intros Hmember Hfresh Hopen Hstack.
@@ -2189,13 +2182,13 @@ Proof.
 Qed.
 
 Lemma access_segment_fold_fresh
-    {Γ entry statement invariant cost}
-    (view : Syntax.view Γ statement = ViewFold invariant)
+    {Γ entry statement invariant}
+    (view : syntax_view Γ statement = ViewFold invariant)
     stack :
   invariant ∉ analysis_open entry ->
   access_stack_consistent (analysis_open entry) stack ->
   access_segment
-    (CertFold cost Γ entry statement invariant view) stack stack.
+    (CertFold Γ entry statement invariant view) stack stack.
 Proof.
   intros Hclosed Hstack.
   constructor.
@@ -2204,8 +2197,8 @@ Proof.
 Qed.
 
 Lemma closed_lifo_is_balanced
-    {Γ entry statement exit cost}
-    (certificate : analysis_certificate cost Γ entry statement exit) :
+    {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
   state_wf entry ->
   analysis_open entry = ∅ ->
   lifo_certificate certificate [] [] ->
@@ -2219,25 +2212,25 @@ Proof.
     exact Hexit.
 Qed.
 
-Theorem analyze_fuel_builds_certificate {Γ fuel} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
-  analyze_fuel fuel cost state statement = inr exit ->
-  analysis_certificate cost Γ state statement exit.
+Theorem analyze_fuel_builds_certificate {Γ fuel} state
+    (statement : syntax_statement Γ) exit :
+  analyze_fuel fuel state statement = inr exit ->
+  analysis_certificate Γ state statement exit.
 Proof.
   revert Γ state statement exit.
   induction fuel as [|fuel IH]; intros Γ state statement exit Hanalyze;
     simpl in Hanalyze; first discriminate.
-  destruct (Syntax.view Γ statement) eqn:Hview.
+  destruct (syntax_view Γ statement) eqn:Hview.
   - eapply CertLeaf; [exact Hview|exact Hanalyze].
   - inversion Hanalyze; subst exit. eapply CertDone. exact Hview.
   - eapply CertUnfold; [exact Hview|exact Hanalyze].
   - inversion Hanalyze; subst exit. eapply CertFold. exact Hview.
-  - destruct (analyze_fuel fuel cost state first) as [error|middle] eqn:Hfirst;
+  - destruct (analyze_fuel fuel state first) as [error|middle] eqn:Hfirst;
       try discriminate.
     eapply CertSequence; [exact Hview|eapply IH|eapply IH]; eauto.
-  - destruct (analyze_fuel fuel cost state then_branch) as [error|then_exit] eqn:Hthen;
+  - destruct (analyze_fuel fuel state then_branch) as [error|then_exit] eqn:Hthen;
       try discriminate.
-    destruct (analyze_fuel fuel cost state else_branch) as [error|else_exit] eqn:Helse;
+    destruct (analyze_fuel fuel state else_branch) as [error|else_exit] eqn:Helse;
       try discriminate.
     destruct (bool_decide
       (analysis_open then_exit = analysis_open else_exit /\
@@ -2249,7 +2242,7 @@ Proof.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
-    destruct (analyze_fuel fuel cost
+    destruct (analyze_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) body) as [error|inner] eqn:Hbody;
       try discriminate.
@@ -2260,21 +2253,21 @@ Proof.
     eapply CertAtomic; eauto.
 Defined.
 
-Corollary analyze_builds_certificate {Γ} (cost : cost_model) state
-    (statement : Syntax.statement Γ) exit :
-  analyze cost state statement = inr exit ->
-  statement_certificate cost state statement exit.
+Corollary analyze_builds_certificate {Γ} state
+    (statement : syntax_statement Γ) exit :
+  analyze state statement = inr exit ->
+  statement_certificate state statement exit.
 Proof. apply analyze_fuel_builds_certificate. Defined.
 
-Theorem analyze_coherent_builds_certificate {Γ} (cost : cost_model) entry
-    (statement : Syntax.statement Γ) exit :
-  analyze_coherent cost entry statement = inr exit ->
-  coherent_statement_certificate cost entry statement exit.
+Theorem analyze_coherent_builds_certificate {Γ} entry
+    (statement : syntax_statement Γ) exit :
+  analyze_coherent entry statement = inr exit ->
+  coherent_statement_certificate entry statement exit.
 Proof.
   unfold analyze_coherent, check_conditional_masks.
-  destruct (analyze cost entry statement) as [error|flat_exit] eqn:Hflat;
+  destruct (analyze entry statement) as [error|flat_exit] eqn:Hflat;
     first discriminate.
-  destruct (check_conditional_masks_fuel (Syntax.size Γ statement) cost entry
+  destruct (check_conditional_masks_fuel (syntax_size Γ statement) entry
     statement) eqn:Hcoherent; last discriminate.
   intros Hresult. inversion Hresult; subst flat_exit.
   apply coherent_analysis_certificate_of_success.
@@ -2285,23 +2278,23 @@ Defined.
 (** The proof-facing bridge for the fused executable pass.  Certificate
     construction is deliberately confined to this theorem: the executable
     checker above never unfolds [analyze_builds_certificate]. *)
-Lemma analyze_coherent_lifo_builds_certificate {Γ} (cost : cost_model)
-    entry (statement : Syntax.statement Γ) exit :
-  analyze_coherent_lifo cost entry statement = Some exit ->
-  { certificate : coherent_statement_certificate cost entry statement exit &
+Lemma analyze_coherent_lifo_builds_certificate {Γ}
+    entry (statement : syntax_statement Γ) exit :
+  analyze_coherent_lifo entry statement = Some exit ->
+  { certificate : coherent_statement_certificate entry statement exit &
     coherent_analysis_lifo certificate [] [] }.
 Proof.
   unfold analyze_coherent_lifo.
-  destruct (analyze_coherent_lifo_fuel (Syntax.size Γ statement) cost entry []
+  destruct (analyze_coherent_lifo_fuel (syntax_size Γ statement) entry []
     statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
   destruct stack_out as [|marker stack_out]; try discriminate.
   intros Hsuccess. inversion Hsuccess; subst actual.
-  pose proof (analyze_coherent_lifo_projects cost entry statement exit) as
+  pose proof (analyze_coherent_lifo_projects entry statement exit) as
     Hcoherent.
-  assert (Hclosed : analyze_coherent_lifo cost entry statement = Some exit).
+  assert (Hclosed : analyze_coherent_lifo entry statement = Some exit).
   { unfold analyze_coherent_lifo. rewrite Hrun. reflexivity. }
   specialize (Hcoherent Hclosed).
-  pose (certificate := analyze_coherent_builds_certificate cost entry
+  pose (certificate := analyze_coherent_builds_certificate entry
     statement exit Hcoherent).
   exists certificate.
   unfold coherent_analysis_lifo.
@@ -2311,13 +2304,13 @@ Qed.
 
 (** Turn a successful executable analysis into the compact dependent-pair
     interface used by the structural certificate combinators above. *)
-Definition certified_run_of_analysis {Γ} (cost : cost_model)
-    (entry : analysis_state) (statement : Syntax.statement Γ) exit
-    (Hsucceeds : analyze cost entry statement = inr exit) :
-  certified_run cost entry statement :=
+Definition certified_run_of_analysis {Γ}
+    (entry : analysis_state) (statement : syntax_statement Γ) exit
+    (Hsucceeds : analyze entry statement = inr exit) :
+  certified_run entry statement :=
   @existT analysis_state
-    (fun exit => statement_certificate cost entry statement exit) exit
-    (analyze_builds_certificate cost entry statement exit Hsucceeds).
+    (fun exit => statement_certificate entry statement exit) exit
+    (analyze_builds_certificate entry statement exit Hsucceeds).
 
-End Analysis.
-End TypedAnalysisView.
+End WithSyntax.
+End AnalysisView.

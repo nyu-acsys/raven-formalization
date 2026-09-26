@@ -184,6 +184,7 @@ Definition h_ra : ra_name := "h_ra".
 
 Module CounterRAConfig.
   Definition ra_map (_ : ra_name) : RA_Pack := MonoNatPack.
+  Definition ra_config : RAConfig := RAConfigData ra_map.
 End CounterRAConfig.
 
 (* Isolates the ra_map h_ra = MonoNatPack rewrite (needed to fall back from

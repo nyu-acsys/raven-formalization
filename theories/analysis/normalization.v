@@ -2,28 +2,24 @@ From Coq Require Import ClassicalEpsilon FunctionalExtensionality Lia
   Program.Equality.
 From stdpp Require Import gmap sets.
 
-From raven Require Import analysis.normalization_base verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model.
+From raven Require Import runtime.erasure analysis.structured_certificates analysis.normalization_base verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model.
 
-Module TypedNormalizationConditional.
+Module NormalizationConditional.
 
-Module Make (RuntimeRAs : ra_base.RA_CONFIG)
-    (Logic : TypedAssertion.LOGIC_SIGNATURE).
-Include TypedNormalizationBase.Make RuntimeRAs Logic.
-Import TypedCore TypedIR Runtime IR Core Runtime.Translation.
+Import NormalizationBase.
+Import Core IR Runtime IR Core Runtime.Translation.
 Import StructuredCertificates.
-Module ConditionalNormalizationPrefix (Config : Runtime.RUNTIME_CONFIGURATION)
-    (ResourceContracts : Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
-(* Only the (non-generative) erasure is needed here.  Applying the full
-   [ConcreteModelCore] would mint a second copy of its generative
-   records, independent of the runtime model on the soundness path. *)
-Module Erasure := Runtime.RuntimeErasure Config.
-Module Certified := Runtime.CertifiedRegions ResourceContracts.
+Module ConditionalNormalizationPrefix.
+(* Only the erasure is needed here, not the concrete model. *)
+Module Erasure := RuntimeErasure.
+Module Certified := Runtime.CertifiedRegions.
 Module Resource := Runtime.Translation.Resource.
-(** The single application of the Hoare calculus's rule functor.  It
-    contains inductive families, so it is generative: everything
-    downstream projects from here rather than re-applying it. *)
-Module RavenHoareRules :=
-  Hoare.ResourceHoare.RavenHoareRules ResourceContracts.
+Module RavenHoareRules := Runtime.Validation.Hoare.ResourceHoare.
+
+Section WithContracts.
+Context {RAs : ra_base.RAConfig} {Logic : Assertion.LogicSignature}
+  {Config : RuntimeErasure.RuntimeConfiguration}
+  {Contracts : RavenHoareRules.ResourceContractEnv}.
 
 (** The Hoare calculus has exactly one stack at every prenex leaf, so
     argument stability holds directly, without a recursive search
@@ -91,43 +87,42 @@ Proof. reflexivity. Qed.
     domination and access safety -- which is why the hand-supply
     evidence layer was removed rather than kept as an extension point. *)
 Record normalization_result {Γ F Δ}
-    (cost : GenericRegions.Atomicity.cost_model)
     (entry exit : GenericRegions.Atomicity.analysis_state)
     (pre post : Resource.resource_prenex Γ F Δ) (source : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
     (source_certificate :
-      GenericRegions.Atomicity.analysis_certificate cost Γ entry source exit)
+      GenericRegions.Atomicity.analysis_certificate Γ entry source exit)
     : Type := {
   normalized_statement : stmt Γ;
   normalization_target_derivation :
     RavenHoareRules.RavenHoareTriple pre normalized_statement post;
   normalization_target_certificate :
-    structured_certificate cost Γ entry normalized_statement exit;
+    structured_certificate Γ entry normalized_statement exit;
   normalization_runtime_erasure : forall names stack,
     Erasure.runtime_stmt names stack source =
       Erasure.runtime_stmt names stack normalized_statement;
 }.
 
-Arguments normalized_statement {_ _ _} {_ _ _ _ _ _ _ _} _.
-Arguments normalization_target_derivation
-  {_ _ _} {_ _ _ _ _ _ _ _} _.
-Arguments normalization_target_certificate
-  {_ _ _} {_ _ _ _ _ _ _ _} _.
-Arguments normalization_runtime_erasure
-  {_ _ _} {_ _ _ _ _ _ _ _} _ _ _.
+#[global] Arguments normalized_statement {_ _ _} {_ _ _ _ _ _ _} _.
+#[global] Arguments normalization_target_derivation
+  {_ _ _} {_ _ _ _ _ _ _} _.
+#[global] Arguments normalization_target_certificate
+  {_ _ _} {_ _ _ _ _ _ _} _.
+#[global] Arguments normalization_runtime_erasure
+  {_ _ _} {_ _ _ _ _ _ _} _ _ _.
 
 (** The identity normalization: any source statement normalizes to itself
     once its analyzer certificate is already structured.  This is the base
     case every later constructor composes with, and it is what makes the
     record inhabited independently of the rewrite library. *)
 Definition normalization_identity {Γ F Δ}
-    {cost entry exit} {pre post : Resource.resource_prenex Γ F Δ}
+    {entry exit} {pre post : Resource.resource_prenex Γ F Δ}
     {source : stmt Γ}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
     (source_certificate :
-      GenericRegions.Atomicity.analysis_certificate cost Γ entry source exit)
-    (structured : structured_certificate cost Γ entry source exit) :
-    normalization_result cost entry exit pre post source
+      GenericRegions.Atomicity.analysis_certificate Γ entry source exit)
+    (structured : structured_certificate Γ entry source exit) :
+    normalization_result entry exit pre post source
       source_derivation source_certificate :=
   {| normalized_statement := source;
      normalization_target_derivation := source_derivation;
@@ -143,14 +138,13 @@ Definition normalization_identity {Γ F Δ}
     [term_certified_body_source_valid] needs in order to
     discharge structured validity without a premise. *)
 Record footprinted_normalization_result {Γ F Δ}
-    (cost : GenericRegions.Atomicity.cost_model)
     (entry exit : GenericRegions.Atomicity.analysis_state)
     (pre post : Resource.resource_prenex Γ F Δ) (source : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit) : Type := {
   footprinted_normalization :
-    @normalization_result Γ F Δ cost entry exit pre post source
+    @normalization_result Γ F Δ entry exit pre post source
       source_derivation source_certificate;
   footprinted_normalization_subset :
     structured_certificate_footprint
@@ -164,11 +158,11 @@ Record footprinted_normalization_result {Γ F Δ}
         normalization_target_certificate);
 }.
 
-Arguments footprinted_normalization {_ _ _} {_ _ _ _ _ _ _ _} _.
-Arguments footprinted_normalization_subset {_ _ _}
-  {_ _ _ _ _ _ _ _} _ _ _.
-Arguments footprinted_normalization_safe {_ _ _}
-  {_ _ _ _ _ _ _ _} _ _.
+#[global] Arguments footprinted_normalization {_ _ _} {_ _ _ _ _ _ _} _.
+#[global] Arguments footprinted_normalization_subset {_ _ _}
+  {_ _ _ _ _ _ _} _ _ _.
+#[global] Arguments footprinted_normalization_safe {_ _ _}
+  {_ _ _ _ _ _ _} _ _.
 
 (** Public restricted-normalization contract.  The executable worker chooses
     only the target syntax; the existence of its resource derivation and
@@ -176,11 +170,11 @@ Arguments footprinted_normalization_safe {_ _ _}
     analysis never has to reduce a Hoare derivation, alignment witness, or
     semantic proof. *)
 Definition restricted_footprinted_normalization_exists
-    {Γ F Δ cost entry exit pre post source}
+    {Γ F Δ entry exit pre post source}
     (derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit) : Prop :=
-  exists result : @footprinted_normalization_result Γ F Δ cost
+  exists result : @footprinted_normalization_result Γ F Δ
       entry exit pre post source derivation certificate,
     restricted_analyze_and_normalize source =
       Some (normalized_statement
@@ -200,16 +194,16 @@ Definition restricted_footprinted_normalization_exists
     because [RTInvAccess] takes the opened body to *be*
     [instantiated_invariant] applied to the access arguments. *)
 Definition normalization_close_one_marker_target
-    {Γ F Δ cost entry opened inner}
+    {Γ F Δ entry opened inner}
     {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source (GenericRegions.Atomicity.fold_invariant invariant inner))
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hbody_certificate : structured_certificate cost Γ opened body inner)
+    (Hbody_certificate : structured_certificate Γ opened body inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Htarget : RavenHoareRules.RavenHoareTriple pre
@@ -217,13 +211,13 @@ Definition normalization_close_one_marker_target
     (Herasure : forall names stack,
       Erasure.runtime_stmt names stack source =
         Erasure.runtime_stmt names stack body) :
-  @normalization_result Γ F Δ cost entry
+  @normalization_result Γ F Δ entry
     (GenericRegions.Atomicity.fold_invariant invariant inner)
     pre post source source_derivation source_certificate :=
   {| normalized_statement := TInvAccess invariant arguments body;
      normalization_target_derivation := Htarget;
      normalization_target_certificate :=
-       StructuredInvAccess cost Γ entry invariant arguments body opened inner
+       StructuredInvAccess Γ entry invariant arguments body opened inner
          Hopen Hbody_certificate Hopen_preserved;
      normalization_runtime_erasure := Herasure |}.
 
@@ -234,16 +228,16 @@ Definition normalization_close_one_marker_target
     constructor only assembles syntax, the structured certificate, and
     runtime erasure; it never inspects the derivation. *)
 Definition normalization_close_one_marker_target_then
-    {Γ F Δ cost entry opened inner exit}
+    {Γ F Δ entry opened inner exit}
     {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre
       (TSeq (TUnfold invariant arguments)
         (TSeq body
           (TSeq (TFold invariant arguments)
             work))) post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry
       (TSeq (TUnfold invariant arguments)
         (TSeq body
@@ -251,19 +245,19 @@ Definition normalization_close_one_marker_target_then
             work))) exit)
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hbody_certificate : structured_certificate cost Γ opened body inner)
+    (Hbody_certificate : structured_certificate Γ opened body inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Htarget : RavenHoareRules.RavenHoareTriple pre
       (TSeq (TInvAccess invariant arguments body) normalized_work)
       post)
-    (Hwork_certificate : structured_certificate cost Γ
+    (Hwork_certificate : structured_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner)
       normalized_work exit)
     (Hwork_erasure : forall names stack,
       Erasure.runtime_stmt names stack work =
         Erasure.runtime_stmt names stack normalized_work) :
-  @normalization_result Γ F Δ cost entry exit pre post
+  @normalization_result Γ F Δ entry exit pre post
     (TSeq (TUnfold invariant arguments)
       (TSeq body
         (TSeq (TFold invariant arguments) work)))
@@ -273,9 +267,9 @@ Proof.
       TSeq (TInvAccess invariant arguments body) normalized_work;
     normalization_target_derivation := Htarget;
     normalization_target_certificate :=
-      StructuredSequence cost Γ entry _
+      StructuredSequence Γ entry _
         (GenericRegions.Atomicity.fold_invariant invariant inner) _ exit
-        (StructuredInvAccess cost Γ entry invariant arguments body opened inner
+        (StructuredInvAccess Γ entry invariant arguments body opened inner
           Hopen Hbody_certificate Hopen_preserved)
         Hwork_certificate |}.
   intros names stack. rewrite runtime_stmt_linear_access_then.
@@ -286,21 +280,21 @@ Defined.
     is the non-atomic counterpart of the earlier baseline constructor: the
     body and continuation certificates are arbitrary analyzer results. *)
 Definition access_then_source_certificate
-    {Γ cost entry opened inner exit} invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    {Γ entry opened inner exit} invariant
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened) :
-  GenericRegions.Atomicity.analysis_certificate cost Γ entry
+  GenericRegions.Atomicity.analysis_certificate Γ entry
     (TSeq (TUnfold invariant arguments)
       (TSeq body
         (TSeq (TFold invariant arguments) work)))
     exit :=
-  GenericRegions.Atomicity.CertSequence cost Γ entry
+  GenericRegions.Atomicity.CertSequence Γ entry
     (TSeq (TUnfold invariant arguments)
       (TSeq body
         (TSeq (TFold invariant arguments) work)))
@@ -308,20 +302,20 @@ Definition access_then_source_certificate
     (TSeq body
       (TSeq (TFold invariant arguments) work))
     exit eq_refl
-    (GenericRegions.Atomicity.CertUnfold cost Γ entry
+    (GenericRegions.Atomicity.CertUnfold Γ entry
       (TUnfold invariant arguments) invariant opened eq_refl Hopen)
-    (GenericRegions.Atomicity.CertSequence cost Γ opened
+    (GenericRegions.Atomicity.CertSequence Γ opened
       (TSeq body
         (TSeq (TFold invariant arguments) work))
       body inner
       (TSeq (TFold invariant arguments) work)
       exit eq_refl body_analysis
-      (GenericRegions.Atomicity.CertSequence cost Γ inner
+      (GenericRegions.Atomicity.CertSequence Γ inner
         (TSeq (TFold invariant arguments) work)
         (TFold invariant arguments)
         (GenericRegions.Atomicity.fold_invariant invariant inner) work exit
         eq_refl
-        (GenericRegions.Atomicity.CertFold cost Γ inner
+        (GenericRegions.Atomicity.CertFold Γ inner
           (TFold invariant arguments) invariant eq_refl)
         work_analysis)).
 
@@ -329,23 +323,23 @@ Definition access_then_source_certificate
     premises are exactly the recursively available facts for the body and
     continuation; no fact about the Hoare proof is required. *)
 Definition normalization_close_one_marker_target_then_footprinted
-    {Γ F Δ cost entry opened inner exit}
+    {Γ F Δ entry opened inner exit}
     {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hbody_certificate : structured_certificate cost Γ opened body inner)
+    (Hbody_certificate : structured_certificate Γ opened body inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Htarget : RavenHoareRules.RavenHoareTriple pre
       (TSeq (TInvAccess invariant arguments body) normalized_work)
       post)
-    (Hwork_certificate : structured_certificate cost Γ
+    (Hwork_certificate : structured_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner)
       normalized_work exit)
     (Hwork_erasure : forall names stack,
@@ -368,7 +362,7 @@ Definition normalization_close_one_marker_target_then_footprinted
   let source_certificate := access_then_source_certificate invariant
     arguments
     body work body_analysis work_analysis Hopen in
-  @footprinted_normalization_result Γ F Δ cost entry exit pre post
+  @footprinted_normalization_result Γ F Δ entry exit pre post
     (TSeq (TUnfold invariant arguments)
       (TSeq body
         (TSeq (TFold invariant arguments) work)))
@@ -404,21 +398,21 @@ Defined.
     The recursive continuation result is consumed at the exact fuel supplied
     by the parent run, avoiding any fuel-irrelevance side theorem. *)
 Lemma footprinted_normalization_continued_access_from_worker
-    {Γ F Δ cost entry opened inner exit}
+    {Γ F Δ entry opened inner exit}
     {pre middle post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
     (work_derivation : RavenHoareRules.RavenHoareTriple middle work post)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
-    (work_result : @footprinted_normalization_result Γ F Δ cost
+    (work_result : @footprinted_normalization_result Γ F Δ
       (GenericRegions.Atomicity.fold_invariant invariant inner) exit
       middle post work work_derivation work_analysis)
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hbody_certificate : structured_certificate cost Γ opened body inner)
+    (Hbody_certificate : structured_certificate Γ opened body inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Htarget : RavenHoareRules.RavenHoareTriple pre
@@ -448,7 +442,7 @@ Lemma footprinted_normalization_continued_access_from_worker
   let source_certificate := access_then_source_certificate invariant
     arguments
     body work body_analysis work_analysis Hopen in
-  exists result : @footprinted_normalization_result Γ F Δ cost
+  exists result : @footprinted_normalization_result Γ F Δ
       entry exit pre post
       (TSeq (TUnfold invariant arguments)
         (TSeq body
@@ -493,30 +487,30 @@ Qed.
 (** Structural composition of two resource normalizations across a
     source sequence: the two erasure equations compose. *)
 Definition normalization_sequence
-    {Γ F Δ cost entry middle exit}
+    {Γ F Δ entry middle exit}
     {pre middle_prenex post : Resource.resource_prenex Γ F Δ}
     {first second : stmt Γ}
     (first_derivation :
       RavenHoareRules.RavenHoareTriple pre first middle_prenex)
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry first middle)
-    (first_normalization : @normalization_result Γ F Δ cost entry
+    (first_normalization : @normalization_result Γ F Δ entry
       middle pre middle_prenex first first_derivation first_certificate)
     (second_derivation :
       RavenHoareRules.RavenHoareTriple middle_prenex second post)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       middle second exit)
-    (second_normalization : @normalization_result Γ F Δ cost middle
+    (second_normalization : @normalization_result Γ F Δ middle
       exit middle_prenex post second second_derivation second_certificate)
     (view : RegionSyntax.view (TSeq first second) =
-      TypedAnalysisView.ViewSequence first second) :
+      AnalysisView.ViewSequence first second) :
   let source := TSeq first second in
   let source_derivation := RavenHoareRules.RTSeq pre middle_prenex post
     first second first_derivation second_derivation in
-  let source_certificate := GenericRegions.Atomicity.CertSequence cost Γ
+  let source_certificate := GenericRegions.Atomicity.CertSequence Γ
     entry source first middle second exit view first_certificate
       second_certificate in
-  @normalization_result Γ F Δ cost entry exit pre post source
+  @normalization_result Γ F Δ entry exit pre post source
     source_derivation source_certificate.
 Proof.
   simpl.
@@ -528,7 +522,7 @@ Proof.
         first_normalization.(normalization_target_derivation)
         second_normalization.(normalization_target_derivation);
     normalization_target_certificate :=
-      StructuredSequence cost Γ entry _ middle _ exit
+      StructuredSequence Γ entry _ middle _ exit
         first_normalization.(normalization_target_certificate)
         second_normalization.(normalization_target_certificate) |}.
   intros names stack. simpl.
@@ -550,10 +544,10 @@ Defined.
     Runtime erasure is [runtime_stmt_linear_access_then]: both shapes run
     the atomic body and then the continuation. *)
 Definition normalization_terminal_atomic_access_then
-    {Γ F Δ cost entry opened inner exit}
+    {Γ F Δ entry opened inner exit}
     {post : Resource.resource_prenex Γ F Δ}
     invariant
-    (arguments closing_arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments closing_arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (input_store output_store : symbolic_store Γ F Δ)
     (frame remainder : Resource.core_assertion F Δ)
     (atomic_body work work_target : stmt Γ)
@@ -567,7 +561,7 @@ Definition normalization_terminal_atomic_access_then
           (TSeq
             (TFold invariant closing_arguments) work)))
       post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry
       (TSeq (TUnfold invariant arguments)
         (TSeq (TAtomic atomic_body)
@@ -576,21 +570,21 @@ Definition normalization_terminal_atomic_access_then
       exit)
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hatomic_certificate : structured_certificate cost Γ opened
+    (Hatomic_certificate : structured_certificate Γ opened
       (TAtomic atomic_body) inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Hbody : RavenHoareRules.RavenHoareTriple
       (Resource.RState input_store
         (Resource.CAnd
-          (RavenHoareRules.Instances.instantiated_invariant invariant
+          (RavenHoareRules.instantiated_invariant invariant
             (IR.symbolize_expr_list input_store arguments)) frame))
       (TAtomic atomic_body)
       (Resource.RState output_store
         (Resource.CAnd
-          (RavenHoareRules.Instances.instantiated_invariant invariant
+          (RavenHoareRules.instantiated_invariant invariant
             (IR.symbolize_expr_list input_store arguments)) remainder)))
-    (work_certificate : structured_certificate cost Γ
+    (work_certificate : structured_certificate Γ
       (GenericRegions.Atomicity.fold_invariant invariant inner)
       work_target exit)
     (work_derivation : RavenHoareRules.RavenHoareTriple
@@ -602,7 +596,7 @@ Definition normalization_terminal_atomic_access_then
     (Hwork_erasure : forall names stack,
       Erasure.runtime_stmt names stack work =
         Erasure.runtime_stmt names stack work_target) :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.RState input_store
       (Resource.CAnd
         (Resource.CInvariant invariant
@@ -624,14 +618,14 @@ Proof.
           (TAtomic atomic_body) _ _ Hbody
           (RavenHoareRules.AccessBase invariant Δ
             (IR.symbolize_expr_list input_store arguments)
-            (RavenHoareRules.Instances.instantiated_invariant invariant
+            (RavenHoareRules.instantiated_invariant invariant
               (IR.symbolize_expr_list input_store arguments))
             output_store remainder))
         work_derivation;
     normalization_target_certificate :=
-      StructuredSequence cost Γ entry _
+      StructuredSequence Γ entry _
         (GenericRegions.Atomicity.fold_invariant invariant inner) _ exit
-        (StructuredInvAccess cost Γ entry invariant arguments
+        (StructuredInvAccess Γ entry invariant arguments
           (TAtomic atomic_body) opened inner Hopen
           Hatomic_certificate Hopen_preserved)
         work_certificate |}.
@@ -661,19 +655,19 @@ Defined.
     [normalization_stack_rewrite]. *)
 
 Definition normalization_frame
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store : symbolic_store Γ F Δ}
     {pre_body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (frame : Resource.core_assertion F Δ)
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store pre_body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F Δ cost entry exit
+    (normalization : @normalization_result Γ F Δ entry exit
       (Resource.RState store pre_body) post source source_derivation
       source_certificate) :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.RState store (Resource.CAnd pre_body frame))
     (Resource.prenex_and post frame) source
     (RavenHoareRules.RTFrame source store pre_body frame post
@@ -690,20 +684,20 @@ Definition normalization_frame
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_consequence
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store : symbolic_store Γ F Δ}
     {pre_body pre_body' : Resource.core_assertion F Δ}
     {post post' : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store pre_body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F Δ cost entry exit
+    (normalization : @normalization_result Γ F Δ entry exit
       (Resource.RState store pre_body) post source source_derivation
       source_certificate)
     (Hpre : Hoare.ResourceHoare.core_entails pre_body' pre_body)
     (Hpost : Hoare.ResourceHoare.resource_prenex_entails post post') :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.RState store pre_body') post' source
     (RavenHoareRules.RTConsequence source store pre_body pre_body' post post'
       source_derivation Hpre Hpost)
@@ -719,19 +713,19 @@ Definition normalization_consequence
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_stack_rewrite
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store store' : symbolic_store Γ F Δ}
     {body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F Δ cost entry exit
+    (normalization : @normalization_result Γ F Δ entry exit
       (Resource.RState store body) post source source_derivation
       source_certificate)
     (Hstore : Hoare.ResourceHoare.store_equal_under body Γ store' store) :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.RState store' body) post source
     (RavenHoareRules.RTStackRewrite source store store' body post
       source_derivation Hstore)
@@ -747,17 +741,17 @@ Definition normalization_stack_rewrite
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_prenex_elim
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre : Resource.resource_prenex Γ F (t :: Δ)}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       pre source (Resource.weaken_resource_prenex post))
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F (t :: Δ) cost entry
+    (normalization : @normalization_result Γ F (t :: Δ) entry
       exit pre (Resource.weaken_resource_prenex post) source
       source_derivation source_certificate) :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.ResourceExists t pre) post source
     (RavenHoareRules.RTPrenexElim t source pre post source_derivation)
     source_certificate :=
@@ -772,14 +766,14 @@ Definition normalization_prenex_elim
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_prenex_preserve
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre post : Resource.resource_prenex Γ F (t :: Δ)} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F (t :: Δ) cost entry
+    (normalization : @normalization_result Γ F (t :: Δ) entry
       exit pre post source source_derivation source_certificate) :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     (Resource.ResourceExists t pre) (Resource.ResourceExists t post) source
     (RavenHoareRules.RTPrenexPreserve t source pre post source_derivation)
     source_certificate :=
@@ -794,14 +788,14 @@ Definition normalization_prenex_preserve
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_bound_weaken
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F Δ cost entry exit
+    (normalization : @normalization_result Γ F Δ entry exit
       pre post source source_derivation source_certificate) :
-  @normalization_result Γ F (t :: Δ) cost entry exit
+  @normalization_result Γ F (t :: Δ) entry exit
     (Resource.weaken_resource_prenex pre)
     (Resource.weaken_resource_prenex post) source
     (RavenHoareRules.RTBoundWeaken t source pre post source_derivation)
@@ -817,16 +811,16 @@ Definition normalization_bound_weaken
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_prenex_consequence
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {pre pre' post post' : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @normalization_result Γ F Δ cost entry exit
+    (normalization : @normalization_result Γ F Δ entry exit
       pre post source source_derivation source_certificate)
     (Hpre : Hoare.ResourceHoare.resource_prenex_entails pre' pre)
     (Hpost : Hoare.ResourceHoare.resource_prenex_entails post post') :
-  @normalization_result Γ F Δ cost entry exit
+  @normalization_result Γ F Δ entry exit
     pre' post' source
     (RavenHoareRules.RTPrenexConsequence source pre pre' post post'
       source_derivation Hpre Hpost) source_certificate :=
@@ -841,7 +835,7 @@ Definition normalization_prenex_consequence
        normalization.(normalization_runtime_erasure) |}.
 
 Definition normalization_conditional
-    {Γ F Δ cost entry then_exit else_exit}
+    {Γ F Δ entry then_exit else_exit}
     {store : symbolic_store Γ F Δ}
     {body : Resource.core_assertion F Δ}
     {condition then_branch else_branch}
@@ -851,9 +845,9 @@ Definition normalization_conditional
         (Resource.CAnd body
           (Resource.CExpr (IR.symbolize_expr store condition))))
       then_branch post)
-    (then_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry then_branch then_exit)
-    (then_normalization : @normalization_result Γ F Δ cost entry
+    (then_normalization : @normalization_result Γ F Δ entry
       then_exit _ post then_branch then_derivation then_certificate)
     (else_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store
@@ -861,16 +855,16 @@ Definition normalization_conditional
           (Resource.CExpr (Core.EUnOp Core.UNot
             (IR.symbolize_expr store condition)))))
       else_branch post)
-    (else_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry else_branch else_exit)
-    (else_normalization : @normalization_result Γ F Δ cost entry
+    (else_normalization : @normalization_result Γ F Δ entry
       else_exit _ post else_branch else_derivation else_certificate)
     (Hopen_equal : GenericRegions.Atomicity.analysis_open then_exit =
       GenericRegions.Atomicity.analysis_open else_exit)
     (Hatomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
-      TypedAnalysisView.ViewConditional then_branch else_branch) :
+      AnalysisView.ViewConditional then_branch else_branch) :
   let source := TIf condition then_branch else_branch in
   let joined := GenericRegions.Atomicity.AnalysisState
     (GenericRegions.Atomicity.analysis_mask then_exit ∩
@@ -881,10 +875,10 @@ Definition normalization_conditional
     (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
   let source_derivation := RavenHoareRules.RTIf store body condition
     then_branch else_branch post then_derivation else_derivation in
-  let source_certificate := GenericRegions.Atomicity.CertConditional cost Γ
+  let source_certificate := GenericRegions.Atomicity.CertConditional Γ
     entry source then_branch else_branch then_exit else_exit view
       then_certificate else_certificate Hopen_equal Hatomic_equal in
-  @normalization_result Γ F Δ cost entry joined
+  @normalization_result Γ F Δ entry joined
     (Resource.RState store body) post source
     source_derivation source_certificate.
 Proof.
@@ -897,7 +891,7 @@ Proof.
         then_normalization.(normalization_target_derivation)
         else_normalization.(normalization_target_derivation);
     normalization_target_certificate :=
-      StructuredConditional cost Γ entry condition _ _ then_exit
+      StructuredConditional Γ entry condition _ _ then_exit
         else_exit
         then_normalization.(normalization_target_certificate)
         else_normalization.(normalization_target_certificate)
@@ -916,19 +910,19 @@ Defined.
     structured certificate unchanged, so the strengthened record's two
     fields transport with no set reasoning at all. *)
 Definition footprinted_normalization_frame
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store : symbolic_store Γ F Δ}
     {pre_body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (frame : Resource.core_assertion F Δ)
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store pre_body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F Δ cost entry exit
+    (result : @footprinted_normalization_result Γ F Δ entry exit
       (Resource.RState store pre_body) post source source_derivation
       source_certificate) :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     (Resource.RState store (Resource.CAnd pre_body frame))
     (Resource.prenex_and post frame) source
     (RavenHoareRules.RTFrame source store pre_body frame post
@@ -943,20 +937,20 @@ Definition footprinted_normalization_frame
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_consequence
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store : symbolic_store Γ F Δ}
     {pre_body pre_body' : Resource.core_assertion F Δ}
     {post post' : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store pre_body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F Δ cost entry exit
+    (result : @footprinted_normalization_result Γ F Δ entry exit
       (Resource.RState store pre_body) post source source_derivation
       source_certificate)
     (Hpre : Hoare.ResourceHoare.core_entails pre_body' pre_body)
     (Hpost : Hoare.ResourceHoare.resource_prenex_entails post post') :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     (Resource.RState store pre_body') post' source
     (RavenHoareRules.RTConsequence source store pre_body pre_body' post post'
       source_derivation Hpre Hpost)
@@ -971,19 +965,19 @@ Definition footprinted_normalization_consequence
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_stack_rewrite
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {store store' : symbolic_store Γ F Δ}
     {body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store body) source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F Δ cost entry exit
+    (result : @footprinted_normalization_result Γ F Δ entry exit
       (Resource.RState store body) post source source_derivation
       source_certificate)
     (Hstore : Hoare.ResourceHoare.store_equal_under body Γ store' store) :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     (Resource.RState store' body) post source
     (RavenHoareRules.RTStackRewrite source store store' body post
       source_derivation Hstore)
@@ -998,17 +992,17 @@ Definition footprinted_normalization_stack_rewrite
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_prenex_elim
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre : Resource.resource_prenex Γ F (t :: Δ)}
     {post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple
       pre source (Resource.weaken_resource_prenex post))
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F (t :: Δ) cost
+    (result : @footprinted_normalization_result Γ F (t :: Δ)
       entry exit pre (Resource.weaken_resource_prenex post) source
       source_derivation source_certificate) :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     (Resource.ResourceExists t pre) post source
     (RavenHoareRules.RTPrenexElim t source pre post source_derivation)
     source_certificate :=
@@ -1021,14 +1015,14 @@ Definition footprinted_normalization_prenex_elim
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_prenex_preserve
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre post : Resource.resource_prenex Γ F (t :: Δ)} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F (t :: Δ) cost
+    (result : @footprinted_normalization_result Γ F (t :: Δ)
       entry exit pre post source source_derivation source_certificate) :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     (Resource.ResourceExists t pre) (Resource.ResourceExists t post) source
     (RavenHoareRules.RTPrenexPreserve t source pre post source_derivation)
     source_certificate :=
@@ -1041,14 +1035,14 @@ Definition footprinted_normalization_prenex_preserve
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_bound_weaken
-    {Γ F Δ t cost entry exit}
+    {Γ F Δ t entry exit}
     {pre post : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F Δ cost entry exit
+    (result : @footprinted_normalization_result Γ F Δ entry exit
       pre post source source_derivation source_certificate) :
-  @footprinted_normalization_result Γ F (t :: Δ) cost entry exit
+  @footprinted_normalization_result Γ F (t :: Δ) entry exit
     (Resource.weaken_resource_prenex pre)
     (Resource.weaken_resource_prenex post) source
     (RavenHoareRules.RTBoundWeaken t source pre post source_derivation)
@@ -1062,16 +1056,16 @@ Definition footprinted_normalization_bound_weaken
        result.(footprinted_normalization_safe) |}.
 
 Definition footprinted_normalization_prenex_consequence
-    {Γ F Δ cost entry exit}
+    {Γ F Δ entry exit}
     {pre pre' post post' : Resource.resource_prenex Γ F Δ} {source}
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (result : @footprinted_normalization_result Γ F Δ cost entry exit
+    (result : @footprinted_normalization_result Γ F Δ entry exit
       pre post source source_derivation source_certificate)
     (Hpre : Hoare.ResourceHoare.resource_prenex_entails pre' pre)
     (Hpost : Hoare.ResourceHoare.resource_prenex_entails post post') :
-  @footprinted_normalization_result Γ F Δ cost entry exit
+  @footprinted_normalization_result Γ F Δ entry exit
     pre' post' source
     (RavenHoareRules.RTPrenexConsequence source pre pre' post post'
       source_derivation Hpre Hpost) source_certificate :=
@@ -1105,57 +1099,57 @@ Definition footprinted_normalization_prenex_consequence
     The two fold/unfold cases also carry no separate witness premise:
     [RTUnfoldInvariant] and [RTFoldInvariant] take the opened body to
     *be* [instantiated_invariant] applied to the access arguments. *)
-Inductive certificate_aligned (cost : GenericRegions.Atomicity.cost_model) :
+Inductive certificate_aligned :
     forall {Γ F Δ} {entry : GenericRegions.Atomicity.analysis_state}
       {statement : stmt Γ} {exit : GenericRegions.Atomicity.analysis_state}
       {pre post : Resource.resource_prenex Γ F Δ},
-      GenericRegions.Atomicity.analysis_certificate cost Γ entry statement exit ->
-      @RavenHoareRules.RavenHoareTriple Γ F Δ pre statement post ->
+      GenericRegions.Atomicity.analysis_certificate Γ entry statement exit ->
+      @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre statement post ->
       Type :=
 | AlignedOrdinaryLeaf : forall Γ F Δ entry statement exit pre post
     view step
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ pre statement post),
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertLeaf cost Γ entry statement exit view step)
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre statement post),
+    certificate_aligned
+      (GenericRegions.Atomicity.CertLeaf Γ entry statement exit view step)
       derivation
 | AlignedDone : forall Γ F Δ entry statement pre post view
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ pre statement post),
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertDone cost Γ entry statement view)
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre statement post),
+    certificate_aligned
+      (GenericRegions.Atomicity.CertDone Γ entry statement view)
       derivation
 | AlignedUnfold : forall Γ F Δ entry invariant arguments exit
     (store : symbolic_store Γ F Δ)
     (view : RegionSyntax.view (TUnfold invariant arguments) =
-      TypedAnalysisView.ViewUnfold invariant)
+      AnalysisView.ViewUnfold invariant)
     (step : GenericRegions.Atomicity.open_invariant invariant entry = inr exit),
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertUnfold cost Γ entry
+    certificate_aligned
+      (GenericRegions.Atomicity.CertUnfold Γ entry
         (TUnfold invariant arguments) invariant exit view step)
       (RavenHoareRules.RTUnfoldInvariant invariant store arguments)
 | AlignedFold : forall Γ F Δ entry invariant arguments
     (store : symbolic_store Γ F Δ)
     (view : RegionSyntax.view (TFold invariant arguments) =
-      TypedAnalysisView.ViewFold invariant),
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertFold cost Γ entry
+      AnalysisView.ViewFold invariant),
+    certificate_aligned
+      (GenericRegions.Atomicity.CertFold Γ entry
         (TFold invariant arguments) invariant view)
       (RavenHoareRules.RTFoldInvariant invariant store arguments)
 | AlignedSequence : forall Γ F Δ state first middle second exit
     (pre middle_prenex post : Resource.resource_prenex Γ F Δ)
     (view : RegionSyntax.view (TSeq first second) =
-      TypedAnalysisView.ViewSequence first second)
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+      AnalysisView.ViewSequence first second)
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       state first middle)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       middle second exit)
     (first_derivation :
-      @RavenHoareRules.RavenHoareTriple Γ F Δ pre first middle_prenex)
+      @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre first middle_prenex)
     (second_derivation :
-      @RavenHoareRules.RavenHoareTriple Γ F Δ middle_prenex second post),
-    certificate_aligned cost first_certificate first_derivation ->
-    certificate_aligned cost second_certificate second_derivation ->
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertSequence cost Γ state
+      @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ middle_prenex second post),
+    certificate_aligned first_certificate first_derivation ->
+    certificate_aligned second_certificate second_derivation ->
+    certificate_aligned
+      (GenericRegions.Atomicity.CertSequence Γ state
         (TSeq first second) first middle second exit view
         first_certificate second_certificate)
       (RavenHoareRules.RTSeq pre middle_prenex post first second
@@ -1165,30 +1159,30 @@ Inductive certificate_aligned (cost : GenericRegions.Atomicity.cost_model) :
     condition then_branch else_branch then_exit else_exit
     (post : Resource.resource_prenex Γ F Δ)
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
-      TypedAnalysisView.ViewConditional then_branch else_branch)
-    (then_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+      AnalysisView.ViewConditional then_branch else_branch)
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       state then_branch then_exit)
-    (else_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       state else_branch else_exit)
     (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
       GenericRegions.Atomicity.analysis_open else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
-    (then_derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (then_derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       (Resource.RState store
         (Resource.CAnd body
           (Resource.CExpr (IR.symbolize_expr store condition))))
       then_branch post)
-    (else_derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (else_derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       (Resource.RState store
         (Resource.CAnd body
           (Resource.CExpr (Core.EUnOp Core.UNot
             (IR.symbolize_expr store condition)))))
       else_branch post),
-    certificate_aligned cost then_certificate then_derivation ->
-    certificate_aligned cost else_certificate else_derivation ->
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertConditional cost Γ state
+    certificate_aligned then_certificate then_derivation ->
+    certificate_aligned else_certificate else_derivation ->
+    certificate_aligned
+      (GenericRegions.Atomicity.CertConditional Γ state
         (TIf condition then_branch else_branch) then_branch else_branch
         then_exit else_exit view then_certificate else_certificate
         open_equal atomic_equal)
@@ -1197,10 +1191,10 @@ Inductive certificate_aligned (cost : GenericRegions.Atomicity.cost_model) :
 | AlignedAtomic : forall Γ F Δ state body outer inner
     (pre post : Resource.resource_prenex Γ F Δ)
     (view : RegionSyntax.view (TAtomic body) =
-      TypedAnalysisView.ViewAtomic body)
+      AnalysisView.ViewAtomic body)
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep state = inr outer)
-    (body_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (body_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       (GenericRegions.Atomicity.AnalysisState
         (GenericRegions.Atomicity.analysis_mask outer)
         (GenericRegions.Atomicity.analysis_open outer)
@@ -1209,89 +1203,89 @@ Inductive certificate_aligned (cost : GenericRegions.Atomicity.cost_model) :
     (open_equal : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open outer)
     (body_derivation :
-      @RavenHoareRules.RavenHoareTriple Γ F Δ pre body post),
-    certificate_aligned cost body_certificate body_derivation ->
-    certificate_aligned cost
-      (GenericRegions.Atomicity.CertAtomic cost Γ state (TAtomic body)
+      @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre body post),
+    certificate_aligned body_certificate body_derivation ->
+    certificate_aligned
+      (GenericRegions.Atomicity.CertAtomic Γ state (TAtomic body)
         body outer inner view step body_certificate open_equal)
       (RavenHoareRules.RTAtomicBlock pre post body body_derivation)
 | AlignedFrame : forall Γ F Δ entry exit statement
     (store : symbolic_store Γ F Δ)
     (pre_body frame : Resource.core_assertion F Δ)
     (post : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       (Resource.RState store pre_body) statement post),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTFrame statement store pre_body frame post derivation)
 | AlignedPrenexElim : forall Γ F Δ t entry exit statement
     (pre : Resource.resource_prenex Γ F (t :: Δ))
     (post : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F (t :: Δ)
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F (t :: Δ)
       pre statement (Resource.weaken_resource_prenex post)),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTPrenexElim t statement pre post derivation)
 | AlignedPrenexPreserve : forall Γ F Δ t entry exit statement
     (pre post : Resource.resource_prenex Γ F (t :: Δ))
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
     (derivation :
-      @RavenHoareRules.RavenHoareTriple Γ F (t :: Δ) pre statement post),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+      @RavenHoareRules.RavenHoareTriple _ _ _ Γ F (t :: Δ) pre statement post),
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTPrenexPreserve t statement pre post derivation)
 | AlignedPrenexConsequence : forall Γ F Δ entry exit statement
     (pre pre' post post' : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       pre statement post)
     (pre_entails : Hoare.ResourceHoare.resource_prenex_entails pre' pre)
     (post_entails : Hoare.ResourceHoare.resource_prenex_entails post post'),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTPrenexConsequence statement pre pre' post post'
         derivation pre_entails post_entails)
 | AlignedConsequence : forall Γ F Δ entry exit statement
     (store : symbolic_store Γ F Δ)
     (pre_body pre_body' : Resource.core_assertion F Δ)
     (post post' : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       (Resource.RState store pre_body) statement post)
     (pre_entails : Hoare.ResourceHoare.core_entails pre_body' pre_body)
     (post_entails : Hoare.ResourceHoare.resource_prenex_entails post post'),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTConsequence statement store pre_body pre_body'
         post post' derivation pre_entails post_entails)
 | AlignedStackRewrite : forall Γ F Δ entry exit statement
     (store store' : symbolic_store Γ F Δ)
     (body : Resource.core_assertion F Δ)
     (post : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       (Resource.RState store body) statement post)
     (store_equal : Hoare.ResourceHoare.store_equal_under body Γ store' store),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTStackRewrite statement store store' body post
         derivation store_equal)
 | AlignedBoundWeaken : forall Γ F Δ t entry exit statement
     (pre post : Resource.resource_prenex Γ F Δ)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
       pre statement post),
-    certificate_aligned cost certificate derivation ->
-    certificate_aligned cost certificate
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
       (RavenHoareRules.RTBoundWeaken t statement pre post derivation).
 
 (** *** Alignment is complete
@@ -1306,20 +1300,20 @@ Inductive certificate_aligned (cost : GenericRegions.Atomicity.cost_model) :
     [analysis_certificate] constructor accepts that view, so there is no
     certificate to align with -- the analyzer never sees a structured
     access in its *source*, only in a normalization's target. *)
-Fixpoint certificate_aligned_complete_exists {cost Γ F} Δ
+Fixpoint certificate_aligned_complete_exists {Γ F} Δ
     (pre post : Resource.resource_prenex Γ F Δ) (statement : stmt Γ)
-    (derivation : @RavenHoareRules.RavenHoareTriple Γ F Δ pre statement post)
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre statement post)
     {struct derivation} :
   forall entry exit
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry statement exit),
-    exists aligned : certificate_aligned cost certificate derivation,
+    exists aligned : certificate_aligned certificate derivation,
       True.
 Proof.
   destruct derivation; intros entry exit certificate.
   (* The rules that leave the statement, and hence the certificate,
      alone. *)
-  all: try (destruct (certificate_aligned_complete_exists cost Γ F
+  all: try (destruct (certificate_aligned_complete_exists Γ F
               _ _ _ _ derivation entry exit certificate) as [A _];
             unshelve eexists;
               [ solve [ eapply AlignedPrenexPreserve; exact A
@@ -1352,23 +1346,23 @@ Proof.
   all: lazymatch goal with
        | [ |- context [RavenHoareRules.RTSeq _ _ _ _ _ ?d1 ?d2] ] =>
            cbn in e; dependent destruction e;
-           destruct (certificate_aligned_complete_exists cost Γ F
+           destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d1 _ _ certificate1) as [A1 _];
-           destruct (certificate_aligned_complete_exists cost Γ F
+           destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d2 _ _ certificate2) as [A2 _];
            unshelve eexists;
              [eapply AlignedSequence; eassumption | exact I]
        | [ |- context [RavenHoareRules.RTIf _ _ _ _ _ _ ?d1 ?d2] ] =>
            cbn in e; dependent destruction e;
-           destruct (certificate_aligned_complete_exists cost Γ F
+           destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d1 _ _ certificate1) as [Athen _];
-           destruct (certificate_aligned_complete_exists cost Γ F
+           destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d2 _ _ certificate2) as [Aelse _];
            unshelve eexists;
              [eapply AlignedConditional; eassumption | exact I]
        | [ |- context [RavenHoareRules.RTAtomicBlock _ _ _ ?d] ] =>
            cbn in e; dependent destruction e;
-           destruct (certificate_aligned_complete_exists cost Γ F
+           destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d _ _ certificate) as [Abody _];
            unshelve eexists;
              [eapply AlignedAtomic; eassumption | exact I]
@@ -1392,25 +1386,25 @@ Qed.
     no alignment and no executable proof evidence.  The restricted checker owns partiality;
     normalization soundness is the proposition
     [restricted_footprinted_normalization_exists] below. *)
-Record analyzed_triple (cost : GenericRegions.Atomicity.cost_model)
+Record analyzed_triple
     {Γ F Δ}
     (pre : Resource.resource_prenex Γ F Δ) (statement : stmt Γ)
     (entry exit : GenericRegions.Atomicity.analysis_state)
     (post : Resource.resource_prenex Γ F Δ) : Type := {
   analyzed_certificate :
-    GenericRegions.Atomicity.analysis_certificate cost Γ entry statement exit;
+    GenericRegions.Atomicity.analysis_certificate Γ entry statement exit;
   analyzed_hoare :
-    @RavenHoareRules.RavenHoareTriple Γ F Δ pre statement post;
+    @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ pre statement post;
   analyzed_restricted : restricted_fragment_accepted statement;
 }.
 
-Arguments analyzed_certificate {_ _ _ _ _ _ _ _ _} _.
-Arguments analyzed_hoare {_ _ _ _ _ _ _ _ _} _.
-Arguments analyzed_restricted {_ _ _ _ _ _ _ _ _} _.
+#[global] Arguments analyzed_certificate {_ _ _ _ _ _ _ _} _.
+#[global] Arguments analyzed_hoare {_ _ _ _ _ _ _ _} _.
+#[global] Arguments analyzed_restricted {_ _ _ _ _ _ _ _} _.
 
 Lemma analyzed_worker_succeeds
-    {cost Γ F Δ pre statement entry exit post}
-    (analyzed : @analyzed_triple cost Γ F Δ pre statement entry exit
+    {Γ F Δ pre statement entry exit post}
+    (analyzed : @analyzed_triple Γ F Δ pre statement entry exit
       post) :
   exists normalized,
     restricted_analyze_and_normalize statement = Some normalized.
@@ -1427,31 +1421,31 @@ Qed.
 
 
 Definition footprinted_normalization_sequence
-    {Γ F Δ cost entry middle exit}
+    {Γ F Δ entry middle exit}
     {pre middle_prenex post : Resource.resource_prenex Γ F Δ}
     {first second : stmt Γ}
     (first_derivation :
       RavenHoareRules.RavenHoareTriple pre first middle_prenex)
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry first middle)
-    (first_result : @footprinted_normalization_result Γ F Δ cost
+    (first_result : @footprinted_normalization_result Γ F Δ
       entry middle pre middle_prenex first first_derivation first_certificate)
     (second_derivation :
       RavenHoareRules.RavenHoareTriple middle_prenex second post)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       middle second exit)
-    (second_result : @footprinted_normalization_result Γ F Δ cost
+    (second_result : @footprinted_normalization_result Γ F Δ
       middle exit middle_prenex post second second_derivation
       second_certificate)
     (view : RegionSyntax.view (TSeq first second) =
-      TypedAnalysisView.ViewSequence first second) :
+      AnalysisView.ViewSequence first second) :
   let source := TSeq first second in
   let source_derivation := RavenHoareRules.RTSeq pre middle_prenex post
     first second first_derivation second_derivation in
-  let source_certificate := GenericRegions.Atomicity.CertSequence cost Γ
+  let source_certificate := GenericRegions.Atomicity.CertSequence Γ
     entry source first middle second exit view first_certificate
       second_certificate in
-  @footprinted_normalization_result Γ F Δ cost entry exit pre post
+  @footprinted_normalization_result Γ F Δ entry exit pre post
     source source_derivation source_certificate.
 Proof.
   simpl.
@@ -1476,30 +1470,30 @@ Proof.
 Defined.
 
 Lemma footprinted_normalization_sequence_from_worker
-    {Γ F Δ cost entry middle exit}
+    {Γ F Δ entry middle exit}
     {pre middle_prenex post : Resource.resource_prenex Γ F Δ}
     {first second normalized_first normalized_second normalized : stmt Γ}
     (first_derivation :
       RavenHoareRules.RavenHoareTriple pre first middle_prenex)
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry first middle)
-    (first_result : @footprinted_normalization_result Γ F Δ cost
+    (first_result : @footprinted_normalization_result Γ F Δ
       entry middle pre middle_prenex first first_derivation first_certificate)
     (Hfirst_result : normalized_statement
       first_result.(footprinted_normalization) = normalized_first)
     (second_derivation :
       RavenHoareRules.RavenHoareTriple middle_prenex second post)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       middle second exit)
-    (second_result : @footprinted_normalization_result Γ F Δ cost
+    (second_result : @footprinted_normalization_result Γ F Δ
       middle exit middle_prenex post second second_derivation
       second_certificate)
     (Hsecond_result : normalized_statement
       second_result.(footprinted_normalization) = normalized_second)
     (view : RegionSyntax.view (TSeq first second) =
-      TypedAnalysisView.ViewSequence first second)
+      AnalysisView.ViewSequence first second)
     (Hnot_unfold : match RegionSyntax.view first with
-      | TypedAnalysisView.ViewUnfold _ => False
+      | AnalysisView.ViewUnfold _ => False
       | _ => True
       end)
     fuel
@@ -1509,11 +1503,11 @@ Lemma footprinted_normalization_sequence_from_worker
       Some normalized_second)
     (Hworker : restricted_normalize_statement_fuel (S fuel)
       (TSeq first second) = Some normalized) :
-  exists result : @footprinted_normalization_result Γ F Δ cost entry
+  exists result : @footprinted_normalization_result Γ F Δ entry
       exit pre post (TSeq first second)
       (RavenHoareRules.RTSeq pre middle_prenex post first second
         first_derivation second_derivation)
-      (GenericRegions.Atomicity.CertSequence cost Γ entry
+      (GenericRegions.Atomicity.CertSequence Γ entry
         (TSeq first second) first middle second exit view
         first_certificate second_certificate),
     normalized_statement
@@ -1530,7 +1524,7 @@ Proof.
 Qed.
 
 Definition footprinted_normalization_conditional
-    {Γ F Δ cost entry then_exit else_exit}
+    {Γ F Δ entry then_exit else_exit}
     {store : symbolic_store Γ F Δ} {body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ}
     {condition} {then_branch else_branch : stmt Γ}
@@ -1538,9 +1532,9 @@ Definition footprinted_normalization_conditional
       (Resource.RState store
         (Resource.CAnd body (Resource.CExpr (IR.symbolize_expr store condition))))
       then_branch post)
-    (then_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry then_branch then_exit)
-    (then_result : @footprinted_normalization_result Γ F Δ cost entry
+    (then_result : @footprinted_normalization_result Γ F Δ entry
       then_exit _ post then_branch then_derivation then_certificate)
     (else_derivation : RavenHoareRules.RavenHoareTriple
       (Resource.RState store
@@ -1548,16 +1542,16 @@ Definition footprinted_normalization_conditional
           (Resource.CExpr (Core.EUnOp Core.UNot
             (IR.symbolize_expr store condition)))))
       else_branch post)
-    (else_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry else_branch else_exit)
-    (else_result : @footprinted_normalization_result Γ F Δ cost entry
+    (else_result : @footprinted_normalization_result Γ F Δ entry
       else_exit _ post else_branch else_derivation else_certificate)
     (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
       GenericRegions.Atomicity.analysis_open else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
-      TypedAnalysisView.ViewConditional then_branch else_branch) :
+      AnalysisView.ViewConditional then_branch else_branch) :
   let source := TIf condition then_branch else_branch in
   let joined := GenericRegions.Atomicity.AnalysisState
     (GenericRegions.Atomicity.analysis_mask then_exit ∩
@@ -1568,10 +1562,10 @@ Definition footprinted_normalization_conditional
     (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
   let source_derivation := RavenHoareRules.RTIf store body condition
     then_branch else_branch post then_derivation else_derivation in
-  let source_certificate := GenericRegions.Atomicity.CertConditional cost Γ
+  let source_certificate := GenericRegions.Atomicity.CertConditional Γ
     entry source then_branch else_branch then_exit else_exit view
       then_certificate else_certificate open_equal atomic_equal in
-  @footprinted_normalization_result Γ F Δ cost entry joined
+  @footprinted_normalization_result Γ F Δ entry joined
     (Resource.RState store body) post source source_derivation
     source_certificate.
 Proof.
@@ -1596,7 +1590,7 @@ Defined.
 
 
 Lemma footprinted_normalization_conditional_from_worker
-    {Γ F Δ cost entry then_exit else_exit}
+    {Γ F Δ entry then_exit else_exit}
     {store : symbolic_store Γ F Δ} {body : Resource.core_assertion F Δ}
     {post : Resource.resource_prenex Γ F Δ}
     {condition} {then_branch else_branch normalized_then normalized_else
@@ -1605,9 +1599,9 @@ Lemma footprinted_normalization_conditional_from_worker
       (Resource.RState store
         (Resource.CAnd body (Resource.CExpr (IR.symbolize_expr store condition))))
       then_branch post)
-    (then_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry then_branch then_exit)
-    (then_result : @footprinted_normalization_result Γ F Δ cost entry
+    (then_result : @footprinted_normalization_result Γ F Δ entry
       then_exit _ post then_branch then_derivation then_certificate)
     (Hthen_result : normalized_statement
       then_result.(footprinted_normalization) = normalized_then)
@@ -1617,9 +1611,9 @@ Lemma footprinted_normalization_conditional_from_worker
           (Resource.CExpr (Core.EUnOp Core.UNot
             (IR.symbolize_expr store condition)))))
       else_branch post)
-    (else_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry else_branch else_exit)
-    (else_result : @footprinted_normalization_result Γ F Δ cost entry
+    (else_result : @footprinted_normalization_result Γ F Δ entry
       else_exit _ post else_branch else_derivation else_certificate)
     (Helse_result : normalized_statement
       else_result.(footprinted_normalization) = normalized_else)
@@ -1628,7 +1622,7 @@ Lemma footprinted_normalization_conditional_from_worker
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
-      TypedAnalysisView.ViewConditional then_branch else_branch)
+      AnalysisView.ViewConditional then_branch else_branch)
     fuel
     (Hthen_worker : restricted_normalize_statement_fuel fuel then_branch =
       Some normalized_then)
@@ -1636,11 +1630,11 @@ Lemma footprinted_normalization_conditional_from_worker
       Some normalized_else)
     (Hworker : restricted_normalize_statement_fuel (S fuel)
       (TIf condition then_branch else_branch) = Some normalized) :
-  exists result : @footprinted_normalization_result Γ F Δ cost entry
+  exists result : @footprinted_normalization_result Γ F Δ entry
       _ _ post (TIf condition then_branch else_branch)
       (RavenHoareRules.RTIf store body condition then_branch else_branch
         post then_derivation else_derivation)
-      (GenericRegions.Atomicity.CertConditional cost Γ entry
+      (GenericRegions.Atomicity.CertConditional Γ entry
         (TIf condition then_branch else_branch) then_branch else_branch
         then_exit else_exit view then_certificate else_certificate
         open_equal atomic_equal),
@@ -1663,16 +1657,16 @@ Qed.
     since [certificate_footprint] always contains the masks and open sets
     at its two ends. *)
 Definition footprinted_normalization_close_one_marker_target
-    {Γ F Δ cost entry opened inner}
+    {Γ F Δ entry opened inner}
     {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source (GenericRegions.Atomicity.fold_invariant invariant inner))
     (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
       inr opened)
-    (Hbody_certificate : structured_certificate cost Γ opened body inner)
+    (Hbody_certificate : structured_certificate Γ opened body inner)
     (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
       GenericRegions.Atomicity.analysis_open opened)
     (Htarget : RavenHoareRules.RavenHoareTriple pre
@@ -1684,7 +1678,7 @@ Definition footprinted_normalization_close_one_marker_target
       GenericRegions.Atomicity.certificate_footprint source_certificate)
     (Hbody_safe : GenericRegions.Atomicity.analysis_in_atomic opened = false ->
       structured_accesses_outside_atomic Hbody_certificate) :
-  @footprinted_normalization_result Γ F Δ cost entry
+  @footprinted_normalization_result Γ F Δ entry
     (GenericRegions.Atomicity.fold_invariant invariant inner)
     pre post source source_derivation source_certificate.
 Proof.
@@ -1720,7 +1714,7 @@ Defined.
 Lemma raw_access_target : forall
     {Γ F Δ}
     (invariant : inv_id)
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) (pre post : Resource.resource_prenex Γ F Δ),
   pexpr_list_dependencies arguments ## statement_writes body ->
   RavenHoareRules.RavenHoareTriple pre
@@ -1783,7 +1777,7 @@ Proof.
 Qed.
 
 Lemma baseline_normalizable_unfold_absurd {Γ} invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant)) :
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant)) :
   baseline_normalizable (TUnfold invariant arguments) -> False.
 Proof. intro H. inversion H; cbn in *; contradiction. Qed.
 
@@ -1813,7 +1807,7 @@ Qed.
 
 Lemma restricted_normalize_terminal_access_inv {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body normalized : stmt Γ) :
   restricted_normalize_statement_fuel fuel
     (TSeq (TUnfold invariant arguments)
@@ -1839,7 +1833,7 @@ Qed.
 
 Lemma restricted_normalize_continued_access_inv {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Logic.invariant_args invariant))
+    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized : stmt Γ) :
   restricted_normalize_statement_fuel fuel
     (TSeq (TUnfold invariant arguments)
@@ -1870,22 +1864,22 @@ Proof.
 Qed.
 
 Lemma conditional_normalization_complete_from_worker
-    {Γ F Δ cost entry exit condition then_branch else_branch}
+    {Γ F Δ entry exit condition then_branch else_branch}
     {pre post : Resource.resource_prenex Γ F Δ}
     (derivation : RavenHoareRules.RavenHoareTriple pre
       (TIf condition then_branch else_branch) post)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ entry
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ entry
       (TIf condition then_branch else_branch) exit)
     (Hthen : forall F0 Δ0 then_exit
       (then_pre then_post : Resource.resource_prenex Γ F0 Δ0)
       (then_derivation : RavenHoareRules.RavenHoareTriple then_pre
         then_branch then_post)
-      (then_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+      (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry then_branch then_exit),
       GenericRegions.Atomicity.lifo_certificate then_certificate [] [] ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel then_branch = Some normalized ->
-      exists result : @footprinted_normalization_result Γ F0 Δ0 cost
+      exists result : @footprinted_normalization_result Γ F0 Δ0
           entry then_exit then_pre then_post then_branch then_derivation
           then_certificate,
         normalized_statement
@@ -1894,12 +1888,12 @@ Lemma conditional_normalization_complete_from_worker
       (else_pre else_post : Resource.resource_prenex Γ F0 Δ0)
       (else_derivation : RavenHoareRules.RavenHoareTriple else_pre
         else_branch else_post)
-      (else_certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+      (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry else_branch else_exit),
       GenericRegions.Atomicity.lifo_certificate else_certificate [] [] ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel else_branch = Some normalized ->
-      exists result : @footprinted_normalization_result Γ F0 Δ0 cost
+      exists result : @footprinted_normalization_result Γ F0 Δ0
           entry else_exit else_pre else_post else_branch else_derivation
           else_certificate,
         normalized_statement
@@ -1908,7 +1902,7 @@ Lemma conditional_normalization_complete_from_worker
   forall fuel normalized,
   restricted_normalize_statement_fuel fuel
     (TIf condition then_branch else_branch) = Some normalized ->
-  exists result : @footprinted_normalization_result Γ F Δ cost
+  exists result : @footprinted_normalization_result Γ F Δ
       entry exit pre post (TIf condition then_branch else_branch)
       derivation certificate,
     normalized_statement
@@ -1917,7 +1911,8 @@ Proof.
   destruct (certificate_aligned_complete_exists Δ pre post
     (TIf condition then_branch else_branch) derivation entry exit
     certificate) as (aligned & _).
-  dependent induction aligned; try discriminate.
+  dependent induction aligned generalizing condition then_branch else_branch
+    derivation certificate Hthen Helse; try discriminate.
   all: intros Hlifo fuel normalized Hworker.
   - destruct Hlifo as [Hthen_lifo Helse_lifo].
     destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
@@ -1983,20 +1978,20 @@ Qed.
     wrappers do not become a second executable normalizer. *)
 Lemma baseline_normalization_complete_from_worker
     {Γ} (source : stmt Γ) (Hbaseline : baseline_normalizable source) :
-  forall F Δ cost entry exit
+  forall F Δ entry exit
     (pre post : Resource.resource_prenex Γ F Δ)
     (derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (certificate : GenericRegions.Atomicity.analysis_certificate cost Γ
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit),
   GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
   forall fuel normalized,
   restricted_normalize_statement_fuel fuel source = Some normalized ->
-  exists result : @footprinted_normalization_result Γ F Δ cost
+  exists result : @footprinted_normalization_result Γ F Δ
       entry exit pre post source derivation certificate,
     normalized_statement
       result.(footprinted_normalization) = normalized.
 Proof.
-  induction Hbaseline; intros F Δ cost entry exit pre post derivation
+  induction Hbaseline; intros F Δ entry exit pre post derivation
     certificate Hlifo fuel normalized Hworker.
   - pose (balanced := unfold_free_balanced_structured_result certificate []
       u Hlifo).
@@ -2039,7 +2034,7 @@ Proof.
            first_balanced.(balanced_structured_footprint);
          footprinted_normalization_safe :=
            fun _ => first_balanced.(balanced_structured_safe) |}).
-    destruct (IHHbaseline F Δ cost middle exit middle_assertion post Hsecond
+    destruct (IHHbaseline F Δ middle exit middle_assertion post Hsecond
       certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
@@ -2054,7 +2049,7 @@ Proof.
     destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
       derivation) as (middle_assertion & Hfirst & Hsecond).
     destruct Hlifo as (middle_stack & Hfirst_lifo & Hsecond_lifo).
-    pose proof (baseline_normalizable_empty_output first0 Hbaseline1 cost
+    pose proof (baseline_normalizable_empty_output first0 Hbaseline1
       state middle certificate1 middle_stack Hfirst_lifo) as Hmiddle_stack.
     subst middle_stack.
     destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
@@ -2063,10 +2058,10 @@ Proof.
       second0 normalized Hbaseline1 Hworker)
       as (normalized_first & normalized_second & Hfirst_worker &
         Hsecond_worker & ->).
-    destruct (IHHbaseline1 F Δ cost state middle pre middle_assertion Hfirst
+    destruct (IHHbaseline1 F Δ state middle pre middle_assertion Hfirst
       certificate1 Hfirst_lifo fuel normalized_first Hfirst_worker)
       as (first_result & Hfirst_result).
-    destruct (IHHbaseline2 F Δ cost middle exit middle_assertion post Hsecond
+    destruct (IHHbaseline2 F Δ middle exit middle_assertion post Hsecond
       certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
@@ -2086,16 +2081,16 @@ Proof.
       eapply IHHbaseline2; eassumption.
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & _ & Htail).
     destruct Htail as (body_stack & Hbody_lifo & Hfold_lifo).
@@ -2113,8 +2108,7 @@ Proof.
       first pre post d
       derivation).
     match goal with
-    | |- exists _ : @footprinted_normalization_result _ _ _ _ _ _
-          _ _ _ _ ?sc, _ =>
+    | |- exists _ : footprinted_normalization_result _ _ _ _ _ _ ?sc, _ =>
         pose (source_certificate := sc)
     end.
     pose (result := footprinted_normalization_close_one_marker_target
@@ -2136,23 +2130,23 @@ Proof.
       normalization_close_one_marker_target]. reflexivity.
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : RegionSyntax.view (TUnfold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : RegionSyntax.view (TSeq _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     match goal with
     | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ _ (TFold _ _) _ |- _ =>
+        _ _ (TFold _ _) _ |- _ =>
         dependent destruction Hfold_certificate
     end; try discriminate.
-    match goal with Hview : RegionSyntax.view (TFold _ _) = _ |- _ =>
+    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
       cbn in Hview; inversion Hview; subst end.
     destruct Hlifo as (opened_stack & Hopen_lifo & Htail).
     destruct Htail as (body_stack & Hbody_lifo & Hfold_work).
@@ -2179,7 +2173,7 @@ Proof.
         Htail_derivation) as (opened_post & Hbody & Hfold_work_derivation).
       destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
         Hfold_work_derivation) as (closed_assertion & Hfold & Hwork).
-      destruct (IHHbaseline F Δ cost
+      destruct (IHHbaseline F Δ
         (GenericRegions.Atomicity.fold_invariant invariant state1) exit
         closed_assertion post Hwork certificate2_2_2 Hwork_lifo remaining
         normalized_work Hwork_worker) as (work_result & Hwork_result).
@@ -2198,12 +2192,11 @@ Proof.
         [(invariant, GenericRegions.Atomicity.analysis_open state)]
         (restricted_access_neutral_unfold_free first a) Hbody_lifo).
       match goal with
-      | |- exists _ : @footprinted_normalization_result _ _ _ _ _ _
-            _ _ _ _ ?sc, _ => pose (source_certificate := sc)
+      | |- exists _ : footprinted_normalization_result _ _ _ _ _ _ ?sc, _ => pose (source_certificate := sc)
       end.
       subst normalized_work.
       change (exists result : @footprinted_normalization_result
-        Γ F Δ cost state exit pre post
+        Γ F Δ state exit pre post
         (TSeq (TUnfold invariant opening_arguments)
           (TSeq first
             (TSeq
@@ -2238,8 +2231,8 @@ Qed.
     supplies both the syntax induction witness and the worker result; the
     analyzer certificate supplies the balanced empty access stack. *)
 Lemma analyzed_normalization_exists
-    {cost Γ F Δ pre source entry exit post}
-    (analyzed : @analyzed_triple cost Γ F Δ pre source entry exit
+    {Γ F Δ pre source entry exit post}
+    (analyzed : @analyzed_triple Γ F Δ pre source entry exit
       post)
     (Hentry : GenericRegions.Atomicity.analysis_open entry = ∅) :
   restricted_footprinted_normalization_exists
@@ -2249,13 +2242,13 @@ Proof.
   pose proof (restricted_fragment_check_sound source
     (analyzed_restricted analyzed)) as Hbaseline.
   pose proof (proj1 (baseline_normalizable_closed_lifo source Hbaseline
-    cost entry exit (analyzed_certificate analyzed) Hentry)) as Hlifo.
+    entry exit (analyzed_certificate analyzed) Hentry)) as Hlifo.
   destruct (analyzed_worker_succeeds analyzed)
     as (normalized & Hworker).
   unfold restricted_analyze_and_normalize in Hworker.
   rewrite (analyzed_restricted analyzed) in Hworker.
   destruct (baseline_normalization_complete_from_worker source
-    Hbaseline F Δ cost entry exit pre post
+    Hbaseline F Δ entry exit pre post
     (analyzed_hoare analyzed)
     (analyzed_certificate analyzed) Hlifo
     (S (normalization_statement_size source)) normalized Hworker)
@@ -2269,6 +2262,6 @@ Qed.
     depth and the budget never decides anything. *)
 
 
+End WithContracts.
 End ConditionalNormalizationPrefix.
-End Make.
-End TypedNormalizationConditional.
+End NormalizationConditional.
