@@ -2,8 +2,7 @@ From Coq Require Import List PArith Program.Equality ProofIrrelevance
   Logic.FunctionalExtensionality String ZArith Lia.
 From stdpp Require Import gmap sets.
 
-From raven_iris.rich_raven_lang Require Import typed_core typed_assertion
-  typed_resource typed_ir.
+From raven Require Import verification.expressions verification.assertions verification.resources verification.ir.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -26,7 +25,7 @@ Open Scope list_scope.
         common output resource assertion, and the monotonic counter needs
         no join (measured: zero cases).
 
-    This module sits between [typed_ir] and [typed_hoare] in the chain, so
+    This module sits between [ir] and [procedures] in the chain, so
     the old and new calculi share one instance of the substrate while both
     exist. *)
 

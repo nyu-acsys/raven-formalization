@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invariant access, ghost updates, trusted atomic blocks, and analyzed-program
   packaging.
 - Raven-like surface notation for the typed verification language.
+- A Dune build with focused `@soundness` and `@examples` aliases.
 
 ### Changed
 
@@ -56,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with redundant resource-specific qualifiers removed from its public names.
 - Runtime-model modules and aliases use `Runtime*` terminology consistently;
   “legacy” is reserved for genuinely historical code.
+- The development now lives under the single `raven` logical root, organized
+  into surface, verification, analysis, runtime, soundness, and example
+  namespaces.
 
 ### Removed
 
@@ -78,6 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   obligations.
 - Unused continuation-executor records left behind by the earlier soundness
   architecture.
+- Dead module-level semantic interfaces superseded by the live term-level
+  records and sections.
+- The `_CoqProject`/generated-Makefile build path, superseded by Dune.
 
 ### Fixed
 

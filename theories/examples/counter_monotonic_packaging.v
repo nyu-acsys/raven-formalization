@@ -2,15 +2,14 @@ From Coq Require Import List Program.Equality ClassicalEpsilon.
 From stdpp Require Import sets.
 From iris.base_logic.lib Require Import iprop invariants fancy_updates.
 From iris.proofmode Require Import proofmode.
-From raven_iris.rich_raven_lang Require Import typed_core
-  typed_counter_monotonic.
+From raven Require Import verification.expressions examples.counter_monotonic.
 
 Import ListNotations.
 Open Scope list_scope.
 
 (** Downstream normalization-readiness and final program-packaging layer for
     the typed monotonic-counter example.  The expensive runtime, normalization,
-    and soundness functors are instantiated once by [typed_counter_monotonic]
+    and soundness functors are instantiated once by [counter_monotonic]
     and are only imported here. *)
 Module TypedCounterMonotonicPackaging.
 

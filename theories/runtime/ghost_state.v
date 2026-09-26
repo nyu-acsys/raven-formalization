@@ -7,7 +7,7 @@ From iris.bi Require Import fractional.
 From iris.base_logic Require Export lib.own.
 From iris.base_logic.lib Require Import ghost_map.
 From iris.proofmode Require Export tactics.
-From raven_iris.simp_raven_lang Require Import ra_base lang.
+From raven Require Import runtime.ra_base runtime.lang.
 
 From iris.base_logic Require Import iprop.
 From iris.proofmode Require Import proofmode.
@@ -16,7 +16,7 @@ Set Default Proof Using "Type".
 Import uPred.
 
 Module Make (RAs : RA_CONFIG).
-Module lang := raven_iris.simp_raven_lang.lang.Make RAs.
+Module lang := raven.runtime.lang.Make RAs.
 Import lang.
 
 Inductive stackvar_addr :=
@@ -49,7 +49,7 @@ Definition stackUR :=
    freshly-allocated location's ghost keys were never claimed before -- via
    plain exclusivity here -- without
    needing to know anything about RAs, Γ, or ghost values at all (those
-   stay entirely at the rich_raven_lang layer). *)
+   stay entirely in the verification layer). *)
 Definition ghost_domUR : ucmra :=
   gmapUR heap_addr (exclR unitO).
 

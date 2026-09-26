@@ -2,7 +2,7 @@ From stdpp Require Export strings.
 From stdpp Require Import gmap list sets countable.
 Require Import Eqdep_dec.
 From iris.program_logic Require Export language ectx_language ectxi_language.
-From raven_iris.simp_raven_lang Require Export ra_base.
+From raven Require Export runtime.ra_base.
 
 Inductive bin_op : Set :=
 | AddOp | SubOp | MulOp | DivOp | ModOp

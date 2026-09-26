@@ -6,10 +6,8 @@ From iris.algebra Require Import auth gset.
 From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants ghost_map.
 
-From raven_iris.simp_raven_lang Require Import lang ghost_state inv_tokens.
-From raven_iris.rich_raven_lang Require Import
-  typed_core typed_analysis_view typed_assertion typed_ir
-  typed_translation typed_validity typed_region.
+From raven Require Import runtime.lang runtime.ghost_state runtime.invariant_tokens.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics.
 
 Import ListNotations.
 Import weakestpre.
@@ -258,7 +256,7 @@ Qed.
 End StructuredCertificates.
 
 (** Canonical pairing used by certified-region soundness.  Unlike the generic
-    pairing in [typed_region], every component below refers to this runtime's
+    pairing in [certificate_semantics], every component below refers to this runtime's
     single non-generative IR instance.  The explicit LIFO boundary stacks let
     the semantic induction split sequences without losing an accessor that
     was opened by the first component and is closed by the second. *)

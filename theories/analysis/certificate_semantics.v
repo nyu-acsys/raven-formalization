@@ -1,7 +1,6 @@
 From iris.proofmode Require Import tactics.
 
-From raven_iris.rich_raven_lang Require Import
-  typed_core typed_analysis_view typed_assertion typed_ir typed_translation.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation.
 
 (** Continuation semantics for certificates emitted by the flat atomicity
     analyzer.  An unfold wraps the complete remaining continuation, so its
@@ -28,15 +27,9 @@ Proof.
   apply Atomicity.analysis_certificate_unique.
 Qed.
 
-Module Type REGION_MODEL.
-  Parameter PROP : bi.
-  Parameter stack_context : context -> Type.
-  Parameter ambient_mask : Type.
-End REGION_MODEL.
-
-(** Term-level counterpart of [REGION_MODEL].  A value of this record can be
-    assembled after an adequacy proof has allocated the runtime ghost names,
-    unlike a module-functor argument. *)
+(** The region model, as a term.  A value of this record can be assembled
+    after an adequacy proof has allocated the runtime ghost names, unlike a
+    module-functor argument. *)
 Record region_model_data (PROP : bi) : Type := RegionModelData {
   term_region_stack_context : context -> Type;
   term_region_ambient_mask : Type;
@@ -45,8 +38,7 @@ Record region_model_data (PROP : bi) : Type := RegionModelData {
 Arguments term_region_stack_context {_} _ _.
 Arguments term_region_ambient_mask {_} _.
 
-(** Term-level generic-region semantics.  This exactly mirrors the module
-    interface [Semantics] below, but all semantic dependencies are explicit
+(** Generic-region semantics, with all semantic dependencies explicit
     values. *)
 Module TermSemantics.
 Section WithModel.
@@ -187,32 +179,6 @@ Definition interpreter : interpreter_data := {|
 End WithModel.
 End TermSemantics.
 
-Module Semantics (Model : REGION_MODEL).
-Local Notation iProp := (bi_car Model.PROP).
-
-Module Type REGION_PRIMITIVES.
-  Parameter operation_wp : forall Γ, Model.stack_context Γ -> Model.ambient_mask ->
-    analysis_state -> Syntax.statement Γ -> analysis_state -> iProp -> iProp.
-  Parameter branch_wp : forall Γ, Model.stack_context Γ -> Model.ambient_mask ->
-    analysis_state -> Syntax.statement Γ -> analysis_state -> analysis_state ->
-    iProp -> iProp -> iProp.
-  Parameter operation_mono : forall Γ runtime ambient entry statement exit P Q,
-    (P ⊢ Q) -> operation_wp Γ runtime ambient entry statement exit P ⊢
-      operation_wp Γ runtime ambient entry statement exit Q.
-  Parameter operation_frame : forall Γ runtime ambient entry statement exit P R,
-    operation_wp Γ runtime ambient entry statement exit P ∗ R ⊢
-      operation_wp Γ runtime ambient entry statement exit (P ∗ R).
-  Parameter branch_mono : forall Γ runtime ambient entry statement then_exit else_exit
-      P P' Q Q',
-    (P ⊢ P') -> (Q ⊢ Q') ->
-    branch_wp Γ runtime ambient entry statement then_exit else_exit P Q ⊢
-      branch_wp Γ runtime ambient entry statement then_exit else_exit P' Q'.
-  Parameter branch_frame : forall Γ runtime ambient entry statement then_exit else_exit
-      P Q R,
-    branch_wp Γ runtime ambient entry statement then_exit else_exit P Q ∗ R ⊢
-      branch_wp Γ runtime ambient entry statement then_exit else_exit (P ∗ R) (Q ∗ R).
-End REGION_PRIMITIVES.
-End Semantics.
 End Generic.
 
 End TypedRegion.

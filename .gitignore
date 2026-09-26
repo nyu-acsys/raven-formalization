@@ -55,3 +55,6 @@ local/
 
 # rocq-mcp scratch files
 rocq_mcp_cache_*.v
+
+# Dune build directory
+_build/

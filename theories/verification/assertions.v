@@ -1,7 +1,7 @@
 From Coq Require Import List PArith Program.Equality ProofIrrelevance
   Logic.FunctionalExtensionality String ZArith Lia.
 
-From raven_iris.rich_raven_lang Require Import typed_core.
+From raven Require Import verification.expressions.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -1500,7 +1500,7 @@ Qed.
 (** ** Structural entailment on assertions
 
     Moved here from [TypedHoare]: these rules mention only the assertion
-    grammar, which the Hoare calculus of [typed_resource_hoare.v]
+    grammar, which the Hoare calculus of [hoare_rules.v]
     needs. *)
 
 

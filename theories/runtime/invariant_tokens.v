@@ -8,8 +8,8 @@ From iris.algebra Require Import ofe cmra agree auth gset gmap.
 From iris.base_logic.lib Require Export own.
 From iris.base_logic.lib Require Import invariants.
 
-From raven_iris.simp_raven_lang Require Export lang lifting ghost_state.
-From raven_iris.simp_raven_lang Require Import ghost_state.
+From raven Require Export runtime.lang runtime.lifting runtime.ghost_state.
+From raven Require Import runtime.ghost_state.
 
 (** Ghost state for Raven's nominal invariant assertions, and the capability
     bundle an adequacy wrapper needs in order to allocate it.
@@ -21,7 +21,7 @@ From raven_iris.simp_raven_lang Require Import ghost_state.
 Module InvTokens.
 
 Module Make (RAs : RA_CONFIG).
-Module lifting := raven_iris.simp_raven_lang.lifting.Make RAs.
+Module lifting := raven.runtime.lifting.Make RAs.
 Module ghost_state := lifting.ghost_state.
 Module lang := ghost_state.lang.
 Import lang ghost_state lifting.

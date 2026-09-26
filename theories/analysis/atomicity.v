@@ -1,7 +1,7 @@
 From Coq Require Import Bool Lia Program.Equality ProofIrrelevance.
 From stdpp Require Import gmap.
 
-From raven_iris.rich_raven_lang Require Import typed_core.
+From raven Require Import verification.expressions.
 
 (** A small, non-generative boundary between an intrinsically typed statement
     family and the atomicity analyzer.  The analyzer never needs the payload

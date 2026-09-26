@@ -3,7 +3,7 @@ From iris.program_logic Require Export weakestpre.
 From iris.proofmode Require Import tactics.
 From iris.program_logic Require Import ectx_lifting.
 From iris Require Import options.
-From raven_iris.simp_raven_lang Require Import lang ghost_state.
+From raven Require Import runtime.lang runtime.ghost_state.
 From stdpp Require Import gmap list fin_maps.
 Import uPred.
 Import weakestpre.
@@ -11,7 +11,7 @@ Import weakestpre.
 From stdpp Require Import countable.
 
 Module Make (RAs : RA_CONFIG).
-Module ghost_state := raven_iris.simp_raven_lang.ghost_state.Make RAs.
+Module ghost_state := raven.runtime.ghost_state.Make RAs.
 Module lang := ghost_state.lang.
 Import lang ghost_state.
 

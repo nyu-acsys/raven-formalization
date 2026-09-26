@@ -1,8 +1,7 @@
 From Coq Require Import List String ZArith PArith Program.Equality
   ProofIrrelevance Lia.
 
-From raven_iris.rich_raven_lang Require Import
-  surface_syntax typed_core typed_assertion typed_resource.
+From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -1106,7 +1105,7 @@ Proof. destruct result; [destruct succeeded | reflexivity]. Qed.
     These mediate between program expressions and the logical expression
     language, so they belong with the store rather than with any one Hoare
     calculus.  They were in [TypedHoare.Make], which put them out of reach
-    of the resource calculus of [typed_resource_hoare.v]. *)
+    of the resource calculus of [hoare_rules.v]. *)
 
 Fixpoint symbolize_expr {Γ F Δ t} (store : symbolic_store Γ F Δ)
     (expression : pexpr Γ t) : expr F Δ t :=

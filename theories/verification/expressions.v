@@ -2,7 +2,7 @@ From Coq Require Import String ZArith List PArith Program.Equality
   Logic.FunctionalExtensionality.
 From stdpp Require Import base countable.
 
-From raven_iris.rich_raven_lang Require Import surface_syntax.
+From raven Require Import surface.syntax.
 
 Import ListNotations.
 Open Scope list_scope.

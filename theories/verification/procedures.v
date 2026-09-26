@@ -2,8 +2,7 @@ From Coq Require Import List Program.Equality ZArith Lia
   Logic.ProofIrrelevance Logic.FunctionalExtensionality.
 From stdpp Require Import gmap sets.
 
-From raven_iris.rich_raven_lang Require Import
-  typed_core typed_assertion typed_ir typed_resource_hoare.
+From raven Require Import verification.expressions verification.assertions verification.ir verification.hoare_rules.
 
 Import ListNotations.
 Open Scope list_scope.

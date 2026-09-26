@@ -1,14 +1,14 @@
 From Coq Require Import List PArith Program.Equality ProofIrrelevance
   Logic.FunctionalExtensionality String ZArith Lia.
 
-From raven_iris.rich_raven_lang Require Import typed_core typed_assertion.
+From raven Require Import verification.expressions verification.assertions.
 
 Import ListNotations.
 Open Scope list_scope.
 
 (** * Resource states: an explicit symbolic stack beside a stack-free core
 
-    The assertion grammar of [typed_assertion.v] allows [AStack] below
+    The assertion grammar of [assertions.v] allows [AStack] below
     conjunctions, conditionals and quantifiers, even though the logic
     intends stack ownership to be exclusive and every useful resource
     triple to carry exactly one symbolic stack.  Here that intent becomes a
@@ -24,7 +24,7 @@ Open Scope list_scope.
 
     - [reindex_stack_context] has no counterpart: there is no [Γ] to move.
     - [subst_bound_core] and [subst_formals_core] are TOTAL.  Their
-      counterparts [subst_bound_assertion] (typed_assertion.v) and
+      counterparts [subst_bound_assertion] (assertions.v) and
       [subst_formals_assertion] are [option]-valued, and in both the
       [AStack] branch is the sole source of [None].
     - Contract bodies stop carrying a phantom stack context.
@@ -346,7 +346,7 @@ Fixpoint subst_bound_core {F Δ Δ'} (substitution : bound_subst F Δ Δ')
   end.
 
 (** Instantiating the head binder at an arbitrary expression witness.
-    Total, where [instantiate_bound_assertion] (typed_assertion.v) is
+    Total, where [instantiate_bound_assertion] (assertions.v) is
     [option]-valued. *)
 Definition instantiate_bound_core {F Δ t} (witness : expr F Δ t)
     (body : core_assertion F (t :: Δ)) : core_assertion F Δ :=
@@ -496,7 +496,7 @@ Fixpoint normalize_resource_prenex {Γ F Δ}
 
 (** The two missing expression-list laws.  Their scalar counterparts are
     [subst_formals_expr_identity] and [subst_formals_expr_compose] in
-    typed_assertion.v; the list versions are needed here for [CInvariant]
+    assertions.v; the list versions are needed here for [CInvariant]
     and [CPredicate] argument vectors. *)
 Lemma subst_formals_expr_list_identity {F Δ ts}
     (expressions : expr_list F Δ ts) :

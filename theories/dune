@@ -1,0 +1,24 @@
+; The whole development is one theory, [raven], with one qualified
+; sub-namespace per directory (raven.runtime, raven.verification, ...).
+; Library boundaries inside it are decided after the functor hierarchy is
+; flattened (Phase O of the cleanup plan).
+
+(include_subdirs qualified)
+
+(coq.theory
+ (name raven)
+ (theories stdpp iris Ltac2)
+ (flags :standard -w -redundant-canonical-projection))
+
+; [dune build @soundness]: the generic development up to the library
+; soundness theorem, without examples.
+(rule
+ (alias soundness)
+ (deps soundness/soundness.vo)
+ (action (progn)))
+
+; [dune build @examples]: the verified examples (and everything they need).
+(rule
+ (alias examples)
+ (deps examples/counter_monotonic_packaging.vo)
+ (action (progn)))

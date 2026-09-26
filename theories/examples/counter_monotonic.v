@@ -2,9 +2,7 @@ From Coq Require Import Ascii ClassicalEpsilon List String ZArith
   Program.Equality.
 From stdpp Require Import namespaces sets.
 
-From raven_iris.rich_raven_lang Require Import
-  mono_nat_ra surface_syntax typed_core typed_assertion typed_ir
-  typed_hoare typed_runtime_certified.
+From raven Require Import examples.mono_nat_ra surface.syntax verification.expressions verification.assertions verification.ir verification.procedures soundness.soundness.
 
 Import ListNotations.
 Open Scope list_scope.

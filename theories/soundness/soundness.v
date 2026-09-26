@@ -5,10 +5,8 @@ From iris.algebra Require Import auth gset.
 From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants.
 
-From raven_iris.simp_raven_lang Require Import lang ghost_state.
-From raven_iris.rich_raven_lang Require Import
-  typed_core typed_analysis_view typed_assertion typed_ir typed_translation
-  typed_validity typed_region typed_runtime typed_normalization_conditional.
+From raven Require Import runtime.lang runtime.ghost_state.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics soundness.runtime_model analysis.normalization.
 
 Import ListNotations.
 Import weakestpre.

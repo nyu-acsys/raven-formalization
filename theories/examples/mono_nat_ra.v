@@ -7,7 +7,7 @@
    leave the default build) so that the redesigned counter examples do not
    have to import it just to get this resource algebra. *)
 From stdpp Require Import gmap namespaces.
-From raven_iris.simp_raven_lang Require Import ra_base.
+From raven Require Import runtime.ra_base.
 
 (* ----------------------------------------------------------------------- *)
 (* The resource algebra: a plain monotone nat -- comp/frame is max, and a
