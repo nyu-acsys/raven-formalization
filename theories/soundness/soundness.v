@@ -1342,9 +1342,9 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
       (Translation.Assertions.weaken_expr_list
         (IR.symbolize_expr_list store arguments))
       (ERef (RefBound MHere)) contract_post ->
-    ResourceContracts.required_mask procedure ⊆ current_mask ->
+    Certified.required_mask procedure ⊆ current_mask ->
     procedure_leaf_obligation current_mask
-      (current_mask ∪ ResourceContracts.granted_mask procedure)
+      (current_mask ∪ Certified.granted_mask procedure)
       (Translation.Resource.RState store contract_pre)
       (TCall procedure arguments (@CTDiscard Γ (Logic.procedure_return procedure)))
       (Translation.Resource.ResourceExists (Logic.procedure_return procedure)
@@ -1360,9 +1360,9 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
       (Translation.Assertions.weaken_expr_list
         (IR.symbolize_expr_list store arguments))
       (ERef (RefBound MHere)) contract_post ->
-    ResourceContracts.required_mask procedure ⊆ current_mask ->
+    Certified.required_mask procedure ⊆ current_mask ->
     procedure_leaf_obligation current_mask
-      (current_mask ∪ ResourceContracts.granted_mask procedure)
+      (current_mask ∪ Certified.granted_mask procedure)
       (Translation.Resource.RState store contract_pre)
       (TCall procedure arguments (CTStore target))
       (Translation.Resource.ResourceExists (Logic.procedure_return procedure)
@@ -1372,7 +1372,7 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
     current_mask :
     resource_instantiated_pre F Δ procedure
       (IR.symbolize_expr_list store arguments) contract_pre ->
-    ResourceContracts.required_mask procedure ⊆ current_mask ->
+    Certified.required_mask procedure ⊆ current_mask ->
     procedure_leaf_obligation current_mask current_mask
       (Translation.Resource.RState store contract_pre)
       (TSpawn procedure arguments)
@@ -1394,9 +1394,9 @@ Lemma call_discard_obligation {Γ F Δ} procedure
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure))
     (current_mask : Hoare.mask) :
   ResourceContracts.procedure_verified procedure ->
-  ResourceContracts.required_mask procedure ⊆ current_mask ->
+  Certified.required_mask procedure ⊆ current_mask ->
   procedure_leaf_obligation current_mask
-    (current_mask ∪ ResourceContracts.granted_mask procedure)
+    (current_mask ∪ Certified.granted_mask procedure)
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
         (IR.symbolize_expr_list store typed_arguments)))
@@ -1422,9 +1422,9 @@ Lemma call_store_obligation {Γ F Δ} procedure
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure))
     (current_mask : Hoare.mask) :
   ResourceContracts.procedure_verified procedure ->
-  ResourceContracts.required_mask procedure ⊆ current_mask ->
+  Certified.required_mask procedure ⊆ current_mask ->
   procedure_leaf_obligation current_mask
-    (current_mask ∪ ResourceContracts.granted_mask procedure)
+    (current_mask ∪ Certified.granted_mask procedure)
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
         (IR.symbolize_expr_list store typed_arguments)))
@@ -1448,7 +1448,7 @@ Lemma spawn_obligation {Γ F Δ} procedure
     (typed_arguments : pexpr_list Γ (Logic.procedure_args procedure))
     (current_mask : Hoare.mask) :
   ResourceContracts.procedure_verified procedure ->
-  ResourceContracts.required_mask procedure ⊆ current_mask ->
+  Certified.required_mask procedure ⊆ current_mask ->
   procedure_leaf_obligation current_mask current_mask
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
@@ -4827,7 +4827,7 @@ Proof.
     iApply (procedure_leaf_operation_valid _ _ _
       (GenericRegions.Atomicity.analysis_mask entry)
       (GenericRegions.Atomicity.analysis_mask entry ∪
-        ResourceContracts.granted_mask procedure) entry exit
+        Certified.granted_mask procedure) entry exit
       (call_discard_obligation procedure store typed_arguments
         (GenericRegions.Atomicity.analysis_mask entry) H Hrequired)
       with "[$Hglobal $Hpre]").
@@ -4843,7 +4843,7 @@ Proof.
     iApply (procedure_leaf_operation_valid _ _ _
       (GenericRegions.Atomicity.analysis_mask entry)
       (GenericRegions.Atomicity.analysis_mask entry ∪
-        ResourceContracts.granted_mask procedure) entry exit
+        Certified.granted_mask procedure) entry exit
       (call_store_obligation procedure store target
         typed_arguments (GenericRegions.Atomicity.analysis_mask entry) H
         Hrequired)
@@ -6389,7 +6389,7 @@ Record analyzed_body_certificate {Γ identity}
       current_mask;
   analyzed_body_exit_mask :
     GenericRegions.Atomicity.analysis_mask analyzed_body_exit =
-      current_mask ∪ ResourceContracts.granted_mask
+      current_mask ∪ Certified.granted_mask
         (procedure_identity _ _ procedure);
   analyzed_body_triple :
     @CertifiedNormalization.analyzed_triple
@@ -6549,7 +6549,7 @@ Qed.
 Definition analyzed_body_valid {Γ identity}
     (procedure : typed_procedure Γ identity) : Type :=
   analyzed_body_certificate procedure
-    (ResourceContracts.required_mask (procedure_identity _ _ procedure)).
+    (Certified.required_mask (procedure_identity _ _ procedure)).
 
 Definition packed_analyzed_body
     (packed : packed_typed_procedure) : Type :=
@@ -6585,7 +6585,7 @@ Definition analyzed_normalization_complete : Prop :=
   forall Γ identity (procedure : typed_procedure Γ identity)
     (body : analyzed_body_valid procedure),
     analyzed_body_normalization_exists procedure
-      (ResourceContracts.required_mask (procedure_identity _ _ procedure)) body.
+      (Certified.required_mask (procedure_identity _ _ procedure)) body.
 
 (** This assembly is closed once the proof-theoretic raw-access cut in the
     normalization layer is discharged.  Its assumptions are intentionally
@@ -6632,8 +6632,8 @@ Record term_registered_body_semantics {Γ F}
     GenericRegions.Atomicity.analysis_open term_semantic_body_exit = ∅;
   term_semantic_body_exit_mask :
     GenericRegions.Atomicity.analysis_mask term_semantic_body_exit =
-      ResourceContracts.required_mask (procedure_identity _ _ procedure) ∪
-      ResourceContracts.granted_mask (procedure_identity _ _ procedure);
+      Certified.required_mask (procedure_identity _ _ procedure) ∪
+      Certified.granted_mask (procedure_identity _ _ procedure);
   term_semantic_body_source_valid : forall
       (runtime : RegionExecution.Primitives.Model.stack_context Γ)
       (formals : formal_env (Logic.procedure_args F)) (atoms : atom_env) ambient,

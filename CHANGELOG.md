@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   node labels, and elaboration no longer threads a node counter.
 - Procedure contracts use one canonical derived cost model; clients no longer
   provide program-specific cost models or coherence proofs.
+- Procedure invariant masks are inferred from contract assertions, including
+  invariants reached through predicate bodies; clients no longer declare
+  required or granted masks separately.
 - The resource calculus is now exposed as `RavenHoareRules.RavenHoareTriple`,
   with redundant resource-specific qualifiers removed from its public names.
 - Runtime-model modules and aliases use `Runtime*` terminology consistently;

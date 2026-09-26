@@ -879,13 +879,57 @@ Qed.
     the two [_rename] parameters (now provable, being a composition of
     total functions), and [reindex_stack_context]. *)
 
+(** *** The invariants a contract depends on
+
+    The invariant ids occurring in a core assertion, where each predicate
+    occurrence contributes the invariants of the predicate's body.  This is
+    how procedure masks are inferred from contracts, as in Raven.  Invariant
+    arguments are ignored.  Along any path of predicate nestings a predicate
+    is unfolded at most once: [pending] holds the declared predicates not yet
+    unfolded on the current path, and the fuel, initially the number of
+    declared predicates, is never exhausted before [pending] is. *)
+Fixpoint core_invariants {F Δ} (inline : pred_id -> gset inv_id)
+    (assertion : core_assertion F Δ) : gset inv_id :=
+  match assertion with
+  | CExists _ body | CForall _ body => core_invariants inline body
+  | CIte _ then_branch else_branch =>
+      core_invariants inline then_branch ∪ core_invariants inline else_branch
+  | CInvariant invariant _ => {[invariant]}
+  | CPredicate predicate _ => inline predicate
+  | CAnd first second =>
+      core_invariants inline first ∪ core_invariants inline second
+  | _ => ∅
+  end.
+
+Fixpoint predicate_invariants
+    (bodies : forall predicate,
+      core_assertion (Logic.predicate_args predicate) [])
+    (fuel : nat) (pending : list pred_id) (predicate : pred_id) :
+    gset inv_id :=
+  match fuel with
+  | O => ∅
+  | S fuel' =>
+      if decide (predicate ∈ pending) then
+        core_invariants
+          (predicate_invariants bodies fuel'
+            (filter (fun other => other ≠ predicate) pending))
+          (bodies predicate)
+      else ∅
+  end.
+
+Definition contract_invariants {F Δ}
+    (bodies : forall predicate,
+      core_assertion (Logic.predicate_args predicate) [])
+    (declared : list pred_id) (assertion : core_assertion F Δ) :
+    gset inv_id :=
+  core_invariants (predicate_invariants bodies (length declared) declared)
+    assertion.
+
 Module Type RESOURCE_CONTRACT_ENV_BASE.
-  (** Masks are analysis state rather than logical contract data, but the analyzer still reads a procedure's declared masks off
-      its contract, so they belong to the authoritative environment.
-      Keeping them here gives the analyzer and resource calculus one
-      authoritative source for procedure effects. *)
-  Parameter required_mask : proc_id -> gset inv_id.
-  Parameter granted_mask : proc_id -> gset inv_id.
+  (** The predicates the program declares.  Procedure masks are inferred
+      from the contracts by unfolding exactly these predicates; see
+      [contract_invariants]. *)
+  Parameter declared_predicates : list pred_id.
   Parameter predicate_body : forall predicate,
     core_assertion (Logic.predicate_args predicate) [].
   Parameter predicate_body_entry_free : forall predicate,

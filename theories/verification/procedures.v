@@ -1536,14 +1536,12 @@ Definition procedure_body_post {Γ identity Δ}
 
 (** Coherence between the authoritative resource-contract environment and
     the typed procedure table.  The environment identifies the logical
-    contract and analyzer-visible masks of each procedure; this interface
-    connects those declarations to the concrete typed procedure selected by
-    the executable table. *)
+    contract of each procedure (its masks are inferred from it); this
+    interface connects those declarations to the concrete typed procedure
+    selected by the executable table. *)
 Module Type PROCEDURE_CONTRACT_COHERENCE
     (RC : ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
   Parameter procedures : typed_procedure_environment.
-  Parameter declared_required_mask : packed_typed_procedure -> mask.
-  Parameter declared_granted_mask : packed_typed_procedure -> mask.
 
   (** Every procedure admitted by the contract environment has a typed
       declaration in the executable table.  The dependent witness can be
@@ -1554,13 +1552,6 @@ Module Type PROCEDURE_CONTRACT_COHERENCE
       { procedure : typed_procedure callee_variables identity |
         lookup_typed_procedure procedures identity =
           Some (pack_typed_procedure procedure) } }.
-
-  Parameter required_mask_coherent : forall identity procedure,
-    lookup_typed_procedure procedures identity = Some procedure ->
-    RC.required_mask identity = declared_required_mask procedure.
-  Parameter granted_mask_coherent : forall identity procedure,
-    lookup_typed_procedure procedures identity = Some procedure ->
-    RC.granted_mask identity = declared_granted_mask procedure.
 
   (** The declared contract *is* the callee's contract.  Both are core
       assertions at the same indices, so these are equations. *)

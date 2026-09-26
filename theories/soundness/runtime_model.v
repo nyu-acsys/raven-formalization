@@ -264,6 +264,19 @@ Module CertifiedRegions
     (Contracts : Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE).
 Module Atomicity := GenericRegions.Atomicity.
 
+(** Procedure masks, inferred from the contracts as in Raven: a procedure
+    requires the invariants its precondition depends on and grants those its
+    postcondition depends on in addition.  This is the only definition of
+    the masks; everything else refers to it. *)
+Definition required_mask (procedure : proc_id) : gset inv_id :=
+  Hoare.ResourceHoare.contract_invariants Contracts.predicate_body
+    Contracts.declared_predicates (Contracts.contract_pre procedure).
+
+Definition granted_mask (procedure : proc_id) : gset inv_id :=
+  Hoare.ResourceHoare.contract_invariants Contracts.predicate_body
+    Contracts.declared_predicates (Contracts.contract_post procedure) ∖
+  required_mask procedure.
+
 (** The analyzer-selected effect of procedure leaves agrees with the contract
     environment used by the Hoare and runtime layers. *)
 Definition procedure_cost_model_sound (cost : Atomicity.cost_model) : Prop :=
@@ -271,11 +284,11 @@ Definition procedure_cost_model_sound (cost : Atomicity.cost_model) : Prop :=
   match statement with
   | TCall procedure _ _ =>
       cost Γ statement = Atomicity.ProcedureCallStep
-        (Contracts.required_mask procedure)
-        (Contracts.granted_mask procedure)
+        (required_mask procedure)
+        (granted_mask procedure)
   | TSpawn procedure _ =>
       cost Γ statement =
-        Atomicity.ProcedureSpawnStep (Contracts.required_mask procedure)
+        Atomicity.ProcedureSpawnStep (required_mask procedure)
   | _ =>
       match cost Γ statement with
       | Atomicity.ProcedureCallStep _ _
@@ -296,10 +309,10 @@ Definition contract_cost_model : Atomicity.cost_model :=
     | TAssign _ _ | TFieldRead _ _ _ | TFieldWrite _ _ _ | TAlloc _ _ =>
         Atomicity.AtomicStep
     | TCall procedure _ _ =>
-        Atomicity.ProcedureCallStep (Contracts.required_mask procedure)
-          (Contracts.granted_mask procedure)
+        Atomicity.ProcedureCallStep (required_mask procedure)
+          (granted_mask procedure)
     | TSpawn procedure _ =>
-        Atomicity.ProcedureSpawnStep (Contracts.required_mask procedure)
+        Atomicity.ProcedureSpawnStep (required_mask procedure)
     | _ => Atomicity.NoStep
     end.
 
@@ -315,10 +328,10 @@ Lemma certified_call_step_effect cost
   Atomicity.take_step
       (cost Γ (@TCall Γ procedure arguments target))
       entry = inr exit ->
-  Contracts.required_mask procedure ⊆ Atomicity.analysis_mask entry /\
-  Contracts.granted_mask procedure ## Atomicity.analysis_open entry /\
+  required_mask procedure ⊆ Atomicity.analysis_mask entry /\
+  granted_mask procedure ## Atomicity.analysis_open entry /\
   Atomicity.analysis_mask exit = Atomicity.analysis_mask entry ∪
-    Contracts.granted_mask procedure /\
+    granted_mask procedure /\
   Atomicity.analysis_open exit = Atomicity.analysis_open entry.
 Proof.
   intros Hstep. specialize (Hcost Γ
@@ -333,7 +346,7 @@ Lemma certified_spawn_step_effect cost
     (arguments : pexpr_list Γ (Logic.procedure_args procedure)) entry exit :
   Atomicity.take_step
       (cost Γ (@TSpawn Γ procedure arguments)) entry = inr exit ->
-  Contracts.required_mask procedure ⊆ Atomicity.analysis_mask entry /\
+  required_mask procedure ⊆ Atomicity.analysis_mask entry /\
   Atomicity.analysis_mask exit = Atomicity.analysis_mask entry /\
   Atomicity.analysis_open exit = Atomicity.analysis_open entry.
 Proof.

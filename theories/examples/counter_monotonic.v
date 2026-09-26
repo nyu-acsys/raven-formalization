@@ -463,11 +463,9 @@ Proof. reflexivity. Qed.
 Module CounterResourceContracts <:
   Runtime.Hoare.ResourceHoare.RESOURCE_CONTRACT_ENV_BASE.
 
-  Definition required_mask (procedure : proc_id) : Runtime.Hoare.mask :=
-    if Pos.eqb procedure make_procedure then ∅ else counter_mask.
-
-  Definition granted_mask (procedure : proc_id) : Runtime.Hoare.mask :=
-    if Pos.eqb procedure make_procedure then counter_mask else ∅.
+  (** The counter declares no predicates.  Its procedure masks are
+      inferred from the contracts below. *)
+  Definition declared_predicates : list pred_id := [].
 
   Definition predicate_body (_ : pred_id) :
       Resource.core_assertion [] [] := Resource.CPure False.
@@ -510,14 +508,6 @@ Module CounterProcedureContracts <:
 
   Definition procedures := counter_typed_procedures.
 
-  Definition declared_required_mask (packed : packed_typed_procedure) : mask :=
-    if Pos.eqb (packed_procedure_id packed) make_procedure
-    then ∅ else counter_mask.
-
-  Definition declared_granted_mask (packed : packed_typed_procedure) : mask :=
-    if Pos.eqb (packed_procedure_id packed) make_procedure
-    then counter_mask else ∅.
-
   (** Section 11: the callee is produced by the computable dependent
       lookup [lookup_typed_procedure_at], not extracted from a [Prop].
       The previous proof needed [constructive_indefinite_description];
@@ -541,30 +531,6 @@ Module CounterProcedureContracts <:
         (procedure_entries procedures)) as Hspec.
       rewrite Hdep in Hspec. exact Hspec.
   Defined.
-
-  Lemma required_mask_coherent : forall identity procedure,
-    lookup_typed_procedure procedures identity = Some procedure ->
-    CounterResourceContracts.required_mask identity =
-      declared_required_mask procedure.
-  Proof.
-    intros identity procedure Hlookup.
-    unfold CounterResourceContracts.required_mask, declared_required_mask.
-    rewrite <- (lookup_packed_procedure_id identity
-      (procedure_entries procedures) procedure Hlookup).
-    reflexivity.
-  Qed.
-
-  Lemma granted_mask_coherent : forall identity procedure,
-    lookup_typed_procedure procedures identity = Some procedure ->
-    CounterResourceContracts.granted_mask identity =
-      declared_granted_mask procedure.
-  Proof.
-    intros identity procedure Hlookup.
-    unfold CounterResourceContracts.granted_mask, declared_granted_mask.
-    rewrite <- (lookup_packed_procedure_id identity
-      (procedure_entries procedures) procedure Hlookup).
-    reflexivity.
-  Qed.
 
   (** Both declared contracts are read off the table by construction, so
       coherence is a property of [lookup_typed_procedure_at] rather than
@@ -620,6 +586,31 @@ Module CounterProcedureContracts <:
     rewrite (lookup_at_of_lookup procedure Hlookup). reflexivity.
   Qed.
 End CounterProcedureContracts.
+
+(** Mask inference unfolds predicates.  The counter declares none, so this
+    checks the mechanism on a small hypothetical declaration: predicate 1
+    mentions itself and predicate 2, whose body depends on the counter
+    invariant.  Each predicate is unfolded at most once along a path, so the
+    recursion terminates and still finds the invariant through the nesting;
+    an undeclared predicate contributes nothing. *)
+Section MaskInferenceExamples.
+Let bodies (predicate : pred_id) :
+    Resource.core_assertion (CounterLogic.predicate_args predicate) [] :=
+  if Pos.eqb predicate 1%positive then
+    Resource.CAnd (Resource.CPredicate 1%positive ExprNil)
+      (Resource.CPredicate 2%positive ExprNil)
+  else Resource.CExists TRef (counter_token_core (ERef (RefBound MHere))).
+
+Example contract_invariants_through_predicates :
+  Runtime.Hoare.ResourceHoare.contract_invariants bodies [1%positive; 2%positive]
+    (Resource.CPredicate (F := []) (Δ := []) 1%positive ExprNil) = {[counter_invariant]}.
+Proof. vm_compute. reflexivity. Qed.
+
+Example contract_invariants_undeclared_predicate :
+  Runtime.Hoare.ResourceHoare.contract_invariants bodies [1%positive]
+    (Resource.CPredicate (F := []) (Δ := []) 1%positive ExprNil) = ∅.
+Proof. vm_compute. reflexivity. Qed.
+End MaskInferenceExamples.
 
 (** The generic initialized soundness theorem specialized to the counter's
     concrete names and procedure-contract table.  The remaining witnesses
@@ -2387,8 +2378,7 @@ Definition make_analyzed_certificate :=
 Definition read_analyzed_body :
   CounterSoundness.analyzed_body_valid read_typed_procedure.
 Proof.
-  unfold CounterSoundness.analyzed_body_valid,
-    CounterResourceContracts.required_mask. simpl.
+  unfold CounterSoundness.analyzed_body_valid.
   unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TInt; TInt] read_procedure read_typed_procedure counter_mask
     (counter_closed_state counter_mask) read_exit_state
@@ -2413,8 +2403,7 @@ Defined.
 Definition incr_analyzed_body :
   CounterSoundness.analyzed_body_valid incr_typed_procedure.
 Proof.
-  unfold CounterSoundness.analyzed_body_valid,
-    CounterResourceContracts.required_mask. simpl.
+  unfold CounterSoundness.analyzed_body_valid.
   unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] incr_procedure
     incr_typed_procedure counter_mask
@@ -2441,8 +2430,7 @@ Defined.
 Definition make_analyzed_body :
   CounterSoundness.analyzed_body_valid make_typed_procedure.
 Proof.
-  unfold CounterSoundness.analyzed_body_valid,
-    CounterResourceContracts.required_mask. simpl.
+  unfold CounterSoundness.analyzed_body_valid.
   unshelve refine (@CounterSoundness.AnalyzedBodyCertificate
     [TRef; TRef] make_procedure make_typed_procedure ∅
     (counter_closed_state ∅)

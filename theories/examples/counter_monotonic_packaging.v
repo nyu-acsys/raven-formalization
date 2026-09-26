@@ -148,12 +148,9 @@ Proof.
   - rewrite (CounterSoundness.analyzed_body_exit_mask _ _ body).
     unfold CounterSoundness.term_registered_invariants,
       counter_program_registration. simpl.
-    unfold CounterResourceContracts.required_mask,
-      CounterResourceContracts.granted_mask,
-      CounterResourceContracts.required_mask,
-      CounterResourceContracts.granted_mask.
-    destruct (Pos.eqb (Runtime.IR.procedure_identity Gamma identity procedure)
-      make_procedure); unfold counter_mask; set_solver.
+    clearbody body. clear body.
+    simpl in Hin. destruct Hin as [Hin | [Hin | [Hin | []]]];
+      dependent destruction Hin; vm_compute; set_solver.
 Qed.
 
 Definition counter_analyzed_program (RG : Runtime.runtimeG Sigma) :
