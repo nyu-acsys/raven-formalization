@@ -90,63 +90,63 @@ Proof.
 Qed.
 
 Fixpoint interp_expr_list {F Δ ts}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (expressions : expr_list F Δ ts) : option (tval_list ts) :=
   match expressions with
   | ExprNil => Some TVNil
   | ExprCons expression expressions' =>
-      match interp_expr formals binders atoms expression,
-            interp_expr_list formals binders atoms expressions' with
+      match interp_expr formals binders valuation expression,
+            interp_expr_list formals binders valuation expressions' with
       | Some value, Some values => Some (TVCons value values)
       | _, _ => None
       end
   end.
 
-Lemma interp_expr_list_stable_atoms {F Δ ts}
+Lemma interp_expr_list_constant_symbols {F Δ ts}
     (formals : formal_env F) (binders : binder_env Δ)
-    (left_atoms right_atoms : atom_env)
+    (left_valuation right_valuation : symbol_valuation)
     (expressions : expr_list F Δ ts) :
-  stable_atoms_agree left_atoms right_atoms ->
+  constant_symbols_agree left_valuation right_valuation ->
   Assertions.expr_list_entry_free expressions ->
-  interp_expr_list formals binders left_atoms expressions =
-    interp_expr_list formals binders right_atoms expressions.
+  interp_expr_list formals binders left_valuation expressions =
+    interp_expr_list formals binders right_valuation expressions.
 Proof.
   intros Hagree Hfree.
   induction expressions as [|t ts expression expressions IH]; first reflexivity.
   destruct Hfree as [Hexpression Hexpressions]. simpl.
-  rewrite (interp_expr_stable_atoms formals binders left_atoms right_atoms
+  rewrite (interp_expr_constant_symbols formals binders left_valuation right_valuation
     expression Hagree Hexpression).
   rewrite (IH Hexpressions). reflexivity.
 Qed.
 
 Lemma interp_expr_list_append {F Δ left_types right_types}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left : expr_list F Δ left_types) (right : expr_list F Δ right_types) :
-  interp_expr_list formals binders atoms
+  interp_expr_list formals binders valuation
       (Assertions.expr_list_append left right) =
-    match interp_expr_list formals binders atoms left,
-          interp_expr_list formals binders atoms right with
+    match interp_expr_list formals binders valuation left,
+          interp_expr_list formals binders valuation right with
     | Some left_values, Some right_values =>
         Some (tval_list_append left_values right_values)
     | _, _ => None
     end.
 Proof.
   induction left as [|t ts expression tail IH]; simpl.
-  - destruct (interp_expr_list formals binders atoms right); reflexivity.
+  - destruct (interp_expr_list formals binders valuation right); reflexivity.
   - rewrite IH.
-    destruct (interp_expr formals binders atoms expression),
-      (interp_expr_list formals binders atoms tail),
-      (interp_expr_list formals binders atoms right); reflexivity.
+    destruct (interp_expr formals binders valuation expression),
+      (interp_expr_list formals binders valuation tail),
+      (interp_expr_list formals binders valuation right); reflexivity.
 Qed.
 
 Lemma interp_expr_list_append_some {F Δ left_types right_types}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left : expr_list F Δ left_types) (right : expr_list F Δ right_types)
     (left_values : tval_list left_types)
     (right_values : tval_list right_types) :
-  interp_expr_list formals binders atoms left = Some left_values ->
-  interp_expr_list formals binders atoms right = Some right_values ->
-  interp_expr_list formals binders atoms
+  interp_expr_list formals binders valuation left = Some left_values ->
+  interp_expr_list formals binders valuation right = Some right_values ->
+  interp_expr_list formals binders valuation
       (Assertions.expr_list_append left right) =
     Some (tval_list_append left_values right_values).
 Proof.
@@ -155,20 +155,20 @@ Proof.
 Qed.
 
 Lemma interp_expr_list_append_some_inv {F Δ left_types right_types}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left : expr_list F Δ left_types) (right : expr_list F Δ right_types)
     (left_values : tval_list left_types)
     (right_values : tval_list right_types) :
-  interp_expr_list formals binders atoms
+  interp_expr_list formals binders valuation
       (Assertions.expr_list_append left right) =
       Some (tval_list_append left_values right_values) ->
-  interp_expr_list formals binders atoms left = Some left_values /\
-  interp_expr_list formals binders atoms right = Some right_values.
+  interp_expr_list formals binders valuation left = Some left_values /\
+  interp_expr_list formals binders valuation right = Some right_values.
 Proof.
   rewrite interp_expr_list_append.
-  destruct (interp_expr_list formals binders atoms left) as
+  destruct (interp_expr_list formals binders valuation left) as
     [actual_left |] eqn:Hleft; [|discriminate].
-  destruct (interp_expr_list formals binders atoms right) as
+  destruct (interp_expr_list formals binders valuation right) as
     [actual_right |] eqn:Hright; [|discriminate].
   intro Hequal. injection Hequal as Hvalues.
   apply tval_list_append_injective in Hvalues as [-> ->].
@@ -178,26 +178,26 @@ Qed.
 Lemma interp_expr_list_equal_assuming {F Δ ts}
     (condition : expr F Δ TBool) (left right : expr_list F Δ ts)
     (Hequal : Assertions.expr_list_equal_assuming condition ts left right)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-    (Hcondition : interp_expr formals binders atoms condition =
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (Hcondition : interp_expr formals binders valuation condition =
       Some (VBool true)) :
-  interp_expr_list formals binders atoms left =
-    interp_expr_list formals binders atoms right.
+  interp_expr_list formals binders valuation left =
+    interp_expr_list formals binders valuation right.
 Proof.
   induction Hequal; simpl; first reflexivity.
-  rewrite (H formals binders atoms Hcondition).
+  rewrite (H formals binders valuation Hcondition).
   rewrite IHHequal. reflexivity.
 Qed.
 
 Lemma interp_expr_list_total {F Δ ts} (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (expressions : expr_list F Δ ts) :
-  exists values, interp_expr_list formals binders atoms expressions =
+  exists values, interp_expr_list formals binders valuation expressions =
     Some values.
 Proof.
   induction expressions as [|t ts expression expressions IH].
   - exists TVNil. reflexivity.
-  - destruct (interp_expr_total formals binders atoms expression) as
+  - destruct (interp_expr_total formals binders valuation expression) as
       [value Hvalue].
     destruct IH as [values Hvalues].
     exists (TVCons value values). simpl. rewrite Hvalue. rewrite Hvalues.
@@ -205,43 +205,43 @@ Proof.
 Qed.
 
 Fixpoint interp_store {Γ F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) : concrete_store Γ :=
   match store with
   | StoreNil => ConcreteNil
   | StoreCons reference tail =>
-      ConcreteCons (interp_ref formals binders atoms reference)
-        (interp_store formals binders atoms tail)
+      ConcreteCons (interp_ref formals binders valuation reference)
+        (interp_store formals binders valuation tail)
   end.
 
-Lemma interp_store_stable_atoms {Γ F Δ}
+Lemma interp_store_constant_symbols {Γ F Δ}
     (formals : formal_env F) (binders : binder_env Δ)
-    (left_atoms right_atoms : atom_env)
+    (left_valuation right_valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
-  stable_atoms_agree left_atoms right_atoms ->
+  constant_symbols_agree left_valuation right_valuation ->
   Assertions.store_entry_free store ->
-  interp_store formals binders left_atoms store =
-    interp_store formals binders right_atoms store.
+  interp_store formals binders left_valuation store =
+    interp_store formals binders right_valuation store.
 Proof.
   intros Hagree Hfree.
   induction store as [|t Γ reference tail IH]; first reflexivity.
   destruct Hfree as [Hreference Htail]. simpl.
-  rewrite (interp_ref_stable_atoms formals binders left_atoms right_atoms
+  rewrite (interp_ref_constant_symbols formals binders left_valuation right_valuation
     reference Hagree Hreference).
   rewrite (IH Htail). reflexivity.
 Qed.
 
 Definition interp_program_expr {Γ F Δ t}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
     option (tval t) :=
-  interp_expr formals binders atoms (IR.symbolize_expr store expression).
+  interp_expr formals binders valuation (IR.symbolize_expr store expression).
 
 Definition interp_program_expr_list {Γ F Δ ts}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
     option (tval_list ts) :=
-  interp_expr_list formals binders atoms
+  interp_expr_list formals binders valuation
     (IR.symbolize_expr_list store expressions).
 
 (** Program-expression interpretation depends on a symbolic store only
@@ -249,13 +249,13 @@ Definition interp_program_expr_list {Γ F Δ ts}
     the semantic bridge used when a proof-only symbolic-store rewrite occurs
     at an invariant boundary. *)
 Lemma interp_lookup_store_ext {Γ F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left right : symbolic_store Γ F Δ) :
-  interp_store formals binders atoms left =
-    interp_store formals binders atoms right ->
+  interp_store formals binders valuation left =
+    interp_store formals binders valuation right ->
   forall t (variable : pvar Γ t),
-    interp_ref formals binders atoms (lookup_store left t variable) =
-    interp_ref formals binders atoms (lookup_store right t variable).
+    interp_ref formals binders valuation (lookup_store left t variable) =
+    interp_ref formals binders valuation (lookup_store right t variable).
 Proof.
   intro Hstore. induction variable.
   - dependent destruction left. dependent destruction right.
@@ -268,12 +268,12 @@ Proof.
 Qed.
 
 Lemma interp_program_expr_store_ext {Γ F Δ t}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left right : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
-  interp_store formals binders atoms left =
-    interp_store formals binders atoms right ->
-  interp_program_expr formals binders atoms left expression =
-    interp_program_expr formals binders atoms right expression.
+  interp_store formals binders valuation left =
+    interp_store formals binders valuation right ->
+  interp_program_expr formals binders valuation left expression =
+    interp_program_expr formals binders valuation right expression.
 Proof.
   intro Hstore. induction expression; cbn [interp_program_expr].
   - unfold interp_program_expr. cbn [IR.symbolize_expr interp_expr].
@@ -287,18 +287,18 @@ Proof.
 Qed.
 
 Lemma interp_program_expr_list_store_ext {Γ F Δ ts}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (left right : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
-  interp_store formals binders atoms left =
-    interp_store formals binders atoms right ->
-  interp_program_expr_list formals binders atoms left expressions =
-    interp_program_expr_list formals binders atoms right expressions.
+  interp_store formals binders valuation left =
+    interp_store formals binders valuation right ->
+  interp_program_expr_list formals binders valuation left expressions =
+    interp_program_expr_list formals binders valuation right expressions.
 Proof.
   intro Hstore. induction expressions; cbn [interp_program_expr_list].
   - reflexivity.
   - unfold interp_program_expr_list in *.
     cbn [IR.symbolize_expr_list interp_expr_list].
-    pose proof (interp_program_expr_store_ext formals binders atoms left right
+    pose proof (interp_program_expr_store_ext formals binders valuation left right
       p Hstore) as Hexpr.
     unfold interp_program_expr in Hexpr.
     rewrite Hexpr. rewrite IHexpressions. reflexivity.
@@ -327,19 +327,19 @@ Proof. rewrite /formal_env_of_values view_member_there. reflexivity. Qed.
 
 Lemma interp_expr_list_formal_subst_of_values {F Δ ts}
     (arguments : expr_list F Δ ts) (values : tval_list ts)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env) :
-  interp_expr_list formals binders atoms arguments = Some values ->
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation) :
+  interp_expr_list formals binders valuation arguments = Some values ->
   forall t (variable : formal ts t),
-    interp_expr formals binders atoms
+    interp_expr formals binders valuation
       (expr_list_formal_subst arguments t variable) =
     Some (formal_env_of_values values t variable).
 Proof.
   revert values. induction arguments; intros values Harguments u variable;
     dependent destruction values; simpl in Harguments.
   - dependent destruction variable.
-  - destruct (interp_expr formals binders atoms e) eqn:Hhead;
+  - destruct (interp_expr formals binders valuation e) eqn:Hhead;
       [|discriminate].
-    destruct (interp_expr_list formals binders atoms arguments) eqn:Htail;
+    destruct (interp_expr_list formals binders valuation arguments) eqn:Htail;
       [|discriminate].
     inversion Harguments; subst. dependent destruction H1.
     dependent destruction variable.
@@ -364,11 +364,11 @@ Definition empty_binder_env : binder_env [] :=
 
 Lemma interp_singleton_bound_subst {F Δ t}
     (reference : value_ref F Δ t) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env) u
+    (binders : binder_env Δ) (valuation : symbol_valuation) u
     (variable : bvar [t] u) :
-  interp_expr formals binders atoms
+  interp_expr formals binders valuation
       (singleton_bound_subst reference u variable) =
-    Some (binder_cons (interp_ref formals binders atoms reference)
+    Some (binder_cons (interp_ref formals binders valuation reference)
       empty_binder_env u variable).
 Proof.
   dependent destruction variable.
@@ -380,13 +380,13 @@ Qed.
 Lemma interp_rename_bound_expr_list {F Δ Δ' ts}
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (expressions : expr_list F Δ ts) :
-  interp_expr_list formals target_binders atoms
+  interp_expr_list formals target_binders valuation
       (rename_bound_expr_list renaming expressions) =
-    interp_expr_list formals source_binders atoms expressions.
+    interp_expr_list formals source_binders valuation expressions.
 Proof.
   induction expressions; simpl; [reflexivity|].
   erewrite interp_rename_bound_expr; [rewrite IHexpressions; reflexivity|].
@@ -396,14 +396,14 @@ Qed.
 Lemma interp_subst_bound_expr_list {F Δ Δ' ts}
     (substitution : bound_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : bvar Δ t),
-      interp_expr formals target_binders atoms (substitution t variable) =
+      interp_expr formals target_binders valuation (substitution t variable) =
         Some (source_binders t variable))
     (expressions : expr_list F Δ ts) :
-  interp_expr_list formals target_binders atoms
+  interp_expr_list formals target_binders valuation
       (subst_bound_expr_list substitution expressions) =
-    interp_expr_list formals source_binders atoms expressions.
+    interp_expr_list formals source_binders valuation expressions.
 Proof.
   induction expressions; simpl; [reflexivity|].
   erewrite interp_subst_bound_expr; [rewrite IHexpressions; reflexivity|].
@@ -413,14 +413,14 @@ Qed.
 Lemma interp_subst_formals_expr_list {F F' Δ ts}
     (substitution : formal_subst F F' Δ)
     (source_formals : formal_env F) (target_formals : formal_env F')
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : formal F t),
-      interp_expr target_formals binders atoms (substitution t variable) =
+      interp_expr target_formals binders valuation (substitution t variable) =
         Some (source_formals t variable))
     (expressions : expr_list F Δ ts) :
-  interp_expr_list target_formals binders atoms
+  interp_expr_list target_formals binders valuation
       (subst_formals_expr_list substitution expressions) =
-    interp_expr_list source_formals binders atoms expressions.
+    interp_expr_list source_formals binders valuation expressions.
 Proof.
   induction expressions; simpl; [reflexivity|].
   erewrite interp_subst_formals_expr; [rewrite IHexpressions; reflexivity|].
@@ -430,13 +430,13 @@ Qed.
 Lemma interp_rename_bound_store {Γ F Δ Δ'}
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (store : symbolic_store Γ F Δ) :
-  interp_store formals target_binders atoms
+  interp_store formals target_binders valuation
       (rename_bound_store renaming store) =
-    interp_store formals source_binders atoms store.
+    interp_store formals source_binders valuation store.
 Proof.
   induction store; simpl; [reflexivity|].
   rewrite IHstore. destruct v; simpl; try reflexivity.
@@ -451,14 +451,14 @@ Qed.
 Lemma interp_subst_bound_value_ref {F Δ Δ' t}
     (substitution : Resource.bound_ref_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall u (variable : bvar Δ u),
-      interp_ref formals target_binders atoms (substitution u variable) =
+      interp_ref formals target_binders valuation (substitution u variable) =
         source_binders u variable)
     (reference : value_ref F Δ t) :
-  interp_ref formals target_binders atoms
+  interp_ref formals target_binders valuation
       (Resource.subst_bound_value_ref substitution reference) =
-    interp_ref formals source_binders atoms reference.
+    interp_ref formals source_binders valuation reference.
 Proof.
   destruct reference; simpl; try reflexivity. apply Hsubstitution.
 Qed.
@@ -466,30 +466,30 @@ Qed.
 Lemma interp_subst_bound_store {Γ F Δ Δ'}
     (substitution : Resource.bound_ref_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall u (variable : bvar Δ u),
-      interp_ref formals target_binders atoms (substitution u variable) =
+      interp_ref formals target_binders valuation (substitution u variable) =
         source_binders u variable)
     (store : symbolic_store Γ F Δ) :
-  interp_store formals target_binders atoms
+  interp_store formals target_binders valuation
       (Resource.subst_bound_store substitution store) =
-    interp_store formals source_binders atoms store.
+    interp_store formals source_binders valuation store.
 Proof.
   induction store; simpl; [reflexivity |].
   rewrite IHstore.
   rewrite (interp_subst_bound_value_ref substitution formals source_binders
-    target_binders atoms Hsubstitution). reflexivity.
+    target_binders valuation Hsubstitution). reflexivity.
 Qed.
 
 (** The head reference substitution interprets as consing the witness's
     value onto the binder environment. *)
 Lemma interp_head_bound_ref_subst {F Δ t}
     (witness : value_ref F Δ t)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env) :
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation) :
   forall u (variable : bvar (t :: Δ) u),
-    interp_ref formals binders atoms
+    interp_ref formals binders valuation
         (Resource.head_bound_ref_subst witness u variable) =
-      binder_cons (interp_ref formals binders atoms witness) binders u
+      binder_cons (interp_ref formals binders valuation witness) binders u
         variable.
 Proof.
   intros u variable. destruct (view_member variable) eqn:Hview.
@@ -563,10 +563,10 @@ Proof.
 Qed.
 
 Lemma interp_weaken_expr {F Δ t u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (head : tval u) (expression : expr F Δ t) :
-  interp_expr formals (binder_cons head binders) atoms (weaken_expr expression) =
-    interp_expr formals binders atoms expression.
+  interp_expr formals (binder_cons head binders) valuation (weaken_expr expression) =
+    interp_expr formals binders valuation expression.
 Proof.
   rewrite weaken_expr_as_renaming.
   apply interp_rename_bound_expr. intros v variable.
@@ -574,33 +574,33 @@ Proof.
 Qed.
 
 Lemma interp_weaken_expr_list {F Δ ts u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (head : tval u) (expressions : expr_list F Δ ts) :
-  interp_expr_list formals (binder_cons head binders) atoms
+  interp_expr_list formals (binder_cons head binders) valuation
       (weaken_expr_list expressions) =
-    interp_expr_list formals binders atoms expressions.
+    interp_expr_list formals binders valuation expressions.
 Proof.
   induction expressions; simpl; [reflexivity|].
   rewrite interp_weaken_expr. rewrite IHexpressions. reflexivity.
 Qed.
 
 Lemma interp_weaken_ref {F Δ t u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (head : tval u) (reference : value_ref F Δ t) :
-  interp_ref formals (binder_cons head binders) atoms
+  interp_ref formals (binder_cons head binders) valuation
       (weaken_ref reference) =
-    interp_ref formals binders atoms reference.
+    interp_ref formals binders valuation reference.
 Proof.
   destruct reference; simpl; try reflexivity.
   apply binder_cons_weaken.
 Qed.
 
 Lemma interp_weaken_store {Γ F Δ u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (head : tval u) (store : symbolic_store Γ F Δ) :
-  interp_store formals (binder_cons head binders) atoms
+  interp_store formals (binder_cons head binders) valuation
       (weaken_store store) =
-    interp_store formals binders atoms store.
+    interp_store formals binders valuation store.
 Proof.
   induction store; simpl; [reflexivity|].
   rewrite interp_weaken_ref. rewrite IHstore. reflexivity.
@@ -609,12 +609,12 @@ Qed.
 Lemma binder_cons_lift_bound_subst {F Δ Δ' t}
     (substitution : bound_subst F Δ Δ') (value : tval t)
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall u (variable : bvar Δ u),
-      interp_expr formals target_binders atoms (substitution u variable) =
+      interp_expr formals target_binders valuation (substitution u variable) =
         Some (source_binders u variable)) :
   forall u (variable : bvar (t :: Δ) u),
-    interp_expr formals (binder_cons value target_binders) atoms
+    interp_expr formals (binder_cons value target_binders) valuation
         (lift_bound_subst substitution u variable) =
       Some (binder_cons value source_binders u variable).
 Proof.
@@ -669,109 +669,109 @@ Definition predicate_semantics := forall predicate,
 Fixpoint interp_assertion {Γ F Δ}
     (predicates : predicate_semantics)
     (runtime : data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : assertion Γ F Δ) : iProp :=
   match formula with
   | AStack store =>
-      data_stack_own Model runtime (interp_store formals binders atoms store)
+      data_stack_own Model runtime (interp_store formals binders valuation store)
   | AExpr condition =>
-      ⌜interp_expr formals binders atoms condition = Some (VBool true)⌝%I
+      ⌜interp_expr formals binders valuation condition = Some (VBool true)⌝%I
   | APure proposition => ⌜proposition⌝%I
   | AOwn field location chunk =>
       (∃ concrete_location concrete_chunk,
-        ⌜interp_expr formals binders atoms location = Some concrete_location⌝ ∗
-        ⌜interp_expr formals binders atoms chunk = Some concrete_chunk⌝ ∗
+        ⌜interp_expr formals binders valuation location = Some concrete_location⌝ ∗
+        ⌜interp_expr formals binders valuation chunk = Some concrete_chunk⌝ ∗
         data_field_own Model field concrete_location concrete_chunk)%I
   | AGhostOwn field location chunk =>
       (∃ concrete_location concrete_chunk,
-        ⌜interp_expr formals binders atoms location = Some concrete_location⌝ ∗
-        ⌜interp_expr formals binders atoms chunk = Some concrete_chunk⌝ ∗
+        ⌜interp_expr formals binders valuation location = Some concrete_location⌝ ∗
+        ⌜interp_expr formals binders valuation chunk = Some concrete_chunk⌝ ∗
         data_ghost_own Model field concrete_location concrete_chunk)%I
   | AFpuAllowed t old_chunk new_chunk =>
       (⌜exists old_value new_value,
-        interp_expr formals binders atoms old_chunk = Some old_value /\
-        interp_expr formals binders atoms new_chunk = Some new_value /\
+        interp_expr formals binders valuation old_chunk = Some old_value /\
+        interp_expr formals binders valuation new_chunk = Some new_value /\
         tval_fpu_allowed old_value new_value⌝)%I
   | ARAValid t chunk =>
-      (⌜exists value, interp_expr formals binders atoms chunk = Some value /\
+      (⌜exists value, interp_expr formals binders valuation chunk = Some value /\
         tval_ra_valid value⌝)%I
   | AExists t body =>
       (∃ value : tval t,
         interp_assertion predicates runtime formals
-          (binder_cons value binders) atoms body)%I
+          (binder_cons value binders) valuation body)%I
   | AForall t body =>
       (∀ value : tval t,
         interp_assertion predicates runtime formals
-          (binder_cons value binders) atoms body)%I
+          (binder_cons value binders) valuation body)%I
   | AIte condition then_branch else_branch =>
-      ((⌜interp_expr formals binders atoms condition = Some (VBool true)⌝ -∗
-          interp_assertion predicates runtime formals binders atoms
+      ((⌜interp_expr formals binders valuation condition = Some (VBool true)⌝ -∗
+          interp_assertion predicates runtime formals binders valuation
             then_branch) ∧
-       (⌜interp_expr formals binders atoms condition <> Some (VBool true)⌝ -∗
-          interp_assertion predicates runtime formals binders atoms
+       (⌜interp_expr formals binders valuation condition <> Some (VBool true)⌝ -∗
+          interp_assertion predicates runtime formals binders valuation
             else_branch))%I
   | AInvariant invariant args =>
       (∃ values,
-        ⌜interp_expr_list formals binders atoms args = Some values⌝ ∗
+        ⌜interp_expr_list formals binders valuation args = Some values⌝ ∗
         data_invariant_own Model invariant values)%I
   | APredicate predicate args =>
       (∃ values,
-        ⌜interp_expr_list formals binders atoms args = Some values⌝ ∗
+        ⌜interp_expr_list formals binders valuation args = Some values⌝ ∗
         predicates predicate values)%I
   | AAnd left_formula right_formula =>
-      (interp_assertion predicates runtime formals binders atoms left_formula ∗
-       interp_assertion predicates runtime formals binders atoms right_formula)%I
+      (interp_assertion predicates runtime formals binders valuation left_formula ∗
+       interp_assertion predicates runtime formals binders valuation right_formula)%I
   end.
 
-Lemma interp_assertion_stable_atoms {Γ F Δ}
+Lemma interp_assertion_constant_symbols {Γ F Δ}
     (left_predicates right_predicates : predicate_semantics)
     (Hpredicates : forall predicate values,
       left_predicates predicate values ≡ right_predicates predicate values)
     (runtime : data_stack_context Model Γ)
     (formals : formal_env F) (binders : binder_env Δ)
-    (left_atoms right_atoms : atom_env)
+    (left_valuation right_valuation : symbol_valuation)
     (formula : assertion Γ F Δ) :
-  stable_atoms_agree left_atoms right_atoms ->
+  constant_symbols_agree left_valuation right_valuation ->
   assertion_entry_free formula ->
-  interp_assertion left_predicates runtime formals binders left_atoms formula ≡
-    interp_assertion right_predicates runtime formals binders right_atoms formula.
+  interp_assertion left_predicates runtime formals binders left_valuation formula ≡
+    interp_assertion right_predicates runtime formals binders right_valuation formula.
 Proof.
   intros Hagree Hfree.
   induction formula; simpl in Hfree |- *.
-  - rewrite (interp_store_stable_atoms _ _ _ _ _ Hagree Hfree). reflexivity.
-  - rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hfree). reflexivity.
+  - rewrite (interp_store_constant_symbols _ _ _ _ _ Hagree Hfree). reflexivity.
+  - rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hfree). reflexivity.
   - reflexivity.
   - destruct Hfree as [Hlocation Hchunk].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hlocation).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hchunk). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hlocation).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hchunk). reflexivity.
   - destruct Hfree as [Hlocation Hchunk].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hlocation).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hchunk). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hlocation).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hchunk). reflexivity.
   - destruct Hfree as [Hold Hnew].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hold).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hnew). reflexivity.
-  - rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hfree). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hold).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hnew). reflexivity.
+  - rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hfree). reflexivity.
   - apply bi.exist_proper. intro value.
     exact (IHformula (binder_cons value binders) Hfree).
   - apply bi.forall_proper. intro value.
     exact (IHformula (binder_cons value binders) Hfree).
   - destruct Hfree as [Hcondition [Hthen Helse]].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hcondition).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hcondition).
     rewrite (IHformula1 binders Hthen). rewrite (IHformula2 binders Helse).
     reflexivity.
-  - rewrite (interp_expr_list_stable_atoms _ _ _ _ _ Hagree Hfree).
+  - rewrite (interp_expr_list_constant_symbols _ _ _ _ _ Hagree Hfree).
     reflexivity.
-  - rewrite (interp_expr_list_stable_atoms _ _ _ _ _ Hagree Hfree).
+  - rewrite (interp_expr_list_constant_symbols _ _ _ _ _ Hagree Hfree).
     apply bi.exist_proper. intro values. rewrite Hpredicates. reflexivity.
   - destruct Hfree as [Hleft Hright].
     rewrite (IHformula1 binders Hleft). rewrite (IHformula2 binders Hright).
     reflexivity.
 Qed.
 
-Lemma interp_assertion_stack {Γ F Δ} predicates runtime formals binders atoms
+Lemma interp_assertion_stack {Γ F Δ} predicates runtime formals binders valuation
     (store : symbolic_store Γ F Δ) :
-  interp_assertion predicates runtime formals binders atoms (AStack store) ≡
-    data_stack_own Model runtime (interp_store formals binders atoms store).
+  interp_assertion predicates runtime formals binders valuation (AStack store) ≡
+    data_stack_own Model runtime (interp_store formals binders valuation store).
 Proof. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -786,93 +786,93 @@ Proof. reflexivity. Qed.
 
 Fixpoint interp_core {F Δ}
     (predicates : predicate_semantics)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : Resource.core_assertion F Δ) : iProp :=
   match formula with
   | Resource.CExpr condition =>
-      ⌜interp_expr formals binders atoms condition = Some (VBool true)⌝%I
+      ⌜interp_expr formals binders valuation condition = Some (VBool true)⌝%I
   | Resource.CPure proposition => ⌜proposition⌝%I
   | Resource.COwn field location chunk =>
       (∃ concrete_location concrete_chunk,
-        ⌜interp_expr formals binders atoms location = Some concrete_location⌝ ∗
-        ⌜interp_expr formals binders atoms chunk = Some concrete_chunk⌝ ∗
+        ⌜interp_expr formals binders valuation location = Some concrete_location⌝ ∗
+        ⌜interp_expr formals binders valuation chunk = Some concrete_chunk⌝ ∗
         data_field_own Model field concrete_location concrete_chunk)%I
   | Resource.CGhostOwn field location chunk =>
       (∃ concrete_location concrete_chunk,
-        ⌜interp_expr formals binders atoms location = Some concrete_location⌝ ∗
-        ⌜interp_expr formals binders atoms chunk = Some concrete_chunk⌝ ∗
+        ⌜interp_expr formals binders valuation location = Some concrete_location⌝ ∗
+        ⌜interp_expr formals binders valuation chunk = Some concrete_chunk⌝ ∗
         data_ghost_own Model field concrete_location concrete_chunk)%I
   | Resource.CFpuAllowed t old_chunk new_chunk =>
       (⌜exists old_value new_value,
-        interp_expr formals binders atoms old_chunk = Some old_value /\
-        interp_expr formals binders atoms new_chunk = Some new_value /\
+        interp_expr formals binders valuation old_chunk = Some old_value /\
+        interp_expr formals binders valuation new_chunk = Some new_value /\
         tval_fpu_allowed old_value new_value⌝)%I
   | Resource.CRAValid t chunk =>
-      (⌜exists value, interp_expr formals binders atoms chunk = Some value /\
+      (⌜exists value, interp_expr formals binders valuation chunk = Some value /\
         tval_ra_valid value⌝)%I
   | Resource.CExists t body =>
       (∃ value : tval t,
-        interp_core predicates formals (binder_cons value binders) atoms
+        interp_core predicates formals (binder_cons value binders) valuation
           body)%I
   | Resource.CForall t body =>
       (∀ value : tval t,
-        interp_core predicates formals (binder_cons value binders) atoms
+        interp_core predicates formals (binder_cons value binders) valuation
           body)%I
   | Resource.CIte condition then_branch else_branch =>
-      ((⌜interp_expr formals binders atoms condition = Some (VBool true)⌝ -∗
-          interp_core predicates formals binders atoms then_branch) ∧
-       (⌜interp_expr formals binders atoms condition <> Some (VBool true)⌝ -∗
-          interp_core predicates formals binders atoms else_branch))%I
+      ((⌜interp_expr formals binders valuation condition = Some (VBool true)⌝ -∗
+          interp_core predicates formals binders valuation then_branch) ∧
+       (⌜interp_expr formals binders valuation condition <> Some (VBool true)⌝ -∗
+          interp_core predicates formals binders valuation else_branch))%I
   | Resource.CInvariant invariant args =>
       (∃ values,
-        ⌜interp_expr_list formals binders atoms args = Some values⌝ ∗
+        ⌜interp_expr_list formals binders valuation args = Some values⌝ ∗
         data_invariant_own Model invariant values)%I
   | Resource.CPredicate predicate args =>
       (∃ values,
-        ⌜interp_expr_list formals binders atoms args = Some values⌝ ∗
+        ⌜interp_expr_list formals binders valuation args = Some values⌝ ∗
         predicates predicate values)%I
   | Resource.CAnd left_formula right_formula =>
-      (interp_core predicates formals binders atoms left_formula ∗
-       interp_core predicates formals binders atoms right_formula)%I
+      (interp_core predicates formals binders valuation left_formula ∗
+       interp_core predicates formals binders valuation right_formula)%I
   end.
 
-Lemma interp_core_stable_atoms {F Δ}
+Lemma interp_core_constant_symbols {F Δ}
     (left_predicates right_predicates : predicate_semantics)
     (Hpredicates : forall predicate values,
       left_predicates predicate values ≡ right_predicates predicate values)
     (formals : formal_env F) (binders : binder_env Δ)
-    (left_atoms right_atoms : atom_env)
+    (left_valuation right_valuation : symbol_valuation)
     (formula : Resource.core_assertion F Δ) :
-  stable_atoms_agree left_atoms right_atoms ->
+  constant_symbols_agree left_valuation right_valuation ->
   Resource.core_entry_free formula ->
-  interp_core left_predicates formals binders left_atoms formula ≡
-    interp_core right_predicates formals binders right_atoms formula.
+  interp_core left_predicates formals binders left_valuation formula ≡
+    interp_core right_predicates formals binders right_valuation formula.
 Proof.
   intros Hagree Hfree.
   induction formula; simpl in Hfree |- *.
-  - rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hfree). reflexivity.
+  - rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hfree). reflexivity.
   - reflexivity.
   - destruct Hfree as [Hlocation Hchunk].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hlocation).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hchunk). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hlocation).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hchunk). reflexivity.
   - destruct Hfree as [Hlocation Hchunk].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hlocation).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hchunk). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hlocation).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hchunk). reflexivity.
   - destruct Hfree as [Hold Hnew].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hold).
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hnew). reflexivity.
-  - rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hfree). reflexivity.
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hold).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hnew). reflexivity.
+  - rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hfree). reflexivity.
   - apply bi.exist_proper. intro value.
     exact (IHformula (binder_cons value binders) Hfree).
   - apply bi.forall_proper. intro value.
     exact (IHformula (binder_cons value binders) Hfree).
   - destruct Hfree as [Hcondition [Hthen Helse]].
-    rewrite (interp_expr_stable_atoms _ _ _ _ _ Hagree Hcondition).
+    rewrite (interp_expr_constant_symbols _ _ _ _ _ Hagree Hcondition).
     rewrite (IHformula1 binders Hthen). rewrite (IHformula2 binders Helse).
     reflexivity.
-  - rewrite (interp_expr_list_stable_atoms _ _ _ _ _ Hagree Hfree).
+  - rewrite (interp_expr_list_constant_symbols _ _ _ _ _ Hagree Hfree).
     reflexivity.
-  - rewrite (interp_expr_list_stable_atoms _ _ _ _ _ Hagree Hfree).
+  - rewrite (interp_expr_list_constant_symbols _ _ _ _ _ Hagree Hfree).
     apply bi.exist_proper. intro values. rewrite Hpredicates. reflexivity.
   - destruct Hfree as [Hleft Hright].
     rewrite (IHformula1 binders Hleft). rewrite (IHformula2 binders Hright).
@@ -882,140 +882,140 @@ Qed.
 Definition interp_resource {Γ F Δ}
     (predicates : predicate_semantics)
     (runtime : data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (state : Resource.resource_assertion Γ F Δ) : iProp :=
   (data_stack_own Model runtime
-     (interp_store formals binders atoms (Resource.resource_stack state)) ∗
-   interp_core predicates formals binders atoms
+     (interp_store formals binders valuation (Resource.resource_stack state)) ∗
+   interp_core predicates formals binders valuation
      (Resource.resource_body state))%I.
 
 Fixpoint interp_resource_prenex {Γ F Δ}
     (predicates : predicate_semantics)
     (runtime : data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (prenex : Resource.resource_prenex Γ F Δ) {struct prenex} : iProp :=
   match prenex in Resource.resource_prenex _ _ Δ0
     return binder_env Δ0 -> iProp with
   | Resource.ResourceBody state =>
       fun binders0 =>
-        interp_resource predicates runtime formals binders0 atoms state
+        interp_resource predicates runtime formals binders0 valuation state
   | Resource.ResourceExists t rest =>
       fun binders0 =>
         (∃ value : tval t,
           interp_resource_prenex predicates runtime formals
-            (binder_cons value binders0) atoms rest)%I
+            (binder_cons value binders0) valuation rest)%I
   end binders.
 
 (** The stack/core decomposition, holding by [reflexivity]. *)
-Lemma interp_resource_split {Γ F Δ} predicates runtime formals binders atoms
+Lemma interp_resource_split {Γ F Δ} predicates runtime formals binders valuation
     (store : symbolic_store Γ F Δ) (body : Resource.core_assertion F Δ) :
-  interp_resource predicates runtime formals binders atoms
+  interp_resource predicates runtime formals binders valuation
       (Resource.ResourceState store body) ≡
-    (data_stack_own Model runtime (interp_store formals binders atoms store) ∗
-     interp_core predicates formals binders atoms body)%I.
+    (data_stack_own Model runtime (interp_store formals binders valuation store) ∗
+     interp_core predicates formals binders valuation body)%I.
 Proof. reflexivity. Qed.
 
 Lemma interp_resource_prenex_exists {Γ F Δ} predicates runtime formals binders
-    atoms t (rest : Resource.resource_prenex Γ F (t :: Δ)) :
-  interp_resource_prenex predicates runtime formals binders atoms
+    valuation t (rest : Resource.resource_prenex Γ F (t :: Δ)) :
+  interp_resource_prenex predicates runtime formals binders valuation
       (Resource.ResourceExists t rest) ≡
     (∃ value : tval t,
       interp_resource_prenex predicates runtime formals
-        (binder_cons value binders) atoms rest)%I.
+        (binder_cons value binders) valuation rest)%I.
 Proof. reflexivity. Qed.
 
-Lemma interp_assertion_and {Γ F Δ} predicates runtime formals binders atoms
+Lemma interp_assertion_and {Γ F Δ} predicates runtime formals binders valuation
     (left right : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals binders atoms (AAnd left right) ≡
-    (interp_assertion predicates runtime formals binders atoms left ∗
-     interp_assertion predicates runtime formals binders atoms right)%I.
+  interp_assertion predicates runtime formals binders valuation (AAnd left right) ≡
+    (interp_assertion predicates runtime formals binders valuation left ∗
+     interp_assertion predicates runtime formals binders valuation right)%I.
 Proof. reflexivity. Qed.
 
-Lemma interp_assertion_exists {Γ F Δ} predicates runtime formals binders atoms t
+Lemma interp_assertion_exists {Γ F Δ} predicates runtime formals binders valuation t
     (body : assertion Γ F (t :: Δ)) :
-  interp_assertion predicates runtime formals binders atoms (AExists t body) ≡
+  interp_assertion predicates runtime formals binders valuation (AExists t body) ≡
     (∃ value : tval t,
       interp_assertion predicates runtime formals
-        (binder_cons value binders) atoms body)%I.
+        (binder_cons value binders) valuation body)%I.
 Proof. reflexivity. Qed.
 
-Lemma interp_assertion_forall {Γ F Δ} predicates runtime formals binders atoms t
+Lemma interp_assertion_forall {Γ F Δ} predicates runtime formals binders valuation t
     (body : assertion Γ F (t :: Δ)) :
-  interp_assertion predicates runtime formals binders atoms (AForall t body) ≡
+  interp_assertion predicates runtime formals binders valuation (AForall t body) ≡
     (∀ value : tval t,
       interp_assertion predicates runtime formals
-        (binder_cons value binders) atoms body)%I.
+        (binder_cons value binders) valuation body)%I.
 Proof. reflexivity. Qed.
 
-Lemma interp_assertion_ite {Γ F Δ} predicates runtime formals binders atoms
+Lemma interp_assertion_ite {Γ F Δ} predicates runtime formals binders valuation
     (condition : expr F Δ TBool) (then_branch else_branch : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals binders atoms
+  interp_assertion predicates runtime formals binders valuation
       (AIte condition then_branch else_branch) ≡
-    ((⌜interp_expr formals binders atoms condition = Some (VBool true)⌝ -∗
-        interp_assertion predicates runtime formals binders atoms then_branch) ∧
-     (⌜interp_expr formals binders atoms condition <> Some (VBool true)⌝ -∗
-        interp_assertion predicates runtime formals binders atoms else_branch))%I.
+    ((⌜interp_expr formals binders valuation condition = Some (VBool true)⌝ -∗
+        interp_assertion predicates runtime formals binders valuation then_branch) ∧
+     (⌜interp_expr formals binders valuation condition <> Some (VBool true)⌝ -∗
+        interp_assertion predicates runtime formals binders valuation else_branch))%I.
 Proof. reflexivity. Qed.
 
 Theorem interp_rename_bound_assertion {Γ F Δ Δ'} predicates
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (formula : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals target_binders atoms
+  interp_assertion predicates runtime formals target_binders valuation
       (rename_bound_assertion renaming formula) ≡
-    interp_assertion predicates runtime formals source_binders atoms formula.
+    interp_assertion predicates runtime formals source_binders valuation formula.
 Proof.
   revert Δ' renaming source_binders target_binders Hrenaming.
   induction formula; intros Δ' renaming source_binders target_binders
       Hrenaming; simpl.
   - rewrite (interp_rename_bound_store renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - apply bi.exist_proper. intros value.
     apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
   - apply bi.forall_proper. intros value.
     apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + apply IHformula1. exact Hrenaming.
     + apply IHformula2. exact Hrenaming.
   - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - apply bi.sep_proper.
     + apply IHformula1. exact Hrenaming.
     + apply IHformula2. exact Hrenaming.
 Qed.
 
 Corollary interp_weaken_assertion {Γ F Δ u} predicates
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (head : tval u) (formula : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals (binder_cons head binders) atoms
+  interp_assertion predicates runtime formals (binder_cons head binders) valuation
       (weaken_assertion formula) ≡
-    interp_assertion predicates runtime formals binders atoms formula.
+    interp_assertion predicates runtime formals binders valuation formula.
 Proof.
   apply interp_rename_bound_assertion.
   intros t variable. apply binder_cons_weaken.
@@ -1026,58 +1026,58 @@ Qed.
 Theorem interp_rename_bound_core {F Δ Δ'} predicates
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (formula : Resource.core_assertion F Δ) :
-  interp_core predicates formals target_binders atoms
+  interp_core predicates formals target_binders valuation
       (Resource.rename_bound_core renaming formula) ≡
-    interp_core predicates formals source_binders atoms formula.
+    interp_core predicates formals source_binders valuation formula.
 Proof.
   revert Δ' renaming source_binders target_binders Hrenaming.
   induction formula; intros Δ' renaming source_binders target_binders
       Hrenaming; simpl.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - apply bi.exist_proper. intros value.
     apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
   - apply bi.forall_proper. intros value.
     apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
   - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders atoms Hrenaming).
+      target_binders valuation Hrenaming).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + apply IHformula1. exact Hrenaming.
     + apply IHformula2. exact Hrenaming.
   - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders atoms Hrenaming). reflexivity.
+      target_binders valuation Hrenaming). reflexivity.
   - apply bi.sep_proper.
     + apply IHformula1. exact Hrenaming.
     + apply IHformula2. exact Hrenaming.
 Qed.
 
 Corollary interp_weaken_core {F Δ u} predicates
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (head : tval u) (formula : Resource.core_assertion F Δ) :
-  interp_core predicates formals (binder_cons head binders) atoms
+  interp_core predicates formals (binder_cons head binders) valuation
       (Resource.weaken_core formula) ≡
-    interp_core predicates formals binders atoms formula.
+    interp_core predicates formals binders valuation formula.
 Proof.
   apply interp_rename_bound_core.
   intros t variable. apply binder_cons_weaken.
@@ -1091,20 +1091,20 @@ Qed.
 Lemma interp_rename_bound_resource {Γ F Δ Δ'} predicates
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (state : Resource.resource_assertion Γ F Δ) :
-  interp_resource predicates runtime formals target_binders atoms
+  interp_resource predicates runtime formals target_binders valuation
       (Resource.rename_bound_resource renaming state) ≡
-    interp_resource predicates runtime formals source_binders atoms state.
+    interp_resource predicates runtime formals source_binders valuation state.
 Proof.
   destruct state as [store body]. unfold interp_resource.
   cbn [Resource.rename_bound_resource Resource.resource_stack
        Resource.resource_body].
   rewrite (interp_rename_bound_store renaming formals source_binders
-    target_binders atoms Hrenaming).
+    target_binders valuation Hrenaming).
   apply bi.sep_proper; [reflexivity |].
   apply interp_rename_bound_core. exact Hrenaming.
 Qed.
@@ -1113,17 +1113,17 @@ Theorem interp_rename_resource_prenex {Γ F Δ} predicates
     (prenex : Resource.resource_prenex Γ F Δ) :
   forall Δ' (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ),
   (forall t (variable : bvar Δ t),
     target_binders t (renaming t variable) = source_binders t variable) ->
-  interp_resource_prenex predicates runtime formals target_binders atoms
+  interp_resource_prenex predicates runtime formals target_binders valuation
       (Resource.rename_resource_prenex prenex _ renaming) ≡
-    interp_resource_prenex predicates runtime formals source_binders atoms
+    interp_resource_prenex predicates runtime formals source_binders valuation
       prenex.
 Proof.
   induction prenex; intros Δ' renaming formals source_binders target_binders
-      atoms runtime Hrenaming;
+      valuation runtime Hrenaming;
     cbn [Resource.rename_resource_prenex interp_resource_prenex].
   - apply interp_rename_bound_resource. exact Hrenaming.
   - apply bi.exist_proper. intros value. apply IHprenex.
@@ -1131,13 +1131,13 @@ Proof.
 Qed.
 
 Corollary interp_weaken_resource_prenex {Γ F Δ u} predicates
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (head : tval u) (prenex : Resource.resource_prenex Γ F Δ) :
   interp_resource_prenex predicates runtime formals
-      (binder_cons head binders) atoms
+      (binder_cons head binders) valuation
       (Resource.weaken_resource_prenex prenex) ≡
-    interp_resource_prenex predicates runtime formals binders atoms prenex.
+    interp_resource_prenex predicates runtime formals binders valuation prenex.
 Proof.
   apply interp_rename_resource_prenex.
   intros t variable. apply binder_cons_weaken.
@@ -1148,11 +1148,11 @@ Qed.
     This is the bridge that lets the Iris validity proofs for assertions be
     reused for resource telescopes: interpreting an embedded resource
     telescope is interpreting the telescope. *)
-Lemma interp_core_to_assertion {Γ F Δ} predicates runtime formals binders atoms
+Lemma interp_core_to_assertion {Γ F Δ} predicates runtime formals binders valuation
     (formula : Resource.core_assertion F Δ) :
-  interp_assertion predicates runtime formals binders atoms
+  interp_assertion predicates runtime formals binders valuation
       (@Resource.core_to_assertion _ _ Γ F Δ formula) ≡
-    interp_core predicates formals binders atoms formula.
+    interp_core predicates formals binders valuation formula.
 Proof.
   revert binders.
   induction formula; intro binders; cbn [Resource.core_to_assertion
@@ -1165,10 +1165,10 @@ Proof.
 Qed.
 
 Lemma interp_resource_to_assertion {Γ F Δ} predicates runtime formals binders
-    atoms (state : Resource.resource_assertion Γ F Δ) :
-  interp_assertion predicates runtime formals binders atoms
+    valuation (state : Resource.resource_assertion Γ F Δ) :
+  interp_assertion predicates runtime formals binders valuation
       (Resource.resource_to_assertion state) ≡
-    interp_resource predicates runtime formals binders atoms state.
+    interp_resource predicates runtime formals binders valuation state.
 Proof.
   destruct state as [store body].
   cbn [Resource.resource_to_assertion Resource.resource_stack
@@ -1177,12 +1177,12 @@ Proof.
   apply bi.sep_proper; [reflexivity | apply interp_core_to_assertion].
 Qed.
 
-Lemma interp_prenex_to_assertion {Γ F Δ} predicates runtime formals atoms
+Lemma interp_prenex_to_assertion {Γ F Δ} predicates runtime formals valuation
     (prenex : Resource.resource_prenex Γ F Δ) :
   forall (binders : binder_env Δ),
-  interp_assertion predicates runtime formals binders atoms
+  interp_assertion predicates runtime formals binders valuation
       (Resource.prenex_to_assertion prenex) ≡
-    interp_resource_prenex predicates runtime formals binders atoms prenex.
+    interp_resource_prenex predicates runtime formals binders valuation prenex.
 Proof.
   induction prenex as [Δ state | Δ t rest IH]; intro binders;
     cbn [Resource.prenex_to_assertion interp_assertion
@@ -1193,13 +1193,13 @@ Qed.
 
 (** Conjoining a core frame under a telescope is separating conjunction,
     at every depth. *)
-Lemma interp_prenex_and {Γ F Δ} predicates runtime formals atoms
+Lemma interp_prenex_and {Γ F Δ} predicates runtime formals valuation
     (prenex : Resource.resource_prenex Γ F Δ) :
   forall (binders : binder_env Δ) (frame : Resource.core_assertion F Δ),
-  interp_resource_prenex predicates runtime formals binders atoms
+  interp_resource_prenex predicates runtime formals binders valuation
       (Resource.prenex_and prenex frame) ⊣⊢
-    (interp_resource_prenex predicates runtime formals binders atoms prenex ∗
-     interp_core predicates formals binders atoms frame)%I.
+    (interp_resource_prenex predicates runtime formals binders valuation prenex ∗
+     interp_core predicates formals binders valuation frame)%I.
 Proof.
   induction prenex as [Δ state | Δ t rest IH];
     intros binders frame;
@@ -1214,15 +1214,15 @@ Qed.
 Theorem interp_subst_bound_assertion {Γ F Δ Δ'} predicates
     (substitution : bound_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (Hsubstitution : forall t (variable : bvar Δ t),
-      interp_expr formals target_binders atoms (substitution t variable) =
+      interp_expr formals target_binders valuation (substitution t variable) =
         Some (source_binders t variable))
     (formula : assertion Γ F Δ) (formula' : assertion Γ F Δ') :
   subst_bound_assertion substitution formula = Some formula' ->
-  interp_assertion predicates runtime formals target_binders atoms formula' ≡
-    interp_assertion predicates runtime formals source_binders atoms formula.
+  interp_assertion predicates runtime formals target_binders valuation formula' ≡
+    interp_assertion predicates runtime formals source_binders valuation formula.
 Proof.
   revert Δ' substitution target_binders formula' Hsubstitution.
   induction formula; intros Δ' substitution target_binders formula'
@@ -1230,26 +1230,26 @@ Proof.
   - discriminate Hresult.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - destruct (subst_bound_assertion (lift_bound_subst substitution) formula)
       as [body'|] eqn:Hbody; [|discriminate Hresult].
     inversion Hresult; subst. simpl. apply bi.exist_proper. intros value.
@@ -1266,16 +1266,16 @@ Proof.
       eqn:Helse; [|discriminate Hresult].
     inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + eapply IHformula1; eauto.
     + eapply IHformula2; eauto.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr_list substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_bound_expr_list substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - destruct (subst_bound_assertion substitution formula1) as [left'|]
       eqn:Hleft; [|discriminate Hresult].
     destruct (subst_bound_assertion substitution formula2) as [right'|]
@@ -1287,10 +1287,10 @@ Qed.
 
 Lemma interp_head_bound_subst {F Δ t}
     (witness : expr F Δ t) (value : tval t)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-    (Hwitness : interp_expr formals binders atoms witness = Some value) :
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (Hwitness : interp_expr formals binders valuation witness = Some value) :
   forall u (variable : bvar (t :: Δ) u),
-    interp_expr formals binders atoms (head_bound_subst witness u variable) =
+    interp_expr formals binders valuation (head_bound_subst witness u variable) =
       Some (binder_cons value binders u variable).
 Proof.
   intros u variable. destruct (view_member variable) eqn:Hview.
@@ -1302,14 +1302,14 @@ Qed.
 
 Corollary interp_instantiate_bound_assertion {Γ F Δ t} predicates
     (witness : expr F Δ t) (value : tval t)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (body : assertion Γ F (t :: Δ)) (formula : assertion Γ F Δ)
-    (Hwitness : interp_expr formals binders atoms witness = Some value)
+    (Hwitness : interp_expr formals binders valuation witness = Some value)
     (Hinstantiate : instantiate_bound_assertion witness body = Some formula) :
-  interp_assertion predicates runtime formals binders atoms formula ≡
+  interp_assertion predicates runtime formals binders valuation formula ≡
     interp_assertion predicates runtime formals (binder_cons value binders)
-      atoms body.
+      valuation body.
 Proof.
   eapply interp_subst_bound_assertion; [|exact Hinstantiate].
   apply interp_head_bound_subst. exact Hwitness.
@@ -1321,48 +1321,48 @@ Qed.
 Theorem interp_subst_bound_core {F Δ Δ'} predicates
     (substitution : bound_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : bvar Δ t),
-      interp_expr formals target_binders atoms (substitution t variable) =
+      interp_expr formals target_binders valuation (substitution t variable) =
         Some (source_binders t variable))
     (formula : Resource.core_assertion F Δ) :
-  interp_core predicates formals target_binders atoms
+  interp_core predicates formals target_binders valuation
       (Resource.subst_bound_core substitution formula) ≡
-    interp_core predicates formals source_binders atoms formula.
+    interp_core predicates formals source_binders valuation formula.
 Proof.
   revert Δ' substitution target_binders Hsubstitution.
   induction formula; intros Δ' substitution target_binders Hsubstitution;
     cbn [Resource.subst_bound_core interp_core].
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - reflexivity.
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - apply bi.exist_proper. intros value. apply IHformula.
     apply binder_cons_lift_bound_subst. exact Hsubstitution.
   - apply bi.forall_proper. intros value. apply IHformula.
     apply binder_cons_lift_bound_subst. exact Hsubstitution.
   - rewrite (interp_subst_bound_expr substitution formals source_binders
-      target_binders atoms Hsubstitution).
+      target_binders valuation Hsubstitution).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + apply IHformula1. exact Hsubstitution.
     + apply IHformula2. exact Hsubstitution.
   - rewrite (interp_subst_bound_expr_list substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_bound_expr_list substitution formals source_binders
-      target_binders atoms Hsubstitution). reflexivity.
+      target_binders valuation Hsubstitution). reflexivity.
   - apply bi.sep_proper.
     + apply IHformula1. exact Hsubstitution.
     + apply IHformula2. exact Hsubstitution.
@@ -1370,12 +1370,12 @@ Qed.
 
 Corollary interp_instantiate_bound_core {F Δ t} predicates
     (witness : expr F Δ t) (value : tval t)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (body : Resource.core_assertion F (t :: Δ))
-    (Hwitness : interp_expr formals binders atoms witness = Some value) :
-  interp_core predicates formals binders atoms
+    (Hwitness : interp_expr formals binders valuation witness = Some value) :
+  interp_core predicates formals binders valuation
       (Resource.instantiate_bound_core witness body) ≡
-    interp_core predicates formals (binder_cons value binders) atoms body.
+    interp_core predicates formals (binder_cons value binders) valuation body.
 Proof.
   apply interp_subst_bound_core.
   apply interp_head_bound_subst. exact Hwitness.
@@ -1384,12 +1384,12 @@ Qed.
 Lemma binder_cons_lift_formal_subst {F F' Δ t}
     (substitution : formal_subst F F' Δ) (value : tval t)
     (source_formals : formal_env F) (target_formals : formal_env F')
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (Hsubstitution : forall u (variable : formal F u),
-      interp_expr target_formals binders atoms (substitution u variable) =
+      interp_expr target_formals binders valuation (substitution u variable) =
         Some (source_formals u variable)) :
   forall u (variable : formal F u),
-    interp_expr target_formals (binder_cons value binders) atoms
+    interp_expr target_formals (binder_cons value binders) valuation
         (lift_formal_subst substitution u variable) =
       Some (source_formals u variable).
 Proof.
@@ -1400,15 +1400,15 @@ Qed.
 Theorem interp_subst_formals_assertion {Γ F F' Δ} predicates
     (substitution : formal_subst F F' Δ)
     (source_formals : formal_env F) (target_formals : formal_env F')
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (runtime : data_stack_context Model Γ)
     (Hsubstitution : forall t (variable : formal F t),
-      interp_expr target_formals binders atoms (substitution t variable) =
+      interp_expr target_formals binders valuation (substitution t variable) =
         Some (source_formals t variable))
     (formula : assertion Γ F Δ) (formula' : assertion Γ F' Δ) :
   subst_formals_assertion substitution formula = Some formula' ->
-  interp_assertion predicates runtime target_formals binders atoms formula' ≡
-    interp_assertion predicates runtime source_formals binders atoms formula.
+  interp_assertion predicates runtime target_formals binders valuation formula' ≡
+    interp_assertion predicates runtime source_formals binders valuation formula.
 Proof.
   revert F' substitution target_formals formula' Hsubstitution.
   induction formula; intros F' substitution target_formals formula'
@@ -1416,26 +1416,26 @@ Proof.
   - discriminate Hresult.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - destruct (subst_formals_assertion (lift_formal_subst substitution) formula)
       as [body'|] eqn:Hbody; [|discriminate Hresult].
     inversion Hresult; subst. simpl. apply bi.exist_proper. intros value.
@@ -1452,16 +1452,16 @@ Proof.
       eqn:Helse; [|discriminate Hresult].
     inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + eapply IHformula1; eauto.
     + eapply IHformula2; eauto.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr_list substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - inversion Hresult; subst. simpl.
     rewrite (interp_subst_formals_expr_list substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - destruct (subst_formals_assertion substitution formula1) as [left'|]
       eqn:Hleft; [|discriminate Hresult].
     destruct (subst_formals_assertion substitution formula2) as [right'|]
@@ -1474,11 +1474,11 @@ Qed.
 (** Opening a closed core assertion into an ambient binder context.  The
     substitution is empty, so the hypothesis is vacuous. *)
 Corollary interp_weaken_core_to {F Δ} predicates
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : Resource.core_assertion F []) :
-  interp_core predicates formals binders atoms
+  interp_core predicates formals binders valuation
       (Resource.weaken_core_to Δ formula) ≡
-    interp_core predicates formals empty_binder_env atoms formula.
+    interp_core predicates formals empty_binder_env valuation formula.
 Proof.
   apply interp_subst_bound_core.
   intros t variable. clear formula. dependent destruction variable.
@@ -1492,48 +1492,48 @@ Qed.
 Theorem interp_subst_formals_core {F F' Δ} predicates
     (substitution : formal_subst F F' Δ)
     (source_formals : formal_env F) (target_formals : formal_env F')
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : formal F t),
-      interp_expr target_formals binders atoms (substitution t variable) =
+      interp_expr target_formals binders valuation (substitution t variable) =
         Some (source_formals t variable))
     (formula : Resource.core_assertion F Δ) :
-  interp_core predicates target_formals binders atoms
+  interp_core predicates target_formals binders valuation
       (Resource.subst_formals_core substitution formula) ≡
-    interp_core predicates source_formals binders atoms formula.
+    interp_core predicates source_formals binders valuation formula.
 Proof.
   revert F' substitution target_formals Hsubstitution.
   induction formula; intros F' substitution target_formals Hsubstitution;
     cbn [Resource.subst_formals_core interp_core].
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - reflexivity.
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - apply bi.exist_proper. intros value. apply IHformula.
     apply binder_cons_lift_formal_subst. exact Hsubstitution.
   - apply bi.forall_proper. intros value. apply IHformula.
     apply binder_cons_lift_formal_subst. exact Hsubstitution.
   - rewrite (interp_subst_formals_expr substitution source_formals
-      target_formals binders atoms Hsubstitution).
+      target_formals binders valuation Hsubstitution).
     apply bi.and_proper; apply bi.wand_proper; try reflexivity.
     + apply IHformula1. exact Hsubstitution.
     + apply IHformula2. exact Hsubstitution.
   - rewrite (interp_subst_formals_expr_list substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - rewrite (interp_subst_formals_expr_list substitution source_formals
-      target_formals binders atoms Hsubstitution). reflexivity.
+      target_formals binders valuation Hsubstitution). reflexivity.
   - apply bi.sep_proper.
     + apply IHformula1. exact Hsubstitution.
     + apply IHformula2. exact Hsubstitution.
@@ -1544,11 +1544,11 @@ Lemma interp_reindex_stack_context {Γ Γ' F Δ} predicates
     (Hreindex : reindex_stack_context formula formula') :
   forall (runtime : data_stack_context Model Γ)
     (runtime' : data_stack_context Model Γ')
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env),
-    interp_assertion predicates runtime formals binders atoms formula ≡
-      interp_assertion predicates runtime' formals binders atoms formula'.
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation),
+    interp_assertion predicates runtime formals binders valuation formula ≡
+      interp_assertion predicates runtime' formals binders valuation formula'.
 Proof.
-  induction Hreindex; intros runtime runtime' formals binders atoms; simpl;
+  induction Hreindex; intros runtime runtime' formals binders valuation; simpl;
     try reflexivity.
   - apply bi.exist_proper. intros value. apply IHHreindex.
   - apply bi.forall_proper. intros value. apply IHHreindex.
@@ -1564,13 +1564,13 @@ Lemma interp_assertion_mono
     (predicates1 predicates2 : predicate_semantics) {Γ F Δ}
     (formula : assertion Γ F Δ) :
   forall (runtime : data_stack_context Model Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env),
+    (binders : binder_env Δ) (valuation : symbol_valuation),
   □ (∀ predicate, ∀ values,
       predicates1 predicate values -∗ predicates2 predicate values) ⊢
-  interp_assertion predicates1 runtime formals binders atoms formula -∗
-  interp_assertion predicates2 runtime formals binders atoms formula.
+  interp_assertion predicates1 runtime formals binders valuation formula -∗
+  interp_assertion predicates2 runtime formals binders valuation formula.
 Proof.
-  induction formula; intros runtime formals binders atoms; simpl.
+  induction formula; intros runtime formals binders valuation; simpl.
   - iIntros "_ H". iExact "H".
   - iIntros "_ H". iExact "H".
   - iIntros "_ H". iExact "H".

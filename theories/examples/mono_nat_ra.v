@@ -3,9 +3,8 @@
    fragment of Auth[MaxNat] the counter_monotonic examples actually need:
    nothing here ever holds a separate authoritative/fragment split, so there
    is no need to formalize Auth on top of it.
-   Extracted out of counter_monotonic.v (a pre-redesign example scheduled to
-   leave the default build) so that the redesigned counter examples do not
-   have to import it just to get this resource algebra. *)
+   Kept separate from counter_monotonic.v so the resource algebra remains a
+   reusable component rather than part of the counter proof itself. *)
 From stdpp Require Import gmap namespaces.
 From raven Require Import runtime.ra_base.
 

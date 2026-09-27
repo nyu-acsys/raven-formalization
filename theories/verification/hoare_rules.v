@@ -148,58 +148,58 @@ Inductive core_entailment_step {F Δ} :
       else_branch
 | CESExprImpl (left right : expr F Δ TBool) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left = Some (VBool true) ->
-      interp_expr formals binders atoms right = Some (VBool true)) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left = Some (VBool true) ->
+      interp_expr formals binders valuation right = Some (VBool true)) ->
     core_entailment_step (CExpr left) (CExpr right)
 | CESExprTrue (expression : expr F Δ TBool) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms expression = Some (VBool true)) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation expression = Some (VBool true)) ->
     core_entailment_step (CPure True) (CExpr expression)
 | CESRAValidTrue t (expression : expr F Δ t) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env) value,
-      interp_expr formals binders atoms expression = Some value ->
+      (valuation : symbol_valuation) value,
+      interp_expr formals binders valuation expression = Some value ->
       tval_ra_valid value) ->
     core_entailment_step (CPure True) (CRAValid t expression)
 | CESFpuAllowedTrue t (old_expression new_expression : expr F Δ t) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env) old_value new_value,
-      interp_expr formals binders atoms old_expression = Some old_value ->
-      interp_expr formals binders atoms new_expression = Some new_value ->
+      (valuation : symbol_valuation) old_value new_value,
+      interp_expr formals binders valuation old_expression = Some old_value ->
+      interp_expr formals binders valuation new_expression = Some new_value ->
       tval_fpu_allowed old_value new_value) ->
     core_entailment_step (CPure True)
       (CFpuAllowed t old_expression new_expression)
 | CESOwnChunkEq field location left_chunk right_chunk :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     core_entailment_step (COwn field location left_chunk)
       (COwn field location right_chunk)
 | CESGhostOwnChunkEq field location left_chunk right_chunk :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     core_entailment_step (CGhostOwn field location left_chunk)
       (CGhostOwn field location right_chunk)
 | CESOwnChunkEqAssume field location left_chunk right_chunk condition :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms condition = Some (VBool true) ->
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation condition = Some (VBool true) ->
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     core_entailment_step
       (CAnd (COwn field location left_chunk) (CExpr condition))
       (COwn field location right_chunk)
 | CESGhostOwnChunkEqAssume field location left_chunk right_chunk condition :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms condition = Some (VBool true) ->
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation condition = Some (VBool true) ->
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     core_entailment_step
       (CAnd (CGhostOwn field location left_chunk) (CExpr condition))
       (CGhostOwn field location right_chunk)

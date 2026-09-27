@@ -1,7 +1,8 @@
 From Coq Require Import List String ZArith PArith Program.Equality
   ProofIrrelevance Lia.
+From stdpp Require Import sets.
 
-From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir.
+From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir verification.procedures.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -86,6 +87,112 @@ Fixpoint lookup_predicate (name : source_name)
 
 Import Assertion.
 
+Definition elaborate_typ (t : source_typ) : typ :=
+  match t with
+  | SBool => TBool
+  | SInt => TInt
+  | SRef => TRef
+  | SUnit => TUnit
+  | SNamed resource => TRA resource
+  end.
+
+(** ** Signatures and environments of modules
+
+    A module's declarations are numbered in order: the [n]-th field,
+    predicate, invariant or procedure has identifier [n].  The logic
+    signature and the elaboration environment are read off the
+    declarations. *)
+Definition declaration_types (declarations : list source_var_decl) : context :=
+  map (fun declaration => elaborate_typ (source_var_type declaration))
+    declarations.
+
+Definition declared {A} (declarations : list A) (identity : positive) :
+    option A :=
+  nth_error declarations (pred (Pos.to_nat identity)).
+
+Definition lookup_declared {A} (default : A) (entries : list A)
+    (identity : positive) : A :=
+  match declared entries identity with
+  | Some entry => entry
+  | None => default
+  end.
+
+(** The per-declaration types are computed first and then looked up, so a
+    computed signature answers each identifier with a literal type. *)
+Definition module_signature (module : source_module) : LogicSignature :=
+  LogicSignatureData
+    (lookup_declared TInt (map (fun declaration =>
+      elaborate_typ (source_field_type declaration))
+      (source_module_fields module)))
+    (lookup_declared [] (map (fun declaration =>
+      declaration_types (source_pred_args declaration))
+      (source_module_predicates module)))
+    (lookup_declared [] (map (fun declaration =>
+      declaration_types (source_inv_args declaration))
+      (source_module_invariants module)))
+    (lookup_declared [] (map (fun declaration =>
+      declaration_types (source_proc_args declaration))
+      (source_module_procedures module)))
+    (lookup_declared TUnit (map (fun declaration =>
+      match source_proc_return declaration with
+      | Some return_declaration =>
+          elaborate_typ (source_var_type return_declaration)
+      | None => TUnit
+      end) (source_module_procedures module))).
+
+Fixpoint numbered_from {A B} (make : A -> positive -> B) (next : positive)
+    (declarations : list A) : list B :=
+  match declarations with
+  | [] => []
+  | declaration :: declarations' =>
+      make declaration next :: numbered_from make (Pos.succ next) declarations'
+  end.
+
+Definition numbered {A B} (make : A -> positive -> B) (declarations : list A) :
+    list B :=
+  numbered_from make 1%positive declarations.
+
+Definition module_environment (module : source_module) :
+    elaboration_environment :=
+  ElaborationEnvironment
+    (numbered (fun declaration => FieldDecl (source_field_name declaration))
+      (source_module_fields module))
+    (numbered (fun declaration =>
+      ProcedureSignature (source_proc_name declaration))
+      (source_module_procedures module))
+    (numbered (fun declaration =>
+      InvariantSignature (source_inv_name declaration))
+      (source_module_invariants module))
+    (numbered (fun declaration =>
+      PredicateSignature (source_pred_name declaration))
+      (source_module_predicates module)).
+
+(** The identifier of a declaration, by name. *)
+Definition field_identity_of (module : source_module) (name : source_name) :
+    field_id :=
+  match lookup_field name (elaboration_fields (module_environment module)) with
+  | Some declaration => field_identity declaration
+  | None => 1%positive
+  end.
+Definition procedure_identity_of (module : source_module) (name : source_name) :
+    proc_id :=
+  match lookup_procedure name (elaboration_procedures (module_environment module)) with
+  | Some declaration => signature_identity declaration
+  | None => 1%positive
+  end.
+Definition invariant_identity_of (module : source_module) (name : source_name) :
+    inv_id :=
+  match lookup_invariant name (elaboration_invariants (module_environment module)) with
+  | Some declaration => invariant_identity declaration
+  | None => 1%positive
+  end.
+Definition predicate_identity_of (module : source_module) (name : source_name) :
+    pred_id :=
+  match lookup_predicate name (elaboration_predicates (module_environment module)) with
+  | Some declaration => predicate_identity declaration
+  | None => 1%positive
+  end.
+
 Section WithSignature.
 Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 
@@ -99,7 +206,10 @@ Inductive elaboration_error :=
 | EEArgumentCount
 | EEReturnTarget
 | EEUnsupportedExpression
-| EEUnsupportedStatement.
+| EEUnsupportedStatement
+| EEUnsupportedAssertion
+| EEIllFormedModule
+| EEUndeclaredProcedure.
 
 Definition packed_pexpr Γ := { t : typ & pexpr Γ t }.
 
@@ -488,25 +598,359 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
   end.
 
 (** Whether elaboration produced a statement. *)
-Definition elaboration_succeeded {Γ} (result : elaboration_error + stmt Γ)
-    : Prop :=
+(** ** Assertions
+
+    Expressions inside assertions are elaborated as program expressions over
+    the named context of bound variables followed by formals, and then read
+    back as logical expressions: a variable of the bound prefix becomes a
+    bound reference, one of the formal suffix a formal reference.  Bound
+    names therefore shadow formals. *)
+
+Fixpoint append_named {Δ F} (bound : named_context Δ)
+    (formals : named_context F) : named_context (Δ ++ F)%list :=
+  match bound with
+  | NCNil => formals
+  | NCCons name t tail => NCCons name t (append_named tail formals)
+  end.
+
+Definition member_case {u Γ t} (variable : member (u :: Γ) t) :
+    (u = t) + member Γ t :=
+  match variable in member Γ' t'
+      return match Γ' with [] => unit | u' :: Γ'' => (u' = t') + member Γ'' t' end
+  with
+  | MHere => inl eq_refl
+  | MThere variable' => inr variable'
+  end.
+
+Fixpoint split_member (Δ : context) {F t} :
+    member (Δ ++ F)%list t -> member Δ t + member F t :=
+  match Δ with
+  | [] => fun variable => inr variable
+  | u :: Δ' => fun variable =>
+      match member_case variable with
+      | inl equal => inl (eq_rect u (member (u :: Δ')) MHere t equal)
+      | inr variable' =>
+          match split_member Δ' variable' with
+          | inl bound => inl (MThere bound)
+          | inr formal => inr formal
+          end
+      end
+  end.
+
+Definition logical_ref {Δ F t} (variable : member (Δ ++ F)%list t) :
+    value_ref F Δ t :=
+  match split_member Δ variable with
+  | inl bound => RefBound bound
+  | inr formal => RefFormal formal
+  end.
+
+Fixpoint logical_expr {Δ F t} (expression : pexpr (Δ ++ F)%list t) : expr F Δ t :=
+  match expression with
+  | PEVar variable => ERef (logical_ref variable)
+  | PEVal value => EVal value
+  | PEUnOp op operand => EUnOp op (logical_expr operand)
+  | PEBinOp op operand1 operand2 =>
+      EBinOp op (logical_expr operand1) (logical_expr operand2)
+  end.
+
+Fixpoint logical_expr_list {Δ F ts} (expressions : pexpr_list (Δ ++ F)%list ts) :
+    expr_list F Δ ts :=
+  match expressions with
+  | PENil => ExprNil
+  | PECons expression expressions' =>
+      ExprCons (logical_expr expression) (logical_expr_list expressions')
+  end.
+
+Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
+    (formals : named_context F) (bound : named_context Δ)
+    (assertion : source_assertion) :
+    elaboration_error + Resource.core_assertion F Δ :=
+  let variables := append_named bound formals in
+  match assertion with
+  | SATrue => inr (Resource.CPure True)
+  | SAFalse => inr (Resource.CPure False)
+  | SAPure condition =>
+      match elaborate_expr variables condition with
+      | inl error => inl error
+      | inr condition' =>
+          match expect_pexpr TBool condition' with
+          | inl error => inl error
+          | inr condition'' => inr (Resource.CExpr (logical_expr condition''))
+          end
+      end
+  | SAOwn (SEField base field_name) chunk None =>
+      match lookup_field field_name (elaboration_fields environment),
+            elaborate_expr variables base, elaborate_expr variables chunk with
+      | None, _, _ => inl (EEUnknownField field_name)
+      | _, inl error, _ | _, _, inl error => inl error
+      | Some field, inr base', inr chunk' =>
+          let identity := field_identity field in
+          match expect_pexpr TRef base',
+                expect_field_chunk (field_type identity) chunk' with
+          | inl error, _ | _, inl error => inl error
+          | inr base'', inr chunk'' =>
+              inr ((match field_type identity with
+                    | TRA _ => @Resource.CGhostOwn _ _ F Δ
+                    | _ => @Resource.COwn _ _ F Δ
+                    end) identity (logical_expr base'') (logical_expr chunk''))
+          end
+      end
+  | SAOwn _ _ _ => inl EEUnsupportedAssertion
+  | SAPredicate name arguments =>
+      match lookup_invariant name (elaboration_invariants environment),
+            lookup_predicate name (elaboration_predicates environment) with
+      | Some invariant, _ =>
+          match elaborate_expr_list variables
+                  (invariant_args (invariant_identity invariant)) arguments with
+          | inl error => inl error
+          | inr arguments' =>
+              inr (Resource.CInvariant (invariant_identity invariant)
+                (logical_expr_list arguments'))
+          end
+      | None, Some predicate =>
+          match elaborate_expr_list variables
+                  (predicate_args (predicate_identity predicate)) arguments with
+          | inl error => inl error
+          | inr arguments' =>
+              inr (Resource.CPredicate (predicate_identity predicate)
+                (logical_expr_list arguments'))
+          end
+      | None, None => inl (EEUnknownInvariant name)
+      end
+  | SAExists name binder_type body =>
+      match elaborate_assertion environment formals
+              (NCCons name (elaborate_typ binder_type) bound) body with
+      | inl error => inl error
+      | inr body' => inr (Resource.CExists (elaborate_typ binder_type) body')
+      end
+  | SAForall name binder_type body =>
+      match elaborate_assertion environment formals
+              (NCCons name (elaborate_typ binder_type) bound) body with
+      | inl error => inl error
+      | inr body' => inr (Resource.CForall (elaborate_typ binder_type) body')
+      end
+  | SAAnd left_assertion right_assertion =>
+      match elaborate_assertion environment formals bound left_assertion,
+            elaborate_assertion environment formals bound right_assertion with
+      | inl error, _ | _, inl error => inl error
+      | inr left', inr right' => inr (Resource.CAnd left' right')
+      end
+  end.
+
+(** ** Procedures
+
+    A procedure's variables are laid out as its arguments, then its locals,
+    then its return variable.  The arguments are the formals, and their
+    declared types must match the procedure's signature in [Logic]. *)
+Fixpoint elaborate_formals (types : context) (declarations : list source_var_decl) :
+    elaboration_error + named_context types :=
+  match types, declarations with
+  | [], [] => inr NCNil
+  | t :: types', declaration :: declarations' =>
+      if typ_eq_dec (elaborate_typ (source_var_type declaration)) t then
+        match elaborate_formals types' declarations' with
+        | inl error => inl error
+        | inr formals => inr (NCCons (source_var_name declaration) t formals)
+        end
+      else inl (EETypeMismatch t (elaborate_typ (source_var_type declaration)))
+  | _, _ => inl EEArgumentCount
+  end.
+
+
+Fixpoint elaborate_locals (declarations : list source_var_decl) :
+    named_context (declaration_types declarations) :=
+  match declarations with
+  | [] => NCNil
+  | declaration :: declarations' =>
+      NCCons (source_var_name declaration)
+        (elaborate_typ (source_var_type declaration))
+        (elaborate_locals declarations')
+  end.
+
+Fixpoint pvar_list_there {Γ F u} (variables : pvar_list Γ F) :
+    pvar_list (u :: Γ) F :=
+  match variables with
+  | PVNil => PVNil
+  | PVCons variable variables' =>
+      PVCons (MThere variable) (pvar_list_there variables')
+  end.
+
+Fixpoint prefix_variables (A R : context) : pvar_list (A ++ R)%list A :=
+  match A with
+  | [] => PVNil
+  | t :: A' => PVCons MHere (pvar_list_there (prefix_variables A' R))
+  end.
+
+Fixpoint member_app_right (A : context) {R t} (variable : member R t) :
+    member (A ++ R)%list t :=
+  match A with
+  | [] => variable
+  | _ :: A' => MThere (member_app_right A' variable)
+  end.
+
+(** A procedure without a [returns] clause returns [Unit] through a hidden
+    variable, which the source cannot mention. *)
+Definition hidden_return_name : source_name := "#return".
+
+Definition elaborate_procedure (environment : elaboration_environment)
+    (procedure : source_proc) : elaboration_error + packed_typed_procedure :=
+  match lookup_procedure (source_proc_name procedure)
+          (elaboration_procedures environment) with
+  | None => inl (EEUnknownProcedure (source_proc_name procedure))
+  | Some signature =>
+      let identity := signature_identity signature in
+      let return_type := procedure_return identity in
+      let return_declaration :=
+        match source_proc_return procedure with
+        | Some declaration => declaration
+        | None => SourceVarDecl hidden_return_name SUnit
+        end in
+      match elaborate_formals (procedure_args identity)
+              (source_proc_args procedure) with
+      | inl error => inl error
+      | inr formals =>
+          if typ_eq_dec (elaborate_typ (source_var_type return_declaration))
+              return_type then
+            let return_binder :=
+              NCCons (source_var_name return_declaration) return_type NCNil in
+            let locals := elaborate_locals (source_proc_locals procedure) in
+            let variables := append_named formals
+              (append_named locals return_binder) in
+            match elaborate_assertion environment formals NCNil
+                    (source_proc_pre procedure),
+                  elaborate_assertion environment formals return_binder
+                    (source_proc_post procedure),
+                  elaborate_stmt environment variables
+                    (source_proc_body procedure) with
+            | inl error, _, _ | _, inl error, _ | _, _, inl error => inl error
+            | inr precondition, inr postcondition, inr body =>
+                inr (pack_typed_procedure
+                  (@TypedProcedure _ _ _ identity variables formals
+                    (prefix_variables _ _)
+                    (member_app_right _ (member_app_right _ MHere))
+                    precondition postcondition body))
+            end
+          else inl (EETypeMismatch return_type
+            (elaborate_typ (source_var_type return_declaration)))
+      end
+  end.
+
+(** ** Modules
+
+    Invariant and predicate bodies are elaborated over their formals.  A
+    module elaborates when its procedure table is well formed:
+    distinct procedure identities, distinct variable names, and contracts
+    free of procedure-entry symbols. *)
+Definition elaborate_invariant (environment : elaboration_environment)
+    (declaration : source_inv) :
+    elaboration_error + { invariant : inv_id &
+      Resource.core_assertion (invariant_args invariant) [] } :=
+  match lookup_invariant (source_inv_name declaration)
+          (elaboration_invariants environment) with
+  | None => inl (EEUnknownInvariant (source_inv_name declaration))
+  | Some signature =>
+      let identity := invariant_identity signature in
+      match elaborate_formals (invariant_args identity)
+              (source_inv_args declaration) with
+      | inl error => inl error
+      | inr formals =>
+          match elaborate_assertion environment formals NCNil
+                  (source_inv_body declaration) with
+          | inl error => inl error
+          | inr body => inr (existT identity body)
+          end
+      end
+  end.
+
+Definition elaborate_predicate (environment : elaboration_environment)
+    (declaration : source_pred) :
+    elaboration_error + { predicate : pred_id &
+      Resource.core_assertion (predicate_args predicate) [] } :=
+  match lookup_predicate (source_pred_name declaration)
+          (elaboration_predicates environment) with
+  | None => inl (EEUnknownInvariant (source_pred_name declaration))
+  | Some signature =>
+      let identity := predicate_identity signature in
+      match elaborate_formals (predicate_args identity)
+              (source_pred_args declaration) with
+      | inl error => inl error
+      | inr formals =>
+          match elaborate_assertion environment formals NCNil
+                  (source_pred_body declaration) with
+          | inl error => inl error
+          | inr body => inr (existT identity body)
+          end
+      end
+  end.
+
+Fixpoint elaborate_all {A B} (elaborate : A -> elaboration_error + B)
+    (declarations : list A) : elaboration_error + list B :=
+  match declarations with
+  | [] => inr []
+  | declaration :: declarations' =>
+      match elaborate declaration, elaborate_all elaborate declarations' with
+      | inl error, _ | _, inl error => inl error
+      | inr result, inr results => inr (result :: results)
+      end
+  end.
+
+Definition elaborate_module_in (environment : elaboration_environment)
+    (module : source_module) : elaboration_error + Hoare.module :=
+  match elaborate_all (elaborate_predicate environment)
+          (source_module_predicates module),
+        elaborate_all (elaborate_invariant environment)
+          (source_module_invariants module),
+        elaborate_all (elaborate_procedure environment)
+          (source_module_procedures module) with
+  | inl error, _, _ | _, inl error, _ | _, _, inl error => inl error
+  | inr predicates, inr invariants, inr procedures =>
+      match Hoare.procedure_table procedures with
+      | None => inl EEIllFormedModule
+      | Some table =>
+          match decide (Forall (Hoare.procedure_contract_invariants_declared
+            (map (@projT1 _ _) predicates)
+            (Hoare.lookup_predicate_body predicates)
+            (map (@projT1 _ _) invariants)) (procedure_entries table)) with
+          | left Hdeclared =>
+              inr (Hoare.make_module table predicates invariants Hdeclared)
+          | right _ => inl EEIllFormedModule
+          end
+      end
+  end.
+
+(** Elaborate a module in the environment determined by its declarations. *)
+Definition elaborate_module (module : source_module) :
+    elaboration_error + Hoare.module :=
+  elaborate_module_in (module_environment module) module.
+
+(** A procedure of an elaborated module, by identifier. *)
+Definition declared_procedure (M : Hoare.module) (identity : proc_id) :
+    elaboration_error + { Γ : context & typed_procedure Γ identity } :=
+  match Hoare.module_procedure M identity with
+  | Some procedure => inr procedure
+  | None => inl EEUndeclaredProcedure
+  end.
+
+(** ** Results *)
+
+(** Whether elaboration produced a result. *)
+Definition elaboration_succeeded {A} (result : elaboration_error + A) : Prop :=
   match result with inl _ => False | inr _ => True end.
 
-(** The statement an elaboration produced, given evidence that it succeeded.
-    The failure branch is discharged by that evidence rather than by an
-    arbitrary placeholder statement, so a program whose source does not
-    elaborate is rejected where it is defined instead of silently becoming
-    some other program. *)
-Definition elaborated_body {Γ} (result : elaboration_error + stmt Γ)
-    (succeeded : elaboration_succeeded result) : stmt Γ :=
-  match result as result' return elaboration_succeeded result' -> stmt Γ with
+(** The result of an elaboration, given evidence that it succeeded.  The
+    failure branch is discharged by that evidence rather than by an arbitrary
+    placeholder, so a source that does not elaborate is rejected where it is
+    used instead of silently becoming a default. *)
+Definition elaborated {A} (result : elaboration_error + A)
+    (succeeded : elaboration_succeeded result) : A :=
+  match result as result' return elaboration_succeeded result' -> A with
   | inl _ => fun impossible => match impossible with end
-  | inr body => fun _ => body
+  | inr value => fun _ => value
   end succeeded.
 
-Lemma elaborated_body_spec {Γ} (result : elaboration_error + stmt Γ)
+Lemma elaborated_spec {A} (result : elaboration_error + A)
     (succeeded : elaboration_succeeded result) :
-  result = inr (elaborated_body result succeeded).
+  result = inr (elaborated result succeeded).
 Proof. destruct result; [destruct succeeded | reflexivity]. Qed.
 
 End WithSignature.

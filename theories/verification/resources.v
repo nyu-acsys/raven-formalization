@@ -79,7 +79,7 @@ Inductive core_assertion (F Δ : context) : Type :=
 #[global] Arguments CAnd {_ _} _ _.
 
 (** User-facing resource assertions cannot observe verifier-generated
-    procedure-entry atoms.  This is what permits each invocation to choose
+    procedure-entry symbols.  This is what permits each invocation to choose
     an interpretation matching its freshly-created concrete frame. *)
 Fixpoint core_entry_free {F Δ} (formula : core_assertion F Δ) : Prop :=
   match formula with
@@ -410,7 +410,7 @@ Definition subst_bound_value_ref {F Δ Δ' t}
   match reference in value_ref _ _ result return value_ref F Δ' result with
   | RefFormal variable => RefFormal variable
   | RefBound variable => substitution _ variable
-  | RefAtom variable => RefAtom variable
+  | RefSymbol variable => RefSymbol variable
   end.
 
 Fixpoint subst_bound_store {Γ F Δ Δ'}
@@ -777,9 +777,7 @@ Fixpoint prenex_to_assertion {Γ F Δ}
   | ResourceExists t rest => AExists t (prenex_to_assertion rest)
   end.
 
-(** The embedding lands in the stack-free fragment — by construction, which
-    is the whole point: what the old development had to prove after every
-    rule is here a property of the image. *)
+(** The embedding lands in the stack-free fragment by construction. *)
 Lemma core_to_assertion_stack_free {Γ F Δ} (formula : core_assertion F Δ) :
   stack_free (@core_to_assertion Γ F Δ formula).
 Proof.
@@ -845,10 +843,9 @@ Proof.
   - rewrite IHformula1, IHformula2. reflexivity.
 Qed.
 
-(** The embedding at two different program-variable contexts is related by
-    [reindex_stack_context] — which is the old development's way of saying
-    "this assertion does not depend on [Γ]".  For a core assertion that is
-    true by construction. *)
+(** A core assertion embeds identically at any two program-variable
+    contexts. The relation [reindex_stack_context] records this independence
+    from [Γ]. *)
 Lemma core_to_assertion_reindex {Γ Γ' F Δ} (formula : core_assertion F Δ) :
   reindex_stack_context (@core_to_assertion Γ F Δ formula)
     (@core_to_assertion Γ' F Δ formula).

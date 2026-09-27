@@ -18,7 +18,6 @@ Module RavenHoareRules := Runtime.Validation.Hoare.ResourceHoare.
 
 Section WithContracts.
 Context {RAs : ra_base.RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeErasure.RuntimeConfiguration}
   {Contracts : RavenHoareRules.ResourceContractEnv}.
 
 (** The Hoare calculus has exactly one stack at every prenex leaf, so
@@ -1822,7 +1821,7 @@ Proof.
     try discriminate.
   destruct (decide (invariant = invariant)) as [Heq|Hneq];
     [|contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn.
   remember (restricted_access_boundary_check arguments arguments body)
     as boundary eqn:Hboundary.
@@ -1851,7 +1850,7 @@ Proof.
     try discriminate.
   destruct (decide (invariant = invariant)) as [Heq|Hneq];
     [|contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn.
   remember (restricted_access_boundary_check arguments arguments body)
     as boundary eqn:Hboundary.
@@ -2038,7 +2037,7 @@ Proof.
       certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
-      first0 second0 Hfirst Hsecond) by apply proof_irrelevance.
+      first0 second0 Hfirst Hsecond) by apply ProofIrrelevance.proof_irrelevance.
     eapply footprinted_normalization_sequence_from_worker
       with (first_result := first_result) (second_result := second_result);
       try eassumption.
@@ -2065,7 +2064,7 @@ Proof.
       certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
-      first0 second0 Hfirst Hsecond) by apply proof_irrelevance.
+      first0 second0 Hfirst Hsecond) by apply ProofIrrelevance.proof_irrelevance.
     eapply footprinted_normalization_sequence_from_worker
       with (first_result := first_result) (second_result := second_result);
       try eassumption.

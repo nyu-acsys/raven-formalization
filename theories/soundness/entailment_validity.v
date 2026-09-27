@@ -1,4 +1,4 @@
-From Coq Require Import Classical FunctionalExtensionality Program.Equality.
+From Coq Require Import FunctionalExtensionality Program.Equality.
 From iris.proofmode Require Import tactics.
 
 From raven Require Import verification.expressions verification.assertions verification.ir verification.procedures soundness.interpretation.
@@ -10,6 +10,19 @@ Import Core IR.
 
 Module Translation := Translation.
 Module Hoare := Translation.Hoare.
+
+(** Whether a Boolean condition evaluated to [true] is decidable. *)
+Definition condition_holds_dec {RAs : RAValueConfig}
+    (result : option (tval TBool)) :
+    {result = Some (VBool true)} + {result <> Some (VBool true)}.
+Proof.
+  destruct result as [value |]; [| right; discriminate].
+  destruct (tval_eqb TBool value (VBool true)) eqn:Hequal.
+  - left. f_equal. apply tval_eqb_eq. exact Hequal.
+  - right. intros Hsome. injection Hsome as Hvalue.
+    rewrite (proj2 (tval_eqb_eq TBool value (VBool true)) Hvalue) in Hequal.
+    discriminate.
+Defined.
 Module IR := Translation.IR.
 Module Core := Translation.Core.
 Module Assertions := Translation.Assertions.
@@ -45,15 +58,15 @@ Context (predicates : predicate_semantics).
 Definition semantically_entails {Γ F Δ}
     (left right : assertion Γ F Δ) : Prop :=
   forall (runtime : Translation.data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env),
-    interp_assertion predicates runtime formals binders atoms left ⊢
-    interp_assertion predicates runtime formals binders atoms right.
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation),
+    interp_assertion predicates runtime formals binders valuation left ⊢
+    interp_assertion predicates runtime formals binders valuation right.
 
 Lemma entailment_step_valid {Γ F Δ}
     (left right : assertion Γ F Δ) :
   entailment_step left right -> semantically_entails left right.
 Proof.
-  intros Hstep runtime formals binders atoms.
+  intros Hstep runtime formals binders valuation.
   destruct Hstep; cbn [Translation.TermSemantics.interp_assertion].
   - iIntros "[Hleft Hright]". iFrame.
   - iIntros "[[Hfirst Hsecond] Hthird]". iFrame.
@@ -78,7 +91,7 @@ Proof.
     + iIntros "_". iExact "Helse".
   - iIntros "H". iDestruct "H" as "[Hite Hindicator]".
     iDestruct "Hindicator" as %Hindicator.
-    destruct (interp_expr formals binders atoms condition) as [value|]
+    destruct (interp_expr formals binders valuation condition) as [value|]
       eqn:Hcondition.
     + dependent destruction value. destruct b.
       * iDestruct "Hite" as "[Hthen _]".
@@ -97,12 +110,12 @@ Proof.
   - iIntros "H". iDestruct "H" as "[Hite Hindicator]".
     iDestruct "Hindicator" as %Hindicator.
     assert (Hindicator_false :
-      interp_expr formals binders atoms indicator = Some (VBool false)).
+      interp_expr formals binders valuation indicator = Some (VBool false)).
     { cbn [interp_expr] in Hindicator.
-      destruct (interp_expr formals binders atoms indicator) as [value|]
+      destruct (interp_expr formals binders valuation indicator) as [value|]
         eqn:Hvalue; [|discriminate].
       dependent destruction value. destruct b; inversion Hindicator. reflexivity. }
-    destruct (interp_expr formals binders atoms condition) as [value|]
+    destruct (interp_expr formals binders valuation condition) as [value|]
       eqn:Hcondition.
     + dependent destruction value. destruct b.
       * iDestruct "Hite" as "[Hthen _]".
@@ -117,16 +130,16 @@ Proof.
       iDestruct ("Helse" with "[]") as "[Hbranch _]".
       { iPureIntro. congruence. }
       iExact "Hbranch".
-  - iIntros "%Hleft". iPureIntro. exact (H formals binders atoms Hleft).
-  - iIntros "_". iPureIntro. exact (H formals binders atoms).
+  - iIntros "%Hleft". iPureIntro. exact (H formals binders valuation Hleft).
+  - iIntros "_". iPureIntro. exact (H formals binders valuation).
   - iIntros "_".
-    destruct (interp_expr_total formals binders atoms expression) as [value Hvalue].
+    destruct (interp_expr_total formals binders valuation expression) as [value Hvalue].
     iPureIntro. exists value. split; [exact Hvalue|].
     eapply H. exact Hvalue.
   - iIntros "_".
-    destruct (interp_expr_total formals binders atoms old_expression)
+    destruct (interp_expr_total formals binders valuation old_expression)
       as [old_value Hold].
-    destruct (interp_expr_total formals binders atoms new_expression)
+    destruct (interp_expr_total formals binders valuation new_expression)
       as [new_value Hnew].
     iPureIntro. exists old_value, new_value. repeat split; try assumption.
     eapply H; eassumption.
@@ -134,24 +147,24 @@ Proof.
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation). reflexivity.
   - iIntros "Hown". iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation). reflexivity.
   - iIntros "[Hown %Hcondition]".
     iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms Hcondition). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation Hcondition). reflexivity.
   - iIntros "[Hown %Hcondition]".
     iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms Hcondition). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation Hcondition). reflexivity.
   - iIntros "[Hinv %Hcondition]".
     iDestruct "Hinv" as (values) "[%Harguments Hinv]".
     iExists values. iFrame. iPureIntro.
@@ -172,7 +185,7 @@ Theorem assertion_entails_valid {Γ F Δ}
   assertion_entails left right -> semantically_entails left right.
 Proof.
   intros Hentails. induction Hentails;
-    intros runtime formals binders atoms.
+    intros runtime formals binders valuation.
   - reflexivity.
   - apply entailment_step_valid. exact H.
   - etrans; [apply IHHentails1 | apply IHHentails2].
@@ -185,7 +198,7 @@ Proof.
     iApply IHHentails. iExact "Hbody".
   - cbn [Translation.TermSemantics.interp_assertion].
     iIntros "Hinstantiated".
-    destruct (interp_expr_total formals binders atoms witness)
+    destruct (interp_expr_total formals binders valuation witness)
       as [value Hvalue].
     iExists value.
     erewrite <- (Translation.TermSemantics.interp_instantiate_bound_assertion
@@ -193,7 +206,7 @@ Proof.
     iExact "Hinstantiated".
   - cbn [Translation.TermSemantics.interp_assertion]. iIntros "H".
     iDestruct "H" as (value) "Hbody".
-    iPoseProof (IHHentails runtime formals (binder_cons value binders) atoms
+    iPoseProof (IHHentails runtime formals (binder_cons value binders) valuation
       with "Hbody") as "Hresult".
     iEval (rewrite Translation.TermSemantics.interp_weaken_assertion) in
       "Hresult". iExact "Hresult".
@@ -234,9 +247,8 @@ Proof.
       rewrite Translation.interp_weaken_expr.
       iPureIntro. exact Hcondition.
   - cbn [Translation.TermSemantics.interp_assertion]. iIntros "H".
-    destruct (classic
-      (Core.interp_expr formals binders atoms condition =
-        Some (Core.VBool true))) as [Hcondition|Hcondition].
+    destruct (condition_holds_dec
+      (Core.interp_expr formals binders valuation condition)) as [Hcondition|Hcondition].
     + iDestruct "H" as "[Hthen _]".
       iPoseProof ("Hthen" $! Hcondition) as "Hthen".
       iDestruct "Hthen" as (value) "Hbody". iExists value. iSplit.
@@ -256,11 +268,11 @@ Proof.
     rewrite (Translation.TermSemantics.interp_rename_bound_assertion
       Model predicates (@exchange_bound_renaming Δ u t) formals
       (binder_cons u_value (binder_cons t_value binders))
-      (binder_cons t_value (binder_cons u_value binders)) atoms runtime
+      (binder_cons t_value (binder_cons u_value binders)) valuation runtime
       (binder_cons_exchange t_value u_value binders) body).
     iExact "H".
   - cbn [Translation.TermSemantics.interp_assertion]. iIntros "H" (value).
-    iApply (IHHentails runtime formals (binder_cons value binders) atoms).
+    iApply (IHHentails runtime formals (binder_cons value binders) valuation).
     iApply ("H" $! value).
 Qed.
 
@@ -274,15 +286,15 @@ Qed.
 Definition core_semantically_entails {F Δ}
     (left right : Resource.core_assertion F Δ) : Prop :=
   forall (formals : formal_env F) (binders : binder_env Δ)
-    (atoms : atom_env),
-    interp_core predicates formals binders atoms left ⊢
-    interp_core predicates formals binders atoms right.
+    (valuation : symbol_valuation),
+    interp_core predicates formals binders valuation left ⊢
+    interp_core predicates formals binders valuation right.
 
 Lemma core_entailment_step_valid {F Δ}
     (left right : Resource.core_assertion F Δ) :
   Hoare.ResourceHoare.core_entailment_step left right -> core_semantically_entails left right.
 Proof.
-  intros Hstep formals binders atoms.
+  intros Hstep formals binders valuation.
   destruct Hstep; cbn [Translation.TermSemantics.interp_core].
   - iIntros "[Hleft Hright]". iFrame.
   - iIntros "[[Hfirst Hsecond] Hthird]". iFrame.
@@ -307,7 +319,7 @@ Proof.
     + iIntros "_". iExact "Helse".
   - iIntros "H". iDestruct "H" as "[Hite Hindicator]".
     iDestruct "Hindicator" as %Hindicator.
-    destruct (interp_expr formals binders atoms condition) as [value|]
+    destruct (interp_expr formals binders valuation condition) as [value|]
       eqn:Hcondition.
     + dependent destruction value. destruct b.
       * iDestruct "Hite" as "[Hthen _]".
@@ -326,12 +338,12 @@ Proof.
   - iIntros "H". iDestruct "H" as "[Hite Hindicator]".
     iDestruct "Hindicator" as %Hindicator.
     assert (Hindicator_false :
-      interp_expr formals binders atoms indicator = Some (VBool false)).
+      interp_expr formals binders valuation indicator = Some (VBool false)).
     { cbn [interp_expr] in Hindicator.
-      destruct (interp_expr formals binders atoms indicator) as [value|]
+      destruct (interp_expr formals binders valuation indicator) as [value|]
         eqn:Hvalue; [|discriminate].
       dependent destruction value. destruct b; inversion Hindicator. reflexivity. }
-    destruct (interp_expr formals binders atoms condition) as [value|]
+    destruct (interp_expr formals binders valuation condition) as [value|]
       eqn:Hcondition.
     + dependent destruction value. destruct b.
       * iDestruct "Hite" as "[Hthen _]".
@@ -346,16 +358,16 @@ Proof.
       iDestruct ("Helse" with "[]") as "[Hbranch _]".
       { iPureIntro. congruence. }
       iExact "Hbranch".
-  - iIntros "%Hleft". iPureIntro. exact (H formals binders atoms Hleft).
-  - iIntros "_". iPureIntro. exact (H formals binders atoms).
+  - iIntros "%Hleft". iPureIntro. exact (H formals binders valuation Hleft).
+  - iIntros "_". iPureIntro. exact (H formals binders valuation).
   - iIntros "_".
-    destruct (interp_expr_total formals binders atoms expression) as [value Hvalue].
+    destruct (interp_expr_total formals binders valuation expression) as [value Hvalue].
     iPureIntro. exists value. split; [exact Hvalue|].
     eapply H. exact Hvalue.
   - iIntros "_".
-    destruct (interp_expr_total formals binders atoms old_expression)
+    destruct (interp_expr_total formals binders valuation old_expression)
       as [old_value Hold].
-    destruct (interp_expr_total formals binders atoms new_expression)
+    destruct (interp_expr_total formals binders valuation new_expression)
       as [new_value Hnew].
     iPureIntro. exists old_value, new_value. repeat split; try assumption.
     eapply H; eassumption.
@@ -363,24 +375,24 @@ Proof.
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation). reflexivity.
   - iIntros "Hown". iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation). reflexivity.
   - iIntros "[Hown %Hcondition]".
     iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms Hcondition). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation Hcondition). reflexivity.
   - iIntros "[Hown %Hcondition]".
     iDestruct "Hown" as (concrete_location concrete_chunk)
       "(%Hlocation & %Hchunk & Hown)".
     iExists concrete_location, concrete_chunk. iSplit; first done.
     iSplit; last iExact "Hown". iPureIntro.
-    rewrite <- Hchunk, <- (H formals binders atoms Hcondition). reflexivity.
+    rewrite <- Hchunk, <- (H formals binders valuation Hcondition). reflexivity.
   - iIntros "[Hinv %Hcondition]".
     iDestruct "Hinv" as (values) "[%Harguments Hinv]".
     iExists values. iFrame. iPureIntro.
@@ -400,7 +412,7 @@ Theorem core_entails_valid {F Δ}
   Hoare.ResourceHoare.core_entails left right -> core_semantically_entails left right.
 Proof.
   intros Hentails. induction Hentails;
-    intros formals binders atoms.
+    intros formals binders valuation.
   - reflexivity.
   - apply core_entailment_step_valid. exact H.
   - etrans; [apply IHHentails1 | apply IHHentails2].
@@ -413,7 +425,7 @@ Proof.
     iApply IHHentails. iExact "Hbody".
   - cbn [Translation.TermSemantics.interp_core].
     iIntros "Hinstantiated".
-    destruct (interp_expr_total formals binders atoms witness)
+    destruct (interp_expr_total formals binders valuation witness)
       as [value Hvalue].
     iExists value.
     erewrite <- (Translation.TermSemantics.interp_instantiate_bound_core
@@ -421,7 +433,7 @@ Proof.
     iExact "Hinstantiated".
   - cbn [Translation.TermSemantics.interp_core]. iIntros "H".
     iDestruct "H" as (value) "Hbody".
-    iPoseProof (IHHentails formals (binder_cons value binders) atoms
+    iPoseProof (IHHentails formals (binder_cons value binders) valuation
       with "Hbody") as "Hresult".
     iEval (rewrite Translation.TermSemantics.interp_weaken_core) in
       "Hresult". iExact "Hresult".
@@ -462,9 +474,8 @@ Proof.
       rewrite Translation.interp_weaken_expr.
       iPureIntro. exact Hcondition.
   - cbn [Translation.TermSemantics.interp_core]. iIntros "H".
-    destruct (classic
-      (Core.interp_expr formals binders atoms condition =
-        Some (Core.VBool true))) as [Hcondition|Hcondition].
+    destruct (condition_holds_dec
+      (Core.interp_expr formals binders valuation condition)) as [Hcondition|Hcondition].
     + iDestruct "H" as "[Hthen _]".
       iPoseProof ("Hthen" $! Hcondition) as "Hthen".
       iDestruct "Hthen" as (value) "Hbody". iExists value. iSplit.
@@ -484,11 +495,11 @@ Proof.
     rewrite (Translation.TermSemantics.interp_rename_bound_core
       Model predicates (@exchange_bound_renaming Δ u t) formals
       (binder_cons u_value (binder_cons t_value binders))
-      (binder_cons t_value (binder_cons u_value binders)) atoms
+      (binder_cons t_value (binder_cons u_value binders)) valuation
       (binder_cons_exchange t_value u_value binders) body).
     iExact "H".
   - cbn [Translation.TermSemantics.interp_core]. iIntros "H" (value).
-    iApply (IHHentails formals (binder_cons value binders) atoms).
+    iApply (IHHentails formals (binder_cons value binders) valuation).
     iApply ("H" $! value).
 Qed.
 
@@ -501,13 +512,13 @@ Definition rpe_intro_valid (Γ F : context) : Prop :=
   forall Δ t (witness : Core.value_ref F Δ t)
     (state : Resource.resource_assertion Γ F (t :: Δ))
     (runtime : Translation.data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env),
-  interp_resource predicates runtime formals binders atoms
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation),
+  interp_resource predicates runtime formals binders valuation
     (Resource.subst_bound_resource
       (Resource.head_bound_ref_subst witness) state) ⊢
   (∃ value : tval t,
     interp_resource predicates runtime formals
-      (binder_cons value binders) atoms state)%I.
+      (binder_cons value binders) valuation state)%I.
 
 (** Proved, not assumed.  Instantiating a resource binder is a
     substitution of a [value_ref] into both halves of the state: into the
@@ -518,25 +529,25 @@ Definition rpe_intro_valid (Γ F : context) : Prop :=
     at the runtime layer. *)
 Theorem rpe_intro_holds (Γ F : context) : rpe_intro_valid Γ F.
 Proof.
-  intros Δ t witness state runtime formals binders atoms.
+  intros Δ t witness state runtime formals binders valuation.
   destruct state as [store body].
   unfold Translation.TermSemantics.interp_resource,
     Resource.subst_bound_resource.
   cbn [Resource.resource_stack Resource.resource_body].
   iIntros "H".
-  iExists (Core.interp_ref formals binders atoms witness).
+  iExists (Core.interp_ref formals binders valuation witness).
   rewrite (Translation.interp_subst_bound_store
-    (Resource.head_bound_ref_subst witness) formals _ binders atoms
-    (Translation.interp_head_bound_ref_subst witness formals binders atoms)
+    (Resource.head_bound_ref_subst witness) formals _ binders valuation
+    (Translation.interp_head_bound_ref_subst witness formals binders valuation)
     store).
   rewrite (Translation.TermSemantics.interp_subst_bound_core Model
     predicates
     (Resource.bound_subst_of_refs (Resource.head_bound_ref_subst witness))
-    formals _ binders atoms
+    formals _ binders valuation
     (fun u variable =>
       f_equal Some
         (Translation.interp_head_bound_ref_subst witness formals binders
-          atoms u variable))
+          valuation u variable))
     body).
   iExact "H".
 Qed.
@@ -545,14 +556,14 @@ Lemma resource_prenex_entails_valid {Γ F}
     {Δ} (left right : Resource.resource_prenex Γ F Δ) :
   Hoare.ResourceHoare.resource_prenex_entails left right ->
   forall (runtime : Translation.data_stack_context Model Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env),
-  interp_resource_prenex predicates runtime formals binders atoms
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation),
+  interp_resource_prenex predicates runtime formals binders valuation
     left ⊢
-  interp_resource_prenex predicates runtime formals binders atoms
+  interp_resource_prenex predicates runtime formals binders valuation
     right.
 Proof.
   intro Hentails; induction Hentails;
-    intros runtime formals binders atoms;
+    intros runtime formals binders valuation;
     cbn [Translation.TermSemantics.interp_resource_prenex].
   - destruct H as [Hstack Hcore].
     destruct left as [lstore lbody]; destruct right as [rstore rbody].
@@ -561,7 +572,7 @@ Proof.
     cbn [Resource.resource_stack Resource.resource_body].
     apply bi.sep_mono;
       [done
-      | exact (core_entails_valid lbody rbody Hcore formals binders atoms)].
+      | exact (core_entails_valid lbody rbody Hcore formals binders valuation)].
   - apply bi.exist_mono; intro value. apply IHHentails.
   - apply rpe_intro_holds.
   - (* RPEOpenCoreExists: unconditional.  The core existential and the
@@ -586,7 +597,7 @@ Proof.
     iIntros "H".
     iDestruct "H" as (value) "[Hstack Hbody]".
     rewrite <- (Translation.interp_weaken_store
-      formals binders atoms value store).
+      formals binders valuation value store).
     iFrame.
   - apply bi.exist_elim; intro value.
     apply bi.equiv_entails_1_1,
@@ -598,10 +609,10 @@ Proof.
         binders t (renaming t variable) = source_binders t variable.
     { intros. reflexivity. }
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex Model
-      predicates left _ renaming formals source_binders binders atoms runtime
+      predicates left _ renaming formals source_binders binders valuation runtime
       Hrenaming).
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex Model
-      predicates right _ renaming formals source_binders binders atoms runtime
+      predicates right _ renaming formals source_binders binders valuation runtime
       Hrenaming).
     apply IHHentails.
   - pose (tail := fun u (variable : bvar Δ u) =>
@@ -609,7 +620,7 @@ Proof.
     have Heta : binder_cons (binders t MHere) tail = binders :=
       binder_cons_eta binders.
     iIntros "Hbody".
-    iPoseProof (IHHentails runtime formals tail atoms with "[Hbody]")
+    iPoseProof (IHHentails runtime formals tail valuation with "[Hbody]")
       as "Htarget".
     { iExists (binders t MHere). rewrite Heta. iExact "Hbody". }
     rewrite <- Heta.

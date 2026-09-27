@@ -236,7 +236,7 @@ Lemma normalization_update_store_here {F Δ head_type tail_context}
     StoreCons (RefBound MHere) (Assertions.weaken_store tail).
 Proof.
   unfold IR.update_store_with_bound, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
+  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
 Qed.
 
 Lemma normalization_update_store_there {F Δ head_type tail_context t}
@@ -248,7 +248,7 @@ Lemma normalization_update_store_there {F Δ head_type tail_context t}
       (IR.update_store_with_bound tail target).
 Proof.
   unfold IR.update_store_with_bound, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
+  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
 Qed.
 
 Lemma normalization_lookup_store_here {F Δ head_type tail_context}
@@ -257,7 +257,7 @@ Lemma normalization_lookup_store_here {F Δ head_type tail_context}
   lookup_store (StoreCons head tail) _ MHere = head.
 Proof.
   unfold lookup_store, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
+  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
 Qed.
 
 Lemma normalization_lookup_store_there {F Δ head_type tail_context t}
@@ -268,7 +268,7 @@ Lemma normalization_lookup_store_there {F Δ head_type tail_context t}
     lookup_store tail _ variable.
 Proof.
   unfold lookup_store, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
+  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
 Qed.
 
 Lemma normalization_lookup_weaken_store {Γ F Δ t u}
@@ -1585,7 +1585,7 @@ Proof.
       destruct (decide (invariant = invariant) : Decision (invariant = invariant))
         as [Heq|Hneq]; last contradiction.
       replace Heq with (@eq_refl inv_id invariant) in Heffects
-        by apply proof_irrelevance.
+        by apply ProofIrrelevance.proof_irrelevance.
       cbn in Heffects.
       apply restricted_access_boundary_check_sound in Heffects as
         [Harguments Hdisjoint].
@@ -1598,7 +1598,7 @@ Proof.
     destruct (decide (invariant = invariant) : Decision (invariant = invariant))
       as [Heq|Hneq]; last contradiction.
     replace Heq with (@eq_refl inv_id invariant) in Heffects
-      by apply proof_irrelevance.
+      by apply ProofIrrelevance.proof_irrelevance.
     cbn in Heffects.
     apply Bool.andb_true_iff in Heffects as [Hboundary Hwork_effects].
     apply restricted_access_boundary_check_sound in Hboundary as
@@ -1723,7 +1723,7 @@ Proof.
   intro Hboundary. cbn [restricted_normalize_statement_fuel].
   destruct (decide (invariant = invariant)) as [Heq | Hneq];
     [| contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn. now rewrite Hboundary.
 Qed.
 
@@ -1744,7 +1744,7 @@ Proof.
   intros Hboundary Hwork. cbn [restricted_normalize_statement_fuel].
   destruct (decide (invariant = invariant)) as [Heq | Hneq];
     [| contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn. now rewrite Hboundary, Hwork.
 Qed.
 
@@ -1762,7 +1762,7 @@ Proof.
   cbn [restricted_fragment_shape_check restricted_access_effect_check].
   destruct (decide (invariant = invariant)) as [Heq | Hneq];
     [| contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   rewrite bool_decide_true; [| reflexivity].
   cbn. rewrite !Bool.andb_true_iff.
   intros [Hneutral Hboundary]. split.
@@ -1787,7 +1787,7 @@ Proof.
   cbn [restricted_fragment_shape_check restricted_access_effect_check].
   destruct (decide (invariant = invariant)) as [Heq | Hneq];
     [| contradiction].
-  replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+  replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn. rewrite !Bool.andb_true_iff.
   intros [[[_ Hneutral] Hwork_shape] [Hboundary Hwork_effect]].
   split; [now apply access_neutralb_spec|].
@@ -1920,11 +1920,11 @@ Proof.
       destruct (decide (invariant = invariant)) as [Heq | Hneq];
         [|contradiction].
       replace Heq with (@eq_refl inv_id invariant) in Heffect |- *
-        by apply proof_irrelevance.
+        by apply ProofIrrelevance.proof_irrelevance.
       cbn in Heffect |- *.
       destruct (decide (invariant = invariant)) as [Heq0 | Hneq];
         [|contradiction].
-      replace Heq0 with Heq by apply proof_irrelevance.
+      replace Heq0 with Heq by apply ProofIrrelevance.proof_irrelevance.
       rewrite Heffect. eexists; reflexivity.
     + destruct current2_2_1; cbn [restricted_fragment_shape_check
         restricted_access_effect_check] in Hshape, Heffect |- *;
@@ -1935,7 +1935,7 @@ Proof.
       destruct (decide (invariant = invariant)) as [Heq | Hneq];
         [|contradiction].
       replace Heq with (@eq_refl inv_id invariant) in Heffect
-        by apply proof_irrelevance.
+        by apply ProofIrrelevance.proof_irrelevance.
       cbn in Heffect.
       apply Bool.andb_true_iff in Heffect as [Hboundary Hwork_effect].
       assert (Hwork_accepted :
@@ -1957,8 +1957,8 @@ Proof.
       cbn [restricted_normalize_statement_fuel].
       destruct (decide (invariant = invariant)) as [Heq0 | Hneq];
         [|contradiction].
-      replace Heq0 with Heq by apply proof_irrelevance.
-      replace Heq with (@eq_refl inv_id invariant) by apply proof_irrelevance.
+      replace Heq0 with Heq by apply ProofIrrelevance.proof_irrelevance.
+      replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
       cbn. rewrite Hboundary, Hwork. eexists; reflexivity.
   - apply unfold_freeb_spec in Hshape.
     destruct (unfold_free_normalize_statement_succeeds_with_fuel current fuel

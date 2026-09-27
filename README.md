@@ -8,7 +8,7 @@ sub-namespace per directory (`raven.runtime`, `raven.verification`,
 To build:
 ```
 $ dune build -j 2              # everything
-$ dune build -j 2 @soundness   # the library soundness theorem, no examples
+$ dune build -j 2 @soundness   # the module soundness theorem, no examples
 $ dune build -j 2 @examples    # the verified examples
 ```
 

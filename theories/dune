@@ -18,5 +18,5 @@
 ; [dune build @examples]: the verified examples (and everything they need).
 (rule
  (alias examples)
- (deps examples/counter_monotonic_packaging.vo)
+ (deps examples/counter_monotonic.vo)
  (action (progn)))

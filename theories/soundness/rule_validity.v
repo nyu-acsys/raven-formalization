@@ -14,8 +14,7 @@ Open Scope list_scope.
 
 (** Validity of the certified-region rules: the concrete runtime
     interpretation, its Iris transport laws, registered procedure layout, and
-    the validity of structured certificates, all over the same runtime
-    configuration. *)
+    the validity of structured certificates. *)
 Module RuleValidity.
 Import Runtime RuntimeErasure.
 Module Hoare := Runtime.Validation.Hoare.
@@ -41,7 +40,6 @@ Module CoreModel := RegionExecution.Primitives.Model.
 
 Section WithContracts.
 Context {RAs : ra_base.RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration}
   {Contracts : Hoare.ResourceHoare.ResourceContractEnv}
   {Coherence : Hoare.ProcedureContractCoherence}.
 
@@ -123,59 +121,89 @@ Qed.
 (** Resource-independent executable registration.  Initialization must inspect
     this data before it can construct [runtimeG], in particular to allocate
     exactly the finite family of invariant-token authorities. *)
-Record certified_program_registration := CertifiedProgramRegistration {
+Record certified_module_registration := CertifiedModuleRegistration {
   registered_invariants : gset inv_id;
-  registered_runtime_procedure_statement :
-    packed_typed_procedure -> RuntimeLang.stmt;
-  registered_runtime_procedure_nonvalue : forall packed,
-    List.In packed (procedure_entries Hoare.coherent_procedures) ->
-    forall stack,
-    RuntimeLang.to_val (RuntimeLang.to_rtstmt stack
-      (registered_runtime_procedure_statement packed)) = None;
+  registered_runtime_procedure_body :
+    packed_typed_procedure -> RuntimeLang.stack_id -> RuntimeLang.runtime_stmt;
   registered_runtime_procedure_layout :
     forall (packed : packed_typed_procedure),
     List.In packed (procedure_entries Hoare.coherent_procedures) ->
     match packed with
     | existT Γ (existT F procedure) =>
         procedure_wf procedure /\
-        ~ List.In "#ret_val" (named_context_names
-          (procedure_variables Γ F procedure)) /\
         forall stack,
-          @RuntimeErasure.runtime_stmt _ _ _ Γ
+          @RuntimeErasure.runtime_stmt _ _ Γ
             (@RuntimeErasure.runtime_procedure_names _ _
               Γ F procedure) stack (procedure_body Γ F procedure) =
-          RuntimeLang.to_rtstmt stack
-            (registered_runtime_procedure_statement packed)
+          registered_runtime_procedure_body packed stack
     end;
 }.
+
+(** ** The canonical registration
+
+    A module determines its registration directly: the body stored for each
+    procedure is its stack-parametric erasure, and the invariant tokens are
+    those of the module's invariants. *)
+Definition canonical_procedure_body (packed : packed_typed_procedure) :
+    RuntimeLang.stack_id -> RuntimeLang.runtime_stmt :=
+  match packed with
+  | existT Γ (existT F procedure) =>
+      fun stack => @RuntimeErasure.runtime_stmt _ _ Γ
+        (@RuntimeErasure.runtime_procedure_names _ _ Γ F procedure) stack
+        (procedure_body Γ F procedure)
+  end.
+
+Lemma canonical_procedure_layout packed :
+  List.In packed (procedure_entries Hoare.coherent_procedures) ->
+  match packed with
+  | existT Γ (existT F procedure) =>
+      procedure_wf procedure /\
+      forall stack,
+        @RuntimeErasure.runtime_stmt _ _ Γ
+          (@RuntimeErasure.runtime_procedure_names _ _
+            Γ F procedure) stack (procedure_body Γ F procedure) =
+        canonical_procedure_body packed stack
+  end.
+Proof.
+  intros Hin.
+  pose proof (proj1 (List.Forall_forall _ _)
+    (procedure_entries_wf Hoare.coherent_procedures) packed Hin) as Hwf.
+  destruct packed as [Γ [F procedure]].
+  split; [exact Hwf | reflexivity].
+Qed.
+
+Definition canonical_registration (invariants : gset inv_id) :
+    certified_module_registration :=
+  CertifiedModuleRegistration invariants canonical_procedure_body
+    canonical_procedure_layout.
 
 (** Pure association between the finite registration and the names allocated
     before [runtimeG] is assembled.  The default is deliberately outside the
     allocated range; it only totalizes the runtime [invTokenG] lookup. *)
 Definition registered_invariant_enumeration
-    (registration : certified_program_registration) : list inv_id :=
+    (registration : certified_module_registration) : list inv_id :=
   elements (registered_invariants registration).
 
 Definition registered_invtoken_map
-    (registration : certified_program_registration) (names : list gname) :
+    (registration : certified_module_registration) (names : list gname) :
     gmap RuntimeModel.inv_name gname :=
   list_to_map (zip
     (map invariant_name
       (registered_invariant_enumeration registration)) names).
 
 Definition registered_invtoken_name
-  (registration : certified_program_registration) (names : list gname) :
+  (registration : certified_module_registration) (names : list gname) :
     RuntimeModel.inv_name -> gname := fun invariant_name =>
   default (fresh (list_to_set names : gset gname))
     (registered_invtoken_map registration names !! invariant_name).
 
 Definition registered_invTokenG {Σ : gFunctors} `{!RuntimeModel.invTokenGpreS Σ}
-    (registration : certified_program_registration) (names : list gname) :
+    (registration : certified_module_registration) (names : list gname) :
     RuntimeModel.invTokenG Σ :=
   Runtime.initialized_invTokenG (registered_invtoken_name registration names).
 
 Definition registered_runtime_procedure_entry
-    (registration : certified_program_registration)
+    (registration : certified_module_registration)
     (packed : packed_typed_procedure) : RuntimeLang.proc :=
   match packed with
   | existT Γ (existT F procedure) =>
@@ -185,11 +213,11 @@ Definition registered_runtime_procedure_entry
           Γ F procedure)
         (@RuntimeErasure.runtime_procedure_locals _ _
           Γ F procedure)
-        (registered_runtime_procedure_statement registration packed)
+        (registered_runtime_procedure_body registration packed)
   end.
 
 Definition registered_runtime_procedure_bindings
-    (registration : certified_program_registration) :
+    (registration : certified_module_registration) :
     list (RuntimeLang.proc_name * RuntimeLang.proc) :=
   map (fun procedure =>
     (procedure_name (packed_procedure_id procedure),
@@ -197,12 +225,12 @@ Definition registered_runtime_procedure_bindings
     (procedure_entries Hoare.coherent_procedures).
 
 Definition registered_runtime_procedure_map
-    (registration : certified_program_registration) :
+    (registration : certified_module_registration) :
     gmap RuntimeLang.proc_name RuntimeLang.proc :=
   list_to_map (registered_runtime_procedure_bindings registration).
 
 Lemma registered_invtoken_map_lookup_nth
-    (registration : certified_program_registration) (names : list gname)
+    (registration : certified_module_registration) (names : list gname)
     index invariant name :
   length names = length (registered_invariant_enumeration registration) ->
   registered_invariant_enumeration registration !! index = Some invariant ->
@@ -223,7 +251,7 @@ Proof.
 Qed.
 
 Lemma registered_invtoken_name_nth
-    (registration : certified_program_registration) (names : list gname)
+    (registration : certified_module_registration) (names : list gname)
     index invariant name :
   length names = length (registered_invariant_enumeration registration) ->
   registered_invariant_enumeration registration !! index = Some invariant ->
@@ -241,7 +269,7 @@ Section RegisteredTokenAuthorities.
 Context {Σ : gFunctors} `{!RuntimeModel.invTokenGpreS Σ}.
 
 Lemma registered_invtoken_authorities
-    (registration : certified_program_registration) (names : list gname) :
+    (registration : certified_module_registration) (names : list gname) :
   length names = length (registered_invariant_enumeration registration) ->
   ([∗ list] name ∈ names,
     @own Σ (authR RuntimeModel.inv_argsUR) RuntimeModel.invtoken_pre_inG name
@@ -288,18 +316,229 @@ Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (bi_car (iPropI Σ)).
 
 Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
-  @RegionExecution.Primitives.semantic_data _ _ _ Σ RG.
+  @RegionExecution.Primitives.semantic_data _ _ Σ RG.
 
-Context (Leaf : @TermLeaf.semantic_leaf_contracts_data _ _ _
-  (iPropI Σ) semantic_data).
+Lemma term_interp_assertion_timeless
+    (predicates : Translation.TermSemantics.predicate_semantics)
+    (Hpredicates : forall predicate values,
+      Timeless (predicates predicate values))
+    {Γ F Δ} (runtime : Translation.data_stack_context semantic_data Γ)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (formula : Translation.Assertions.assertion Γ F Δ) :
+  Timeless (Translation.TermSemantics.interp_assertion semantic_data predicates
+    runtime formals binders valuation formula).
+Proof.
+  induction formula; simpl.
+  - apply _.
+  - apply _.
+  - apply _.
+  - apply _.
+  - apply _.
+  - apply _.
+  - apply _.
+  - apply bi.exist_timeless. intros. apply IHformula.
+  - apply bi.forall_timeless. intros. apply IHformula.
+  - apply bi.and_timeless; apply bi.wand_timeless; apply IHformula1 ||
+      apply IHformula2.
+  - apply bi.exist_timeless. intros. apply bi.sep_timeless; [apply _|apply _].
+  - apply bi.exist_timeless. intros. apply bi.sep_timeless; [apply _|].
+    apply Hpredicates.
+  - apply bi.sep_timeless; [apply IHformula1|apply IHformula2].
+Qed.
+
+Local Notation predicate_semantics :=
+  (Translation.TermSemantics.predicate_semantics (PROP := iPropI Σ)).
+
+(** ** Predicate semantics
+
+    A module's predicates denote the least timeless solution of their
+    unfolding equations: the meet of all timeless prefixed points of the
+    functional that interprets the predicate bodies (Knaster--Tarski).  The
+    functional is monotone because predicate occurrences in core assertions
+    are positive, and it preserves timelessness; hence the meet is itself a
+    timeless fixpoint. *)
+Definition predicate_functional (valuation : symbol_valuation)
+    (predicates : predicate_semantics) :
+    predicate_semantics :=
+  fun predicate values =>
+    Translation.TermSemantics.interp_core semantic_data predicates
+      (formal_env_of_values values) empty_binder_env valuation
+      (Hoare.ResourceHoare.predicate_body predicate).
+
+Definition timeless_predicate_semantics : Type :=
+  { predicates : predicate_semantics |
+    forall predicate values, Timeless (predicates predicate values) }.
+
+Definition predicate_fixpoint (valuation : symbol_valuation) :
+    predicate_semantics :=
+  fun predicate values =>
+    (∀ Φ : timeless_predicate_semantics,
+      □ (∀ predicate' values',
+          predicate_functional valuation (proj1_sig Φ) predicate' values' -∗
+          proj1_sig Φ predicate' values') -∗
+      proj1_sig Φ predicate values)%I.
+
+Lemma interp_core_predicates_mono {F Δ}
+    (left_predicates right_predicates : predicate_semantics)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (formula : Translation.Resource.core_assertion F Δ) :
+  □ (∀ predicate values,
+      left_predicates predicate values -∗ right_predicates predicate values) ⊢
+  Translation.TermSemantics.interp_core semantic_data left_predicates
+      formals binders valuation formula -∗
+  Translation.TermSemantics.interp_core semantic_data right_predicates
+      formals binders valuation formula.
+Proof.
+  rewrite -!(Translation.TermSemantics.interp_core_to_assertion semantic_data
+    _ (Translation.data_empty_stack_context semantic_data)).
+  apply Translation.TermSemantics.interp_assertion_mono.
+Qed.
+
+Lemma interp_core_predicates_timeless {F Δ}
+    (predicates : predicate_semantics)
+    (Hpredicates : forall predicate values,
+      Timeless (predicates predicate values))
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (formula : Translation.Resource.core_assertion F Δ) :
+  Timeless (Translation.TermSemantics.interp_core semantic_data predicates
+    formals binders valuation formula).
+Proof.
+  rewrite -(Translation.TermSemantics.interp_core_to_assertion semantic_data
+    _ (Translation.data_empty_stack_context semantic_data)).
+  apply term_interp_assertion_timeless, Hpredicates.
+Qed.
+
+Lemma predicate_functional_mono valuation
+    (left_predicates right_predicates : predicate_semantics) :
+  □ (∀ predicate values,
+      left_predicates predicate values -∗ right_predicates predicate values) ⊢
+  ∀ predicate values,
+    predicate_functional valuation left_predicates predicate values -∗
+    predicate_functional valuation right_predicates predicate values.
+Proof.
+  iIntros "#Hmono" (predicate values). unfold predicate_functional.
+  iApply (interp_core_predicates_mono with "Hmono").
+Qed.
+
+Lemma predicate_fixpoint_timeless valuation predicate values :
+  Timeless (predicate_fixpoint valuation predicate values).
+Proof.
+  unfold predicate_fixpoint.
+  apply bi.forall_timeless. intros [Φ HΦ].
+  apply bi.wand_timeless. apply HΦ.
+Qed.
+
+Lemma predicate_fixpoint_fold valuation predicate values :
+  predicate_functional valuation (predicate_fixpoint valuation) predicate values ⊢
+  predicate_fixpoint valuation predicate values.
+Proof.
+  iIntros "Hbody" (Φ) "#Hprefixed".
+  iApply "Hprefixed".
+  iApply (predicate_functional_mono with "[] Hbody").
+  iIntros "!>" (predicate' values') "Hfixpoint".
+  iApply ("Hfixpoint" $! Φ with "Hprefixed").
+Qed.
+
+Lemma predicate_fixpoint_unfold valuation predicate values :
+  predicate_fixpoint valuation predicate values ⊢
+  predicate_functional valuation (predicate_fixpoint valuation) predicate values.
+Proof.
+  iIntros "Hfixpoint".
+  set (Φ := exist (fun predicates : predicate_semantics =>
+      forall predicate values, Timeless (predicates predicate values))
+    (predicate_functional valuation (predicate_fixpoint valuation))
+    (fun predicate values => interp_core_predicates_timeless _
+      (predicate_fixpoint_timeless valuation) _ _ _ _)).
+  iApply ("Hfixpoint" $! Φ). simpl.
+  iIntros "!>" (predicate' values') "Hbody".
+  iApply (predicate_functional_mono with "[] Hbody").
+  iIntros "!>" (predicate'' values'') "Hbody".
+  iApply (predicate_fixpoint_fold with "Hbody").
+Qed.
+
+Lemma predicate_fixpoint_eq valuation predicate values :
+  predicate_fixpoint valuation predicate values ⊣⊢
+  predicate_functional valuation (predicate_fixpoint valuation) predicate values.
+Proof.
+  iSplit; [iApply predicate_fixpoint_unfold | iApply predicate_fixpoint_fold].
+Qed.
+
+Lemma constant_symbols_agree_sym left_valuation right_valuation :
+  constant_symbols_agree left_valuation right_valuation ->
+  constant_symbols_agree right_valuation left_valuation.
+Proof.
+  intros Hagree t symbolic. specialize (Hagree t symbolic).
+  destruct symbolic; [symmetry |]; exact Hagree.
+Qed.
+
+Lemma predicate_functional_stable left_valuation right_valuation
+    (predicates : predicate_semantics) predicate values :
+  constant_symbols_agree left_valuation right_valuation ->
+  predicate_functional left_valuation predicates predicate values ≡
+  predicate_functional right_valuation predicates predicate values.
+Proof.
+  intros Hagree. unfold predicate_functional.
+  apply Translation.TermSemantics.interp_core_constant_symbols; [done | exact Hagree |].
+  apply Hoare.ResourceHoare.predicate_body_entry_free.
+Qed.
+
+Lemma predicate_fixpoint_stable_entails left_valuation right_valuation predicate values :
+  constant_symbols_agree left_valuation right_valuation ->
+  predicate_fixpoint left_valuation predicate values ⊢
+  predicate_fixpoint right_valuation predicate values.
+Proof.
+  iIntros (Hagree) "Hfixpoint".
+  set (Φ := exist (fun predicates : predicate_semantics =>
+      forall predicate values, Timeless (predicates predicate values))
+    (predicate_fixpoint right_valuation) (predicate_fixpoint_timeless right_valuation)).
+  iApply ("Hfixpoint" $! Φ). simpl.
+  iIntros "!>" (predicate' values') "Hbody".
+  iApply predicate_fixpoint_fold.
+  by rewrite (predicate_functional_stable left_valuation right_valuation).
+Qed.
+
+(** The leaf contracts of the module: its predicates, interpreted by their
+    least timeless fixpoint. *)
+Definition fixpoint_leaf : @TermLeaf.semantic_leaf_contracts_data _ _ _
+    (iPropI Σ) semantic_data.
+Proof.
+  refine (@TermLeaf.SemanticLeafContractsData _ _ _ (iPropI Σ) semantic_data
+    predicate_fixpoint predicate_fixpoint_timeless _ _).
+  - intros left_valuation right_valuation Hagree predicate values.
+    iSplit; iApply predicate_fixpoint_stable_entails;
+      [exact Hagree | exact (constant_symbols_agree_sym _ _ Hagree)].
+  - intros F Δ formals binders valuation predicate arguments.
+    destruct (interp_expr_list_total formals binders valuation arguments)
+      as [values Harguments].
+    have Hactuals := interp_expr_list_formal_subst_of_values arguments values
+      formals binders valuation Harguments.
+    unfold RI.instantiated_predicate.
+    rewrite (Translation.TermSemantics.interp_subst_formals_core semantic_data
+      (predicate_fixpoint valuation) (expr_list_formal_subst arguments)
+      (formal_env_of_values values) formals binders valuation Hactuals).
+    rewrite (Translation.TermSemantics.interp_weaken_core_to semantic_data).
+    cbn [Translation.TermSemantics.interp_core].
+    change (Translation.TermSemantics.interp_core semantic_data
+      (predicate_fixpoint valuation) (formal_env_of_values values) empty_binder_env
+      valuation (Hoare.ResourceHoare.predicate_body predicate)) with
+      (predicate_functional valuation (predicate_fixpoint valuation) predicate values).
+    rewrite -predicate_fixpoint_eq.
+    iSplit.
+    + iIntros "H". iExists values. iFrame. done.
+    + iIntros "H". iDestruct "H" as (values') "[%Hvalues' H]".
+      rewrite Harguments in Hvalues'. injection Hvalues' as <-. iExact "H".
+Defined.
+
+(** The leaf contracts are always the module's predicate fixpoint. *)
+Local Notation Leaf := fixpoint_leaf.
 Context (Hruntime_ghost_namespace :
   @runtime_ghost_namespace _ _ Σ RG = ghost_heap_namespace).
 
-Definition term_predicates (atoms : atom_env) :=
+Definition term_predicates (valuation : symbol_valuation) :=
   @TermLeaf.term_predicates _ _ _ (iPropI Σ) semantic_data Leaf
-    atoms.
+    valuation.
 
-Definition dynamic_region_interpreter := @RegionExecution.interpreter _ _ _ _ Σ RG.
+Definition dynamic_region_interpreter := @RegionExecution.interpreter _ _ _ Σ RG.
 
 Definition to_region_runtime {Γ} (runtime : RegionExecution.Primitives.Model.stack_context Γ) :
     GenericRegions.term_region_stack_context
@@ -357,7 +596,7 @@ Definition translated_runtime_wp {Γ} (runtime : RegionExecution.Primitives.Mode
   runtime_masked_wp
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     (RegionExecution.Primitives.Model.active_runtime_mask ambient exit)
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement)
     post.
@@ -365,10 +604,10 @@ Definition translated_runtime_wp {Γ} (runtime : RegionExecution.Primitives.Mode
 Lemma term_translated_runtime_wp_runtime_stmt_ext {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient entry exit
     (left right : stmt Γ) post :
-  @RuntimeErasure.runtime_stmt _ _ _ Γ
+  @RuntimeErasure.runtime_stmt _ _ Γ
     (RegionExecution.Primitives.Model.runtime_names Γ runtime)
     (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) left =
-  @RuntimeErasure.runtime_stmt _ _ _ Γ
+  @RuntimeErasure.runtime_stmt _ _ Γ
     (RegionExecution.Primitives.Model.runtime_names Γ runtime)
     (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) right ->
   translated_runtime_wp runtime ambient entry exit left post ⊣⊢
@@ -395,7 +634,7 @@ Qed.
 Lemma translated_runtime_wp_erased {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient entry exit
     (statement : stmt Γ) post :
-  @RuntimeErasure.runtime_stmt _ _ _ Γ
+  @RuntimeErasure.runtime_stmt _ _ Γ
     (RegionExecution.Primitives.Model.runtime_names Γ runtime)
     (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement =
     RuntimeErasure.runtime_noop ->
@@ -453,7 +692,7 @@ Lemma translated_runtime_wp_as_masked {Γ}
     runtime_masked_wp
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient exit)
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (@RuntimeErasure.runtime_stmt _ _ Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement) post.
 Proof. reflexivity. Qed.
 
@@ -548,10 +787,10 @@ Definition term_semantic_runtime {Γ}
 
 Lemma term_stack_own_update {Γ F Δ t}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ t) (value : tval t) :
   Translation.data_stack_own semantic_data (term_semantic_runtime runtime)
-      (interp_store formals (binder_cons value binders) atoms
+      (interp_store formals (binder_cons value binders) valuation
         (IR.update_store_with_bound store target)) ⊣⊢
     RuntimeGhost.stack_frame_own
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -562,7 +801,7 @@ Lemma term_stack_own_update {Γ F Δ t}
           (RuntimeLang.locals (RuntimeLang.StackFrame
             (@RegionExecution.Primitives.Model.concrete_locals _ Γ
               (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-              (interp_store formals binders atoms store)))))).
+              (interp_store formals binders valuation store)))))).
 Proof.
   apply RegionExecution.Primitives.semantic_stack_own_update.
 Qed.
@@ -573,11 +812,11 @@ Qed.
     Raven-rule induction be ported incrementally. *)
 Definition term_interp_assertion {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : Translation.Assertions.assertion Γ F Δ) : iProp :=
   Translation.TermSemantics.interp_assertion semantic_data
-    (term_predicates atoms)
-    (term_semantic_runtime runtime) formals binders atoms formula.
+    (term_predicates valuation)
+    (term_semantic_runtime runtime) formals binders valuation formula.
 
 (** *** Interpretation over resource telescopes
 
@@ -586,22 +825,22 @@ Definition term_interp_assertion {Γ F Δ}
     [prenex_to_assertion]: the slice is proved against the runtime
     primitives directly. *)
 Definition term_interp_core {F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : Translation.Resource.core_assertion F Δ) : iProp :=
   Translation.TermSemantics.interp_core semantic_data
-    (term_predicates atoms) formals binders atoms formula.
+    (term_predicates valuation) formals binders valuation formula.
 
-Lemma term_interp_core_stable_atoms {F Δ}
+Lemma term_interp_core_constant_symbols {F Δ}
     (formals : formal_env F) (binders : binder_env Δ)
-    (left_atoms right_atoms : atom_env)
+    (left_valuation right_valuation : symbol_valuation)
     (formula : Translation.Resource.core_assertion F Δ) :
-  stable_atoms_agree left_atoms right_atoms ->
+  constant_symbols_agree left_valuation right_valuation ->
   Translation.Resource.core_entry_free formula ->
-  term_interp_core formals binders left_atoms formula ≡
-    term_interp_core formals binders right_atoms formula.
+  term_interp_core formals binders left_valuation formula ≡
+    term_interp_core formals binders right_valuation formula.
 Proof.
   intros Hagree Hfree. unfold term_interp_core.
-  eapply Translation.TermSemantics.interp_core_stable_atoms;
+  eapply Translation.TermSemantics.interp_core_constant_symbols;
     [apply (@TermLeaf.term_predicates_stable _ _ _ (iPropI Σ) semantic_data Leaf);
       exact Hagree
     | exact Hagree | exact Hfree].
@@ -609,10 +848,10 @@ Qed.
 
 Lemma term_interp_core_as_assertion {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (formula : Translation.Resource.core_assertion F Δ) :
-  term_interp_core formals binders atoms formula ⊣⊢
-  term_interp_assertion runtime formals binders atoms
+  term_interp_core formals binders valuation formula ⊣⊢
+  term_interp_assertion runtime formals binders valuation
     (@Translation.Resource.core_to_assertion _ _ Γ F Δ formula).
 Proof.
   symmetry.
@@ -621,35 +860,35 @@ Qed.
 
 Definition term_interp_resource_prenex {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) : iProp :=
   Translation.TermSemantics.interp_resource_prenex semantic_data
-    (term_predicates atoms)
-    (term_semantic_runtime runtime) formals binders atoms prenex.
+    (term_predicates valuation)
+    (term_semantic_runtime runtime) formals binders valuation prenex.
 
 (** A telescope leaf is a stack assertion separated from a core assertion,
     by construction rather than by a theorem about where [AStack] sits. *)
 Lemma term_interp_rstate {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ)
     (body : Translation.Resource.core_assertion F Δ) :
-  term_interp_resource_prenex runtime formals binders atoms
+  term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store body) =
     (Translation.data_stack_own semantic_data (term_semantic_runtime runtime)
-       (interp_store formals binders atoms store) ∗
-     term_interp_core formals binders atoms body)%I.
+       (interp_store formals binders valuation store) ∗
+     term_interp_core formals binders valuation body)%I.
 Proof. reflexivity. Qed.
 
 Lemma term_interp_resource_exists {Γ F Δ t}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (rest : Translation.Resource.resource_prenex Γ F (t :: Δ)) :
-  term_interp_resource_prenex runtime formals binders atoms
+  term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.ResourceExists t rest) =
     (∃ value : tval t,
       term_interp_resource_prenex runtime formals (binder_cons value binders)
-        atoms rest)%I.
+        valuation rest)%I.
 Proof. reflexivity. Qed.
 
 (** Resource interpretation enriched with the *semantic* value of a vector
@@ -658,16 +897,16 @@ Proof. reflexivity. Qed.
     expressions is required. *)
 Fixpoint term_interp_resource_prenex_at_arguments {Γ F Δ ts}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (arguments : pexpr_list Γ ts) (values : tval_list ts)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) : iProp :=
   (match prenex in Translation.Resource.resource_prenex _ _ Δ0
     return binder_env Δ0 -> iProp with
   | Translation.Resource.ResourceBody state =>
       fun binders0 =>
-        (term_interp_resource_prenex runtime formals binders0 atoms
+        (term_interp_resource_prenex runtime formals binders0 valuation
             (Translation.Resource.ResourceBody state) ∗
-         ⌜interp_expr_list formals binders0 atoms
+         ⌜interp_expr_list formals binders0 valuation
             (IR.symbolize_expr_list
               (Translation.Resource.resource_stack state) arguments) =
           Some values⌝)%I
@@ -675,12 +914,12 @@ Fixpoint term_interp_resource_prenex_at_arguments {Γ F Δ ts}
       fun binders0 =>
         (∃ value : tval t,
           term_interp_resource_prenex_at_arguments runtime formals
-            (binder_cons value binders0) atoms arguments values rest)%I
+            (binder_cons value binders0) valuation arguments values rest)%I
   end) binders.
 
 Lemma term_interp_resource_prenex_at_arguments_rename {Γ F Δ ts}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (atoms : atom_env)
+    (formals : formal_env F) (valuation : symbol_valuation)
     (arguments : pexpr_list Γ ts) (values : tval_list ts)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) :
   forall Δ' (renaming : bound_renaming Δ Δ')
@@ -688,10 +927,10 @@ Lemma term_interp_resource_prenex_at_arguments_rename {Γ F Δ ts}
   (forall t (variable : bvar Δ t),
     target_binders t (renaming t variable) = source_binders t variable) ->
   term_interp_resource_prenex_at_arguments runtime formals target_binders
-      atoms arguments values
+      valuation arguments values
       (Translation.Resource.rename_resource_prenex prenex _ renaming) ≡
     term_interp_resource_prenex_at_arguments runtime formals source_binders
-      atoms arguments values prenex.
+      valuation arguments values prenex.
 Proof.
   induction prenex; intros Δ' renaming source_binders target_binders
     Hrenaming.
@@ -700,13 +939,13 @@ Proof.
     apply bi.sep_proper.
     + unfold term_interp_resource_prenex.
       apply (Translation.TermSemantics.interp_rename_resource_prenex
-        semantic_data (term_predicates atoms)
+        semantic_data (term_predicates valuation)
         (Translation.Resource.ResourceBody state) Δ' renaming formals
-        source_binders target_binders atoms (term_semantic_runtime runtime)
+        source_binders target_binders valuation (term_semantic_runtime runtime)
         Hrenaming).
     + apply bi.pure_proper. rewrite IR.symbolize_expr_list_rename_bound_store.
       rewrite (interp_rename_bound_expr_list renaming formals source_binders
-        target_binders atoms Hrenaming). reflexivity.
+        target_binders valuation Hrenaming). reflexivity.
   - cbn [term_interp_resource_prenex_at_arguments
       Translation.Resource.rename_resource_prenex].
     apply bi.exist_proper. intros value.
@@ -715,14 +954,14 @@ Qed.
 
 Lemma term_interp_resource_prenex_at_arguments_weaken {Γ F Δ ts u}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (arguments : pexpr_list Γ ts) (values : tval_list ts)
     (head : tval u)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) :
   term_interp_resource_prenex_at_arguments runtime formals
-      (binder_cons head binders) atoms arguments values
+      (binder_cons head binders) valuation arguments values
       (Translation.Resource.weaken_resource_prenex prenex) ≡
-    term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
       arguments values prenex.
 Proof.
   apply term_interp_resource_prenex_at_arguments_rename.
@@ -731,13 +970,13 @@ Qed.
 
 Lemma term_interp_resource_prenex_at_arguments_entails {Γ F Δ ts}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (arguments : pexpr_list Γ ts) (values : tval_list ts)
     (left right : Translation.Resource.resource_prenex Γ F Δ) :
   Hoare.ResourceHoare.resource_prenex_entails left right ->
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       arguments values left ⊢
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       arguments values right.
 Proof.
   intro Hentails. induction Hentails;
@@ -751,7 +990,7 @@ Proof.
     iSplitL "Hstack Hbody".
     + iSplitL "Hstack"; [iExact "Hstack"|].
       iApply (Validation.TermSemantics.core_entails_valid semantic_data
-        (term_predicates atoms) lbody rbody Hcore formals binders atoms).
+        (term_predicates valuation) lbody rbody Hcore formals binders valuation).
       iExact "Hbody".
     + iPureIntro. exact Hargs.
   - iIntros "H". iDestruct "H" as (value) "H".
@@ -762,20 +1001,20 @@ Proof.
       in *.
     rewrite !term_interp_rstate.
     iIntros "[[Hstack Hbody] %Hargs]".
-    iExists (interp_ref formals binders atoms witness).
+    iExists (interp_ref formals binders valuation witness).
     rewrite term_interp_rstate.
     rewrite (Translation.interp_subst_bound_store
       (Translation.Resource.head_bound_ref_subst witness) formals _ binders
-      atoms (Translation.interp_head_bound_ref_subst witness formals
-        binders atoms) store).
+      valuation (Translation.interp_head_bound_ref_subst witness formals
+        binders valuation) store).
     rewrite <- (Translation.TermSemantics.interp_subst_bound_core semantic_data
-      (term_predicates atoms)
+      (term_predicates valuation)
       (Translation.Resource.bound_subst_of_refs
         (Translation.Resource.head_bound_ref_subst witness))
-      formals _ binders atoms
+      formals _ binders valuation
         (fun u variable => f_equal Some
           (Translation.interp_head_bound_ref_subst witness formals binders
-            atoms u variable)) body).
+            valuation u variable)) body).
     iSplit.
     + iSplitL "Hstack"; [iExact "Hstack" | iExact "Hbody"].
     + iPureIntro.
@@ -785,16 +1024,16 @@ Proof.
       rewrite (Translation.interp_subst_bound_expr_list
         (Translation.Resource.bound_subst_of_refs
           (Translation.Resource.head_bound_ref_subst witness)) formals
-        (binder_cons (interp_ref formals binders atoms witness) binders)
-        binders atoms
+        (binder_cons (interp_ref formals binders valuation witness) binders)
+        binders valuation
         (fun u variable => f_equal Some
           (Translation.interp_head_bound_ref_subst witness formals binders
-            atoms u variable)) (IR.symbolize_expr_list store arguments)) in Hargs.
+            valuation u variable)) (IR.symbolize_expr_list store arguments)) in Hargs.
       exact Hargs.
   - iIntros "[[Hstack Hbody] %Hargs]".
     iDestruct "Hbody" as (value) "Hbody". iExists value.
     cbn [Translation.Resource.resource_stack].
-    iEval (rewrite <- (Translation.interp_weaken_store formals binders atoms
+    iEval (rewrite <- (Translation.interp_weaken_store formals binders valuation
       value store)) in "Hstack".
     iSplit.
     + iSplitL "Hstack"; [iExact "Hstack" | iExact "Hbody"].
@@ -804,7 +1043,7 @@ Proof.
   - iIntros "H". iDestruct "H" as (value) "H".
     iDestruct "H" as "[[Hstack Hbody] %Hargs]".
     cbn [Translation.Resource.resource_stack].
-    iEval (rewrite (Translation.interp_weaken_store formals binders atoms
+    iEval (rewrite (Translation.interp_weaken_store formals binders valuation
       value store)) in "Hstack".
     iFrame "Hstack". iSplitL "Hbody".
     + iExists value. iExact "Hbody".
@@ -813,7 +1052,7 @@ Proof.
   - iIntros "H". iDestruct "H" as (value) "H".
     iApply (bi.equiv_entails_1_1 _ _
       (term_interp_resource_prenex_at_arguments_weaken runtime formals
-        binders atoms arguments values value body)).
+        binders valuation arguments values value body)).
     iExact "H".
   - iIntros "Hfirst".
     iApply (IHHentails2 binders).
@@ -824,9 +1063,9 @@ Proof.
         binders t (renaming t variable) = source_binders t variable.
     { intros. reflexivity. }
     rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms arguments values left _ renaming source_binders binders Hrenaming).
+      valuation arguments values left _ renaming source_binders binders Hrenaming).
     rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms arguments values right _ renaming source_binders binders Hrenaming).
+      valuation arguments values right _ renaming source_binders binders Hrenaming).
     apply IHHentails.
   - pose (tail := fun u (variable : bvar Δ u) =>
       binders u (MThere variable)).
@@ -839,21 +1078,21 @@ Proof.
     rewrite <- Heta.
     iApply (bi.equiv_entails_1_2 _ _
       (term_interp_resource_prenex_at_arguments_weaken runtime formals tail
-        atoms arguments values (binders t MHere) target)).
+        valuation arguments values (binders t MHere) target)).
     iExact "Htarget".
 Qed.
 
 Lemma term_interp_resource_prenex_at_arguments_and {Γ F Δ ts}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (arguments : pexpr_list Γ ts) (values : tval_list ts)
     (prenex : Translation.Resource.resource_prenex Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ) :
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       arguments values (Translation.Resource.prenex_and prenex frame) ≡
-    (term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    (term_interp_resource_prenex_at_arguments runtime formals binders valuation
        arguments values prenex ∗
-     term_interp_core formals binders atoms frame)%I.
+     term_interp_core formals binders valuation frame)%I.
 Proof.
   revert binders frame. induction prenex; intros binders frame.
   - cbn [term_interp_resource_prenex_at_arguments
@@ -886,11 +1125,11 @@ Qed.
 
 Lemma term_interp_resource_prenex_at_arguments_empty {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) :
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       (@PENil _ Γ) Translation.TVNil prenex ≡
-    term_interp_resource_prenex runtime formals binders atoms prenex.
+    term_interp_resource_prenex runtime formals binders valuation prenex.
 Proof.
   revert binders. induction prenex; intros binders; simpl.
   - iSplit.
@@ -906,14 +1145,14 @@ Proof.
 Qed.
 
 Definition concrete_operation_wp {Γ} :=
-  @RegionExecution.Primitives.operation_wp _ _ _ Σ RG Γ
-    (@RegionExecution.Control.concrete_control_operations _ _ _ Σ RG)
-    (@RegionExecution.Primitives.concrete_invariant_operations _ _ _ Σ RG).
+  @RegionExecution.Primitives.operation_wp _ _ Σ RG Γ
+    (@RegionExecution.Control.concrete_control_operations _ _ Σ RG)
+    (@RegionExecution.Primitives.concrete_invariant_operations _ _ Σ RG).
 
 (** The finite registration fixes invariant names and executable procedure
     layouts.  Operation semantics come from the concrete interpreter exported
     by [ConcreteGenericRegionExecutionCore]. *)
-Context (Registration : certified_program_registration).
+Context (Registration : certified_module_registration).
 
 (** Semantic trust boundary for Raven atomic blocks.  An explicit [TAtomic]
     block is itself the trust declaration: every configured transition must
@@ -951,9 +1190,10 @@ Axiom term_trusted_atomic_runtime_refinement : forall
 Definition term_registered_invariants : gset inv_id :=
   registered_invariants Registration.
 
-Definition term_runtime_procedure_statement
-    (packed : packed_typed_procedure) : RuntimeLang.stmt :=
-  registered_runtime_procedure_statement Registration packed.
+Definition term_runtime_procedure_body
+    (packed : packed_typed_procedure) :
+    RuntimeLang.stack_id -> RuntimeLang.runtime_stmt :=
+  registered_runtime_procedure_body Registration packed.
 
 Lemma term_runtime_procedure_layout_configured
     (packed : packed_typed_procedure) :
@@ -961,14 +1201,11 @@ Lemma term_runtime_procedure_layout_configured
   match packed with
   | existT Γ (existT F procedure) =>
       procedure_wf procedure /\
-      ~ List.In "#ret_val" (named_context_names
-        (procedure_variables Γ F procedure)) /\
       forall stack,
-        @RuntimeErasure.runtime_stmt _ _ _ Γ
+        @RuntimeErasure.runtime_stmt _ _ Γ
           (@RuntimeErasure.runtime_procedure_names _ _
             Γ F procedure) stack (procedure_body Γ F procedure) =
-        RuntimeLang.to_rtstmt stack
-          (term_runtime_procedure_statement packed)
+        term_runtime_procedure_body packed stack
   end.
 Proof.
   apply registered_runtime_procedure_layout.
@@ -987,7 +1224,8 @@ Proof.
   pose proof (term_runtime_procedure_layout_configured procedure Hin)
     as Hlayout.
   destruct procedure as [Γ [F procedure]]. simpl in *.
-  destruct Hlayout as (Hwf & Hfresh & Hbody).
+  destruct Hlayout as (Hwf & Hbody).
+  pose proof (procedure_reserved_return_fresh _ Hwf) as Hfresh.
   constructor; simpl; try reflexivity.
   - apply NoDup_ListNoDup.
     apply RuntimeErasure.runtime_procedure_argument_names_nodup. exact Hwf.
@@ -1077,81 +1315,81 @@ Proof. apply registered_procedure_chunks_lookup. Qed.
 
 (** The invariant world, stated against the semantic data of the dynamic
     interpreter. *)
-Definition world_body_interp (atoms : atom_env) invariant
+Definition world_body_interp (valuation : symbol_valuation) invariant
     (values : tval_list (Assertion.invariant_args invariant)) : iProp :=
-  term_interp_core (formal_env_of_values values) empty_binder_env atoms
+  term_interp_core (formal_env_of_values values) empty_binder_env valuation
     (Hoare.ResourceHoare.invariant_body invariant).
 
-Definition world_body_at (atoms : atom_env) invariant
+Definition world_body_at (valuation : symbol_valuation) invariant
     (raw_values : list RuntimeModel.val) : iProp :=
   (∃ values : tval_list (Assertion.invariant_args invariant),
     ⌜@RegionExecution.Primitives.Model.tval_list_to_rich_list _
        (Assertion.invariant_args invariant) values = raw_values⌝ ∗
-    world_body_interp atoms invariant values)%I.
+    world_body_interp valuation invariant values)%I.
 
-Definition term_world (atoms : atom_env) invariant : iProp :=
+Definition term_world (valuation : symbol_valuation) invariant : iProp :=
   (∃ established : gset (list RuntimeModel.val),
     @own Σ (authR RuntimeModel.inv_argsUR)
       (@RegionExecution.Primitives.Model.core_invtoken_inG _ _ Σ RG)
       (RuntimeModel.invtoken_names (invariant_name invariant))
       (● (established : RuntimeModel.inv_argsUR)) ∗
     [∗ set] raw_values ∈ established,
-      world_body_at atoms invariant raw_values)%I.
+      world_body_at valuation invariant raw_values)%I.
 
-Definition term_world_context (atoms : atom_env) : iProp :=
+Definition term_world_context (valuation : symbol_valuation) : iProp :=
   ([∗ set] invariant ∈ term_registered_invariants ,
-    inv (invariant_namespace invariant) (term_world atoms invariant))%I.
+    inv (invariant_namespace invariant) (term_world valuation invariant))%I.
 
-Global Instance term_world_context_persistent atoms :
-  Persistent (term_world_context atoms).
+Global Instance term_world_context_persistent valuation :
+  Persistent (term_world_context valuation).
 Proof. unfold term_world_context. apply _. Qed.
 
-Lemma world_body_interp_stable_atoms left_atoms right_atoms invariant values :
-  stable_atoms_agree left_atoms right_atoms ->
-  world_body_interp left_atoms invariant values ≡
-    world_body_interp right_atoms invariant values.
+Lemma world_body_interp_constant_symbols left_valuation right_valuation invariant values :
+  constant_symbols_agree left_valuation right_valuation ->
+  world_body_interp left_valuation invariant values ≡
+    world_body_interp right_valuation invariant values.
 Proof.
   intros Hagree. unfold world_body_interp.
-  apply term_interp_core_stable_atoms; first exact Hagree.
+  apply term_interp_core_constant_symbols; first exact Hagree.
   apply Hoare.ResourceHoare.invariant_body_entry_free.
 Qed.
 
-Lemma world_body_at_stable_atoms left_atoms right_atoms invariant raw_values :
-  stable_atoms_agree left_atoms right_atoms ->
-  world_body_at left_atoms invariant raw_values ≡
-    world_body_at right_atoms invariant raw_values.
+Lemma world_body_at_constant_symbols left_valuation right_valuation invariant raw_values :
+  constant_symbols_agree left_valuation right_valuation ->
+  world_body_at left_valuation invariant raw_values ≡
+    world_body_at right_valuation invariant raw_values.
 Proof.
   intros Hagree. unfold world_body_at.
   apply bi.exist_proper. intro values.
-  rewrite (world_body_interp_stable_atoms left_atoms right_atoms invariant
+  rewrite (world_body_interp_constant_symbols left_valuation right_valuation invariant
     values Hagree). reflexivity.
 Qed.
 
-Lemma term_world_stable_atoms left_atoms right_atoms invariant :
-  stable_atoms_agree left_atoms right_atoms ->
-  term_world left_atoms invariant ≡ term_world right_atoms invariant.
+Lemma term_world_constant_symbols left_valuation right_valuation invariant :
+  constant_symbols_agree left_valuation right_valuation ->
+  term_world left_valuation invariant ≡ term_world right_valuation invariant.
 Proof.
   intros Hagree. unfold term_world.
   apply bi.exist_proper. intro established.
   apply bi.sep_proper; first reflexivity.
   apply big_sepS_proper. intros raw_values Hmember.
-  apply world_body_at_stable_atoms. exact Hagree.
+  apply world_body_at_constant_symbols. exact Hagree.
 Qed.
 
-Lemma term_world_context_stable_atoms left_atoms right_atoms :
-  stable_atoms_agree left_atoms right_atoms ->
-  term_world_context left_atoms ≡
-    term_world_context right_atoms.
+Lemma term_world_context_constant_symbols left_valuation right_valuation :
+  constant_symbols_agree left_valuation right_valuation ->
+  term_world_context left_valuation ≡
+    term_world_context right_valuation.
 Proof.
   intros Hagree. unfold term_world_context.
   apply big_sepS_proper. intros invariant Hmember.
-  apply inv_proper. apply term_world_stable_atoms. exact Hagree.
+  apply inv_proper. apply term_world_constant_symbols. exact Hagree.
 Qed.
 
-Lemma term_world_context_lookup atoms invariant :
+Lemma term_world_context_lookup valuation invariant :
   invariant ∈ term_registered_invariants  ->
-  term_world_context atoms ⊢
-    inv (invariant_namespace invariant) (term_world atoms invariant).
+  term_world_context valuation ⊢
+    inv (invariant_namespace invariant) (term_world valuation invariant).
 Proof.
   intros Hmember. iIntros "#Hworlds".
   iApply (big_sepS_elem_of with "Hworlds"). exact Hmember.
@@ -1159,13 +1397,13 @@ Qed.
 
 (** Install the finite family of invariant worlds from the empty authorities
     allocated before [runtimeG] was assembled. *)
-Lemma term_world_context_alloc (atoms : atom_env) :
+Lemma term_world_context_alloc (valuation : symbol_valuation) :
   ([∗ set] invariant ∈ term_registered_invariants ,
     @own Σ (authR RuntimeModel.inv_argsUR)
       (@RegionExecution.Primitives.Model.core_invtoken_inG _ _ Σ RG)
       (RuntimeModel.invtoken_names (invariant_name invariant))
       (● (∅ : RuntimeModel.inv_argsUR))) ={⊤}=∗
-    term_world_context atoms.
+    term_world_context valuation.
 Proof.
   iIntros "Htokens".
   iApply big_sepS_fupd.
@@ -1176,36 +1414,10 @@ Proof.
   rewrite big_sepS_empty. iFrame.
 Qed.
 
-Lemma term_interp_assertion_timeless
-    (predicates : Translation.TermSemantics.predicate_semantics)
-    (Hpredicates : forall predicate values,
-      Timeless (predicates predicate values))
-    {Γ F Δ} (runtime : Translation.data_stack_context semantic_data Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
-    (formula : Translation.Assertions.assertion Γ F Δ) :
-  Timeless (Translation.TermSemantics.interp_assertion semantic_data predicates
-    runtime formals binders atoms formula).
-Proof.
-  induction formula; simpl.
-  - apply _.
-  - apply _.
-  - apply _.
-  - apply _.
-  - apply _.
-  - apply _.
-  - apply _.
-  - apply bi.exist_timeless. intros. apply IHformula.
-  - apply bi.forall_timeless. intros. apply IHformula.
-  - apply bi.and_timeless; apply bi.wand_timeless; apply IHformula1 ||
-      apply IHformula2.
-  - apply bi.exist_timeless. intros. apply bi.sep_timeless; [apply _|apply _].
-  - apply bi.exist_timeless. intros. apply bi.sep_timeless; [apply _|].
-    apply Hpredicates.
-  - apply bi.sep_timeless; [apply IHformula1|apply IHformula2].
-Qed.
 
-Global Instance world_body_interp_timeless atoms invariant values :
-  Timeless (world_body_interp atoms invariant values).
+
+Global Instance world_body_interp_timeless valuation invariant values :
+  Timeless (world_body_interp valuation invariant values).
 Proof.
   unfold world_body_interp.
   rewrite (term_interp_core_as_assertion
@@ -1214,15 +1426,15 @@ Proof.
   apply TermLeaf.term_predicates_timeless.
 Qed.
 
-Global Instance world_body_at_timeless atoms invariant raw_values :
-  Timeless (world_body_at atoms invariant raw_values).
+Global Instance world_body_at_timeless valuation invariant raw_values :
+  Timeless (world_body_at valuation invariant raw_values).
 Proof.
   unfold world_body_at. apply bi.exist_timeless. intros values.
   apply bi.sep_timeless; apply _.
 Qed.
 
-Global Instance term_world_timeless atoms invariant :
-  Timeless (term_world atoms invariant).
+Global Instance term_world_timeless valuation invariant :
+  Timeless (term_world valuation invariant).
 Proof.
   unfold term_world. apply bi.exist_timeless. intros established.
   apply bi.sep_timeless; first apply _.
@@ -1234,7 +1446,7 @@ Lemma term_world_fragment_member invariant established values :
       (@RegionExecution.Primitives.Model.core_invtoken_inG _ _ Σ RG)
       (RuntimeModel.invtoken_names (invariant_name invariant))
       (● (established : RuntimeModel.inv_argsUR)) -∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant values -∗
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant values -∗
   ⌜@RegionExecution.Primitives.Model.tval_list_to_rich_list _ (Assertion.invariant_args invariant) values ∈
     established⌝.
 Proof.
@@ -1244,13 +1456,13 @@ Proof.
   apply gset_included in Hincluded. iPureIntro. set_solver.
 Qed.
 
-Lemma term_world_open atoms invariant values E :
+Lemma term_world_open valuation invariant values E :
   ↑(invariant_namespace invariant) ⊆ E ->
-  inv (invariant_namespace invariant) (term_world atoms invariant) -∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant values
+  inv (invariant_namespace invariant) (term_world valuation invariant) -∗
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant values
     ={E, E ∖ ↑(invariant_namespace invariant)}=∗
-  world_body_interp atoms invariant values ∗
-    (world_body_interp atoms invariant values
+  world_body_interp valuation invariant values ∗
+    (world_body_interp valuation invariant values
       ={E ∖ ↑(invariant_namespace invariant), E}=∗ True).
 Proof.
   intros Hnamespace. iIntros "#Hworld Hfragment".
@@ -1271,11 +1483,11 @@ Proof.
   iFrame "Hbodies". iExists values. iFrame. done.
 Qed.
 
-Lemma term_world_establish atoms invariant values E :
+Lemma term_world_establish valuation invariant values E :
   ↑(invariant_namespace invariant) ⊆ E ->
-  inv (invariant_namespace invariant) (term_world atoms invariant) -∗
-  world_body_interp atoms invariant values ={E}=∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant values.
+  inv (invariant_namespace invariant) (term_world valuation invariant) -∗
+  world_body_interp valuation invariant values ={E}=∗
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant values.
 Proof.
   intros Hnamespace. iIntros "#Hworld Hbody".
   iMod (inv_acc_timeless with "Hworld") as "[Hcontents Hclose]";
@@ -1454,32 +1666,32 @@ Definition verified_procedure_specs : iProp :=
       (pre post : Translation.Resource.resource_prenex Γ F Δ)
       (statement : stmt Γ) (mask_pre mask_post : Hoare.mask) entry exit
       (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-      (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+      (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
       (ambient : coPset),
     ⌜procedure_leaf_obligation mask_pre mask_post pre statement post⌝ -∗
     ⌜RegionExecution.Primitives.Model.runtime_mask mask_post ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry⌝ -∗
-    term_world_context atoms -∗
-    term_interp_resource_prenex runtime formals binders atoms pre -∗
+    term_world_context valuation -∗
+    term_interp_resource_prenex runtime formals binders valuation pre -∗
     concrete_operation_wp runtime ambient entry statement exit
-      (term_interp_resource_prenex runtime formals binders atoms post))%I.
+      (term_interp_resource_prenex runtime formals binders valuation post))%I.
 
-Definition global_world_context (atoms : atom_env) : iProp :=
-  (term_world_context atoms ∗
+Definition global_world_context (valuation : symbol_valuation) : iProp :=
+  (term_world_context valuation ∗
     (all_registered_procedure_chunks  ∗
       verified_procedure_specs ))%I.
 
-Global Instance global_world_context_persistent atoms :
-  Persistent (global_world_context atoms).
+Global Instance global_world_context_persistent valuation :
+  Persistent (global_world_context valuation).
 Proof. unfold global_world_context, all_registered_procedure_chunks. apply _. Qed.
 
-Lemma global_world_context_stable_atoms left_atoms right_atoms :
-  stable_atoms_agree left_atoms right_atoms ->
-  global_world_context left_atoms ≡
-    global_world_context right_atoms.
+Lemma global_world_context_constant_symbols left_valuation right_valuation :
+  constant_symbols_agree left_valuation right_valuation ->
+  global_world_context left_valuation ≡
+    global_world_context right_valuation.
 Proof.
   intros Hagree. unfold global_world_context.
-  rewrite (term_world_context_stable_atoms left_atoms right_atoms
+  rewrite (term_world_context_constant_symbols left_valuation right_valuation
     Hagree). reflexivity.
 Qed.
 
@@ -1492,23 +1704,23 @@ Proof.
   iFrame "Hprocedures". iNext. iExact "IH".
 Qed.
 
-Lemma global_world_procedure_specs atoms :
-  global_world_context atoms ⊢
-    term_world_context atoms ∗ verified_procedure_specs .
+Lemma global_world_procedure_specs valuation :
+  global_world_context valuation ⊢
+    term_world_context valuation ∗ verified_procedure_specs .
 Proof.
   rewrite /global_world_context.
   iIntros "[$ [_ $]]".
 Qed.
 
 Lemma term_interpreted_expr_list_total {F Δ ts} (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (expressions : Translation.Assertions.expr_list F Δ ts) :
-  exists values, interp_expr_list formals binders atoms expressions =
+  exists values, interp_expr_list formals binders valuation expressions =
     Some values.
 Proof.
   induction expressions as [|t ts expression expressions IH].
   - exists TVNil. reflexivity.
-  - destruct (interp_expr_total formals binders atoms expression) as
+  - destruct (interp_expr_total formals binders valuation expression) as
       [value Hvalue].
     destruct IH as [values Hvalues].
     exists (TVCons value values). simpl. rewrite Hvalue. rewrite Hvalues.
@@ -1525,34 +1737,34 @@ Lemma procedure_pre_instantiation_interp
     {callee_variables callee_formals}
     (procedure : typed_procedure callee_variables callee_formals)
     {F Δ} (arguments : expr_list F Δ (Assertion.procedure_args callee_formals))
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (values : tval_list (Assertion.procedure_args callee_formals))
-    (Harguments : interp_expr_list formals binders atoms arguments =
+    (Harguments : interp_expr_list formals binders valuation arguments =
       Some values) :
-  term_interp_core formals binders atoms
+  term_interp_core formals binders valuation
       (Hoare.procedure_pre_instantiation procedure arguments) ⊣⊢
-  term_interp_core (formal_env_of_values values) empty_binder_env atoms
+  term_interp_core (formal_env_of_values values) empty_binder_env valuation
     (procedure_precondition _ _ procedure).
 Proof.
   have Hactuals := interp_expr_list_formal_subst_of_values arguments values
-    formals binders atoms Harguments.
+    formals binders valuation Harguments.
   unfold Hoare.procedure_pre_instantiation, term_interp_core.
   etrans;
     [apply (Translation.TermSemantics.interp_subst_formals_core semantic_data
-      (term_predicates atoms) (expr_list_formal_subst arguments)
-      (formal_env_of_values values) formals binders atoms Hactuals) |].
+      (term_predicates valuation) (expr_list_formal_subst arguments)
+      (formal_env_of_values values) formals binders valuation Hactuals) |].
   apply (Translation.TermSemantics.interp_weaken_core_to semantic_data).
 Qed.
 
 Lemma existentially_close_prenex_interp {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (atoms : atom_env)
+    (formals : formal_env F) (valuation : symbol_valuation)
     (prenex : Translation.Resource.resource_prenex Γ F Δ) :
-  term_interp_resource_prenex runtime formals empty_binder_env atoms
+  term_interp_resource_prenex runtime formals empty_binder_env valuation
       (Hoare.existentially_close_prenex prenex) ⊣⊢
   (∃ values : tval_list Δ,
     term_interp_resource_prenex runtime formals
-      (formal_env_of_values values) atoms prenex)%I.
+      (formal_env_of_values values) valuation prenex)%I.
 Proof.
   induction Δ as [|t tail IH].
   - simpl. iSplit.
@@ -1574,16 +1786,16 @@ Lemma procedure_body_post_interp {Γ F Δ}
       (procedure_return_type _ _ procedure))
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args F))
-    (atoms : atom_env) :
-  term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (valuation : symbol_valuation) :
+  term_interp_resource_prenex runtime formals empty_binder_env valuation
       (Hoare.procedure_body_post procedure exit_store return_reference) ⊣⊢
   (∃ values : tval_list Δ,
     Translation.data_stack_own semantic_data (term_semantic_runtime runtime)
-      (interp_store formals (formal_env_of_values values) atoms exit_store) ∗
+      (interp_store formals (formal_env_of_values values) valuation exit_store) ∗
     term_interp_core formals
       (binder_cons
-        (interp_ref formals (formal_env_of_values values) atoms
-          return_reference) empty_binder_env) atoms
+        (interp_ref formals (formal_env_of_values values) valuation
+          return_reference) empty_binder_env) valuation
       (procedure_postcondition _ _ procedure))%I.
 Proof.
   unfold Hoare.procedure_body_post.
@@ -1593,12 +1805,12 @@ Proof.
   apply bi.sep_proper; first reflexivity.
   unfold term_interp_core.
   apply (Translation.TermSemantics.interp_subst_bound_core
-    semantic_data (term_predicates atoms)
+    semantic_data (term_predicates valuation)
     (singleton_bound_subst return_reference) formals
     (binder_cons
-      (interp_ref formals (formal_env_of_values values) atoms
+      (interp_ref formals (formal_env_of_values values) valuation
         return_reference) empty_binder_env)
-    (formal_env_of_values values) atoms).
+    (formal_env_of_values values) valuation).
   intros t variable. apply interp_singleton_bound_subst.
 Qed.
 
@@ -1621,29 +1833,29 @@ Lemma procedure_post_instantiation_interp
     (Hinst : resource_instantiated_post_value F Δ
       (procedure_identity _ _ procedure)
       arguments result contract)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (values : tval_list (Assertion.procedure_args callee_formals))
     (return_value : tval (Assertion.procedure_return callee_formals))
     (Harguments : interp_expr_list formals
-      (binder_cons return_value binders) atoms arguments = Some values) :
+      (binder_cons return_value binders) valuation arguments = Some values) :
     term_interp_core formals
-        (binder_cons return_value binders) atoms contract ⊣⊢
+        (binder_cons return_value binders) valuation contract ⊣⊢
     term_interp_core (formal_env_of_values values)
-        (binder_cons return_value empty_binder_env) atoms
+        (binder_cons return_value empty_binder_env) valuation
         (procedure_postcondition _ _ procedure).
 Proof.
   apply (instantiated_post_value_coherent procedure arguments result contract
     Hlookup) in Hinst.
   subst contract.
   have Hactuals := interp_expr_list_formal_subst_of_values arguments values
-    formals (binder_cons return_value binders) atoms Harguments.
+    formals (binder_cons return_value binders) valuation Harguments.
   unfold term_interp_core.
   etrans;
     [apply (Translation.TermSemantics.interp_subst_formals_core
-      semantic_data (term_predicates atoms)
+      semantic_data (term_predicates valuation)
       (expr_list_formal_subst arguments)
       (formal_env_of_values values) formals
-      (binder_cons return_value binders) atoms Hactuals) |].
+      (binder_cons return_value binders) valuation Hactuals) |].
   apply (Translation.TermSemantics.interp_rename_bound_core semantic_data).
   apply binder_cons_return_bound_renaming.
 Qed.
@@ -1654,18 +1866,18 @@ Lemma procedure_leaf_operation_valid {Γ F Δ}
     (Hprocedure : procedure_leaf_obligation
       mask_pre mask_post pre statement post) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask mask_post ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
-    (global_world_context atoms ∗
-      term_interp_resource_prenex runtime formals binders atoms pre) ⊢
+    (global_world_context valuation ∗
+      term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     concrete_operation_wp runtime ambient entry statement exit
-      (term_interp_resource_prenex runtime formals binders atoms post).
+      (term_interp_resource_prenex runtime formals binders valuation post).
 Proof.
-  intros runtime formals binders atoms ambient Henvelope.
+  intros runtime formals binders valuation ambient Henvelope.
   iIntros "[#Hglobal Hpre]".
-  iPoseProof (global_world_procedure_specs atoms with "Hglobal")
+  iPoseProof (global_world_procedure_specs valuation with "Hglobal")
     as "[#Hworld #Hprocedures]".
   iApply ("Hprocedures" with "[] [] Hworld Hpre").
   - iPureIntro. exact Hprocedure.
@@ -1693,38 +1905,38 @@ Proof.
   apply RegionExecution.Primitives.operation_frame.
 Qed.
 
-Lemma world_body_interp_core (atoms : atom_env) invariant
+Lemma world_body_interp_core (valuation : symbol_valuation) invariant
     (values : tval_list (Assertion.invariant_args invariant)) :
-  world_body_interp atoms invariant values ⊣⊢
-  term_interp_core (formal_env_of_values values) empty_binder_env atoms
+  world_body_interp valuation invariant values ⊣⊢
+  term_interp_core (formal_env_of_values values) empty_binder_env valuation
     (Hoare.ResourceHoare.invariant_body invariant).
 Proof. reflexivity. Qed.
 
 (** Semantic interpretation of the canonical invariant instance.  The
     instance is a total function of its arguments. *)
 Lemma term_invariant_definition_compatible {F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     invariant
     (expressions : Translation.Assertions.expr_list F Δ
       (Assertion.invariant_args invariant)) :
   exists values : tval_list (Assertion.invariant_args invariant),
-    interp_expr_list formals binders atoms expressions = Some values /\
-    term_interp_core formals binders atoms
+    interp_expr_list formals binders valuation expressions = Some values /\
+    term_interp_core formals binders valuation
       (ResourceInstances.instantiated_invariant invariant expressions) ≡
-      world_body_interp atoms invariant values.
+      world_body_interp valuation invariant values.
 Proof.
-  destruct (term_interpreted_expr_list_total formals binders atoms expressions)
+  destruct (term_interpreted_expr_list_total formals binders valuation expressions)
     as [values Hvalues].
   exists values. split; first exact Hvalues.
   have Hactuals := interp_expr_list_formal_subst_of_values expressions values
-    formals binders atoms Hvalues.
+    formals binders valuation Hvalues.
   rewrite world_body_interp_core.
   unfold ResourceInstances.instantiated_invariant, term_interp_core.
   etrans;
     [apply (Translation.TermSemantics.interp_subst_formals_core semantic_data
-      (term_predicates atoms)
+      (term_predicates valuation)
       (Translation.Assertions.expr_list_formal_subst expressions)
-      (formal_env_of_values values) formals binders atoms Hactuals) |].
+      (formal_env_of_values values) formals binders valuation Hactuals) |].
   apply (Translation.TermSemantics.interp_weaken_core_to semantic_data).
 Qed.
 
@@ -1738,19 +1950,19 @@ Lemma term_ambient_assert_rule_valid {Γ F Δ}
     (body : Translation.Resource.core_assertion F Δ) condition
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.CAnd body
           (Translation.Resource.CExpr (IR.symbolize_expr store condition)))) ⊢
     concrete_operation_wp runtime ambient entry (TAssert condition) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.RState store
           (Translation.Resource.CAnd body
             (Translation.Resource.CExpr (IR.symbolize_expr store condition))))).
 Proof.
-  intros runtime formals binders atoms ambient.
+  intros runtime formals binders valuation ambient.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. reflexivity.
 Qed.
@@ -1766,29 +1978,29 @@ Lemma term_ambient_field_write_rule_valid {Γ F Δ}
     (expression : pexpr Γ (Assertion.field_type field)) old_chunk
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.COwn field (IR.symbolize_expr store base)
           old_chunk)) ⊢
     concrete_operation_wp runtime ambient entry
       (TFieldWrite field base expression) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.RState store
           (Translation.Resource.COwn field
             (IR.symbolize_expr store base)
             (IR.symbolize_expr store expression)))).
 Proof.
-  intros runtime formals binders atoms ambient.
+  intros runtime formals binders valuation ambient.
   rewrite term_interp_rstate.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. unfold RegionExecution.Primitives.ambient_leaf_wp.
   simpl. unfold RegionExecution.Primitives.ambient_physical_leaf_wp.
   unfold term_interp_core. iIntros "[Hstack Hown]".
   iDestruct "Hown" as (location old_value) "(%Hlocation & %Hold & Hown)".
-  iPoseProof (@RegionExecution.Primitives.Model.runtime_field_write_wp _ _ _ Σ RG Γ F Δ
-    runtime formals binders atoms store field base expression location old_value
+  iPoseProof (@RegionExecution.Primitives.Model.runtime_field_write_wp _ _ Σ RG Γ F Δ
+    runtime formals binders valuation store field base expression location old_value
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     Hlocation with "[$Hstack $Hown]") as "Hwp".
   iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
@@ -1808,15 +2020,15 @@ Lemma term_ambient_field_read_rule_valid {Γ F Δ}
     (target : pvar Γ (Assertion.field_type field)) (base : pexpr Γ TRef)
     chunk (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.COwn field (IR.symbolize_expr store base)
           chunk)) ⊢
     concrete_operation_wp runtime ambient entry
       (TFieldRead field target base) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.ResourceExists (Assertion.field_type field)
           (Translation.Resource.RState
             (IR.update_store_with_bound store target)
@@ -1830,15 +2042,15 @@ Lemma term_ambient_field_read_rule_valid {Γ F Δ}
                   (ERef (RefBound MHere))
                   (Translation.Assertions.weaken_expr chunk))))))).
 Proof.
-  intros runtime formals binders atoms ambient.
+  intros runtime formals binders valuation ambient.
   rewrite term_interp_rstate term_interp_resource_exists.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. unfold RegionExecution.Primitives.ambient_leaf_wp.
   simpl. unfold RegionExecution.Primitives.ambient_physical_leaf_wp.
   unfold term_interp_core. iIntros "[Hstack Hown]".
   iDestruct "Hown" as (location value) "(%Hlocation & %Hchunk & Hown)".
-  iPoseProof (@RegionExecution.Primitives.Model.runtime_field_read_wp _ _ _ Σ RG Γ F Δ
-    runtime formals binders atoms store field target base location value
+  iPoseProof (@RegionExecution.Primitives.Model.runtime_field_read_wp _ _ Σ RG Γ F Δ
+    runtime formals binders valuation store field target base location value
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     Hlocation with "[$Hstack $Hown]") as "Hwp".
   iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
@@ -1858,14 +2070,14 @@ Qed.
 
 Lemma term_interp_expr_eq_rect {F Δ left right}
     (equality : left = right) (expression : expr F Δ left)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env) :
-  interp_expr formals binders atoms
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation) :
+  interp_expr formals binders valuation
       (eq_rect left (fun t => expr F Δ t) expression right equality) =
   option_map (fun value => eq_rect left tval value right equality)
-    (interp_expr formals binders atoms expression).
+    (interp_expr formals binders valuation expression).
 Proof.
   destruct equality. simpl.
-  destruct (interp_expr formals binders atoms expression); reflexivity.
+  destruct (interp_expr formals binders valuation expression); reflexivity.
 Qed.
 
 (** The three allocation helpers below establish [term_interp_core] for
@@ -1876,12 +2088,12 @@ Qed.
     assertion grammar. *)
 Lemma term_ambient_allocated_physical_fields_rule_interp_core {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields address :
-  @RegionExecution.Primitives.Model.allocated_physical_fields_own _ _ _ Σ RG Γ F Δ runtime formals
-      binders atoms store (VRef address) fields ⊢
+  @RegionExecution.Primitives.Model.allocated_physical_fields_own _ _ Σ RG Γ F Δ runtime formals
+      binders valuation store (VRef address) fields ⊢
   term_interp_core formals (binder_cons (VRef address) binders)
-    atoms (Hoare.ResourceHoare.allocated_physical_fields_core store fields).
+    valuation (Hoare.ResourceHoare.allocated_physical_fields_core store fields).
 Proof.
   induction fields as [|[field expression] fields IH]; simpl.
   - iIntros "_". done.
@@ -1898,12 +2110,12 @@ Qed.
 
 Lemma term_ambient_allocated_ghost_fields_rule_interp_core {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (fields : list (ghost_field_init Γ)) address :
   @RegionExecution.Primitives.Model.allocated_ghost_fields_own _ _ Σ RG Γ F Δ runtime
-      formals binders atoms store (VRef address) fields ⊢
+      formals binders valuation store (VRef address) fields ⊢
   term_interp_core formals (binder_cons (VRef address) binders)
-    atoms (Hoare.ResourceHoare.allocated_ghost_fields_core store fields).
+    valuation (Hoare.ResourceHoare.allocated_ghost_fields_core store fields).
 Proof.
   induction fields as [|[resource field Hfield expression] fields IH]; simpl.
   - iIntros "_". done.
@@ -1923,12 +2135,12 @@ Qed.
 
 Lemma term_ambient_allocated_fields_rule_interp_core {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields address :
-  @RegionExecution.Primitives.Model.allocated_fields_own _ _ _ Σ RG Γ F Δ runtime formals
-      binders atoms store (VRef address) fields ⊢
+  @RegionExecution.Primitives.Model.allocated_fields_own _ _ Σ RG Γ F Δ runtime formals
+      binders valuation store (VRef address) fields ⊢
   term_interp_core formals (binder_cons (VRef address) binders)
-    atoms (Hoare.ResourceHoare.allocated_fields_core store fields).
+    valuation (Hoare.ResourceHoare.allocated_fields_core store fields).
 Proof.
   unfold RegionExecution.Primitives.Model.allocated_fields_own,
     Hoare.ResourceHoare.allocated_fields_core.
@@ -1939,13 +2151,13 @@ Proof.
 Qed.
 
 Lemma term_valid_ghost_initializers_semantic_core {Γ F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields :
-  term_interp_core formals binders atoms
+  term_interp_core formals binders valuation
     (Hoare.ResourceHoare.ghost_initializers_valid_core store fields) ⊢
   ⌜
   @RegionExecution.Primitives.Model.ghost_initializers_semantically_valid _ _
-    Γ F Δ formals binders atoms store fields⌝.
+    Γ F Δ formals binders valuation store fields⌝.
 Proof.
   induction fields as [|initialization rest IH].
   - simpl. iPureIntro. constructor.
@@ -1972,9 +2184,9 @@ Lemma term_ambient_ghost_update_rule_valid {Γ F Δ}
     (store : symbolic_store Γ F Δ) field base old_value new_value
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.CAnd
           (Translation.Resource.CGhostOwn field
@@ -1985,13 +2197,13 @@ Lemma term_ambient_ghost_update_rule_valid {Γ F Δ}
             (IR.symbolize_expr store new_value)))) ⊢
     concrete_operation_wp runtime ambient entry
       (TGhostUpdate field base old_value new_value) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.RState store
           (Translation.Resource.CGhostOwn field
             (IR.symbolize_expr store base)
             (IR.symbolize_expr store new_value)))).
 Proof.
-  intros runtime formals binders atoms ambient.
+  intros runtime formals binders valuation ambient.
   rewrite !term_interp_rstate.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. unfold RegionExecution.Primitives.ambient_leaf_wp. simpl.
@@ -2025,14 +2237,14 @@ Lemma term_ambient_assignment_rule_valid {Γ F Δ t}
     (expression : pexpr Γ t)
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.CPure True)) ⊢
     concrete_operation_wp runtime ambient entry
       (TAssign target expression) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.ResourceExists t
           (Translation.Resource.RState
             (IR.update_store_with_bound store target)
@@ -2041,14 +2253,14 @@ Lemma term_ambient_assignment_rule_valid {Γ F Δ t}
                 (Translation.Assertions.weaken_expr
                   (IR.symbolize_expr store expression))))))).
 Proof.
-  intros runtime formals binders atoms ambient.
+  intros runtime formals binders valuation ambient.
   rewrite term_interp_rstate term_interp_resource_exists.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. unfold RegionExecution.Primitives.ambient_leaf_wp.
   simpl. unfold RegionExecution.Primitives.ambient_physical_leaf_wp.
   iIntros "[Hstack _]".
   iPoseProof (@RegionExecution.Primitives.Model.runtime_assignment_wp _ _ Σ RG
-    Γ F Δ t runtime formals binders atoms store target expression
+    Γ F Δ t runtime formals binders valuation store target expression
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     with "Hstack") as "Hwp".
   iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
@@ -2068,22 +2280,22 @@ Lemma term_ambient_predicate_unfold_rule_valid {Γ F Δ}
     (body : Translation.Resource.core_assertion F Δ)
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_core formals binders atoms body ≡
-      term_interp_core formals binders atoms
+    term_interp_core formals binders valuation body ≡
+      term_interp_core formals binders valuation
         (Translation.Resource.CPredicate predicate
           (IR.symbolize_expr_list store arguments)) ->
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Translation.Resource.CPredicate predicate
           (IR.symbolize_expr_list store arguments))) ⊢
     concrete_operation_wp runtime ambient entry
       (TPredicateUnfold predicate arguments) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.RState store body)).
 Proof.
-  intros runtime formals binders atoms ambient Hinstantiation.
+  intros runtime formals binders valuation ambient Hinstantiation.
   rewrite !term_interp_rstate.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. iIntros "[Hstack Hpredicate]". iFrame "Hstack".
@@ -2095,22 +2307,22 @@ Lemma term_ambient_predicate_fold_rule_valid {Γ F Δ}
     (body : Translation.Resource.core_assertion F Δ)
     (entry exit : GenericRegions.Atomicity.analysis_state) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
-    term_interp_core formals binders atoms body ≡
-      term_interp_core formals binders atoms
+    term_interp_core formals binders valuation body ≡
+      term_interp_core formals binders valuation
         (Translation.Resource.CPredicate predicate
           (IR.symbolize_expr_list store arguments)) ->
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store body) ⊢
     concrete_operation_wp runtime ambient entry
       (TPredicateFold predicate arguments) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.RState store
           (Translation.Resource.CPredicate predicate
             (IR.symbolize_expr_list store arguments)))).
 Proof.
-  intros runtime formals binders atoms ambient Hinstantiation.
+  intros runtime formals binders valuation ambient Hinstantiation.
   rewrite !term_interp_rstate.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. iIntros "[Hstack Hbody]". iFrame "Hstack".
@@ -2138,15 +2350,15 @@ Definition term_structured_runtime_valid
       Γ entry statement exit)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) : Prop :=
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint certificate) ⊆ ambient ->
-    (global_world_context atoms ∗
-      term_interp_resource_prenex runtime formals binders atoms pre) ⊢
+    (global_world_context valuation ∗
+      term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     term_structured_runtime_wp certificate runtime ambient
-      (global_world_context atoms ∗
-        term_interp_resource_prenex runtime formals binders atoms post).
+      (global_world_context valuation ∗
+        term_interp_resource_prenex runtime formals binders valuation post).
 
 (** Parametric strengthening used by matched invariant accesses.  For every
     vector whose stack dependencies the statement does not write, the
@@ -2162,16 +2374,16 @@ Definition term_structured_runtime_arguments_valid
       Hoare.ResourceHoare.statement_writes statement ->
   forall (values : tval_list ts)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint certificate) ⊆ ambient ->
-    (global_world_context atoms ∗
-      term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    (global_world_context valuation ∗
+      term_interp_resource_prenex_at_arguments runtime formals binders valuation
         arguments values pre) ⊢
     term_structured_runtime_wp certificate runtime ambient
-      (global_world_context atoms ∗
-       term_interp_resource_prenex_at_arguments runtime formals binders atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
          arguments values post).
 
 Lemma term_structured_certificate_preserves_open
@@ -2246,23 +2458,23 @@ Lemma term_invariant_fresh_fold_node_valid {Γ F Δ} invariant arguments
     RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env),
-  (global_world_context atoms ∗
-   term_interp_resource_prenex runtime formals binders atoms
+    (binders : binder_env Δ) (valuation : symbol_valuation),
+  (global_world_context valuation ∗
+   term_interp_resource_prenex runtime formals binders valuation
      (Translation.Resource.RState store
        (ResourceInstances.instantiated_invariant invariant
          (IR.symbolize_expr_list store arguments)))) ⊢
   concrete_operation_wp runtime ambient entry
     (TFold invariant arguments)
     (GenericRegions.Atomicity.fold_invariant invariant entry)
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals binders atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals binders valuation
        (Translation.Resource.RState store
          (Translation.Resource.CInvariant invariant
            (IR.symbolize_expr_list store arguments)))).
 Proof.
-  intros Hfresh Hregistered Hnamespace runtime formals binders atoms.
-  destruct (term_invariant_definition_compatible formals binders atoms
+  intros Hfresh Hregistered Hnamespace runtime formals binders valuation.
+  destruct (term_invariant_definition_compatible formals binders valuation
     invariant (IR.symbolize_expr_list store arguments))
     as (values & Harguments & Hbody_core).
   have Hfold_facts := GenericRegions.Atomicity.fold_fresh_invariant
@@ -2282,9 +2494,9 @@ Proof.
   iDestruct "Hglobal" as "[#Hworlds [#Hchunks #Hprocedures]]".
   iDestruct "Hbody" as "Hbody".
   iPoseProof (bi.equiv_entails_1_1 _ _ Hbody_core with "Hbody") as "Hbody".
-  iPoseProof (term_world_context_lookup atoms invariant Hregistered
+  iPoseProof (term_world_context_lookup valuation invariant Hregistered
     with "Hworlds") as "#Hworld".
-  iMod (term_world_establish atoms invariant values
+  iMod (term_world_establish valuation invariant values
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry) Hnamespace
     with "Hworld Hbody") as "#Htoken".
   iApply fupd_mask_intro.
@@ -2358,7 +2570,7 @@ Lemma translated_runtime_wp_default_arm {Γ}
     (statement : stmt Γ) post :
   translated_runtime_wp runtime ambient entry exit statement post ⊢
   @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+    (@RuntimeErasure.runtime_stmt _ _ Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) statement)
     (fun result =>
       (⌜result = RuntimeLang.LitUnit⌝ ∗
@@ -2368,15 +2580,15 @@ Proof. reflexivity. Qed.
 
 Lemma runtime_condition_step {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) condition b :
-  interp_expr formals binders atoms
+  interp_expr formals binders valuation
     (IR.symbolize_expr store condition) = Some (VBool b) ->
   RuntimeLang.expr_step
     (@RuntimeErasure.runtime_expr _ Γ _ (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
     (RuntimeLang.StackFrame
       (@RegionExecution.Primitives.Model.concrete_locals _ Γ (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
     (RuntimeLang.Val (@RuntimeErasure.tval_to_val _ TBool (VBool b))).
 Proof.
   intros Hcondition. eapply RuntimeErasure.runtime_expr_sound.
@@ -2457,15 +2669,15 @@ Qed.
 
 Lemma translated_runtime_wp_if {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) ambient entry exit condition
     (then_branch else_branch : stmt Γ) post P b :
-  interp_expr formals binders atoms
+  interp_expr formals binders valuation
     (IR.symbolize_expr store condition) = Some (VBool b) ->
-  (@RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+  (@RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient entry exit
       (if b then then_branch else else_branch) post) ->
-  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient entry exit
       (TIf condition then_branch else_branch) post.
 Proof.
@@ -2487,32 +2699,32 @@ Proof.
       reflexivity.
   - intros _. unfold runtime_masked_wp. destruct b.
     + eapply runtime_wp_if_true; [|exact Hselected].
-      exact (runtime_condition_step runtime formals binders atoms store
+      exact (runtime_condition_step runtime formals binders valuation store
         condition true Hcondition).
     + eapply runtime_wp_if_false; [|exact Hselected].
-      exact (runtime_condition_step runtime formals binders atoms store
+      exact (runtime_condition_step runtime formals binders valuation store
         condition false Hcondition).
 Qed.
 
 Corollary translated_runtime_wp_if_total {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) ambient entry exit condition
     (then_branch else_branch : stmt Γ) post P :
-  (interp_expr formals binders atoms
+  (interp_expr formals binders valuation
       (IR.symbolize_expr store condition) = Some (VBool true) ->
-    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
       translated_runtime_wp runtime ambient entry exit then_branch post) ->
-  (interp_expr formals binders atoms
+  (interp_expr formals binders valuation
       (IR.symbolize_expr store condition) = Some (VBool false) ->
-    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
       translated_runtime_wp runtime ambient entry exit else_branch post) ->
-  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient entry exit
       (TIf condition then_branch else_branch) post.
 Proof.
   intros Hthen Helse.
-  destruct (interp_expr_total formals binders atoms
+  destruct (interp_expr_total formals binders valuation
     (IR.symbolize_expr store condition)) as [value Hvalue].
   dependent destruction value. destruct b.
   - eapply translated_runtime_wp_if; [exact Hvalue|apply Hthen; exact Hvalue].
@@ -2561,22 +2773,22 @@ Qed.
 
 Lemma translated_runtime_wp_if_total_join {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) ambient state condition
     (then_branch else_branch : stmt Γ) then_exit else_exit post P
     (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
       GenericRegions.Atomicity.analysis_open else_exit) :
-  (interp_expr formals binders atoms
+  (interp_expr formals binders valuation
       (IR.symbolize_expr store condition) = Some (VBool true) ->
-    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
       translated_runtime_wp runtime ambient state then_exit
         then_branch post) ->
-  (interp_expr formals binders atoms
+  (interp_expr formals binders valuation
       (IR.symbolize_expr store condition) = Some (VBool false) ->
-    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
       translated_runtime_wp runtime ambient state else_exit
         else_branch post) ->
-  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders atoms store) ∗ P ⊢
+  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient state
       (GenericRegions.Atomicity.AnalysisState
         (GenericRegions.Atomicity.analysis_mask then_exit ∩
@@ -2611,7 +2823,7 @@ Lemma term_structured_runtime_fresh_fold_valid {Γ F Δ entry invariant
       (Translation.Resource.CInvariant invariant
         (IR.symbolize_expr_list store arguments))).
 Proof.
-  intros runtime formals binders atoms ambient Henvelope.
+  intros runtime formals binders valuation ambient Henvelope.
   pose (raw := GenericRegions.Atomicity.CertFold Γ entry
     (TFold invariant arguments) invariant eq_refl).
   have Hraw_envelope : RegionExecution.Primitives.Model.runtime_mask
@@ -2632,7 +2844,7 @@ Proof.
   iIntros "[Hglobal Hpre]".
   iPoseProof (term_invariant_fresh_fold_node_valid invariant
     arguments store entry ambient Hfresh Hregistered Hnamespace runtime
-    formals binders atoms with "[$Hglobal $Hpre]") as "Hwp".
+    formals binders valuation with "[$Hglobal $Hpre]") as "Hwp".
   iEval (unfold concrete_operation_wp,
     RegionExecution.Primitives.operation_wp, RegionSyntax.view) in "Hwp".
   rewrite translated_runtime_wp_erased; [|reflexivity]. iExact "Hwp".
@@ -2673,33 +2885,33 @@ Lemma interp_store_equal_under {Γ F Δ}
     (body : Translation.Resource.core_assertion F Δ)
     (store store' : symbolic_store Γ F Δ)
     (Hstore : Hoare.ResourceHoare.store_equal_under body Γ store' store)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env) :
-  term_interp_core formals binders atoms body ⊢
-    ⌜interp_store formals binders atoms store' =
-     interp_store formals binders atoms store⌝.
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation) :
+  term_interp_core formals binders valuation body ⊢
+    ⌜interp_store formals binders valuation store' =
+     interp_store formals binders valuation store⌝.
 Proof.
   induction Hstore.
   - iIntros "_". iPureIntro. reflexivity.
-  - have Hhead : (term_interp_core formals binders atoms body ⊢
-        ⌜interp_ref formals binders atoms left =
-         interp_ref formals binders atoms right⌝)%I.
+  - have Hhead : (term_interp_core formals binders valuation body ⊢
+        ⌜interp_ref formals binders valuation left =
+         interp_ref formals binders valuation right⌝)%I.
     { iIntros "Hbody".
       iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
-        (term_predicates atoms) _ _ H formals binders atoms with "Hbody")
+        (term_predicates valuation) _ _ H formals binders valuation with "Hbody")
         as "%Hequal".
       iPureIntro.
       cbn [Translation.TermSemantics.interp_core interp_expr interp_binop]
         in Hequal.
       apply tval_eqb_eq.
-      destruct (tval_eqb t (interp_ref formals binders atoms left)
-        (interp_ref formals binders atoms right)) eqn:Hbool.
+      destruct (tval_eqb t (interp_ref formals binders valuation left)
+        (interp_ref formals binders valuation right)) eqn:Hbool.
       + reflexivity.
       + first [ discriminate Hequal | inversion Hequal | congruence ]. }
     iIntros "Hbody".
-    iAssert (⌜interp_ref formals binders atoms left =
-               interp_ref formals binders atoms right⌝ ∧
-             ⌜interp_store formals binders atoms left_tail =
-               interp_store formals binders atoms right_tail⌝)%I
+    iAssert (⌜interp_ref formals binders valuation left =
+               interp_ref formals binders valuation right⌝ ∧
+             ⌜interp_store formals binders valuation left_tail =
+               interp_store formals binders valuation right_tail⌝)%I
       with "[Hbody]" as "[%Hhead' %Htail]".
     { iSplit.
       - iApply Hhead. iExact "Hbody".
@@ -2719,23 +2931,23 @@ Lemma term_access_opening_arguments_valid {Γ F Δ} invariant
     (Hopening : CertifiedNormalization.RavenHoareRules.access_opening
       invariant program_arguments focus external body_pre)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     {tracked_types} (tracked : pexpr_list Γ tracked_types)
     (tracked_values : tval_list tracked_types) (outer_mask : coPset) :
   ↑(invariant_namespace invariant) ⊆ outer_mask ->
-  inv (invariant_namespace invariant) (term_world atoms invariant) -∗
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  inv (invariant_namespace invariant) (term_world valuation invariant) -∗
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values external -∗
   |={outer_mask, outer_mask ∖ ↑(invariant_namespace invariant)}=>
     ∃ invariant_values : tval_list (Assertion.invariant_args invariant),
-      term_interp_resource_prenex_at_arguments runtime formals binders atoms
+      term_interp_resource_prenex_at_arguments runtime formals binders valuation
         (IR.pexpr_list_append tracked program_arguments)
         (Translation.tval_list_append tracked_values invariant_values)
         body_pre ∗
-      (world_body_interp atoms invariant invariant_values
+      (world_body_interp valuation invariant invariant_values
         ={outer_mask ∖ ↑(invariant_namespace invariant), outer_mask}=∗
         True) ∗
-      @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant
+      @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
         invariant_values.
 Proof.
   intros Hnamespace. revert binders.
@@ -2744,10 +2956,10 @@ Proof.
     iDestruct "Hpre" as "[[Hstack Htoken] %Htracked]".
     iDestruct "Htoken" as (values) "[%Harguments #Htoken]".
     iPoseProof "Htoken" as "#Htoken_saved".
-    iMod (term_world_open atoms invariant values outer_mask Hnamespace
+    iMod (term_world_open valuation invariant values outer_mask Hnamespace
       with "Hworld Htoken") as "[Hbody Hclose]".
     destruct (term_invariant_definition_compatible formals binders
-      atoms invariant (IR.symbolize_expr_list store program_arguments)) as
+      valuation invariant (IR.symbolize_expr_list store program_arguments)) as
       (actual_values & Hactual & Hbody_equiv).
     rewrite Harguments in Hactual. injection Hactual as Hvalues.
     subst actual_values.
@@ -2770,14 +2982,14 @@ Proof.
           source_binders u variable.
     { intros. reflexivity. }
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms tracked tracked_values external _
+      valuation tracked tracked_values external _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming)) in
       "Hpre".
     iMod (IHHopening source_binders with "Hworld Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms (IR.pexpr_list_append tracked program_arguments)
+      valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values values) body_pre _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming)).
     iExact "Hbody".
@@ -2787,19 +2999,19 @@ Proof.
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
-      formals binders atoms
+      formals binders valuation
       (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values values) value body_pre)) in
       "Hbody".
     iExact "Hbody".
   - iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-      formals binders atoms tracked tracked_values external' external H
+      formals binders valuation tracked tracked_values external' external H
       with "Hpre") as "Hpre".
     iMod (IHHopening binders with "Hworld Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-      binders atoms (IR.pexpr_list_append tracked program_arguments)
+      binders valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values values)
       body_pre body_pre' H0 with "Hbody").
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
@@ -2810,13 +3022,13 @@ Proof.
       iPureIntro. exact Htracked. }
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders atoms (IR.pexpr_list_append tracked program_arguments)
+      formals binders valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values values) body_pre frame)).
     iFrame.
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as "[[Hstack Hpre] %Htracked]".
     iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
-      (term_predicates atoms) _ _ H formals binders atoms with "Hpre") as
+      (term_predicates valuation) _ _ H formals binders valuation with "Hpre") as
       "Hpre".
     iMod (IHHopening binders with "Hworld [Hstack Hpre]") as
       (values) "[Hbody [Hclose Htoken]]".
@@ -2824,16 +3036,16 @@ Proof.
       iPureIntro. exact Htracked. }
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-      binders atoms (IR.pexpr_list_append tracked program_arguments)
+      binders valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values values)
       body_pre body_pre' H0 with "Hbody").
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as "[[Hstack Hbody] %Htracked]".
     iPoseProof (interp_store_equal_under pre_body store store' H formals
-      binders atoms with "Hbody") as "%Hstores".
+      binders valuation with "Hbody") as "%Hstores".
     iEval (rewrite Hstores) in "Hstack".
     have Hargument_interp := interp_program_expr_list_store_ext formals
-      binders atoms store' store tracked Hstores.
+      binders valuation store' store tracked Hstores.
     unfold interp_program_expr_list in Hargument_interp.
     rewrite Htracked in Hargument_interp.
     iApply (IHHopening binders with "Hworld [Hstack Hbody]").
@@ -2853,21 +3065,21 @@ Lemma term_access_closing_arguments_valid {Γ F Δ} invariant
     (Hclosing : CertifiedNormalization.RavenHoareRules.access_closing
       invariant program_arguments focus body_post external_post)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     {tracked_types} (tracked : pexpr_list Γ tracked_types)
     (tracked_values : tval_list tracked_types)
     (invariant_values : tval_list (Assertion.invariant_args invariant))
     (inner_mask outer_mask : coPset) :
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values invariant_values)
       body_post -∗
-  (world_body_interp atoms invariant invariant_values
+  (world_body_interp valuation invariant invariant_values
     ={inner_mask, outer_mask}=∗ True) -∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
     invariant_values -∗
   |={inner_mask, outer_mask}=>
-    term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values external_post.
 Proof.
   revert binders.
@@ -2879,7 +3091,7 @@ Proof.
     apply Translation.interp_expr_list_append_some_inv in Hcombined as
       [Htracked Hinvariant].
     destruct (term_invariant_definition_compatible formals binders
-      atoms invariant (IR.symbolize_expr_list store program_arguments)) as
+      valuation invariant (IR.symbolize_expr_list store program_arguments)) as
       (actual_values & Hactual & Hbody_equiv).
     rewrite Hinvariant in Hactual. injection Hactual as Hvalues.
     subst actual_values.
@@ -2903,7 +3115,7 @@ Proof.
           source_binders u variable.
     { intros. reflexivity. }
     rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms (IR.pexpr_list_append tracked program_arguments)
+      valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values invariant_values)
       body_post _ Assertions.weaken_bound_renaming source_binders binders
       Hrenaming).
@@ -2912,7 +3124,7 @@ Proof.
       "Hclosed".
     iMod "Hclosed". iModIntro.
     rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      atoms tracked tracked_values external_post _
+      valuation tracked tracked_values external_post _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming).
     iExact "Hclosed".
   - cbn [term_interp_resource_prenex_at_arguments].
@@ -2921,37 +3133,37 @@ Proof.
       "Hpost Hclose Htoken") as "Hclosed".
     iMod "Hclosed". iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
-      formals binders atoms tracked tracked_values value external_post)) in
+      formals binders valuation tracked tracked_values value external_post)) in
       "Hclosed".
     iExact "Hclosed".
   - iIntros "Hpost Hclose Htoken".
     iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-      formals binders atoms (IR.pexpr_list_append tracked program_arguments)
+      formals binders valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values invariant_values)
       body_post' body_post H with "Hpost") as "Hpost".
     iPoseProof (IHHclosing binders with "Hpost Hclose Htoken") as "Hclosed".
     iMod "Hclosed". iModIntro.
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-      binders atoms tracked tracked_values external_post external_post' H0
+      binders valuation tracked tracked_values external_post external_post' H0
       with "Hclosed").
   - iIntros "Hpost Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders atoms (IR.pexpr_list_append tracked program_arguments)
+      formals binders valuation (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values invariant_values)
       body_post frame)) in "Hpost".
     iDestruct "Hpost" as "[Hpost Hframe]".
     iPoseProof (IHHclosing binders with "Hpost Hclose Htoken") as "Hclosed".
     iMod "Hclosed". iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders atoms tracked tracked_values external_post frame)).
+      formals binders valuation tracked tracked_values external_post frame)).
     iFrame.
   - cbn [term_interp_resource_prenex_at_arguments].
     iIntros "[[Hstack Hbody] %Harguments] Hclose Htoken".
     iPoseProof (interp_store_equal_under body store store' H formals binders
-      atoms with "Hbody") as "%Hstores".
+      valuation with "Hbody") as "%Hstores".
     iEval (rewrite Hstores) in "Hstack".
     have Hargument_interp := interp_program_expr_list_store_ext formals
-      binders atoms store' store
+      binders valuation store' store
       (IR.pexpr_list_append tracked program_arguments) Hstores.
     unfold interp_program_expr_list in Hargument_interp.
     rewrite Harguments in Hargument_interp.
@@ -2976,58 +3188,58 @@ Lemma term_independent_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant
     (body : stmt Γ)
     (tracked : pexpr_list Γ ts) (tracked_values : tval_list ts)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (outer_mask : coPset) :
   invariant ∈ term_registered_invariants  ->
   ↑(invariant_namespace invariant) ⊆ outer_mask ->
   (forall invariant_values : tval_list (Assertion.invariant_args invariant),
-    (global_world_context atoms ∗
-     term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex_at_arguments runtime formals binders valuation
        (IR.pexpr_list_append tracked program_arguments)
        (Translation.tval_list_append tracked_values invariant_values)
        body_pre) ⊢
     runtime_masked_wp
       (outer_mask ∖ ↑(invariant_namespace invariant))
       (outer_mask ∖ ↑(invariant_namespace invariant))
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex_at_arguments runtime formals binders atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
          (IR.pexpr_list_append tracked program_arguments)
          (Translation.tval_list_append tracked_values invariant_values)
          body_post)) ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body) ->
-  (global_world_context atoms ∗
-   term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  (global_world_context valuation ∗
+   term_interp_resource_prenex_at_arguments runtime formals binders valuation
      tracked tracked_values external_pre) ⊢
   runtime_masked_wp outer_mask outer_mask
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (TInvAccess invariant program_arguments body))
-    (global_world_context atoms ∗
-     term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex_at_arguments runtime formals binders valuation
        tracked tracked_values external_post).
 Proof.
   intros Hregistered Hnamespace Hbody Hatomic.
   simpl. iIntros "[#Hglobal Hpre]".
   iEval (unfold global_world_context) in "Hglobal".
   iDestruct "Hglobal" as "[#Hworlds [#Hchunks #Hprocedures]]".
-  iPoseProof (term_world_context_lookup atoms invariant Hregistered
+  iPoseProof (term_world_context_lookup valuation invariant Hregistered
     with "Hworlds") as "#Hworld".
   iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(invariant_namespace invariant))
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       body) _ Hatomic).
   iMod (term_access_opening_arguments_valid invariant
     program_arguments focus_open external_pre body_pre Hopening runtime
-    formals binders atoms tracked tracked_values outer_mask Hnamespace
+    formals binders valuation tracked tracked_values outer_mask Hnamespace
     with "Hworld Hpre") as (invariant_values)
     "[Hpre [Hclose Htoken]]".
   iModIntro.
@@ -3039,7 +3251,7 @@ Proof.
   iIntros "[[#Hglobal Hpost] [Hclose Htoken]]". iFrame "Hglobal".
   iApply (term_access_closing_arguments_valid invariant
     program_arguments focus_close body_post external_post Hclosing runtime
-    formals binders atoms tracked tracked_values invariant_values
+    formals binders valuation tracked tracked_values invariant_values
     (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask
     with "Hpost Hclose Htoken").
 Qed.
@@ -3058,18 +3270,18 @@ Lemma term_invariant_access_closure_valid {Γ F Δ} invariant
     (Hclosure : CertifiedNormalization.RavenHoareRules.access_closure
       invariant Δ arguments invariant_body opened closed)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (values : tval_list (Assertion.invariant_args invariant))
     (inner_mask outer_mask : coPset) :
-  interp_expr_list formals binders atoms arguments = Some values ->
-  term_interp_core formals binders atoms invariant_body ≡
-    world_body_interp atoms invariant values ->
-  term_interp_resource_prenex runtime formals binders atoms opened -∗
-  (world_body_interp atoms invariant values
+  interp_expr_list formals binders valuation arguments = Some values ->
+  term_interp_core formals binders valuation invariant_body ≡
+    world_body_interp valuation invariant values ->
+  term_interp_resource_prenex runtime formals binders valuation opened -∗
+  (world_body_interp valuation invariant values
     ={inner_mask, outer_mask}=∗ True) -∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant values -∗
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant values -∗
   |={inner_mask, outer_mask}=>
-    term_interp_resource_prenex runtime formals binders atoms closed.
+    term_interp_resource_prenex runtime formals binders valuation closed.
 Proof.
   revert binders.
   induction Hclosure; intros binders Harguments Hinvariant_body.
@@ -3085,13 +3297,13 @@ Proof.
     iIntros "Hopened Hclose Htoken".
     iDestruct "Hopened" as (value) "Hopened".
     have Harguments' : interp_expr_list formals (binder_cons value binders)
-        atoms (Translation.Assertions.weaken_expr_list arguments) =
+        valuation (Translation.Assertions.weaken_expr_list arguments) =
         Some values.
     { rewrite interp_weaken_expr_list. exact Harguments. }
     have Hinvariant_body' :
-        term_interp_core formals (binder_cons value binders) atoms
+        term_interp_core formals (binder_cons value binders) valuation
           (Translation.Resource.weaken_core invariant_body) ≡
-        world_body_interp atoms invariant values.
+        world_body_interp valuation invariant values.
     { unfold term_interp_core.
       rewrite (Translation.TermSemantics.interp_weaken_core semantic_data).
       exact Hinvariant_body. }
@@ -3102,11 +3314,11 @@ Proof.
     cbn [Translation.TermSemantics.interp_core].
     iIntros "[Hstack [Hbody [Hremainder %Hcondition]]] Hclose Htoken".
     destruct (term_invariant_definition_compatible formals binders
-      atoms invariant closing_arguments) as
+      valuation invariant closing_arguments) as
       [closing_values [Hclosing_arguments Hclosing_body]].
     have Hsame_arguments :
-        interp_expr_list formals binders atoms closing_arguments =
-        interp_expr_list formals binders atoms opening_arguments.
+        interp_expr_list formals binders valuation closing_arguments =
+        interp_expr_list formals binders valuation opening_arguments.
     { apply Translation.interp_expr_list_equal_assuming with
         (condition := condition); assumption. }
     rewrite Harguments in Hsame_arguments.
@@ -3127,18 +3339,18 @@ Proof.
     iMod "Hclosed". iModIntro. iFrame.
   - iIntros "Hopened Hclose Htoken".
     iPoseProof (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates atoms) opened' opened H runtime formals
-      binders atoms with "Hopened") as "Hopened".
+      semantic_data (term_predicates valuation) opened' opened H runtime formals
+      binders valuation with "Hopened") as "Hopened".
     iPoseProof (IHHclosure binders Harguments Hinvariant_body with
       "Hopened Hclose Htoken") as "Hclosed".
     iMod "Hclosed". iModIntro.
     iApply (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates atoms) closed closed' H0 runtime formals
-      binders atoms with "Hclosed").
+      semantic_data (term_predicates valuation) closed closed' H0 runtime formals
+      binders valuation with "Hclosed").
   - rewrite !term_interp_rstate.
     iIntros "[Hstack Hbody] Hclose Htoken".
     iPoseProof (interp_store_equal_under body store store' H formals binders
-      atoms with "Hbody") as "%Hstores".
+      valuation with "Hbody") as "%Hstores".
     iEval (rewrite Hstores) in "Hstack".
     iApply (IHHclosure binders Harguments Hinvariant_body with
       "[Hstack Hbody] Hclose Htoken").
@@ -3146,13 +3358,13 @@ Proof.
   - rewrite !term_interp_rstate.
     iIntros "[Hstack Hbody] Hclose Htoken".
     iPoseProof (interp_store_equal_under body closing_store opening_store H
-      formals binders atoms with "Hbody") as "%Hstores".
+      formals binders valuation with "Hbody") as "%Hstores".
     have Hargument_interp := interp_program_expr_list_store_ext formals
-      binders atoms opening_store closing_store program_arguments Hstores.
+      binders valuation opening_store closing_store program_arguments Hstores.
     unfold interp_program_expr_list in Hargument_interp.
     rewrite Harguments in Hargument_interp.
     destruct (term_invariant_definition_compatible formals binders
-      atoms invariant
+      valuation invariant
       (IR.symbolize_expr_list closing_store program_arguments)) as
       (closing_values & Hclosing_arguments & Hclosing_body).
     rewrite Hclosing_arguments in Hargument_interp.
@@ -3167,32 +3379,32 @@ Proof.
         binders t (renaming t variable) = source_binders t variable.
     { intros. reflexivity. }
     have Harguments' :
-        interp_expr_list formals source_binders atoms arguments = Some values.
+        interp_expr_list formals source_binders valuation arguments = Some values.
     { rewrite <- (Translation.interp_rename_bound_expr_list renaming formals
-        source_binders binders atoms Hrenaming).
+        source_binders binders valuation Hrenaming).
       exact Harguments. }
     have Hinvariant_body' :
-        term_interp_core formals source_binders atoms invariant_body ≡
-        world_body_interp atoms invariant values.
+        term_interp_core formals source_binders valuation invariant_body ≡
+        world_body_interp valuation invariant values.
     { etrans.
       - symmetry. unfold term_interp_core.
         apply (Translation.TermSemantics.interp_rename_bound_core
-          semantic_data (term_predicates atoms) renaming formals
-          source_binders binders atoms Hrenaming).
+          semantic_data (term_predicates valuation) renaming formals
+          source_binders binders valuation Hrenaming).
       - exact Hinvariant_body. }
     iIntros "Hopened Hclose Htoken".
     unfold term_interp_resource_prenex at 1.
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates atoms) opened _ renaming formals
-      source_binders binders atoms (term_semantic_runtime runtime)
+      semantic_data (term_predicates valuation) opened _ renaming formals
+      source_binders binders valuation (term_semantic_runtime runtime)
       Hrenaming).
     iPoseProof (IHHclosure source_binders Harguments' Hinvariant_body'
       with "Hopened Hclose Htoken") as "Hclosed".
     iMod "Hclosed". iModIntro.
     unfold term_interp_resource_prenex.
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates atoms) closed _ renaming formals
-      source_binders binders atoms (term_semantic_runtime runtime)
+      semantic_data (term_predicates valuation) closed _ renaming formals
+      source_binders binders valuation (term_semantic_runtime runtime)
       Hrenaming).
     iExact "Hclosed".
 Qed.
@@ -3204,20 +3416,20 @@ Lemma term_invariant_access_closure_arguments_valid {Γ F Δ ts}
     (Hclosure : CertifiedNormalization.RavenHoareRules.access_closure
       invariant Δ arguments invariant_body opened closed)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (values : tval_list (Assertion.invariant_args invariant))
     (tracked : pexpr_list Γ ts) (tracked_values : tval_list ts)
     (inner_mask outer_mask : coPset) :
-  interp_expr_list formals binders atoms arguments = Some values ->
-  term_interp_core formals binders atoms invariant_body ≡
-    world_body_interp atoms invariant values ->
-  term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  interp_expr_list formals binders valuation arguments = Some values ->
+  term_interp_core formals binders valuation invariant_body ≡
+    world_body_interp valuation invariant values ->
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values opened -∗
-  (world_body_interp atoms invariant values
+  (world_body_interp valuation invariant values
     ={inner_mask, outer_mask}=∗ True) -∗
-  @RegionExecution.Primitives.Model.core_invariant_own _ _ _ Σ RG invariant values -∗
+  @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant values -∗
   |={inner_mask, outer_mask}=>
-    term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values closed.
 Proof.
   revert binders.
@@ -3227,18 +3439,18 @@ Proof.
     iMod (term_invariant_access_closure_valid invariant arguments
       invariant_body _ _ (CertifiedNormalization.RavenHoareRules.AccessBase
         invariant Δ arguments invariant_body store remainder)
-      runtime formals binders atoms values inner_mask outer_mask Harguments
+      runtime formals binders valuation values inner_mask outer_mask Harguments
       Hinvariant_body with "Hopened Hclose Htoken") as "Hclosed".
     iModIntro. iFrame. iPureIntro. exact Htracked.
   - cbn [term_interp_resource_prenex_at_arguments].
     iIntros "Hopened Hclose Htoken". iDestruct "Hopened" as (value) "Hopened".
     have Harguments' : interp_expr_list formals (binder_cons value binders)
-        atoms (Translation.Assertions.weaken_expr_list arguments) = Some values.
+        valuation (Translation.Assertions.weaken_expr_list arguments) = Some values.
     { rewrite interp_weaken_expr_list. exact Harguments. }
     have Hinvariant_body' :
-        term_interp_core formals (binder_cons value binders) atoms
+        term_interp_core formals (binder_cons value binders) valuation
           (Translation.Resource.weaken_core invariant_body) ≡
-        world_body_interp atoms invariant values.
+        world_body_interp valuation invariant values.
     { unfold term_interp_core.
       rewrite (Translation.TermSemantics.interp_weaken_core semantic_data).
       exact Hinvariant_body. }
@@ -3252,32 +3464,32 @@ Proof.
       (CertifiedNormalization.RavenHoareRules.AccessEquality invariant Δ
         opening_arguments closing_arguments opening_body store remainder
         condition H)
-      runtime formals binders atoms values inner_mask outer_mask Harguments Hinvariant_body
+      runtime formals binders valuation values inner_mask outer_mask Harguments Hinvariant_body
       with "Hopened Hclose Htoken") as "Hclosed".
     iModIntro. iFrame. iPureIntro. exact Htracked.
   - iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders atoms tracked tracked_values opened frame)).
+      formals binders valuation tracked tracked_values opened frame)).
     iIntros "[Hopened Hframe] Hclose Htoken".
     iMod (IHHclosure binders Harguments Hinvariant_body with
       "Hopened Hclose Htoken") as "Hclosed".
     iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders atoms tracked tracked_values closed frame)). iFrame.
+      formals binders valuation tracked tracked_values closed frame)). iFrame.
   - iIntros "Hopened Hclose Htoken".
     iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-      formals binders atoms tracked tracked_values opened' opened H
+      formals binders valuation tracked tracked_values opened' opened H
       with "Hopened") as "Hopened".
     iMod (IHHclosure binders Harguments Hinvariant_body with
       "Hopened Hclose Htoken") as "Hclosed".
     iModIntro. iApply (term_interp_resource_prenex_at_arguments_entails runtime
-      formals binders atoms tracked tracked_values closed closed' H0
+      formals binders valuation tracked tracked_values closed closed' H0
       with "Hclosed").
   - cbn [term_interp_resource_prenex_at_arguments].
     iIntros "[[Hstack Hbody] %Htracked] Hclose Htoken".
     iPoseProof (interp_store_equal_under body store store' H formals binders
-      atoms with "Hbody") as "%Hstores".
+      valuation with "Hbody") as "%Hstores".
     iEval (rewrite Hstores) in "Hstack".
-    have Htracked' := interp_program_expr_list_store_ext formals binders atoms
+    have Htracked' := interp_program_expr_list_store_ext formals binders valuation
       store' store tracked Hstores.
     unfold interp_program_expr_list in Htracked'. rewrite Htracked in Htracked'.
     iApply (IHHclosure binders Harguments Hinvariant_body with
@@ -3287,17 +3499,17 @@ Proof.
   - cbn [term_interp_resource_prenex_at_arguments].
     iIntros "[[Hstack Hbody] %Htracked] Hclose Htoken".
     iPoseProof (interp_store_equal_under body closing_store opening_store H
-      formals binders atoms with "Hbody") as "%Hstores".
+      formals binders valuation with "Hbody") as "%Hstores".
     have Hargument_interp := interp_program_expr_list_store_ext formals
-      binders atoms opening_store closing_store program_arguments Hstores.
+      binders valuation opening_store closing_store program_arguments Hstores.
     unfold interp_program_expr_list in Hargument_interp.
     rewrite Harguments in Hargument_interp.
     destruct (term_invariant_definition_compatible formals binders
-      atoms invariant (IR.symbolize_expr_list closing_store program_arguments))
+      valuation invariant (IR.symbolize_expr_list closing_store program_arguments))
       as (closing_values & Hclosing_arguments & Hclosing_body).
     rewrite Hclosing_arguments in Hargument_interp.
     injection Hargument_interp as Hvalues. subst closing_values.
-    have Htracked' := interp_program_expr_list_store_ext formals binders atoms
+    have Htracked' := interp_program_expr_list_store_ext formals binders valuation
       opening_store closing_store tracked Hstores.
     unfold interp_program_expr_list in Htracked'. rewrite Htracked in Htracked'.
     iEval (rewrite Hstores) in "Hstack".
@@ -3311,27 +3523,27 @@ Proof.
         binders t (renaming t variable) = source_binders t variable.
     { intros. reflexivity. }
     have Harguments' :
-        interp_expr_list formals source_binders atoms arguments = Some values.
+        interp_expr_list formals source_binders valuation arguments = Some values.
     { rewrite <- (Translation.interp_rename_bound_expr_list renaming formals
-        source_binders binders atoms Hrenaming). exact Harguments. }
+        source_binders binders valuation Hrenaming). exact Harguments. }
     have Hinvariant_body' :
-        term_interp_core formals source_binders atoms invariant_body ≡
-        world_body_interp atoms invariant values.
+        term_interp_core formals source_binders valuation invariant_body ≡
+        world_body_interp valuation invariant values.
     { etrans.
       - symmetry. unfold term_interp_core.
         apply (Translation.TermSemantics.interp_rename_bound_core semantic_data
-          (term_predicates atoms) renaming formals source_binders binders atoms
+          (term_predicates valuation) renaming formals source_binders binders valuation
           Hrenaming).
       - exact Hinvariant_body. }
     iIntros "Hopened Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime
-      formals atoms tracked tracked_values opened _ renaming source_binders
+      formals valuation tracked tracked_values opened _ renaming source_binders
       binders Hrenaming)) in "Hopened".
     iMod (IHHclosure source_binders Harguments' Hinvariant_body' with
       "Hopened Hclose Htoken") as "Hclosed".
     iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime
-      formals atoms tracked tracked_values closed _ renaming source_binders
+      formals valuation tracked tracked_values closed _ renaming source_binders
       binders Hrenaming)). iExact "Hclosed".
 Qed.
 
@@ -3341,23 +3553,23 @@ Lemma term_structured_inv_access_runtime_valid {Γ F Δ} invariant arguments
     (opened_post closed_post : Translation.Resource.resource_prenex Γ F Δ)
     (body : stmt Γ)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (outer_mask inner_mask : coPset) :
   invariant ∈ term_registered_invariants  ->
   ↑(invariant_namespace invariant) ⊆ outer_mask ->
   inner_mask = outer_mask ∖ ↑(invariant_namespace invariant) ->
-  (global_world_context atoms ∗
-   term_interp_resource_prenex runtime formals binders atoms
+  (global_world_context valuation ∗
+   term_interp_resource_prenex runtime formals binders valuation
      (Translation.Resource.RState input_store
        (Translation.Resource.CAnd
          (ResourceInstances.instantiated_invariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame)) ⊢
    runtime_masked_wp inner_mask inner_mask
-     (@RuntimeErasure.runtime_stmt _ _ _ Γ
+     (@RuntimeErasure.runtime_stmt _ _ Γ
        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
-     (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals binders atoms
+     (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals binders valuation
        opened_post)) ->
   CertifiedNormalization.RavenHoareRules.access_closure invariant Δ
     (IR.symbolize_expr_list input_store arguments)
@@ -3365,27 +3577,27 @@ Lemma term_structured_inv_access_runtime_valid {Γ F Δ} invariant arguments
       (IR.symbolize_expr_list input_store arguments))
     opened_post closed_post ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         body) ->
-  (global_world_context atoms ∗
-   term_interp_resource_prenex runtime formals binders atoms
+  (global_world_context valuation ∗
+   term_interp_resource_prenex runtime formals binders valuation
      (Translation.Resource.RState input_store
        (Translation.Resource.CAnd
          (Translation.Resource.CInvariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame))) ⊢
   runtime_masked_wp outer_mask outer_mask
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (TInvAccess invariant arguments body))
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals binders atoms closed_post).
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals binders valuation closed_post).
 Proof.
   intros Hregistered Hnamespace -> Hbody Hclosure Hatomic.
   destruct (term_invariant_definition_compatible formals binders
-    atoms invariant (IR.symbolize_expr_list input_store arguments))
+    valuation invariant (IR.symbolize_expr_list input_store arguments))
     as (values & Harguments & Hinvariant_body).
   rewrite term_interp_rstate.
   cbn [Translation.TermSemantics.interp_core].
@@ -3397,15 +3609,15 @@ Proof.
   have Hvalues : actual_values = values by congruence.
   subst actual_values.
   iPoseProof "Htoken" as "#Htoken_saved".
-  iPoseProof (term_world_context_lookup atoms invariant Hregistered
+  iPoseProof (term_world_context_lookup valuation invariant Hregistered
     with "Hworlds") as "#Hworld".
   iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(invariant_namespace invariant))
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       body) _ Hatomic).
-  iMod (term_world_open atoms invariant values outer_mask Hnamespace
+  iMod (term_world_open valuation invariant values outer_mask Hnamespace
     with "Hworld Htoken") as "[Hinv_body Hclose]".
   iModIntro.
   iEval (rewrite -Hinvariant_body) in "Hinv_body".
@@ -3420,7 +3632,7 @@ Proof.
     (IR.symbolize_expr_list input_store arguments)
     (ResourceInstances.instantiated_invariant invariant
       (IR.symbolize_expr_list input_store arguments))
-    opened_post closed_post Hclosure runtime formals binders atoms values
+    opened_post closed_post Hclosure runtime formals binders valuation values
     (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask
     Harguments Hinvariant_body with "Hpost Hclose Htoken_saved").
 Qed.
@@ -3435,25 +3647,25 @@ Lemma term_structured_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant 
     (opened_post closed_post : Translation.Resource.resource_prenex Γ F Δ)
     (body : stmt Γ)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (tracked : pexpr_list Γ ts) (tracked_values : tval_list ts)
     (outer_mask inner_mask : coPset) :
   invariant ∈ term_registered_invariants  ->
   ↑(invariant_namespace invariant) ⊆ outer_mask ->
   inner_mask = outer_mask ∖ ↑(invariant_namespace invariant) ->
-  (global_world_context atoms ∗
-   term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  (global_world_context valuation ∗
+   term_interp_resource_prenex_at_arguments runtime formals binders valuation
      tracked tracked_values
      (Translation.Resource.RState input_store
        (Translation.Resource.CAnd
          (ResourceInstances.instantiated_invariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame)) ⊢
    runtime_masked_wp inner_mask inner_mask
-     (@RuntimeErasure.runtime_stmt _ _ _ Γ
+     (@RuntimeErasure.runtime_stmt _ _ Γ
        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
-     (global_world_context atoms ∗
-      term_interp_resource_prenex_at_arguments runtime formals binders atoms
+     (global_world_context valuation ∗
+      term_interp_resource_prenex_at_arguments runtime formals binders valuation
         tracked tracked_values opened_post)) ->
   CertifiedNormalization.RavenHoareRules.access_closure invariant Δ
     (IR.symbolize_expr_list input_store arguments)
@@ -3461,29 +3673,29 @@ Lemma term_structured_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant 
       (IR.symbolize_expr_list input_store arguments))
     opened_post closed_post ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         body) ->
-  (global_world_context atoms ∗
-   term_interp_resource_prenex_at_arguments runtime formals binders atoms
+  (global_world_context valuation ∗
+   term_interp_resource_prenex_at_arguments runtime formals binders valuation
      tracked tracked_values
      (Translation.Resource.RState input_store
        (Translation.Resource.CAnd
          (Translation.Resource.CInvariant invariant
            (IR.symbolize_expr_list input_store arguments)) frame))) ⊢
   runtime_masked_wp outer_mask outer_mask
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (TInvAccess invariant arguments body))
-    (global_world_context atoms ∗
-     term_interp_resource_prenex_at_arguments runtime formals binders atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex_at_arguments runtime formals binders valuation
        tracked tracked_values closed_post).
 Proof.
   intros Hregistered Hnamespace -> Hbody Hclosure Hatomic.
   destruct (term_invariant_definition_compatible formals binders
-    atoms invariant (IR.symbolize_expr_list input_store arguments))
+    valuation invariant (IR.symbolize_expr_list input_store arguments))
     as (values & Harguments & Hinvariant_body).
   cbn [term_interp_resource_prenex_at_arguments term_interp_rstate
     Translation.TermSemantics.interp_core].
@@ -3494,15 +3706,15 @@ Proof.
   have Hvalues : actual_values = values by congruence.
   subst actual_values.
   iPoseProof "Htoken" as "#Htoken_saved".
-  iPoseProof (term_world_context_lookup atoms invariant Hregistered
+  iPoseProof (term_world_context_lookup valuation invariant Hregistered
     with "Hworlds") as "#Hworld".
   iApply (runtime_masked_wp_atomic_mask_change outer_mask
     (outer_mask ∖ ↑(invariant_namespace invariant))
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       body) _ Hatomic).
-  iMod (term_world_open atoms invariant values outer_mask Hnamespace
+  iMod (term_world_open valuation invariant values outer_mask Hnamespace
     with "Hworld Htoken") as "[Hinv_body Hclose]".
   iModIntro.
   iEval (rewrite -Hinvariant_body) in "Hinv_body".
@@ -3518,7 +3730,7 @@ Proof.
     (IR.symbolize_expr_list input_store arguments)
     (ResourceInstances.instantiated_invariant invariant
       (IR.symbolize_expr_list input_store arguments))
-    opened_post closed_post Hclosure runtime formals binders atoms values
+    opened_post closed_post Hclosure runtime formals binders valuation values
     tracked tracked_values
     (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask
     Harguments Hinvariant_body with "Hpost Hclose Htoken_saved").
@@ -3555,7 +3767,7 @@ Lemma term_structured_runtime_inv_access_valid
     opened_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         body)) ->
@@ -3568,7 +3780,7 @@ Lemma term_structured_runtime_inv_access_valid
           (IR.symbolize_expr_list input_store arguments)) frame))
     closed_post.
 Proof.
-  intros Hbody Hatomic runtime formals binders atoms ambient Henvelope.
+  intros Hbody Hatomic runtime formals binders valuation ambient Henvelope.
   have Hopen_facts := Hopen.
   apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
     (Hfresh & Hmember & _ & Hopened).
@@ -3592,13 +3804,13 @@ Proof.
   rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_structured_inv_access_runtime_valid invariant
     arguments input_store frame opened_post closed_post body runtime
-    formals binders atoms
+    formals binders valuation
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     (RegionExecution.Primitives.Model.active_runtime_mask ambient inner)).
   - exact Hregistered.
   - exact Hnamespace.
   - exact Hinner_mask.
-  - have Hbody_wp := Hbody runtime formals binders atoms ambient.
+  - have Hbody_wp := Hbody runtime formals binders valuation ambient.
     have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
         (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
     { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
@@ -3643,7 +3855,7 @@ Lemma term_structured_runtime_inv_access_arguments_valid
     opened_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         body)) ->
@@ -3657,7 +3869,7 @@ Lemma term_structured_runtime_inv_access_arguments_valid
           (IR.symbolize_expr_list input_store arguments)) frame))
     closed_post.
 Proof.
-  intros Hbody Hatomic Hstable tracked_values runtime formals binders atoms
+  intros Hbody Hatomic Hstable tracked_values runtime formals binders valuation
     ambient Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Hstable.
   have Hopen_facts := Hopen.
@@ -3683,13 +3895,13 @@ Proof.
   rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_structured_inv_access_runtime_arguments_valid
     invariant arguments input_store frame opened_post closed_post body runtime
-    formals binders atoms tracked tracked_values
+    formals binders valuation tracked tracked_values
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     (RegionExecution.Primitives.Model.active_runtime_mask ambient inner)).
   - exact Hregistered.
   - exact Hnamespace.
   - exact Hinner_mask.
-  - have Hbody_wp := Hbody Hstable tracked_values runtime formals binders atoms ambient.
+  - have Hbody_wp := Hbody Hstable tracked_values runtime formals binders valuation ambient.
     have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
         (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
     { etrans; last exact Henvelope.
@@ -3737,7 +3949,7 @@ Lemma term_structured_runtime_independent_inv_access_arguments_valid
     (IR.pexpr_list_append tracked program_arguments) body_pre body_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_arguments_valid
@@ -3746,7 +3958,7 @@ Lemma term_structured_runtime_independent_inv_access_arguments_valid
     tracked external_pre external_post.
 Proof.
   intros Hbody Hatomic Htracked_stable tracked_values runtime formals binders
-    atoms ambient Henvelope.
+    valuation ambient Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Htracked_stable.
   have Hcombined_stable :
       Hoare.ResourceHoare.pexpr_list_dependencies
@@ -3779,7 +3991,7 @@ Proof.
   eapply (term_independent_inv_access_runtime_arguments_valid
     invariant program_arguments focus_open focus_close external_pre body_pre
     body_post external_post Hopening Hclosing body tracked tracked_values
-    runtime formals binders atoms
+    runtime formals binders valuation
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)).
   - exact Hregistered.
   - exact Hnamespace.
@@ -3793,7 +4005,7 @@ Proof.
       repeat rewrite elem_of_union. tauto. }
     have Hbody_wp := Hbody Hcombined_stable
       (Translation.tval_list_append tracked_values invariant_values)
-      runtime formals binders atoms ambient Hbody_envelope.
+      runtime formals binders valuation ambient Hbody_envelope.
     unfold term_structured_runtime_wp in Hbody_wp.
     rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask
@@ -3828,14 +4040,14 @@ Lemma term_structured_runtime_atomic_valid
     (Structured.StructuredAtomic Γ state body outer inner step
       body_certificate open_equal) pre post.
 Proof.
-  intros Hbody runtime formals binders atoms ambient Henvelope.
+  intros Hbody runtime formals binders valuation ambient Henvelope.
   have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
     intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
   iIntros "Hpre".
-  iPoseProof (Hbody runtime formals binders atoms ambient Hbody_envelope
+  iPoseProof (Hbody runtime formals binders valuation ambient Hbody_envelope
     with "Hpre") as "Hwp".
   unfold term_structured_runtime_wp.
   iApply (term_trusted_atomic_runtime_refinement body_certificate
@@ -3863,7 +4075,7 @@ Lemma term_structured_runtime_arguments_atomic_valid
     (Structured.StructuredAtomic Γ state body outer inner step
       body_certificate open_equal) tracked pre post.
 Proof.
-  intros Hbody Hdisjoint values runtime formals binders atoms ambient
+  intros Hbody Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
@@ -3872,7 +4084,7 @@ Proof.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
     intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
   iIntros "Hpre".
-  iPoseProof (Hbody Hdisjoint values runtime formals binders atoms ambient
+  iPoseProof (Hbody Hdisjoint values runtime formals binders valuation ambient
     Hbody_envelope with "Hpre") as "Hwp".
   unfold term_structured_runtime_wp.
   iApply (term_trusted_atomic_runtime_refinement body_certificate
@@ -3931,7 +4143,7 @@ Lemma term_structured_runtime_terminal_access_valid
     opened_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         (TAtomic atomic_body))) ->
@@ -3973,7 +4185,7 @@ Lemma term_structured_runtime_sequence_valid
     (Structured.StructuredSequence Γ entry first middle second exit
       first_certificate second_certificate) pre post.
 Proof.
-  intros Hfirst Hsecond runtime formals binders atoms ambient Henvelope.
+  intros Hfirst Hsecond runtime formals binders valuation ambient Henvelope.
   have Hfirst_envelope : RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint first_certificate) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
@@ -3986,11 +4198,11 @@ Proof.
   iApply term_translated_runtime_wp_sequence.
   - exact (eq_sym
       (term_structured_certificate_preserves_open first_certificate)).
-  - iPoseProof (Hfirst runtime formals binders atoms ambient Hfirst_envelope
+  - iPoseProof (Hfirst runtime formals binders valuation ambient Hfirst_envelope
       with "Hpre") as "Hfirst".
     iApply (translated_runtime_wp_mono with "Hfirst").
     iIntros "[Hglobal Hmiddle]".
-    iApply (Hsecond runtime formals binders atoms ambient Hsecond_envelope).
+    iApply (Hsecond runtime formals binders valuation ambient Hsecond_envelope).
     iFrame.
 Qed.
 
@@ -4010,7 +4222,7 @@ Lemma term_structured_runtime_arguments_sequence_valid
     (Structured.StructuredSequence Γ entry first middle second exit
       first_certificate second_certificate) arguments pre post.
 Proof.
-  intros Hfirst Hsecond Hdisjoint values runtime formals binders atoms ambient
+  intros Hfirst Hsecond Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hfirst_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies arguments
@@ -4034,11 +4246,11 @@ Proof.
   iIntros "Hpre". iApply term_translated_runtime_wp_sequence.
   - exact (eq_sym
       (term_structured_certificate_preserves_open first_certificate)).
-  - iPoseProof (Hfirst Hfirst_disjoint values runtime formals binders atoms
+  - iPoseProof (Hfirst Hfirst_disjoint values runtime formals binders valuation
       ambient Hfirst_envelope with "Hpre") as "Hfirst".
     iApply (translated_runtime_wp_mono with "Hfirst").
     iIntros "[Hglobal Hmiddle]".
-    iApply (Hsecond Hsecond_disjoint values runtime formals binders atoms
+    iApply (Hsecond Hsecond_disjoint values runtime formals binders valuation
       ambient Hsecond_envelope). iFrame.
 Qed.
 
@@ -4068,11 +4280,11 @@ Lemma term_structured_runtime_arguments_frame_valid
       (Translation.Resource.CAnd pre_body frame))
     (Translation.Resource.prenex_and post frame).
 Proof.
-  intros Hvalid Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [[Hstack [Hbody Hframe]] %Harguments]]".
-  iPoseProof (Hvalid Hdisjoint values runtime formals binders atoms ambient
+  iPoseProof (Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope with "[-Hframe]") as "Hwp".
   { cbn [term_interp_resource_prenex_at_arguments].
     iFrame "Hglobal Hstack Hbody". iPureIntro. exact Harguments. }
@@ -4081,7 +4293,7 @@ Proof.
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "[[Hglobal' Hpost] Hframe]". iFrame "Hglobal'".
   iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-    formals binders atoms tracked values post frame)).
+    formals binders valuation tracked values post frame)).
   iFrame.
 Qed.
 
@@ -4100,12 +4312,12 @@ Lemma term_structured_runtime_arguments_prenex_preserve_valid
     arguments (Translation.Resource.ResourceExists t pre)
       (Translation.Resource.ResourceExists t post).
 Proof.
-  intros Hvalid Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
   iPoseProof (Hvalid Hdisjoint values runtime formals
-    (binder_cons value binders) atoms ambient Henvelope
+    (binder_cons value binders) valuation ambient Henvelope
     with "[$Hglobal $Hbody]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "[Hglobal' Hpost]". iFrame "Hglobal'".
@@ -4124,17 +4336,17 @@ Lemma term_structured_runtime_arguments_prenex_elim_valid
   term_structured_runtime_arguments_valid certificate
     arguments (Translation.Resource.ResourceExists t pre) post.
 Proof.
-  intros Hvalid Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
   iPoseProof (Hvalid Hdisjoint values runtime formals
-    (binder_cons value binders) atoms ambient Henvelope
+    (binder_cons value binders) valuation ambient Henvelope
     with "[$Hglobal $Hbody]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "[Hglobal' Hpost]". iFrame "Hglobal'".
   iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
-    formals binders atoms arguments values value post)) in "Hpost".
+    formals binders valuation arguments values value post)) in "Hpost".
   iExact "Hpost".
 Qed.
 
@@ -4152,7 +4364,7 @@ Lemma term_structured_runtime_arguments_bound_weaken_valid
     (Translation.Resource.weaken_resource_prenex pre)
     (Translation.Resource.weaken_resource_prenex post).
 Proof.
-  intros Hvalid Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   pose (source_binders := fun u (variable : bvar Δ u) =>
     binders u (MThere variable)).
@@ -4161,15 +4373,15 @@ Proof.
         source_binders u variable.
   { intros. reflexivity. }
   rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-    atoms arguments values pre _ Assertions.weaken_bound_renaming
+    valuation arguments values pre _ Assertions.weaken_bound_renaming
     source_binders binders Hrenaming).
   iIntros "[#Hglobal Hpre]".
-  iPoseProof (Hvalid Hdisjoint values runtime formals source_binders atoms
+  iPoseProof (Hvalid Hdisjoint values runtime formals source_binders valuation
     ambient Henvelope with "[$Hglobal $Hpre]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "[Hglobal' Hpost]". iFrame "Hglobal'".
   rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-    atoms arguments values post _ Assertions.weaken_bound_renaming
+    valuation arguments values post _ Assertions.weaken_bound_renaming
     source_binders binders Hrenaming).
   iExact "Hpost".
 Qed.
@@ -4191,18 +4403,18 @@ Lemma term_structured_runtime_arguments_prenex_consequence_valid
   term_structured_runtime_arguments_valid certificate
     arguments pre' post'.
 Proof.
-  intros Hvalid Hpre Hpost Hdisjoint values runtime formals binders atoms
+  intros Hvalid Hpre Hpost Hdisjoint values runtime formals binders valuation
     ambient Henvelope.
   iIntros "[#Hglobal Hpre]".
   iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-    formals binders atoms arguments values pre' pre Hpre with "Hpre")
+    formals binders valuation arguments values pre' pre Hpre with "Hpre")
     as "Hpre".
-  iPoseProof (Hvalid Hdisjoint values runtime formals binders atoms ambient
+  iPoseProof (Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope with "[$Hglobal $Hpre]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "[Hglobal' Hpost]". iFrame "Hglobal'".
   iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-    binders atoms arguments values post post' Hpost with "Hpost").
+    binders valuation arguments values post post' Hpost with "Hpost").
 Qed.
 
 Lemma term_structured_runtime_arguments_frame_pre_valid
@@ -4218,19 +4430,19 @@ Lemma term_structured_runtime_arguments_frame_pre_valid
   term_structured_runtime_arguments_valid certificate
     arguments (Translation.Resource.prenex_and pre' frame) post.
 Proof.
-  intros Hvalid Hpre Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hpre Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   iIntros "[#Hglobal Hframed]".
   iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-    formals binders atoms arguments values pre' frame)) in "Hframed".
+    formals binders valuation arguments values pre' frame)) in "Hframed".
   iDestruct "Hframed" as "[Hpre Hframe]".
   iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-    formals binders atoms arguments values pre' pre Hpre with "Hpre")
+    formals binders valuation arguments values pre' pre Hpre with "Hpre")
     as "Hpre".
-  iApply (Hvalid Hdisjoint values runtime formals binders atoms ambient
+  iApply (Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope).
   iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-    formals binders atoms arguments values pre frame)).
+    formals binders valuation arguments values pre frame)).
   iFrame "Hglobal Hpre Hframe".
 Qed.
 
@@ -4248,14 +4460,14 @@ Lemma term_structured_runtime_arguments_core_consequence_valid
   term_structured_runtime_arguments_valid certificate
     arguments (Translation.Resource.RState store pre_body') post.
 Proof.
-  intros Hvalid Hpre Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hpre Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [[Hstack Hbody] %Harguments]]".
   iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
-    (term_predicates atoms) _ _ Hpre formals binders atoms with "Hbody")
+    (term_predicates valuation) _ _ Hpre formals binders valuation with "Hbody")
     as "Hbody".
-  iPoseProof (Hvalid Hdisjoint values runtime formals binders atoms ambient
+  iPoseProof (Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope with "[-]") as "Hwp".
   { iFrame "Hglobal Hstack Hbody". iPureIntro. exact Harguments. }
   iApply (translated_runtime_wp_mono with "Hwp").
@@ -4277,22 +4489,22 @@ Lemma term_structured_runtime_arguments_stack_rewrite_valid
   term_structured_runtime_arguments_valid certificate
     arguments (Translation.Resource.RState store' body) post.
 Proof.
-  intros Hvalid Hstore Hdisjoint values runtime formals binders atoms ambient
+  intros Hvalid Hstore Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [[Hstack Hbody] %Harguments]]".
-  iAssert (⌜interp_store formals binders atoms store' =
-             interp_store formals binders atoms store⌝)%I
+  iAssert (⌜interp_store formals binders valuation store' =
+             interp_store formals binders valuation store⌝)%I
     with "[Hbody]" as "%Hequal".
   { iApply (interp_store_equal_under body store store' Hstore). iExact "Hbody". }
   rewrite Hequal.
-  iApply (Hvalid Hdisjoint values runtime formals binders atoms ambient
+  iApply (Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope).
   cbn [term_interp_resource_prenex_at_arguments].
   iFrame "Hglobal Hstack Hbody".
   iPureIntro.
   have Hargument_interp := interp_program_expr_list_store_ext formals
-    binders atoms store' store arguments Hequal.
+    binders valuation store' store arguments Hequal.
   unfold interp_program_expr_list in Hargument_interp.
   rewrite Harguments in Hargument_interp. symmetry. exact Hargument_interp.
 Qed.
@@ -4330,7 +4542,7 @@ Lemma term_structured_runtime_arguments_conditional_valid
       else_certificate open_equal atomic_equal)
     arguments (Translation.Resource.RState store body) post.
 Proof.
-  intros Hthen Helse Hdisjoint values runtime formals binders atoms ambient
+  intros Hthen Helse Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hthen_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies arguments
@@ -4353,40 +4565,40 @@ Proof.
     intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [[Hstack Hbody] %Harguments]]".
-  destruct (interp_expr_total formals binders atoms
+  destruct (interp_expr_total formals binders valuation
     (IR.symbolize_expr store condition)) as [value Hvalue].
   dependent destruction value. destruct b.
-  - iApply (translated_runtime_wp_if_total_join runtime formals binders atoms
+  - iApply (translated_runtime_wp_if_total_join runtime formals binders valuation
       store ambient state condition then_branch else_branch then_exit
       else_exit
-      (global_world_context atoms ∗
-       term_interp_resource_prenex_at_arguments runtime formals binders atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
          arguments values post)
-      (global_world_context atoms ∗
-       (term_interp_core formals binders atoms body ∗
-        ⌜interp_expr_list formals binders atoms
+      (global_world_context valuation ∗
+       (term_interp_core formals binders valuation body ∗
+        ⌜interp_expr_list formals binders valuation
           (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal).
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
-      iApply (Hthen Hthen_disjoint values runtime formals binders atoms ambient
+      iApply (Hthen Hthen_disjoint values runtime formals binders valuation ambient
         Hthen_envelope).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hstack Hbody". iPureIntro. split;
         [exact Hvalue | exact Harguments'].
     + intros Hfalse. rewrite Hvalue in Hfalse. discriminate.
     + iFrame "Hstack Hglobal Hbody". iPureIntro. exact Harguments.
-  - iApply (translated_runtime_wp_if_total_join runtime formals binders atoms
+  - iApply (translated_runtime_wp_if_total_join runtime formals binders valuation
       store ambient state condition then_branch else_branch then_exit
       else_exit
-      (global_world_context atoms ∗
-       term_interp_resource_prenex_at_arguments runtime formals binders atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
          arguments values post)
-      (global_world_context atoms ∗
-       (term_interp_core formals binders atoms body ∗
-        ⌜interp_expr_list formals binders atoms
+      (global_world_context valuation ∗
+       (term_interp_core formals binders valuation body ∗
+        ⌜interp_expr_list formals binders valuation
           (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal).
     + intros Htrue. rewrite Hvalue in Htrue. discriminate.
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
-      iApply (Helse Helse_disjoint values runtime formals binders atoms ambient
+      iApply (Helse Helse_disjoint values runtime formals binders valuation ambient
         Helse_envelope).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hstack Hbody". iPureIntro. split.
@@ -4423,7 +4635,7 @@ Lemma term_structured_runtime_inv_access_focus_base_framed_arguments_valid
       tracked (Translation.Resource.prenex_and body_pre frame) body_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_arguments_valid
@@ -4480,7 +4692,7 @@ Lemma term_structured_runtime_inv_access_boundary_arguments_valid
       tracked body_pre body_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_arguments_valid
@@ -4523,31 +4735,31 @@ Lemma term_ambient_allocation_rule_valid {Γ F Δ}
   NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
   ghost_initializers_require_physical fields ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     ↑ghost_heap_namespace ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
-    term_interp_resource_prenex runtime formals binders atoms
+    term_interp_resource_prenex runtime formals binders valuation
       (Translation.Resource.RState store
         (Hoare.ResourceHoare.ghost_initializers_valid_core store
           (ghost_field_initializers fields))) ⊢
     concrete_operation_wp runtime ambient entry (TAlloc target fields) exit
-      (term_interp_resource_prenex runtime formals binders atoms
+      (term_interp_resource_prenex runtime formals binders valuation
         (Translation.Resource.ResourceExists TRef
           (Translation.Resource.RState
             (IR.update_store_with_bound store target)
             (Hoare.ResourceHoare.allocated_fields_core store fields)))).
 Proof.
-  intros Hnodup Hghostnodup Hphysical runtime formals binders atoms
+  intros Hnodup Hghostnodup Hphysical runtime formals binders valuation
     ambient Hghostmask.
   unfold concrete_operation_wp, RegionExecution.Primitives.operation_wp.
   simpl. unfold RegionExecution.Primitives.ambient_leaf_wp.
   simpl. unfold RegionExecution.Primitives.ambient_physical_leaf_wp.
   rewrite term_interp_rstate. iIntros "[Hstack Hvalid]".
-  iDestruct (term_valid_ghost_initializers_semantic_core formals binders atoms
+  iDestruct (term_valid_ghost_initializers_semantic_core formals binders valuation
     store (ghost_field_initializers fields) with "Hvalid") as %Hvalid.
-  iPoseProof (@RegionExecution.Primitives.Model.runtime_allocation_wp _ _ _ Σ RG Γ F Δ
-    runtime formals binders atoms store target fields
+  iPoseProof (@RegionExecution.Primitives.Model.runtime_allocation_wp _ _ Σ RG Γ F Δ
+    runtime formals binders valuation store target fields
     (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
     Hnodup Hghostnodup Hphysical Hvalid with "Hstack") as "Hwp".
   { rewrite Hruntime_ghost_namespace. exact Hghostmask. }
@@ -4559,7 +4771,7 @@ Proof.
   rewrite term_interp_resource_exists.
   iExists (VRef address). rewrite term_interp_rstate. iFrame "Hstack".
   iApply (term_ambient_allocated_fields_rule_interp_core runtime formals
-    binders atoms store fields address with "Hfields").
+    binders valuation store fields address with "Hfields").
 Qed.
 
 (** The predicate-definition compatibility the resource fold/unfold
@@ -4569,30 +4781,30 @@ Qed.
     discharged once, here, rather than separately at each leaf. *)
 Lemma term_interp_core_instantiated_predicate {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     predicate
     (arguments : Translation.Assertions.expr_list F Δ
       (Assertion.predicate_args predicate)) :
-  term_interp_core formals binders atoms
+  term_interp_core formals binders valuation
       (ResourceInstances.instantiated_predicate predicate arguments) ≡
-    term_interp_core formals binders atoms
+    term_interp_core formals binders valuation
       (Translation.Resource.CPredicate predicate arguments).
 Proof.
   exact (@TermLeaf.term_predicate_instantiation_valid _ _ _ (iPropI Σ) semantic_data
-    Leaf F Δ formals binders atoms predicate arguments).
+    Leaf F Δ formals binders valuation predicate arguments).
 Qed.
 
 (** A single-slot stack update preserves every program expression whose
     syntactic dependency set excludes that slot. *)
 Lemma interp_program_expr_update_store_with_bound_disjoint {Γ F Δ t u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ u)
     (value : tval u) (expression : pexpr Γ t) :
   Hoare.ResourceHoare.pexpr_dependencies expression ##
       ({[member_index target]} : gset nat) ->
-  interp_program_expr formals (binder_cons value binders) atoms
+  interp_program_expr formals (binder_cons value binders) valuation
       (IR.update_store_with_bound store target) expression =
-    interp_program_expr formals binders atoms store expression.
+    interp_program_expr formals binders valuation store expression.
 Proof.
   intro Hdisjoint. induction expression; cbn [interp_program_expr] in *.
   - have Hneq : member_index variable <> member_index target.
@@ -4621,14 +4833,14 @@ Qed.
 
 Lemma interp_program_expr_list_update_store_with_bound_disjoint
     {Γ F Δ ts u}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ u)
     (value : tval u) (expressions : pexpr_list Γ ts) :
   Hoare.ResourceHoare.pexpr_list_dependencies expressions ##
       ({[member_index target]} : gset nat) ->
-  interp_program_expr_list formals (binder_cons value binders) atoms
+  interp_program_expr_list formals (binder_cons value binders) valuation
       (IR.update_store_with_bound store target) expressions =
-    interp_program_expr_list formals binders atoms store expressions.
+    interp_program_expr_list formals binders valuation store expressions.
 Proof.
   intro Hdisjoint. induction expressions; cbn [interp_program_expr_list] in *.
   - reflexivity.
@@ -4644,7 +4856,7 @@ Proof.
     cbn [IR.symbolize_expr_list interp_expr_list] in *.
     have Hhead_equal :=
       interp_program_expr_update_store_with_bound_disjoint formals binders
-        atoms store target value p Hhead.
+        valuation store target value p Hhead.
     unfold interp_program_expr in Hhead_equal.
     rewrite Hhead_equal.
     rewrite (IHexpressions Htail). reflexivity.
@@ -4667,25 +4879,25 @@ Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
   Certified.procedure_cost_model_sound ->
   CertifiedNormalization.RavenHoareRules.RavenHoareTriple pre statement post ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask exit) ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
-    (global_world_context atoms ∗
-      term_interp_resource_prenex runtime formals binders atoms pre) ⊢
+    (global_world_context valuation ∗
+      term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     concrete_operation_wp runtime ambient entry statement exit
-      (term_interp_resource_prenex runtime formals binders atoms post).
+      (term_interp_resource_prenex runtime formals binders valuation post).
 Proof.
   intros Γ F Δ pre post statement entry exit Hview Hstep Hcost
     Htriple.
-  induction Htriple; intros runtime formals binders atoms ambient Henvelope;
+  induction Htriple; intros runtime formals binders valuation ambient Henvelope;
     simpl in Hview; try discriminate.
   - (* telescope preservation *)
     rewrite !term_interp_resource_exists.
     iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
     iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) atoms ambient Henvelope
+      (binder_cons value binders) valuation ambient Henvelope
       with "[$Hglobal $Hbody]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     iIntros "Hpost". iExists value. iExact "Hpost".
@@ -4698,24 +4910,24 @@ Proof.
     { intros. reflexivity. }
     unfold term_interp_resource_prenex at 1.
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates atoms) pre _
-      Assertions.weaken_bound_renaming formals source_binders binders atoms
+      semantic_data (term_predicates valuation) pre _
+      Assertions.weaken_bound_renaming formals source_binders binders valuation
       (term_semantic_runtime runtime) Hrenaming).
     iIntros "[#Hglobal Hpre]".
-    iPoseProof (IHHtriple Hview Hstep runtime formals source_binders atoms
+    iPoseProof (IHHtriple Hview Hstep runtime formals source_binders valuation
       ambient Henvelope with "[$Hglobal $Hpre]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     unfold term_interp_resource_prenex.
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates atoms) post _
-      Assertions.weaken_bound_renaming formals source_binders binders atoms
+      semantic_data (term_predicates valuation) post _
+      Assertions.weaken_bound_renaming formals source_binders binders valuation
       (term_semantic_runtime runtime) Hrenaming).
     done.
   - (* telescope elimination *)
     rewrite term_interp_resource_exists.
     iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
     iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) atoms ambient Henvelope
+      (binder_cons value binders) valuation ambient Henvelope
       with "[$Hglobal $Hbody]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     unfold term_interp_resource_prenex.
@@ -4724,18 +4936,18 @@ Proof.
   - (* prenex consequence *)
     iIntros "[#Hglobal Hpre]".
     iPoseProof (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates atoms) _ _ H runtime formals binders
-      atoms with "Hpre") as "Hpre".
-    iPoseProof (IHHtriple Hview Hstep runtime formals binders atoms ambient
+      semantic_data (term_predicates valuation) _ _ H runtime formals binders
+      valuation with "Hpre") as "Hpre".
+    iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
       Henvelope with "[$Hglobal $Hpre]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     iApply (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates atoms) _ _ H0 runtime formals binders
-      atoms).
+      semantic_data (term_predicates valuation) _ _ H0 runtime formals binders
+      valuation).
   - (* frame *)
     etrans; [| apply concrete_operation_wp_mono with
-      (P := (term_interp_resource_prenex runtime formals binders atoms post ∗
-             term_interp_core formals binders atoms frame)%I)].
+      (P := (term_interp_resource_prenex runtime formals binders valuation post ∗
+             term_interp_core formals binders valuation frame)%I)].
     2: { unfold term_interp_resource_prenex.
          rewrite (Translation.TermSemantics.interp_prenex_and semantic_data).
          done. }
@@ -4751,24 +4963,24 @@ Proof.
     rewrite term_interp_rstate.
     iIntros "[#Hglobal [Hstack Hbody]]".
     iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
-      (term_predicates atoms) _ _ H formals binders atoms with "Hbody")
+      (term_predicates valuation) _ _ H formals binders valuation with "Hbody")
       as "Hbody".
-    iPoseProof (IHHtriple Hview Hstep runtime formals binders atoms ambient
+    iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
       Henvelope with "[Hstack Hbody]") as "Hwp".
     { rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody". }
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     apply (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates atoms) post post' H0 runtime formals
-      binders atoms).
+      semantic_data (term_predicates valuation) post post' H0 runtime formals
+      binders valuation).
   - (* store rewrite *)
     rewrite term_interp_rstate.
     iIntros "[#Hglobal [Hstack Hbody]]".
-    iAssert (⌜interp_store formals binders atoms store' =
-               interp_store formals binders atoms store⌝)%I
+    iAssert (⌜interp_store formals binders valuation store' =
+               interp_store formals binders valuation store⌝)%I
       with "[Hbody]" as "%Hequal".
     { iApply (interp_store_equal_under body store store' H). iExact "Hbody". }
     rewrite Hequal.
-    iApply (IHHtriple Hview Hstep runtime formals binders atoms ambient
+    iApply (IHHtriple Hview Hstep runtime formals binders valuation ambient
       Henvelope).
     rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
   - (* assert *)
@@ -4867,7 +5079,7 @@ Lemma term_structured_runtime_resource_prenex_leaf_valid
   term_structured_runtime_valid
     (Structured.StructuredLeaf Γ entry statement exit view step) pre post.
 Proof.
-  intros runtime formals binders atoms ambient Henvelope.
+  intros runtime formals binders valuation ambient Henvelope.
   have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
   { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf |].
     exact (GenericRegions.Atomicity.CertLeaf Γ entry statement exit
@@ -4897,10 +5109,10 @@ Proof.
   iIntros "[#Hglobal Hpre]".
   iPoseProof (term_resource_prenex_ordinary_leaf_operation_valid
     pre post statement entry exit view step Hprocedure derivation runtime
-    formals binders atoms ambient Hactive with "[$Hglobal $Hpre]") as "Hleaf".
+    formals binders valuation ambient Hactive with "[$Hglobal $Hpre]") as "Hleaf".
   iPoseProof (@concrete_operation_wp_frame Γ runtime ambient entry statement
-    exit (term_interp_resource_prenex runtime formals binders atoms post)
-    (global_world_context atoms) with "[$Hleaf $Hglobal]") as "Hleaf".
+    exit (term_interp_resource_prenex runtime formals binders valuation post)
+    (global_world_context valuation) with "[$Hleaf $Hglobal]") as "Hleaf".
   iPoseProof (term_leaf_operation_to_translated runtime ambient entry exit
     statement _ view (eq_sym Hopen) with "Hleaf") as "Hleaf".
   iApply (translated_runtime_wp_mono with "Hleaf").
@@ -4923,12 +5135,12 @@ Lemma term_structured_runtime_arguments_same_store_valid
     tracked (Translation.Resource.RState store pre_body)
       (Translation.Resource.RState store post_body).
 Proof.
-  intros Hvalid _ values runtime formals binders atoms ambient Henvelope.
+  intros Hvalid _ values runtime formals binders valuation ambient Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [Hpre %Harguments]]".
-  iPoseProof (Hvalid runtime formals binders atoms ambient Henvelope
+  iPoseProof (Hvalid runtime formals binders valuation ambient Henvelope
     with "[$Hglobal $Hpre]") as "Hwp".
-  iAssert (⌜interp_expr_list formals binders atoms
+  iAssert (⌜interp_expr_list formals binders valuation
       (IR.symbolize_expr_list store tracked) = Some values⌝)%I
     with "[]" as "Harguments_saved".
   { iPureIntro. exact Harguments. }
@@ -4960,14 +5172,14 @@ Lemma term_structured_runtime_arguments_updated_store_valid
         (Translation.Resource.RState
           (IR.update_store_with_bound store target) post_body)).
 Proof.
-  intros Hwrites Hvalid Hdisjoint values runtime formals binders atoms ambient
+  intros Hwrites Hvalid Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
   rewrite Hwrites in Hdisjoint.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [Hpre %Harguments]]".
-  iPoseProof (Hvalid runtime formals binders atoms ambient Henvelope
+  iPoseProof (Hvalid runtime formals binders valuation ambient Henvelope
     with "[$Hglobal $Hpre]") as "Hwp".
-  iAssert (⌜interp_expr_list formals binders atoms
+  iAssert (⌜interp_expr_list formals binders valuation
       (IR.symbolize_expr_list store tracked) = Some values⌝)%I
     with "[]" as "Harguments_saved".
   { iPureIntro. exact Harguments. }
@@ -4980,7 +5192,7 @@ Proof.
   iExists result. cbn [term_interp_resource_prenex_at_arguments].
   iFrame "Hpost". iPureIntro.
   have Hstable := interp_program_expr_list_update_store_with_bound_disjoint
-    formals binders atoms store target result tracked Hdisjoint.
+    formals binders valuation store target result tracked Hdisjoint.
   unfold interp_program_expr_list in Hstable.
   rewrite Harguments' in Hstable. exact Hstable.
 Qed.
@@ -5001,12 +5213,12 @@ Lemma term_structured_runtime_arguments_weakened_store_valid
       (Translation.Resource.ResourceExists u
         (Translation.Resource.RState (weaken_store store) post_body)).
 Proof.
-  intros Hvalid _ values runtime formals binders atoms ambient Henvelope.
+  intros Hvalid _ values runtime formals binders valuation ambient Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [Hpre %Harguments]]".
-  iPoseProof (Hvalid runtime formals binders atoms ambient Henvelope
+  iPoseProof (Hvalid runtime formals binders valuation ambient Henvelope
     with "[$Hglobal $Hpre]") as "Hwp".
-  iAssert (⌜interp_expr_list formals binders atoms
+  iAssert (⌜interp_expr_list formals binders valuation
       (IR.symbolize_expr_list store tracked) = Some values⌝)%I
     with "[]" as "Harguments_saved".
   { iPureIntro. exact Harguments. }
@@ -5038,14 +5250,14 @@ Lemma term_structured_runtime_arguments_fresh_fold_valid
       (Translation.Resource.CInvariant invariant
         (IR.symbolize_expr_list store arguments))).
 Proof.
-  intros _ values runtime formals binders atoms ambient Henvelope.
+  intros _ values runtime formals binders valuation ambient Henvelope.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [Hpre %Harguments]]".
   have Hvalid := @term_structured_runtime_fresh_fold_valid
     _ _ _ _ _ _ store Hfresh Hregistered
-    runtime formals binders atoms ambient Henvelope.
+    runtime formals binders valuation ambient Henvelope.
   iPoseProof (Hvalid with "[$Hglobal $Hpre]") as "Hwp".
-  iAssert (⌜interp_expr_list formals binders atoms
+  iAssert (⌜interp_expr_list formals binders valuation
       (IR.symbolize_expr_list store tracked) = Some values⌝)%I
     with "[]" as "Harguments_saved".
   { iPureIntro. exact Harguments. }
@@ -5153,7 +5365,7 @@ Lemma term_terminal_access_then_normalization_valid
           (IR.symbolize_expr_list input_store arguments)) remainder)) ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         (TAtomic atomic_body))) ->
@@ -5235,7 +5447,7 @@ Theorem term_procedure_body_source_valid
         body_pre source body_post)
     (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
-    (normalization : @CertifiedNormalization.normalization_result _ _ _ _
+    (normalization : @CertifiedNormalization.normalization_result _ _ _
       Γ (Assertion.procedure_args identity) [] entry exit
       body_pre body_post source source_derivation source_certificate)
     (Hsource : procedure_body _ _ procedure = source) :
@@ -5245,21 +5457,21 @@ Theorem term_procedure_body_source_valid
     body_pre body_post ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args identity))
-    (atoms : atom_env) (ambient : coPset),
+    (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint
         (CertifiedNormalization.normalization_target_certificate
           normalization)) ⊆ ambient ->
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient entry exit
       (procedure_body _ _ procedure)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex runtime formals empty_binder_env atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure exit_store return_reference)).
 Proof.
-  intros Hvalid runtime formals atoms ambient Henvelope.
+  intros Hvalid runtime formals valuation ambient Henvelope.
   rewrite Hpre Hpost.
   rewrite (term_translated_runtime_wp_runtime_stmt_ext runtime ambient
     entry exit (procedure_body _ _ procedure)
@@ -5267,7 +5479,7 @@ Proof.
     (eq_trans (f_equal _ Hsource)
       (CertifiedNormalization.normalization_runtime_erasure
         normalization _ _))).
-  pose proof (Hvalid runtime formals empty_binder_env atoms ambient Henvelope)
+  pose proof (Hvalid runtime formals empty_binder_env valuation ambient Henvelope)
     as Hwp.
   unfold term_structured_runtime_wp in Hwp.
   exact Hwp.
@@ -5298,7 +5510,7 @@ Theorem term_procedure_body_source_valid_footprinted
     (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
       entry source exit)
     (normalization :
-      @CertifiedNormalization.footprinted_normalization_result _ _ _ _
+      @CertifiedNormalization.footprinted_normalization_result _ _ _
         Γ (Assertion.procedure_args identity) [] entry exit
         body_pre body_post source source_derivation source_certificate)
     (Hsource : procedure_body _ _ procedure = source) :
@@ -5309,20 +5521,20 @@ Theorem term_procedure_body_source_valid_footprinted
     body_pre body_post ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args identity))
-    (atoms : atom_env) (ambient : coPset),
+    (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint source_certificate) ⊆
       ambient ->
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient entry exit
       (procedure_body _ _ procedure)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex runtime formals empty_binder_env atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure exit_store return_reference)).
 Proof.
-  intros Hvalid runtime formals atoms ambient Henvelope.
+  intros Hvalid runtime formals valuation ambient Henvelope.
   apply (term_procedure_body_source_valid procedure
     exit_store return_reference Hpre Hpost source_derivation
     source_certificate
@@ -5425,11 +5637,11 @@ Lemma term_runtime_conditional_statement_atomic {Γ}
     (names : named_context Γ) stack condition
     (then_branch else_branch : stmt Γ) :
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ names stack then_branch) ->
+    (@RuntimeErasure.runtime_stmt _ _ Γ names stack then_branch) ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ names stack else_branch) ->
+    (@RuntimeErasure.runtime_stmt _ _ Γ names stack else_branch) ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ names stack
+    (@RuntimeErasure.runtime_stmt _ _ Γ names stack
       (TIf condition then_branch else_branch)).
 Proof.
   intros Hthen Helse. cbn [RuntimeErasure.runtime_stmt].
@@ -5448,7 +5660,7 @@ Lemma term_open_leaf_runtime_atomic {Γ entry statement exit}
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       statement).
@@ -5484,7 +5696,7 @@ Lemma term_open_physical_leaf_takes_unique_step
   GenericRegions.Atomicity.analysis_open entry ≠ ∅ ->
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   RuntimeErasure.runtime_is_noop
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       statement) = false ->
@@ -5620,7 +5832,7 @@ Lemma term_structured_certificate_runtime_step_budget
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   term_analysis_step_bit entry +
       term_runtime_step_count
-        (@RuntimeErasure.runtime_stmt _ _ _ Γ
+        (@RuntimeErasure.runtime_stmt _ _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
           statement) <=
@@ -5639,7 +5851,7 @@ Proof.
       | Γ state invariant arguments body opened inner step body_certificate
         IHbody open_equal]; simpl in *.
   - destruct (RuntimeErasure.runtime_is_noop
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
         statement)) eqn:Hruntime.
@@ -5688,10 +5900,10 @@ Proof.
     specialize (IHsecond runtime Hmiddle_open Hmiddle_atomic).
     unfold RuntimeErasure.runtime_stmt; simpl.
     pose proof (term_runtime_step_count_seq
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) first)
-      (@RuntimeErasure.runtime_stmt _ _ _ Γ
+      (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) second)) as Hcombine.
     etrans.
@@ -5704,21 +5916,21 @@ Proof.
         change erased with (RuntimeErasure.runtime_if
           (@RuntimeErasure.runtime_expr _ Γ _
             (RegionExecution.Primitives.Model.runtime_names Γ runtime) condition)
-          (@RuntimeErasure.runtime_stmt _ _ _ Γ
+          (@RuntimeErasure.runtime_stmt _ _ Γ
             (RegionExecution.Primitives.Model.runtime_names Γ runtime)
             (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
             then_branch)
-          (@RuntimeErasure.runtime_stmt _ _ _ Γ
+          (@RuntimeErasure.runtime_stmt _ _ Γ
             (RegionExecution.Primitives.Model.runtime_names Γ runtime)
             (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
             else_branch)
           (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime))
     end.
-    remember (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    remember (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) then_branch)
       as then_runtime eqn:Hthen.
-    remember (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    remember (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) else_branch)
       as else_runtime eqn:Helse.
@@ -5740,7 +5952,7 @@ Proof.
         (GenericRegions.Atomicity.analysis_step_taken then_exit),
         (GenericRegions.Atomicity.analysis_step_taken else_exit);
       simpl in *; lia.
-  - remember (@RuntimeErasure.runtime_stmt _ _ _ Γ
+  - remember (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
       as body_runtime.
@@ -5809,7 +6021,7 @@ Lemma term_open_structured_certificate_runtime_atomic
   GenericRegions.Atomicity.analysis_in_atomic entry = false ->
   term_structured_certificate_trusted_runtime_atomicity certificate runtime ->
   @Atomic RuntimeLang.simp_lang WeaklyAtomic
-    (@RuntimeErasure.runtime_stmt _ _ _ Γ
+    (@RuntimeErasure.runtime_stmt _ _ Γ
       (RegionExecution.Primitives.Model.runtime_names Γ runtime)
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       statement).
@@ -5847,25 +6059,25 @@ Proof.
     + (* two physical steps would exceed the region's single-step budget *)
       intros Hfirst_physical Hsecond_physical. exfalso.
       assert (Hfirst_count : term_runtime_step_count
-        (@RuntimeErasure.runtime_stmt _ _ _ Γ
+        (@RuntimeErasure.runtime_stmt _ _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
           first) = 1).
       { unfold term_runtime_step_count.
         assert (Hnoop : RuntimeErasure.runtime_is_noop
-          (@RuntimeErasure.runtime_stmt _ _ _ Γ
+          (@RuntimeErasure.runtime_stmt _ _ Γ
             (RegionExecution.Primitives.Model.runtime_names Γ runtime)
             (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
             first) = false) by exact Hfirst_physical.
         rewrite Hnoop. reflexivity. }
       assert (Hsecond_count : term_runtime_step_count
-        (@RuntimeErasure.runtime_stmt _ _ _ Γ
+        (@RuntimeErasure.runtime_stmt _ _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
           second) = 1).
       { unfold term_runtime_step_count.
         assert (Hnoop : RuntimeErasure.runtime_is_noop
-          (@RuntimeErasure.runtime_stmt _ _ _ Γ
+          (@RuntimeErasure.runtime_stmt _ _ Γ
             (RegionExecution.Primitives.Model.runtime_names Γ runtime)
             (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
             second) = false) by exact Hsecond_physical.
@@ -6017,7 +6229,7 @@ Proof.
        [|={E,E}=> post] — no leaf machinery, and no dependence on the shape
        of the pre- and postcondition. *)
     split; [|intros runtime; exact I]. intros ts tracked.
-    intros Hdisjoint values runtime formals binders atoms ambient Henvelope.
+    intros Hdisjoint values runtime formals binders valuation ambient Henvelope.
     unfold term_structured_runtime_wp.
     rewrite translated_runtime_wp_erased; [|reflexivity].
     iIntros "H". iModIntro. iExact "H".
@@ -6301,11 +6513,11 @@ Proof.
      certificate derivation Hwf Hcost Hprocedure_cost Hregistered Hsafe)
     as [Harguments Htrusted].
   split; [|exact Htrusted].
-  intros runtime formals binders atoms ambient Henvelope.
+  intros runtime formals binders valuation ambient Henvelope.
   have Hempty := Harguments [] (@PENil _ Γ).
   unfold term_structured_runtime_arguments_valid in Hempty.
   specialize (Hempty ltac:(simpl; apply disjoint_empty_l)
-    Translation.TVNil runtime formals binders atoms ambient Henvelope).
+    Translation.TVNil runtime formals binders valuation ambient Henvelope).
   rewrite term_interp_resource_prenex_at_arguments_empty in Hempty.
   etrans; first exact Hempty.
   unfold term_structured_runtime_wp.

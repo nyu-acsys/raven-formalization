@@ -72,6 +72,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedure validity, and adequacy modules, with elaboration, erasure, and
   structured certificates likewise separated from their former aggregate
   modules.
+- Raven module declarations now elaborate fields, predicates, invariants,
+  procedures, contracts, coherence, predicate semantics, and executable
+  registration through one module-indexed interface.
+- Runtime procedure bodies are direct, stack-indexed erasures of verification
+  procedures; call and spawn validity uniformly support both value and
+  non-value bodies.
+- Module elaboration derives its name environment internally, and rejects
+  contracts whose invariant dependencies are not declared by the module.
+- Module analysis evidence consists solely of procedure-body certificates;
+  runtime registration coverage is derived generically at the soundness
+  boundary.
+- Typed free symbolic names use `symbol`/`symbol_valuation` terminology,
+  distinguishing constant symbols from call-local procedure-entry symbols.
 
 ### Removed
 
@@ -97,11 +110,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dead module-level semantic interfaces superseded by the live term-level
   records and sections.
 - The `_CoqProject`/generated-Makefile build path, superseded by Dune.
+- The secondary runtime-statement syntax, its reification and restacking
+  machinery, and partial procedure-registrability checks.
+- Example-specific runtime-registration packages, including the monotonic
+  counter's registration alias and registrability proof.
+- Redundant analysis-builder and adequacy forwarding interfaces, including
+  the artificial dependency of syntactic analysis evidence on `runtimeG`.
 
 ### Fixed
 
-- Procedure-entry correspondence now uses canonical entry frames whose atom
-  environment agrees with the symbolic entry store.
+- Procedure-entry correspondence now uses canonical entry frames whose symbol
+  valuation agrees with the symbolic entry store.
 - Ghost resources are indexed by the active runtime ghost state, allowing
   allocation witnesses to carry the intended separation content.
 - Procedure contract instantiation, argument stability, and invariant access

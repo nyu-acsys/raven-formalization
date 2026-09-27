@@ -213,33 +213,37 @@ Local Notation stack_map := (gmap stack_id stack_frame).
 
 (** A trusted atomic operation may update the heap and thread-local stacks,
     but not the immutable procedure table.  The relation itself is supplied
-    by the Raven runtime configuration and is carried opaquely by the
+    by the erasure of the atomic block and is carried opaquely by the
     statement; it is not required to correspond to a built-in primitive. *)
 Definition trusted_atomic_transition : Type :=
   heap -> stack_map -> Z -> heap -> stack_map -> Z -> Prop.
 
-Inductive stmt :=
-| Seq (s1 s2 : stmt)
-| IfS (e : expr) (s1 s2 : stmt)
-| Assign (v : var) (e : expr)
-| DoneS
-| StuckS
-| Call (v : var) (proc : proc_name) (args : list expr)
-| CallNoStore (proc : proc_name) (args : list expr)
-| FldWr (v : var) (fld : fld_name) (e2 : expr)
-| FldRd (v : var) (e : expr) (fld : fld_name)
-| CAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr)
-| Alloc (v : var) (fs: list (fld_name * val))
-| Spawn (proc : proc_name) (args : list expr)
-| TrustedAtomic (transition : trusted_atomic_transition).
-
-Definition stmt_append (s1 s2 : stmt) : stmt := Seq s1 s2.
+(** Executable statements, with each primitive annotated by the stack frame
+    on which it operates. *)
+Inductive runtime_stmt :=
+| RTSeq (s1 s2 : runtime_stmt)
+| RTIfS (e : expr) (s1 s2 : runtime_stmt) (stk_id : stack_id)
+| RTAssign (v : var) (e : expr) (stk_id : stack_id)
+| RTStuckS
+| RTVal (v : val)
+| RTCall (v : var) (proc : proc_name) (args : list expr) (stk_id : stack_id)
+| RTActiveCall (v : var) (s : runtime_stmt)
+    (callee_stk_id caller_stk_id : stack_id)
+| RTCallNoStore (proc : proc_name) (args : list expr) (stk_id : stack_id)
+| RTActiveCallNoStore (s : runtime_stmt) (callee_stk_id : stack_id)
+| RTFldWr (base : expr) (fld : fld_name) (e : expr) (stk_id : stack_id)
+| RTFldRd (v : var) (e : expr) (fld : fld_name) (stk_id : stack_id)
+| RTCAS (v : var) (e1 : expr) (fld : fld_name) (e2 e3 : expr)
+    (stk_id : stack_id)
+| RTAlloc (v : var) (fs : list (fld_name * expr)) (stk_id : stack_id)
+| RTSpawn (proc : proc_name) (args : list expr) (stk_id : stack_id)
+| RTTrustedAtomic (transition : trusted_atomic_transition) (stk_id : stack_id).
 
 Record proc := Proc {
   proc_name_val : proc_name;
   proc_args : list (var * typ);
   proc_local_vars : list (var * typ);
-  proc_stmt : stmt;
+  proc_stmt : stack_id -> runtime_stmt;
 }.
 
 (* Global state combines heap and stack *)
@@ -308,29 +312,6 @@ Fixpoint subst_expr (e : expr) (subst : list (var * expr)) : expr :=
   | IfE e1 e2 e3 => IfE (subst_expr e1 subst) (subst_expr e2 subst) (subst_expr e3 subst)
   | StuckE => StuckE
   end.
-
-
-  (* Assuming that local variables of each procedure are disjoint *)
-Fixpoint subst_stmt (s : stmt) (subst : list (var * expr)) : stmt :=
-  match s with
-  | Seq s1 s2 => Seq (subst_stmt s1 subst) (subst_stmt s2 subst)
-  (* | Return e => Return (subst_expr e subst) *)
-  | IfS e s1 s2 => IfS (subst_expr e subst) (subst_stmt s1 subst) (subst_stmt s2 subst)
-  | Assign v e => Assign v (subst_expr e subst)
-  (* | Free e => Free (subst_expr e subst) *)
-  | DoneS => DoneS
-  | StuckS => StuckS
-  (* | ExprS e => ExprS (subst_expr e subst) *)
-  | Call v proc args => Call v proc (map (λ e, subst_expr e subst) args)
-  | CallNoStore proc args =>
-      CallNoStore proc (map (λ e, subst_expr e subst) args)
-  | FldWr v f e2 => FldWr v f (subst_expr e2 subst)
-  | FldRd v e f => FldRd v e f
-  | CAS vr e1 f e2 e3 => CAS vr (subst_expr e1 subst) f (subst_expr e2 subst) (subst_expr e3 subst)
-  | Alloc v fs => Alloc v fs
-  | Spawn proc args => Spawn proc (map (λ e, subst_expr e subst) args)
-  | TrustedAtomic transition => TrustedAtomic transition
-  end.
 End state.
 
 Local Notation heap := (gmap heap_addr val).
@@ -341,28 +322,6 @@ Definition fresh_loc (h : heap) : loc :=
 
 (* Operational Semantics *)
 Section semantics.
-
-Inductive runtime_stmt :=
-| RTSeq (s1 s2 : runtime_stmt)
-| RTIfS (e : expr) (s1 s2 : runtime_stmt) (stk_id : stack_id)
-| RTAssign (v : var) (e : expr) (stk_id : stack_id)
-(* | RTFree (e : expr) (stk_id : stack_id) *)
-| RTStuckS
-| RTVal (v : val)
-| RTCall (v : var) (proc : proc_name) (args : list expr) (stk_id : stack_id)
-| RTActiveCall (v : var) (s : runtime_stmt) (callee_stk_id : stack_id) (caller_stk_id : stack_id)
-(** A call whose return value is intentionally not stored.  Keeping this
-    distinct from [RTCall] prevents void/discard calls from manufacturing a
-    reserved caller-local destination. *)
-| RTCallNoStore (proc : proc_name) (args : list expr) (stk_id : stack_id)
-| RTActiveCallNoStore (s : runtime_stmt) (callee_stk_id : stack_id)
-| RTFldWr (base : expr) (fld : fld_name) (e : expr) (stk_id : stack_id)
-| RTFldRd (v : var) (e : expr) (fld : fld_name) (stk_id : stack_id)
-| RTCAS (v : var) (e1 : expr) (fld : fld_name) (e2 : expr) (e3 : expr) (stk_id : stack_id)
-| RTAlloc (v : var) (fs : list (fld_name * expr)) (stk_id : stack_id)
-| RTSpawn (proc : proc_name) (args : list expr) (stk_id : stack_id)
-| RTTrustedAtomic (transition : trusted_atomic_transition) (stk_id : stack_id)
-.
 
 Definition of_val v := RTVal v.
 Definition to_val (e : runtime_stmt) := match e with
@@ -386,98 +345,6 @@ Definition fill_item (Ki : ectx_item) (s : runtime_stmt) : runtime_stmt :=
   | SeqCtx s1 => RTSeq s s1
   | ActiveCallCtx v c_id cr_id => RTActiveCall v s c_id cr_id
   | ActiveCallNoStoreCtx c_id => RTActiveCallNoStore s c_id
-  end.
-
-Fixpoint to_rtstmt (stk_id : stack_id) (s : stmt) :=
-match s with
-| Seq s1 s2 => RTSeq (to_rtstmt stk_id s1) (to_rtstmt stk_id s2)
-(* | Return (e : expr) *)
-| IfS e s1 s2 => RTIfS e (to_rtstmt stk_id s1) (to_rtstmt stk_id s2) stk_id
-| Assign v e => RTAssign v e stk_id
-(* | Free (e : expr) *)
-| DoneS => RTVal LitUnit
-| StuckS => RTStuckS (* stuck statement *)
-(* | ExprS (e : expr) *)
-| Call v proc args => RTCall v proc args stk_id
-| CallNoStore proc args => RTCallNoStore proc args stk_id
-| FldWr v fld e => RTFldWr (Var v) fld e stk_id
-| FldRd v e fld => RTFldRd v e fld stk_id
-| CAS v e1 fld e2 e3 => RTCAS v e1 fld e2 e3 stk_id
-| Alloc v fs => RTAlloc v (map (fun '(field, value) => (field, Val value)) fs)
-    stk_id
-| Spawn proc args => RTSpawn proc args stk_id
-| TrustedAtomic transition => RTTrustedAtomic transition stk_id
-end
-.
-
-(** Partial reification of a runtime statement as a source statement at a
-    fixed stack identifier.  This is used only at the procedure-registration
-    boundary.  Active-call states are deliberately not reifiable, and the
-    older source syntax restricts field writes to variable bases and
-    allocation initializers to literal values. *)
-Fixpoint reify_runtime_fields
-    (fields : list (fld_name * expr)) : option (list (fld_name * val)) :=
-  match fields with
-  | [] => Some []
-  | (field, Val value) :: fields' =>
-      match reify_runtime_fields fields' with
-      | Some result => Some ((field, value) :: result)
-      | None => None
-      end
-  | _ => None
-  end.
-
-Fixpoint reify_runtime_stmt (stk_id : stack_id) (runtime : runtime_stmt) :
-    option stmt :=
-  let same_stack actual := bool_decide (actual = stk_id) in
-  match runtime with
-  | RTSeq first second =>
-      match reify_runtime_stmt stk_id first,
-            reify_runtime_stmt stk_id second with
-      | Some first', Some second' => Some (Seq first' second')
-      | _, _ => None
-      end
-  | RTIfS condition then_branch else_branch actual =>
-      if same_stack actual then
-        match reify_runtime_stmt stk_id then_branch,
-              reify_runtime_stmt stk_id else_branch with
-        | Some then_branch', Some else_branch' =>
-            Some (IfS condition then_branch' else_branch')
-        | _, _ => None
-        end
-      else None
-  | RTAssign variable value actual =>
-      if same_stack actual then Some (Assign variable value) else None
-  | RTStuckS => Some StuckS
-  | RTVal LitUnit => Some DoneS
-  | RTVal _ => None
-  | RTCall variable procedure arguments actual =>
-      if same_stack actual then Some (Call variable procedure arguments)
-      else None
-  | RTCallNoStore procedure arguments actual =>
-      if same_stack actual then Some (CallNoStore procedure arguments)
-      else None
-  | RTActiveCall _ _ _ _ | RTActiveCallNoStore _ _ => None
-  | RTFldWr (Var variable) field value actual =>
-      if same_stack actual then Some (FldWr variable field value) else None
-  | RTFldWr _ _ _ _ => None
-  | RTFldRd variable base field actual =>
-      if same_stack actual then Some (FldRd variable base field) else None
-  | RTCAS variable base field old_value new_value actual =>
-      if same_stack actual then
-        Some (CAS variable base field old_value new_value)
-      else None
-  | RTAlloc variable fields actual =>
-      if same_stack actual then
-        match reify_runtime_fields fields with
-        | Some fields' => Some (Alloc variable fields')
-        | None => None
-        end
-      else None
-  | RTSpawn procedure arguments actual =>
-      if same_stack actual then Some (Spawn procedure arguments) else None
-  | RTTrustedAtomic transition actual =>
-      if same_stack actual then Some (TrustedAtomic transition) else None
   end.
 
 Definition un_op_eval (op : un_op) (v : val) : option val :=
@@ -650,7 +517,7 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
                     ++ decls_zip_vals procedure.(proc_local_vars) local_vals))
     in
   let σ'' := update_stack σ' new_stk_id new_stk_frame in
-  let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
+  let new_stmt := procedure.(proc_stmt) new_stk_id in
   runtime_step (RTCall v proc args stk_id) σ []
   (RTActiveCall v new_stmt new_stk_id stk_id) σ'' []
 
@@ -709,7 +576,7 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
       (list_to_map (decls_zip_vals procedure.(proc_args) arg_vals
                     ++ decls_zip_vals procedure.(proc_local_vars) local_vals))
   in
-  let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
+  let new_stmt := procedure.(proc_stmt) new_stk_id in
   let σ'' := update_stack σ' new_stk_id new_stk_frame in
   runtime_step (RTSpawn proc args stk_id) σ [] (RTVal LitUnit) σ'' [new_stmt]
 
@@ -736,7 +603,7 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
       (list_to_map (decls_zip_vals procedure.(proc_args) arg_vals
                     ++ decls_zip_vals procedure.(proc_local_vars) local_vals)) in
   let σ'' := update_stack σ' new_stk_id new_stk_frame in
-  let new_stmt := to_rtstmt new_stk_id procedure.(proc_stmt) in
+  let new_stmt := procedure.(proc_stmt) new_stk_id in
   runtime_step (RTCallNoStore proc args stk_id) σ []
     (RTActiveCallNoStore new_stmt new_stk_id) σ'' []
 

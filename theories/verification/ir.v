@@ -304,7 +304,7 @@ Inductive stmt (Γ : context) : Type :=
 #[global] Arguments TAtomic {_} _.
 
 (** Canonical procedure-entry stores.  Every frame slot starts as a fresh
-    procedure-local symbolic atom; installing the formal-variable embedding
+    procedure-local symbolic symbol; installing the formal-variable embedding
     then replaces exactly the argument slots by their corresponding formal
     references. *)
 Fixpoint procedure_local_entry_store_from {Γ F}
@@ -312,7 +312,7 @@ Fixpoint procedure_local_entry_store_from {Γ F}
   match Γ with
   | [] => StoreNil
   | t :: Γ' =>
-      StoreCons (RefAtom (ProcedureEntryAtom identity slot))
+      StoreCons (RefSymbol (ProcedureEntrySymbol identity slot))
         (@procedure_local_entry_store_from Γ' F identity (S slot))
   end.
 
@@ -419,6 +419,9 @@ Definition procedure_return_type (Γ : context) (identity : proc_id)
 Record procedure_wf {Γ F} (procedure : typed_procedure Γ F) : Prop := {
   procedure_variable_names_unique :
     NoDup (named_context_names (procedure_variables _ _ procedure));
+  procedure_reserved_return_fresh :
+    ~ List.In "#ret_val"
+      (named_context_names (procedure_variables _ _ procedure));
   procedure_formal_slots_unique :
     NoDup (pvar_list_indices (procedure_formal_variables _ _ procedure));
   procedure_return_slot_local :
@@ -581,6 +584,33 @@ Lemma lookup_typed_procedure_member environment identity procedure :
   List.In procedure (procedure_entries environment).
 Proof. apply lookup_packed_procedure_member. Qed.
 
+Lemma lookup_packed_procedure_of_member procedures procedure :
+  NoDup (map packed_procedure_id procedures) ->
+  List.In procedure procedures ->
+  lookup_packed_procedure (packed_procedure_id procedure) procedures =
+    Some procedure.
+Proof.
+  intros Hnodup Hin.
+  induction procedures as [|head tail IH]; [contradiction|].
+  inversion Hnodup as [|? ? Hfresh Htail]; subst.
+  destruct Hin as [-> | Hin].
+  - simpl. rewrite Pos.eqb_refl. reflexivity.
+  - simpl. destruct (Pos.eqb (packed_procedure_id procedure)
+      (packed_procedure_id head)) eqn:Heq.
+    + apply Pos.eqb_eq in Heq. exfalso. apply Hfresh.
+      rewrite <- Heq. apply in_map. exact Hin.
+    + exact (IH Htail Hin).
+Qed.
+
+Lemma lookup_typed_procedure_of_member environment procedure :
+  List.In procedure (procedure_entries environment) ->
+  lookup_typed_procedure environment (packed_procedure_id procedure) =
+    Some procedure.
+Proof.
+  apply lookup_packed_procedure_of_member.
+  exact (procedure_ids_unique environment).
+Qed.
+
 Lemma lookup_typed_procedure_wf environment identity procedure :
   lookup_typed_procedure environment identity = Some procedure ->
   packed_procedure_wf procedure.
@@ -709,7 +739,7 @@ Lemma lookup_procedure_local_entry_store_from {Γ F} identity slot t
     (variable : pvar Γ t) :
   lookup_store (@procedure_local_entry_store_from Γ F identity slot)
       t variable =
-    RefAtom (ProcedureEntryAtom identity (slot + member_index variable)).
+    RefSymbol (ProcedureEntrySymbol identity (slot + member_index variable)).
 Proof.
   revert slot. induction variable; intros slot;
     cbn [procedure_local_entry_store_from member_index].
@@ -776,7 +806,7 @@ Lemma lookup_canonical_entry_store_absent {Γ F} identity
     (variables : pvar_list Γ F) t (variable : pvar Γ t) :
   ~ In (member_index variable) (pvar_list_indices variables) ->
   lookup_store (canonical_entry_store_from identity variables) t variable =
-    RefAtom (ProcedureEntryAtom identity (member_index variable)).
+    RefSymbol (ProcedureEntrySymbol identity (member_index variable)).
 Proof.
   intros Hnot. unfold canonical_entry_store_from.
   rewrite lookup_install_procedure_formals_absent by exact Hnot.

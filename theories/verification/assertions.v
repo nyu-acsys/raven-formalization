@@ -213,13 +213,13 @@ Definition assertion_stack_linear {Γ F Δ} (formula : assertion Γ F Δ) : Prop
   assertion_stack_count formula <= 1.
 
 (** Binder weakening changes only bound-variable references.  Formal
-    references and stable atoms are definitionally unaffected. *)
+    references and stable valuation are definitionally unaffected. *)
 Definition weaken_ref {F Δ t u}
     (reference : value_ref F Δ t) : value_ref F (u :: Δ) t :=
   match reference with
   | RefFormal x => RefFormal x
   | RefBound x => RefBound (MThere x)
-  | RefAtom x => RefAtom x
+  | RefSymbol x => RefSymbol x
   end.
 
 Fixpoint weaken_expr {F Δ t u} (expression : expr F Δ t) :
@@ -282,7 +282,7 @@ Definition subst_bound_ref {F Δ Δ' t}
   match reference in value_ref _ _ result return expr F Δ' result with
   | RefFormal variable => ERef (RefFormal variable)
   | RefBound variable => substitution _ variable
-  | RefAtom symbolic => ERef (RefAtom symbolic)
+  | RefSymbol symbolic => ERef (RefSymbol symbolic)
   end.
 
 Fixpoint subst_bound_expr {F Δ Δ' t}
@@ -364,14 +364,14 @@ Proof. apply subst_bound_ref_singleton_here. Qed.
 Lemma interp_subst_bound_expr {F Δ Δ' t}
     (substitution : bound_subst F Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : bvar Δ t),
-      interp_expr formals target_binders atoms (substitution t variable) =
+      interp_expr formals target_binders valuation (substitution t variable) =
         Some (source_binders t variable))
     (expression : expr F Δ t) :
-  interp_expr formals target_binders atoms
+  interp_expr formals target_binders valuation
       (subst_bound_expr substitution expression) =
-    interp_expr formals source_binders atoms expression.
+    interp_expr formals source_binders valuation expression.
 Proof.
   induction expression; simpl.
   - destruct reference; simpl; try reflexivity. apply Hsubstitution.
@@ -389,7 +389,7 @@ Definition rename_bound_ref {F Δ Δ' t}
   match reference in value_ref _ _ result return value_ref F Δ' result with
   | RefFormal variable => RefFormal variable
   | RefBound variable => RefBound (renaming _ variable)
-  | RefAtom symbolic => RefAtom symbolic
+  | RefSymbol symbolic => RefSymbol symbolic
   end.
 
 Fixpoint rename_bound_expr {F Δ Δ' t}
@@ -472,13 +472,13 @@ Definition return_bound_renaming {Δ t} : bound_renaming [t] (t :: Δ) :=
 Lemma interp_rename_bound_expr {F Δ Δ' t}
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (atoms : atom_env)
+    (target_binders : binder_env Δ') (valuation : symbol_valuation)
     (Hrenaming : forall t (variable : bvar Δ t),
       target_binders t (renaming t variable) = source_binders t variable)
     (expression : expr F Δ t) :
-  interp_expr formals target_binders atoms
+  interp_expr formals target_binders valuation
       (rename_bound_expr renaming expression) =
-    interp_expr formals source_binders atoms expression.
+    interp_expr formals source_binders valuation expression.
 Proof.
   induction expression; simpl.
   - destruct reference; simpl; try reflexivity. rewrite Hrenaming. reflexivity.
@@ -522,10 +522,10 @@ Inductive expr_list_equal_assuming {F Δ}
     (left_head right_head : expr F Δ t)
     (left_tail right_tail : expr_list F Δ ts) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms condition = Some (VBool true) ->
-      interp_expr formals binders atoms left_head =
-        interp_expr formals binders atoms right_head) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation condition = Some (VBool true) ->
+      interp_expr formals binders valuation left_head =
+        interp_expr formals binders valuation right_head) ->
     expr_list_equal_assuming condition ts left_tail right_tail ->
     expr_list_equal_assuming condition (t :: ts)
       (ExprCons left_head left_tail) (ExprCons right_head right_tail).
@@ -538,7 +538,7 @@ Proof.
   intros Hequal. induction Hequal.
   - apply ExprListEqualNil.
   - apply ExprListEqualCons.
-    + intros formals binders atoms Hcondition.
+    + intros formals binders valuation Hcondition.
       symmetry. apply H. exact Hcondition.
     + exact IHHequal.
 Qed.
@@ -683,7 +683,7 @@ Definition subst_formals_ref {F F' Δ t}
   match reference in value_ref _ _ result return expr F' Δ result with
   | RefFormal variable => substitution _ variable
   | RefBound variable => ERef (RefBound variable)
-  | RefAtom symbolic => ERef (RefAtom symbolic)
+  | RefSymbol symbolic => ERef (RefSymbol symbolic)
   end.
 
 Fixpoint subst_formals_expr {F F' Δ t}
@@ -706,14 +706,14 @@ Definition lift_formal_subst {F F' Δ u}
 Lemma interp_subst_formals_expr {F F' Δ t}
     (substitution : formal_subst F F' Δ)
     (source_formals : formal_env F) (target_formals : formal_env F')
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (Hsubstitution : forall t (variable : formal F t),
-      interp_expr target_formals binders atoms (substitution t variable) =
+      interp_expr target_formals binders valuation (substitution t variable) =
         Some (source_formals t variable))
     (expression : expr F Δ t) :
-  interp_expr target_formals binders atoms
+  interp_expr target_formals binders valuation
       (subst_formals_expr substitution expression) =
-    interp_expr source_formals binders atoms expression.
+    interp_expr source_formals binders valuation expression.
 Proof.
   induction expression; simpl.
   - destruct reference; simpl; try reflexivity.
@@ -748,15 +748,15 @@ Proof.
   destruct reference; reflexivity.
 Qed.
 
-(** Atom renaming is deliberately independent of formal instantiation. *)
-Definition atom_renaming := forall t, atom t -> atom t.
+(** ConstantSymbol renaming is deliberately independent of formal instantiation. *)
+Definition atom_renaming := forall t, symbol t -> symbol t.
 
 Definition rename_atom_ref {F Δ t} (renaming : atom_renaming)
     (reference : value_ref F Δ t) : value_ref F Δ t :=
   match reference in value_ref _ _ result return value_ref F Δ result with
   | RefFormal variable => RefFormal variable
   | RefBound variable => RefBound variable
-  | RefAtom symbolic => RefAtom (renaming _ symbolic)
+  | RefSymbol symbolic => RefSymbol (renaming _ symbolic)
   end.
 
 Fixpoint rename_atoms_expr {F Δ t} (renaming : atom_renaming)
@@ -772,8 +772,8 @@ Fixpoint rename_atoms_expr {F Δ t} (renaming : atom_renaming)
 
 Lemma interp_rename_atoms_expr {F Δ t} (renaming : atom_renaming)
     (formals : formal_env F) (binders : binder_env Δ)
-    (source_atoms target_atoms : atom_env)
-    (Hrenaming : forall t (symbolic : atom t),
+    (source_atoms target_atoms : symbol_valuation)
+    (Hrenaming : forall t (symbolic : symbol t),
       target_atoms t (renaming t symbolic) = source_atoms t symbolic)
     (expression : expr F Δ t) :
   interp_expr formals binders target_atoms (rename_atoms_expr renaming expression) =
@@ -804,7 +804,7 @@ Definition lift_ref_under {F Δ t u v}
   match reference with
   | RefFormal x => RefFormal x
   | RefBound x => RefBound (insert_member_after_head x)
-  | RefAtom x => RefAtom x
+  | RefSymbol x => RefSymbol x
   end.
 
 (** A syntactic predicate identifying assertions independent of the symbolic
@@ -1565,58 +1565,58 @@ Inductive entailment_step {Γ F Δ} :
       else_branch
 | ESExprImpl (left right : expr F Δ TBool) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left = Some (VBool true) ->
-      interp_expr formals binders atoms right = Some (VBool true)) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left = Some (VBool true) ->
+      interp_expr formals binders valuation right = Some (VBool true)) ->
     entailment_step (AExpr left) (AExpr right)
 | ESExprTrue (expression : expr F Δ TBool) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms expression = Some (VBool true)) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation expression = Some (VBool true)) ->
     entailment_step (APure True) (AExpr expression)
 | ESRAValidTrue t (expression : expr F Δ t) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env) value,
-      interp_expr formals binders atoms expression = Some value ->
+      (valuation : symbol_valuation) value,
+      interp_expr formals binders valuation expression = Some value ->
       tval_ra_valid value) ->
     entailment_step (APure True) (ARAValid t expression)
 | ESFpuAllowedTrue t (old_expression new_expression : expr F Δ t) :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env) old_value new_value,
-      interp_expr formals binders atoms old_expression = Some old_value ->
-      interp_expr formals binders atoms new_expression = Some new_value ->
+      (valuation : symbol_valuation) old_value new_value,
+      interp_expr formals binders valuation old_expression = Some old_value ->
+      interp_expr formals binders valuation new_expression = Some new_value ->
       tval_fpu_allowed old_value new_value) ->
     entailment_step (APure True)
       (AFpuAllowed t old_expression new_expression)
 | ESOwnChunkEq field location left_chunk right_chunk :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     entailment_step (AOwn field location left_chunk)
       (AOwn field location right_chunk)
 | ESGhostOwnChunkEq field location left_chunk right_chunk :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     entailment_step (AGhostOwn field location left_chunk)
       (AGhostOwn field location right_chunk)
 | ESOwnChunkEqAssume field location left_chunk right_chunk condition :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms condition = Some (VBool true) ->
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation condition = Some (VBool true) ->
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     entailment_step
       (AAnd (AOwn field location left_chunk) (AExpr condition))
       (AOwn field location right_chunk)
 | ESGhostOwnChunkEqAssume field location left_chunk right_chunk condition :
     (forall (formals : formal_env F) (binders : binder_env Δ)
-      (atoms : atom_env),
-      interp_expr formals binders atoms condition = Some (VBool true) ->
-      interp_expr formals binders atoms left_chunk =
-        interp_expr formals binders atoms right_chunk) ->
+      (valuation : symbol_valuation),
+      interp_expr formals binders valuation condition = Some (VBool true) ->
+      interp_expr formals binders valuation left_chunk =
+        interp_expr formals binders valuation right_chunk) ->
     entailment_step
       (AAnd (AGhostOwn field location left_chunk) (AExpr condition))
       (AGhostOwn field location right_chunk)

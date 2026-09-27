@@ -88,7 +88,8 @@ Definition granted_mask (procedure : proc_id) : gset inv_id :=
   required_mask procedure.
 
 (** The cost of every leaf is determined by the language and the contract
-    environment, so no program supplies a cost model.  Proof-only leaves
+    environment, so each module uses the same derived cost model.
+    Proof-only leaves
     take no step; the physical primitives are single atomic steps of the
     runtime language; calls and spawns take the effect declared by the
     callee's contract.  Structural statements are analyzed structurally and
@@ -246,9 +247,9 @@ Definition runtime_ghost_update_spec {Σ : gFunctors}
     ghost_own field location old_chunk ⊢
       |={E}=> ghost_own field location new_chunk.
 
-(** Term-level resources chosen by adequacy.  In contrast to the old module
-    interface, a value of this class can be constructed with names returned
-    by [own_alloc] inside an Iris initialization proof. *)
+(** Term-level resources chosen by adequacy. A value of this class can be
+    constructed with names returned by [own_alloc] inside an Iris
+    initialization proof. *)
 Class runtimeG (Σ : gFunctors) := RuntimeG {
   runtime_simpLangG : RuntimeLifting.simpLangG Σ;
   runtime_invTokenG : RuntimeModel.invTokenG Σ;
@@ -263,10 +264,10 @@ Class runtimeG (Σ : gFunctors) := RuntimeG {
     runtime_ghost_own;
 }.
 
-(** Program-defined ghost ownership may itself require allocating an Iris
+(** Module-defined ghost ownership may itself require allocating an Iris
     invariant or authoritative camera before a [runtimeG] value can be
     assembled.  The implementation of that allocation belongs to the logic
-    configuration, not to individual Raven programs.  Its result is an
+    configuration, not to individual Raven modules. Its result is an
     opaque proof-time handle; any persistent infrastructure needed by the
     resulting ownership predicate is established internally by
     [runtime_ghost_resource_alloc]. *)
@@ -341,7 +342,7 @@ Definition initialized_invTokenG
   RuntimeModel.InvTokenG Σ RuntimeModel.invtoken_pre_inG names.
 
 (** Allocate a finite, pairwise-distinct family of empty invariant-token
-    authorities.  The list form is intentionally independent of the program's
+    authorities. The list form is intentionally independent of the module's
     identifier type; initialized certified adequacy zips it with the finite
     registered-invariant enumeration. *)
 Lemma allocate_invtoken_authority_names (count : nat) :
@@ -433,8 +434,8 @@ Proof.
 Qed.
 
 (** One allocation transaction for all inputs used to construct the dynamic
-    runtime bundle.  Program-specific initialization subsequently specializes
-    [token_names] to its finite invariant enumeration and forms [runtimeG]. *)
+    runtime bundle. Module initialization specializes [token_names] to its
+    finite invariant enumeration and forms [runtimeG]. *)
 Lemma initialized_runtime_resources_alloc
     (initial_state : RuntimeLang.state)
     (Hstate_wf : RuntimeGhost.state_wf initial_state)
@@ -474,17 +475,15 @@ End RuntimeInitialization.
 
 End WithSignature.
 
-(** The implementation depends only on the static program naming
-    configuration.  Iris resources are ordinary section variables, so its
-    definitions apply to a [runtimeG] value assembled after [own_alloc]. *)
+(** Iris resources are ordinary section variables, so the definitions below
+    apply to a [runtimeG] value assembled after [own_alloc]. *)
 Module ConcreteModelCore.
 Import RuntimeErasure.
 
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
 (** Proof-only statements may be distributed across a conditional without
-    changing the generated runtime program.  The operational refinement uses
+    changing the generated runtime statement. The operational refinement uses
     this equality for an invariant unfold/fold pair: branch selection happens
     first, and only the selected arm enters the Iris invariant. *)
 Lemma runtime_stmt_distribute_erased_before_if {Γ}
@@ -567,7 +566,7 @@ Qed.
     Iris-atomic runtime statement.  Non-atomic leaves need no additional witness because the
     analysis already rejects them while an invariant is open.  Trusted
     [TAtomic] blocks are structural certificates rather than leaves and are
-    handled by their separate module refinement assumption. *)
+    handled by the framework's trusted-atomic refinement assumption. *)
 Definition runtime_cost_model_sound : Prop :=
   forall Γ (names : named_context Γ) stack (statement : stmt Γ),
     RegionSyntax.view statement = AnalysisView.ViewLeaf ->
@@ -607,7 +606,7 @@ Record runtime_procedure_registration {Γ F}
   registered_procedure_body : forall stack,
     runtime_stmt (runtime_procedure_names procedure) stack
       (procedure_body _ _ procedure) =
-    RuntimeLang.to_rtstmt stack (RuntimeLang.proc_stmt entry);
+    RuntimeLang.proc_stmt entry stack;
 }.
 
 Definition packed_runtime_procedure_registration
@@ -647,7 +646,7 @@ Proof.
 Qed.
 
 Theorem procedure_entry_frame_corresponds {Γ F}
-    (caller_atoms : atom_env) (procedure : typed_procedure Γ F)
+    (caller_valuation : symbol_valuation) (procedure : typed_procedure Γ F)
     (values : tval_list (Assertion.procedure_args F))
     (frame : RuntimeLang.stack_frame) :
   procedure_wf procedure ->
@@ -663,18 +662,18 @@ Theorem procedure_entry_frame_corresponds {Γ F}
   dom frame.(RuntimeLang.locals) =
     list_to_set (runtime_procedure_arguments procedure).*1 ∪
       list_to_set (runtime_procedure_locals procedure).*1 ->
-  exists callee_atoms : atom_env,
-    stable_atoms_agree caller_atoms callee_atoms /\
+  exists callee_valuation : symbol_valuation,
+    constant_symbols_agree caller_valuation callee_valuation /\
     stack_corresponds (runtime_procedure_names procedure)
-      (formal_env_of_values values) empty_binder_env callee_atoms
+      (formal_env_of_values values) empty_binder_env callee_valuation
       (procedure_entry_store _ _ procedure) frame /\
     dom frame.(RuntimeLang.locals) =
       list_to_set (runtime_variables (runtime_procedure_names procedure)).
 Proof.
   intros Hwf Harguments Hlocals Hdom.
-  destruct (procedure_frame_entry_atoms_exist caller_atoms procedure frame
-    Hlocals) as (callee_atoms & Hagree & Hlocal).
-  exists callee_atoms. split; [exact Hagree|]. split.
+  destruct (procedure_frame_entry_symbol_valuation_exist caller_valuation procedure frame
+    Hlocals) as (callee_valuation & Hagree & Hlocal).
+  exists callee_valuation. split; [exact Hagree|]. split.
   - intros t variable.
     destruct (in_dec Nat.eq_dec (member_index variable)
       (pvar_list_indices (procedure_formal_variables _ _ procedure)))
@@ -698,11 +697,11 @@ Proof.
 Qed.
 
 Lemma runtime_expr_list_sound {Γ F Δ ts} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame)
     (expressions : pexpr_list Γ ts) (values : tval_list ts) :
-  stack_corresponds names formals binders atoms store frame ->
-  interp_expr_list formals binders atoms
+  stack_corresponds names formals binders valuation store frame ->
+  interp_expr_list formals binders valuation
     (IR.symbolize_expr_list store expressions) = Some values ->
   Forall2 (fun expression value =>
     RuntimeLang.expr_step expression frame (RuntimeLang.Val value))
@@ -712,9 +711,9 @@ Proof.
   induction expressions; intros values Hvalues; dependent destruction values;
     simpl in Hvalues.
   - constructor.
-  - destruct (interp_expr formals binders atoms
+  - destruct (interp_expr formals binders valuation
       (IR.symbolize_expr store p)) eqn:Hhead; [|discriminate].
-    destruct (interp_expr_list formals binders atoms
+    destruct (interp_expr_list formals binders valuation
       (IR.symbolize_expr_list store expressions)) eqn:Htail;
       [|discriminate].
     inversion Hvalues; subst. constructor.
@@ -778,14 +777,14 @@ Definition concrete_locals {Γ} (names : named_context Γ)
   concrete_locals_by_store store names.
 
 Lemma concrete_locals_interp_lookup {Γ F Δ} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
   NoDup (runtime_variables names) ->
   forall t (variable : pvar Γ t),
-    concrete_locals names (interp_store formals binders atoms store) !!
+    concrete_locals names (interp_store formals binders valuation store) !!
         runtime_variable names variable =
       Some (tval_to_val
-        (interp_ref formals binders atoms (lookup_store store t variable))).
+        (interp_ref formals binders valuation (lookup_store store t variable))).
 Proof.
   induction names; intros Hnames u variable.
   - dependent destruction variable.
@@ -809,12 +808,12 @@ Qed.
 Lemma concrete_procedure_return_lookup {Γ F Δ}
     (procedure : typed_procedure Γ F)
     (formals : formal_env (Assertion.procedure_args F))
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ (Assertion.procedure_args F) Δ) :
   NoDup (runtime_variables (runtime_procedure_names procedure)) ->
   concrete_locals (runtime_procedure_names procedure)
-      (interp_store formals binders atoms store) !! "#ret_val" =
-    Some (tval_to_val (interp_ref formals binders atoms
+      (interp_store formals binders valuation store) !! "#ret_val" =
+    Some (tval_to_val (interp_ref formals binders valuation
       (lookup_store store _ (procedure_return_variable _ _ procedure)))).
 Proof.
   intros Hnames. rewrite <- (runtime_procedure_return_name procedure).
@@ -852,13 +851,13 @@ Qed.
 
 Lemma stack_corresponds_canonical_frame_eq {Γ F Δ}
     (names : named_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame) :
   NoDup (runtime_variables names) ->
-  stack_corresponds names formals binders atoms store frame ->
+  stack_corresponds names formals binders valuation store frame ->
   dom frame.(RuntimeLang.locals) = list_to_set (runtime_variables names) ->
   frame = RuntimeLang.StackFrame
-    (concrete_locals names (interp_store formals binders atoms store)).
+    (concrete_locals names (interp_store formals binders valuation store)).
 Proof.
   intros Hnames Hcorresponds Hdom. destruct frame as [locals]. simpl in *.
   f_equal. apply map_eq. intros name.
@@ -878,15 +877,15 @@ Proof.
 Qed.
 
 Lemma concrete_locals_update_store {Γ F Δ t} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ t)
     (value : tval t) :
   NoDup (runtime_variables names) ->
   concrete_locals names
-      (interp_store formals (binder_cons value binders) atoms
+      (interp_store formals (binder_cons value binders) valuation
         (IR.update_store_with_bound store target)) =
     <[runtime_variable names target := tval_to_val value]>
-      (concrete_locals names (interp_store formals binders atoms store)).
+      (concrete_locals names (interp_store formals binders valuation store)).
 Proof.
   induction names; intros Hnames.
   - dependent destruction target.
@@ -918,12 +917,12 @@ Proof.
 Qed.
 
 Lemma concrete_stack_corresponds {Γ F Δ} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
   NoDup (runtime_variables names) ->
-  stack_corresponds names formals binders atoms store
+  stack_corresponds names formals binders valuation store
     (RuntimeLang.StackFrame
-      (concrete_locals names (interp_store formals binders atoms store))).
+      (concrete_locals names (interp_store formals binders valuation store))).
 Proof.
   intros Hnames t variable.
   apply concrete_locals_interp_lookup. exact Hnames.
@@ -976,12 +975,12 @@ Local Notation concrete_invtoken_inG := core_invtoken_inG.
 
 Lemma runtime_stack_frame_corresponds {Γ F Δ}
     (runtime : stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
-  stack_corresponds (runtime_names _ runtime) formals binders atoms store
+  stack_corresponds (runtime_names _ runtime) formals binders valuation store
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
-        (interp_store formals binders atoms store))).
+        (interp_store formals binders valuation store))).
 Proof.
   intros t variable. apply concrete_locals_interp_lookup.
   apply runtime_names_nodup.
@@ -1237,10 +1236,10 @@ Proof.
 Qed.
 
 Lemma runtime_assignment_wp {Γ F Δ t} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ t)
     (expression : pexpr Γ t) (mask : coPset) :
-  stack_own Γ runtime (interp_store formals binders atoms store) ⊢
+  stack_own Γ runtime (interp_store formals binders valuation store) ⊢
   runtime_wp mask
     (RuntimeLang.RTAssign
       (runtime_variable (runtime_names _ runtime) target)
@@ -1249,21 +1248,21 @@ Lemma runtime_assignment_wp {Γ F Δ t} (runtime : stack_context Γ)
     (fun result =>
       (⌜result = RuntimeLang.LitUnit⌝ ∗
        ∃ value,
-         ⌜interp_program_expr formals binders atoms store expression =
+         ⌜interp_program_expr formals binders valuation store expression =
            Some value⌝ ∗
          stack_own Γ runtime
-           (interp_store formals (binder_cons value binders) atoms
+           (interp_store formals (binder_cons value binders) valuation
              (IR.update_store_with_bound store target)))%I).
 Proof.
   iIntros "Hstack". unfold runtime_wp.
   iEval (unfold stack_own) in "Hstack".
-  destruct (interp_expr_total formals binders atoms
+  destruct (interp_expr_total formals binders valuation
     (IR.symbolize_expr store expression)) as [value Hvalue].
   iApply (RuntimeLifting.wp_assign
     (runtime_stack_id _ runtime)
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
     (runtime_variable (runtime_names _ runtime) target)
     (tval_to_val value) (runtime_expr (runtime_names _ runtime) expression)
     mask with "[Hstack]").
@@ -1278,13 +1277,13 @@ Proof.
 Qed.
 
 Lemma runtime_field_write_wp {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) field (base : pexpr Γ TRef)
     (expression : pexpr Γ (Assertion.field_type field))
     (location : tval TRef) (old_value : tval (Assertion.field_type field))
     (mask : coPset) :
-  interp_program_expr formals binders atoms store base = Some location ->
-  stack_own Γ runtime (interp_store formals binders atoms store) ∗
+  interp_program_expr formals binders valuation store base = Some location ->
+  stack_own Γ runtime (interp_store formals binders valuation store) ∗
     field_own field location old_value ⊢
   runtime_wp mask
     (RuntimeLang.RTFldWr (runtime_expr (runtime_names _ runtime) base)
@@ -1294,16 +1293,16 @@ Lemma runtime_field_write_wp {Γ F Δ} (runtime : stack_context Γ)
     (fun result =>
       (⌜result = RuntimeLang.LitUnit⌝ ∗
        ∃ new_value,
-         ⌜interp_program_expr formals binders atoms store expression =
+         ⌜interp_program_expr formals binders valuation store expression =
            Some new_value⌝ ∗
-         stack_own Γ runtime (interp_store formals binders atoms store) ∗
+         stack_own Γ runtime (interp_store formals binders valuation store) ∗
          field_own field location new_value)%I).
 Proof.
   intros Hlocation. iIntros "[Hstack Hfield]". unfold runtime_wp.
   iEval (unfold stack_own) in "Hstack".
-  destruct (interp_program_expr formals binders atoms store expression)
+  destruct (interp_program_expr formals binders valuation store expression)
     as [new_value|] eqn:Hvalue.
-  2: exfalso; destruct (interp_expr_total formals binders atoms
+  2: exfalso; destruct (interp_expr_total formals binders valuation
         (IR.symbolize_expr store expression)) as [new_value Htotal];
       unfold interp_program_expr in Hvalue; congruence.
   dependent destruction location. iEval (unfold field_own) in "Hfield".
@@ -1311,20 +1310,20 @@ Proof.
     (runtime_stack_id _ runtime)
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
     (runtime_expr (runtime_names _ runtime) base)
     (runtime_expr (runtime_names _ runtime) expression)
     (tval_to_val new_value) (RuntimeLang.Loc location)
     (field_name field) (tval_to_val old_value) mask
     with "[Hstack Hfield]").
   { iFrame. iPureIntro. split.
-    - exact (runtime_expr_sound (runtime_names _ runtime) formals binders atoms
+    - exact (runtime_expr_sound (runtime_names _ runtime) formals binders valuation
         store _ base (VRef location)
-        (runtime_stack_frame_corresponds runtime formals binders atoms store)
+        (runtime_stack_frame_corresponds runtime formals binders valuation store)
         Hlocation).
-    - exact (runtime_expr_sound (runtime_names _ runtime) formals binders atoms
+    - exact (runtime_expr_sound (runtime_names _ runtime) formals binders valuation
         store _ expression new_value
-        (runtime_stack_frame_corresponds runtime formals binders atoms store)
+        (runtime_stack_frame_corresponds runtime formals binders valuation store)
         Hvalue). }
   iNext. iIntros "[Hstack [Hfield Hcredit]]". iSplit; first done.
   iExists new_value. iSplit; first done.
@@ -1332,13 +1331,13 @@ Proof.
 Qed.
 
 Lemma runtime_field_read_wp {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) field
     (target : pvar Γ (Assertion.field_type field)) (base : pexpr Γ TRef)
     (location : tval TRef) (chunk : tval (Assertion.field_type field))
     (mask : coPset) :
-  interp_program_expr formals binders atoms store base = Some location ->
-  stack_own Γ runtime (interp_store formals binders atoms store) ∗
+  interp_program_expr formals binders valuation store base = Some location ->
+  stack_own Γ runtime (interp_store formals binders valuation store) ∗
     field_own field location chunk ⊢
   runtime_wp mask
     (RuntimeLang.RTFldRd
@@ -1350,7 +1349,7 @@ Lemma runtime_field_read_wp {Γ F Δ} (runtime : stack_context Γ)
        ∃ value,
          ⌜value = chunk⌝ ∗
          stack_own Γ runtime
-           (interp_store formals (binder_cons value binders) atoms
+           (interp_store formals (binder_cons value binders) valuation
              (IR.update_store_with_bound store target)) ∗
          field_own field location chunk)%I).
 Proof.
@@ -1361,16 +1360,16 @@ Proof.
     (runtime_stack_id _ runtime)
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
     (field_name field)
     (runtime_expr (runtime_names _ runtime) base)
     (tval_to_val chunk) (RuntimeLang.Loc location)
     (runtime_variable (runtime_names _ runtime) target) mask 1%Qp
     with "[Hstack Hfield]").
   { iFrame. iPureIntro.
-    exact (runtime_expr_sound (runtime_names _ runtime) formals binders atoms
+    exact (runtime_expr_sound (runtime_names _ runtime) formals binders valuation
       store _ base (VRef location)
-      (runtime_stack_frame_corresponds runtime formals binders atoms store)
+      (runtime_stack_frame_corresponds runtime formals binders valuation store)
       Hlocation). }
   iNext. iIntros "[Hstack [Hfield Hcredit]]". iSplit; first done.
   iExists chunk. iSplit; first done. unfold stack_own, field_own. simpl.
@@ -1379,53 +1378,53 @@ Proof.
 Qed.
 
 Fixpoint allocated_physical_fields_own {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (location : tval TRef)
     (fields : list (field_init Γ)) : iProp Σ :=
   match fields with
   | [] => True%I
   | FieldInit field expression :: fields' =>
       (∃ value,
-        ⌜interp_program_expr formals binders atoms store expression =
+        ⌜interp_program_expr formals binders valuation store expression =
           Some value⌝ ∗
         field_own field location value ∗
-        allocated_physical_fields_own runtime formals binders atoms store location
+        allocated_physical_fields_own runtime formals binders valuation store location
           fields')%I
   end.
 
 Fixpoint allocated_ghost_fields_own {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (location : tval TRef)
     (fields : list (ghost_field_init Γ)) : iProp Σ :=
   match fields with
   | [] => True%I
   | GhostFieldInit resource field Hfield expression :: fields' =>
       (∃ value : RAValues.ra_carrier resource,
-        ⌜interp_program_expr formals binders atoms store expression =
+        ⌜interp_program_expr formals binders valuation store expression =
           Some (VRA value)⌝ ∗
         ghost_own field location
           (eq_rect (TRA resource) tval (VRA value)
             (Assertion.field_type field) (eq_sym Hfield)) ∗
-        allocated_ghost_fields_own runtime formals binders atoms store location
+        allocated_ghost_fields_own runtime formals binders valuation store location
           fields')%I
   end.
 
 Definition allocated_fields_own {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (location : tval TRef)
     (fields : list (field_init Γ)) : iProp Σ :=
-  (allocated_physical_fields_own runtime formals binders atoms store location
+  (allocated_physical_fields_own runtime formals binders valuation store location
       (physical_field_initializers fields) ∗
-   allocated_ghost_fields_own runtime formals binders atoms store location
+   allocated_ghost_fields_own runtime formals binders valuation store location
       (ghost_field_initializers fields))%I.
 
 Definition ghost_initializers_semantically_valid {Γ F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (fields : list (ghost_field_init Γ)) : Prop :=
   Forall (fun initialization =>
     match initialization with
     | GhostFieldInit resource _ _ expression => forall value,
-        interp_program_expr formals binders atoms store expression =
+        interp_program_expr formals binders valuation store expression =
           Some (VRA value) ->
         @ra_base.valid _ (ra_base.RA_inst (RuntimeLang.ra_map resource)) value
     end) fields.
@@ -1446,15 +1445,15 @@ Proof.
 Qed.
 
 Lemma allocated_ghost_fields_alloc {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields address E :
   NoDup (runtime_packed_ghost_field_names fields) ->
-  ghost_initializers_semantically_valid formals binders atoms store fields ->
+  ghost_initializers_semantically_valid formals binders valuation store fields ->
   (↑runtime_ghost_namespace : coPset) ⊆ E ->
   @RuntimeGhost.ghost_dom_frag _ Σ core_heapG
     (list_to_set (map (RuntimeLang.heap_addr_constr (RuntimeLang.Loc address))
       (runtime_packed_ghost_field_names fields))) -∗
-  |={E}=> allocated_ghost_fields_own runtime formals binders atoms store
+  |={E}=> allocated_ghost_fields_own runtime formals binders valuation store
     (VRef address) fields.
 Proof.
   intros Hnames Hvalid Hmask.
@@ -1463,7 +1462,7 @@ Proof.
   - inversion Hnames as [|? ? Hfresh Hnames']; subst.
     inversion Hvalid as [|? ? Hhead_valid Hvalid']; subst.
     simpl.
-    destruct (interp_expr_total formals binders atoms
+    destruct (interp_expr_total formals binders valuation
       (IR.symbolize_expr store expression)) as [value Hvalue].
     dependent destruction value.
     iIntros "Hdomain".
@@ -1480,54 +1479,54 @@ Proof.
 Qed.
 
 Inductive field_values_match {Γ F Δ}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
     list (field_init Γ) -> list (RuntimeLang.fld_name * RuntimeLang.val) -> Prop :=
-| FieldValuesNil : field_values_match formals binders atoms store [] []
+| FieldValuesNil : field_values_match formals binders valuation store [] []
 | FieldValuesCons field expression fields value values :
-    interp_program_expr formals binders atoms store expression = Some value ->
-    field_values_match formals binders atoms store fields values ->
-    field_values_match formals binders atoms store
+    interp_program_expr formals binders valuation store expression = Some value ->
+    field_values_match formals binders valuation store fields values ->
+    field_values_match formals binders valuation store
       (FieldInit field expression :: fields)
       ((field_name field, tval_to_val value) :: values).
 
 Lemma field_values_match_exists {Γ F Δ} (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (fields : list (field_init Γ)) :
-  exists values, field_values_match formals binders atoms store fields values.
+  exists values, field_values_match formals binders valuation store fields values.
 Proof.
   induction fields as [|[field expression] fields IH].
   - exists []. constructor.
   - destruct IH as [values Hvalues].
-    destruct (interp_expr_total formals binders atoms
+    destruct (interp_expr_total formals binders valuation
       (IR.symbolize_expr store expression)) as [value Hvalue].
     exists ((field_name field, tval_to_val value) :: values).
     constructor; [exact Hvalue|exact Hvalues].
 Qed.
 
 Lemma field_values_match_steps {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields values :
-  field_values_match formals binders atoms store fields values ->
+  field_values_match formals binders valuation store fields values ->
   Forall2 (fun initializer field_value =>
     fst initializer = fst field_value /\
     RuntimeLang.expr_step (snd initializer)
       (RuntimeLang.StackFrame
         (concrete_locals (runtime_names _ runtime)
-          (interp_store formals binders atoms store)))
+          (interp_store formals binders valuation store)))
       (RuntimeLang.Val (snd field_value)))
     (runtime_field_initializers (runtime_names _ runtime) fields) values.
 Proof.
   intros Hmatch. induction Hmatch; simpl; constructor; [|exact IHHmatch].
   split; first reflexivity.
-  exact (runtime_expr_sound (runtime_names _ runtime) formals binders atoms
+  exact (runtime_expr_sound (runtime_names _ runtime) formals binders valuation
     store _ expression value
-    (runtime_stack_frame_corresponds runtime formals binders atoms store) H).
+    (runtime_stack_frame_corresponds runtime formals binders valuation store) H).
 Qed.
 
-Lemma field_values_match_names {Γ F Δ} formals binders atoms
+Lemma field_values_match_names {Γ F Δ} formals binders valuation
     (store : symbolic_store Γ F Δ) fields values :
-  field_values_match formals binders atoms store fields values ->
+  field_values_match formals binders valuation store fields values ->
   values.*1 = map (fun initialization =>
     field_name (field_init_id initialization)) fields.
 Proof.
@@ -1592,11 +1591,11 @@ Proof.
 Qed.
 
 Lemma field_values_match_own {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) fields values address :
-  field_values_match formals binders atoms store fields values ->
+  field_values_match formals binders valuation store fields values ->
   RuntimeLifting.field_list_to_iprop (RuntimeLang.Loc address) values ⊢
-    allocated_physical_fields_own runtime formals binders atoms store (VRef address)
+    allocated_physical_fields_own runtime formals binders valuation store (VRef address)
       fields.
 Proof.
   intros Hmatch. induction Hmatch; simpl.
@@ -1606,16 +1605,16 @@ Proof.
 Qed.
 
 Lemma runtime_allocation_wp {Γ F Δ} (runtime : stack_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ TRef)
     (fields : list (field_init Γ)) (mask : coPset) :
   NoDup (map field_init_id fields) ->
   NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
   ghost_initializers_require_physical fields ->
-  ghost_initializers_semantically_valid formals binders atoms store
+  ghost_initializers_semantically_valid formals binders valuation store
     (ghost_field_initializers fields) ->
   (↑runtime_ghost_namespace : coPset) ⊆ mask ->
-  stack_own Γ runtime (interp_store formals binders atoms store) ⊢
+  stack_own Γ runtime (interp_store formals binders valuation store) ⊢
   runtime_wp mask
     (RuntimeLang.RTAlloc (runtime_variable (runtime_names _ runtime) target)
       (runtime_physical_field_initializers (runtime_names _ runtime) fields)
@@ -1624,30 +1623,30 @@ Lemma runtime_allocation_wp {Γ F Δ} (runtime : stack_context Γ)
       (⌜result = RuntimeLang.LitUnit⌝ ∗
        ∃ address : Z,
          stack_own Γ runtime
-           (interp_store formals (binder_cons (VRef address) binders) atoms
+           (interp_store formals (binder_cons (VRef address) binders) valuation
              (IR.update_store_with_bound store target)) ∗
-         allocated_fields_own runtime formals binders atoms store
+         allocated_fields_own runtime formals binders valuation store
            (VRef address) fields)%I).
 Proof.
   intros Hfields Hghostfields Hphysical Hvalid Hmask.
   iIntros "Hstack". unfold runtime_wp.
   iApply wp_fupd.
   iEval (unfold stack_own) in "Hstack".
-  destruct (field_values_match_exists formals binders atoms store
+  destruct (field_values_match_exists formals binders valuation store
     (physical_field_initializers fields))
     as [values Hvalues].
   iApply (RuntimeLifting.wp_alloc_expr
     (runtime_stack_id _ runtime)
     (RuntimeLang.StackFrame
       (concrete_locals (runtime_names _ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
     (runtime_physical_field_initializers (runtime_names _ runtime) fields)
     values (runtime_ghost_field_names fields)
     (runtime_variable (runtime_names _ runtime) target) mask
     with "Hstack").
-  - exact (field_values_match_steps runtime formals binders atoms store
+  - exact (field_values_match_steps runtime formals binders valuation store
       (physical_field_initializers fields) values Hvalues).
-  - rewrite (field_values_match_names formals binders atoms store
+  - rewrite (field_values_match_names formals binders valuation store
       (physical_field_initializers fields) values Hvalues).
     apply runtime_field_names_nodup.
     exact (runtime_physical_field_ids_nodup fields Hfields).
@@ -1665,7 +1664,7 @@ Proof.
   - iNext. iIntros "Hpost".
     iDestruct "Hpost" as (location) "[Hstack [Hfields [Hghost Hcredit]]]".
     destruct location as [address].
-    iMod (allocated_ghost_fields_alloc runtime formals binders atoms store
+    iMod (allocated_ghost_fields_alloc runtime formals binders valuation store
       (ghost_field_initializers fields) address mask with "Hghost") as "Hghost".
     { apply runtime_packed_ghost_field_names_nodup. exact Hghostfields. }
     { exact Hvalid. }
@@ -1675,7 +1674,7 @@ Proof.
     + unfold stack_own. simpl. rewrite concrete_locals_update_store.
       iExact "Hstack". apply runtime_names_nodup.
     + iSplitL "Hfields".
-      * iApply (field_values_match_own runtime formals binders atoms store
+      * iApply (field_values_match_own runtime formals binders valuation store
           (physical_field_initializers fields) values address Hvalues).
         iExact "Hfields".
       * iExact "Hghost".
@@ -1712,7 +1711,7 @@ Definition core_semantic_data : Translation.semantic_config_data (iPropI Σ) := 
 |}.
 
 End WithRuntime.
-End WithConfiguration.
+End WithSignature.
 End ConcreteModelCore.
 
 (** Term-level operation interfaces for an initialized runtime.  A proof may
@@ -1763,14 +1762,13 @@ End WithModel.
 End WithSignature.
 End TermControlOperations.
 
-(** Concrete term-level operation model.  The configuration is static while
-    [RG] is an ordinary section variable, so [control_operations] can be formed after the
+(** Concrete term-level operation model.  [RG] is an ordinary section
+    variable, so [control_operations] can be formed after the
     adequacy proof has allocated all required ghost names. *)
 Module ConcreteControlCore.
 Module Model := ConcreteModelCore.
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
 Section WithRuntime.
 Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 Local Instance core_simpLangG : RuntimeLifting.simpLangG Σ :=
@@ -1784,7 +1782,7 @@ Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (iProp Σ).
 
 Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
-  @Model.core_semantic_data _ _ _ Σ RG.
+  @Model.core_semantic_data _ _ Σ RG.
 
 Definition procedure_wp {Γ} (runtime : Model.stack_context Γ)
     (statement : stmt Γ) (mask_pre mask_post : Hoare.mask)
@@ -1903,7 +1901,7 @@ Definition concrete_control_operations :
     @TermControlOperations.control_operations_data _ _ (iPropI Σ)
       semantic_data := control_operations procedure_operations.
 End WithRuntime.
-End WithConfiguration.
+End WithSignature.
 End ConcreteControlCore.
 
 Import Translation.Assertions.
@@ -1918,28 +1916,28 @@ Context `{!FUpd PROP}.
 Local Notation iProp := (bi_car PROP).
 
 Record semantic_leaf_contracts_data := SemanticLeafContractsData {
-  term_predicates : atom_env ->
+  term_predicates : symbol_valuation ->
     Translation.TermSemantics.predicate_semantics;
-  term_predicates_timeless : forall atoms predicate values,
-    Timeless (term_predicates atoms predicate values);
-  term_predicates_stable : forall left_atoms right_atoms,
-    stable_atoms_agree left_atoms right_atoms ->
+  term_predicates_timeless : forall valuation predicate values,
+    Timeless (term_predicates valuation predicate values);
+  term_predicates_stable : forall left_valuation right_valuation,
+    constant_symbols_agree left_valuation right_valuation ->
     forall predicate values,
-      term_predicates left_atoms predicate values ≡
-      term_predicates right_atoms predicate values;
+      term_predicates left_valuation predicate values ≡
+      term_predicates right_valuation predicate values;
   (** The instantiated predicate body agrees with the abstract predicate
-      atom.  Stated over the resource core: the instantiation is a total
+      symbol.  Stated over the resource core: the instantiation is a total
       function of the arguments, so there is no relation to destruct and no
       reindexing step, and the obligation never mentions the assertion
       representation. *)
   term_predicate_instantiation_valid : forall {F Δ}
-      (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+      (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
       predicate (expressions : expr_list F Δ (Assertion.predicate_args predicate)),
-    Translation.TermSemantics.interp_core Model (term_predicates atoms)
-      formals binders atoms
+    Translation.TermSemantics.interp_core Model (term_predicates valuation)
+      formals binders valuation
       (RI.instantiated_predicate predicate expressions) ≡
-    Translation.TermSemantics.interp_core Model (term_predicates atoms)
-      formals binders atoms
+    Translation.TermSemantics.interp_core Model (term_predicates valuation)
+      formals binders valuation
       (Translation.Resource.CPredicate predicate expressions);
 }.
 End WithModel.
@@ -1982,9 +1980,8 @@ Module OperationalGenericRegionPrimitivesCore.
 Module Control := ConcreteControlCore.
 Module Model := Control.Model.
 
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
 (** Construct a runtime stack context through the model's public alias, so
     clients need not rely on reduction through the nested [Control.Model]
     alias. *)
@@ -2031,14 +2028,14 @@ Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (iProp Σ).
 
 Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
-  @Control.semantic_data _ _ _ Σ RG.
+  @Control.semantic_data _ _ Σ RG.
 
 Lemma semantic_stack_own_update {Γ F Δ t}
     (runtime : Model.stack_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (target : pvar Γ t) (value : tval t) :
   Translation.data_stack_own semantic_data runtime
-      (interp_store formals (binder_cons value binders) atoms
+      (interp_store formals (binder_cons value binders) valuation
         (IR.update_store_with_bound store target)) ⊣⊢
     RuntimeGhost.stack_frame_own (Model.runtime_stack_id _ runtime)
       (RuntimeLang.StackFrame
@@ -2046,7 +2043,7 @@ Lemma semantic_stack_own_update {Γ F Δ t}
             RuntimeErasure.tval_to_val value]>
           (RuntimeLang.locals (RuntimeLang.StackFrame
             (Model.concrete_locals (Model.runtime_names _ runtime)
-              (interp_store formals binders atoms store)))))).
+              (interp_store formals binders valuation store)))))).
 Proof.
   unfold semantic_data, Control.semantic_data, Model.core_semantic_data.
   simpl. unfold Model.core_stack_own.
@@ -2299,7 +2296,7 @@ Definition interpreter (Operations :
   GenericRegions.TermSemantics.interpreter region_model
     (primitives Operations InvariantOps).
 End WithRuntime.
-End WithConfiguration.
+End WithSignature.
 End OperationalGenericRegionPrimitivesCore.
 
 (** Fully concrete dynamic generic-region interpreter, suitable for a
@@ -2307,17 +2304,16 @@ End OperationalGenericRegionPrimitivesCore.
 Module ConcreteGenericRegionExecutionCore.
 Module Primitives := OperationalGenericRegionPrimitivesCore.
 Module Control := Primitives.Control.
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration} {Cost : AnalysisView.LeafCost}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
 Section WithRuntime.
 Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
 
-Definition interpreter := @Primitives.interpreter _ _ _ _ Σ RG
-  (@Control.concrete_control_operations _ _ _ Σ RG)
-  (@Primitives.concrete_invariant_operations _ _ _ Σ RG).
+Definition interpreter := @Primitives.interpreter _ _ _ Σ RG
+  (@Control.concrete_control_operations _ _ Σ RG)
+  (@Primitives.concrete_invariant_operations _ _ Σ RG).
 End WithRuntime.
-End WithConfiguration.
+End WithSignature.
 End ConcreteGenericRegionExecutionCore.
 
 End Runtime.

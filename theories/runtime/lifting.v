@@ -1207,14 +1207,16 @@ Section lifting.
     "#ret_val" ∈ (proc_local_vars proc_entry).*1 ->
     length args = length (proc_entry.(proc_args)) ->
     Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
-    ▷ (∀ stk_id' stk_frm',
+    ▷ □ (∀ stk_id' stk_frm',
       ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val) proc_entry.(proc_args).*1 arg_vals
        ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
             ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
        ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪ list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
-        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
-            to_rtstmt stk_id' proc_entry.(proc_stmt) @ mask
-        {{{ RET (LitUnit); ∃ ret_val stk_frm'', stack_own[ stk_id', stk_frm'' ] ∗ ⌜ (stk_frm''.(locals) !! "#ret_val" = Some ret_val) ⌝ ∗ q ret_val }}} ) -∗
+        stack_own[ stk_id', stk_frm' ] ∗ p -∗
+        WP proc_entry.(proc_stmt) stk_id' @ mask {{ result,
+          ⌜result = LitUnit⌝ ∗ ∃ ret_val stk_frm'',
+          stack_own[ stk_id', stk_frm'' ] ∗
+          ⌜stk_frm''.(locals) !! "#ret_val" = Some ret_val⌝ ∗ q ret_val }}) -∗
 
     {{{ stack_own[ stk_id, stk_frm ] ∗ (proc_tbl_chunk proc proc_entry) ∗ p }}}
         RTCall x proc args stk_id @ mask
@@ -1244,7 +1246,7 @@ Section lifting.
                     ++ decls_zip_vals proc_entry.(proc_local_vars) local_vals0)).
     set σ'' := update_stack σ' new_stk_id new_stk_frame.
 
-    set new_stmt := to_rtstmt new_stk_id proc_entry.(proc_stmt).
+    set new_stmt := proc_entry.(proc_stmt) new_stk_id.
 
     exists [], (RTActiveCall x new_stmt new_stk_id stk_id), σ'', [].
 
@@ -1345,11 +1347,10 @@ Section lifting.
         reflexivity.
     }
     iClear "Hproc_body".
-    iApply ("Hproc_body'" with "[Hstk' Hp]") .
-
-    + iFrame.
-
-    + iNext. simpl. iIntros "[%ret_val [%stk_frm'' [Hstk'' [%Hret Hq]]]]".
+    iPoseProof ("Hproc_body'" with "[$Hstk' $Hp]") as "Hbodywp".
+    iApply (wp_wand with "Hbodywp").
+    iIntros (result) "[%Hunit [%ret_val [%stk_frm'' [Hstk'' [%Hret Hq]]]]]".
+    subst result.
       iApply wp_lift_atomic_base_step_no_fork; first done.
       iIntros (σ1 ns0 κ κs0 nt0) "Hstate".
       iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D1 [Hgdom1 %HgdomB1]] %Hwf1]]]]".
@@ -1400,14 +1401,16 @@ Section lifting.
     "#ret_val" ∈ (proc_local_vars proc_entry).*1 ->
     length args = length (proc_entry.(proc_args)) ->
     Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
-    ▷ (∀ stk_id' stk_frm',
+    ▷ □ (∀ stk_id' stk_frm',
       ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val) proc_entry.(proc_args).*1 arg_vals
        ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
             ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
        ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪ list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
-        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
-            to_rtstmt stk_id' proc_entry.(proc_stmt) @ mask
-        {{{ RET (LitUnit); ∃ ret_val stk_frm'', stack_own[ stk_id', stk_frm'' ] ∗ ⌜ (stk_frm''.(locals) !! "#ret_val" = Some ret_val) ⌝ ∗ q ret_val }}} ) -∗
+        stack_own[ stk_id', stk_frm' ] ∗ p -∗
+        WP proc_entry.(proc_stmt) stk_id' @ mask {{ result,
+          ⌜result = LitUnit⌝ ∗ ∃ ret_val stk_frm'',
+          stack_own[ stk_id', stk_frm'' ] ∗
+          ⌜stk_frm''.(locals) !! "#ret_val" = Some ret_val⌝ ∗ q ret_val }}) -∗
 
     {{{ stack_own[ stk_id, stk_frm ] ∗ (proc_tbl_chunk proc proc_entry) ∗ p }}}
         RTCallNoStore proc args stk_id @ mask
@@ -1437,7 +1440,7 @@ Section lifting.
                     ++ decls_zip_vals proc_entry.(proc_local_vars) local_vals0)).
     set σ'' := update_stack σ' new_stk_id new_stk_frame.
 
-    set new_stmt := to_rtstmt new_stk_id proc_entry.(proc_stmt).
+    set new_stmt := proc_entry.(proc_stmt) new_stk_id.
 
     exists [], (RTActiveCallNoStore new_stmt new_stk_id), σ'', [].
 
@@ -1538,11 +1541,10 @@ Section lifting.
         reflexivity.
     }
     iClear "Hproc_body".
-    iApply ("Hproc_body'" with "[Hstk' Hp]") .
-
-    + iFrame.
-
-    + iNext. simpl. iIntros "[%ret_val [%stk_frm'' [Hstk'' [%Hret Hq]]]]".
+    iPoseProof ("Hproc_body'" with "[$Hstk' $Hp]") as "Hbodywp".
+    iApply (wp_wand with "Hbodywp").
+    iIntros (result) "[%Hunit [%ret_val [%stk_frm'' [Hstk'' [%Hret Hq]]]]]".
+    subst result.
       iApply (wp_active_call_nostore stk_id' stk_frm'' LitUnit mask
         (stack_own[ stk_id, stk_frm ] ∗ q ret_val) with
         "[$Hstk'' $Hstk $Hq]").
@@ -1557,14 +1559,13 @@ Section lifting.
     "#ret_val" ∈ (proc_local_vars proc_entry).*1 ->
     length args = length (proc_entry.(proc_args)) ->
     Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
-    ▷ (∀ stk_id' stk_frm',
+    ▷ □ (∀ stk_id' stk_frm',
       ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val) proc_entry.(proc_args).*1 arg_vals
        ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
             ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
        ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪ list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
-        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
-            to_rtstmt stk_id' proc_entry.(proc_stmt) @ ⊤
-        {{{ RET LitUnit; True }}}) -∗
+        stack_own[ stk_id', stk_frm' ] ∗ p -∗
+        WP proc_entry.(proc_stmt) stk_id' @ ⊤ {{ _, True }}) -∗
     {{{ stack_own[ stk_id, stk_frm ] ∗ proc_tbl_chunk proc proc_entry ∗ p }}}
         RTSpawn proc args stk_id @ mask
     {{{ RET LitUnit; stack_own[ stk_id, stk_frm ] ∗ £1 }}}.
@@ -1587,7 +1588,7 @@ Section lifting.
                       ++ decls_zip_vals proc_entry.(proc_local_vars) local_vals0)).
       set new_stk_id := (fresh_stk_id σ1).1.
       set σ' := update_stack (fresh_stk_id σ1).2 new_stk_id new_stk_frame.
-      exists [], (RTVal LitUnit), σ', [to_rtstmt new_stk_id proc_entry.(proc_stmt)].
+      exists [], (RTVal LitUnit), σ', [proc_entry.(proc_stmt) new_stk_id].
       apply (SpawnStep σ1 stk_id stk_frm proc args arg_vals proc_entry local_vals0); try done.
       apply Forall2_canonical_val_has_typ.
     - iNext. iIntros (e2 σ2 efs) "%Hstep Hcred".
@@ -1679,11 +1680,8 @@ Section lifting.
           - rewrite dom_union_L !dom_list_to_map_L
               (fst_zip _ _ Hargs_len_le) (fst_zip _ _ Hlocals_len_le).
             reflexivity. }
-        iSpecialize ("Hbody" $! (fun _ => True%I)).
         iPoseProof ("Hbody" with "[$Hstk' $Hp]") as "Hbodywp".
-        iSpecialize ("Hbodywp" with "[]").
-        { iNext. iIntros "_". done. }
-        iExact "Hbodywp".
+        iApply (wp_wand with "Hbodywp"). done.
   Qed.
 
   Lemma wp_call_nostore_no_ret stk_id stk_frm args arg_vals proc proc_entry
@@ -1691,18 +1689,18 @@ Section lifting.
     proc_call_layout proc_entry ->
     length args = length (proc_entry.(proc_args)) ->
     Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
-    ▷ (∀ stk_id' stk_frm',
+    ▷ □ (∀ stk_id' stk_frm',
       ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val)
           proc_entry.(proc_args).*1 arg_vals
        ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
             ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
        ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪
            list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
-        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
-            to_rtstmt stk_id' proc_entry.(proc_stmt) @ mask
-        {{{ RET (LitUnit); ∃ ret_val stk_frm'', stack_own[ stk_id', stk_frm'' ] ∗
-            ⌜ (stk_frm''.(locals) !! "#ret_val" = Some ret_val) ⌝ ∗
-            q ret_val }}} ) -∗
+        stack_own[ stk_id', stk_frm' ] ∗ p -∗
+        WP proc_entry.(proc_stmt) stk_id' @ mask {{ result,
+          ⌜result = LitUnit⌝ ∗ ∃ ret_val stk_frm'',
+          stack_own[ stk_id', stk_frm'' ] ∗
+          ⌜stk_frm''.(locals) !! "#ret_val" = Some ret_val⌝ ∗ q ret_val }}) -∗
     {{{ stack_own[ stk_id, stk_frm ] ∗ (proc_tbl_chunk proc proc_entry) ∗ p }}}
         RTCallNoStore proc args stk_id @ mask
     {{{ RET LitUnit; ∃ ret_val, stack_own[ stk_id, stk_frm ] ∗ q ret_val ∗ £1}}}.
@@ -1716,16 +1714,15 @@ Section lifting.
     proc_call_layout proc_entry ->
     length args = length (proc_entry.(proc_args)) ->
     Forall2 (fun expr val => expr_step expr stk_frm (Val val)) args arg_vals ->
-    ▷ (∀ stk_id' stk_frm',
+    ▷ □ (∀ stk_id' stk_frm',
       ⌜Forall2 (fun var val => stk_frm'.(locals) !! var = Some val)
           proc_entry.(proc_args).*1 arg_vals
        ∧ (∀ v tp, (v, tp) ∈ proc_entry.(proc_local_vars) ->
             ∃ val, stk_frm'.(locals) !! v = Some val ∧ val_has_typ val tp)
        ∧ dom stk_frm'.(locals) = list_to_set proc_entry.(proc_args).*1 ∪
            list_to_set (proc_entry.(proc_local_vars)).*1⌝ -∗
-        {{{ stack_own[ stk_id', stk_frm' ] ∗ p }}}
-            to_rtstmt stk_id' proc_entry.(proc_stmt) @ ⊤
-        {{{ RET LitUnit; True }}}) -∗
+        stack_own[ stk_id', stk_frm' ] ∗ p -∗
+        WP proc_entry.(proc_stmt) stk_id' @ ⊤ {{ _, True }}) -∗
     {{{ stack_own[ stk_id, stk_frm ] ∗ proc_tbl_chunk proc proc_entry ∗ p }}}
         RTSpawn proc args stk_id @ mask
     {{{ RET LitUnit; stack_own[ stk_id, stk_frm ] ∗ £1 }}}.

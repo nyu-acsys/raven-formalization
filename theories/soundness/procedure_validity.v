@@ -22,7 +22,6 @@ Import Translation.Assertions.
 
 Section WithContracts.
 Context {RAs : ra_base.RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration}
   {Contracts : Hoare.ResourceHoare.ResourceContractEnv}
   {Coherence : Hoare.ProcedureContractCoherence}.
 
@@ -33,35 +32,28 @@ Local Existing Instances RuleValidity.core_simpLangG RuleValidity.core_invTokenG
 Local Existing Instance weakestpre.wp'.
 Local Notation iProp := (bi_car (iPropI Σ)).
 
-Context (Leaf : @TermLeaf.semantic_leaf_contracts_data _ _ _
-  (iPropI Σ) semantic_data).
 Context (Hruntime_ghost_namespace :
   @runtime_ghost_namespace _ _ Σ RG = ghost_heap_namespace).
-Context (Registration : certified_program_registration).
+Context (Registration : certified_module_registration).
 
-Local Notation all_registered_procedure_chunks := (@RuleValidity.all_registered_procedure_chunks _ _ _ _ _ _ _ Registration).
-Local Notation all_registered_procedure_chunks_lookup := (@RuleValidity.all_registered_procedure_chunks_lookup _ _ _ _ _ _ _ Registration).
-Local Notation global_world_context := (@RuleValidity.global_world_context _ _ _ _ _ _ _ Leaf Registration).
-Local Notation global_world_context_stable_atoms := (@RuleValidity.global_world_context_stable_atoms _ _ _ _ _ _ _ Leaf Registration).
-Local Notation procedure_body_post_interp := (@RuleValidity.procedure_body_post_interp _ _ _ _ _ _ Leaf).
-Local Notation procedure_post_instantiation_interp := (@RuleValidity.procedure_post_instantiation_interp _ _ _ _ _ _ _ Leaf).
-Local Notation procedure_pre_instantiation_interp := (@RuleValidity.procedure_pre_instantiation_interp _ _ _ _ _ _ Leaf).
-Local Notation registered_procedure_chunk := (@RuleValidity.registered_procedure_chunk _ _ _ _ _ _ _ Registration).
-Local Notation runtime_procedure_entry := (@RuleValidity.runtime_procedure_entry _ _ _ _ _ Registration).
-Local Notation runtime_procedure_entry_coherent := (@RuleValidity.runtime_procedure_entry_coherent _ _ _ _ _ Registration).
-Local Notation runtime_procedure_map_chunks := (@RuleValidity.runtime_procedure_map_chunks _ _ _ _ _ _ _ Registration).
-Local Notation term_interp_core := (@RuleValidity.term_interp_core _ _ _ _ _ _ Leaf).
-Local Notation term_interp_core_stable_atoms := (@RuleValidity.term_interp_core_stable_atoms _ _ _ _ _ _ Leaf).
-Local Notation term_interp_resource_prenex := (@RuleValidity.term_interp_resource_prenex _ _ _ _ _ _ Leaf).
-Local Notation term_procedure_body_source_valid_footprinted := (@RuleValidity.term_procedure_body_source_valid_footprinted _ _ _ _ _ _ _ Leaf Registration).
-Local Notation term_registered_invariants := (@RuleValidity.term_registered_invariants _ _ _ _ _ Registration).
-Local Notation term_runtime_procedure_layout_configured := (@RuleValidity.term_runtime_procedure_layout_configured _ _ _ _ _ Registration).
-Local Notation term_runtime_procedure_statement := (@RuleValidity.term_runtime_procedure_statement _ _ _ _ _ Registration).
-Local Notation term_structured_certificate_resource_prenex_valid := (@RuleValidity.term_structured_certificate_resource_prenex_valid _ _ _ _ _ _ _ Leaf Hruntime_ghost_namespace Registration).
-Local Notation term_structured_runtime_valid := (@RuleValidity.term_structured_runtime_valid _ _ _ _ _ _ _ Leaf Registration).
-Local Notation term_world_context_alloc := (@RuleValidity.term_world_context_alloc _ _ _ _ _ _ _ Leaf Registration).
-Local Notation verified_procedure_specs := (@RuleValidity.verified_procedure_specs _ _ _ _ _ _ _ Leaf Registration).
-Local Notation verified_procedure_specs_valid := (@RuleValidity.verified_procedure_specs_valid _ _ _ _ _ _ _ Leaf Registration).
+Local Notation all_registered_procedure_chunks := (@RuleValidity.all_registered_procedure_chunks _ _ _ _ _ _ Registration).
+Local Notation all_registered_procedure_chunks_lookup := (@RuleValidity.all_registered_procedure_chunks_lookup _ _ _ _ _ _ Registration).
+Local Notation global_world_context := (@RuleValidity.global_world_context _ _ _ _ _ _ Registration).
+Local Notation global_world_context_constant_symbols := (@RuleValidity.global_world_context_constant_symbols _ _ _ _ _ _ Registration).
+Local Notation registered_procedure_chunk := (@RuleValidity.registered_procedure_chunk _ _ _ _ _ _ Registration).
+Local Notation runtime_procedure_entry := (@RuleValidity.runtime_procedure_entry _ _ _ _ Registration).
+Local Notation runtime_procedure_entry_coherent := (@RuleValidity.runtime_procedure_entry_coherent _ _ _ _ Registration).
+Local Notation runtime_procedure_map_chunks := (@RuleValidity.runtime_procedure_map_chunks _ _ _ _ _ _ Registration).
+Local Notation term_procedure_body_source_valid_footprinted := (@RuleValidity.term_procedure_body_source_valid_footprinted _ _ _ _ _ _ Registration).
+Local Notation term_registered_invariants := (@RuleValidity.term_registered_invariants _ _ _ _ Registration).
+Local Notation term_runtime_procedure_layout_configured := (@RuleValidity.term_runtime_procedure_layout_configured _ _ _ _ Registration).
+Local Notation term_runtime_procedure_body :=
+  (@RuleValidity.term_runtime_procedure_body _ _ _ _ Registration).
+Local Notation term_structured_certificate_resource_prenex_valid := (@RuleValidity.term_structured_certificate_resource_prenex_valid _ _ _ _ _ _ Hruntime_ghost_namespace Registration).
+Local Notation term_structured_runtime_valid := (@RuleValidity.term_structured_runtime_valid _ _ _ _ _ _ Registration).
+Local Notation term_world_context_alloc := (@RuleValidity.term_world_context_alloc _ _ _ _ _ _ Registration).
+Local Notation verified_procedure_specs := (@RuleValidity.verified_procedure_specs _ _ _ _ _ _ Registration).
+Local Notation verified_procedure_specs_valid := (@RuleValidity.verified_procedure_specs_valid _ _ _ _ _ _ Registration).
 
 (* ------------------------------------------------------------------ *)
 (** *** The resource-calculus procedure boundary
@@ -69,12 +61,12 @@ Local Notation verified_procedure_specs_valid := (@RuleValidity.verified_procedu
     This is the syntax-driven, proposition-valued input consumed by generic
     normalization.  Stable procedure facts and the analyzer certificate are
     recorded directly; alignment and normalization witnesses are derived by
-    the generic completeness theorem rather than supplied by each program. *)
+    the generic completeness theorem rather than supplied by each module. *)
 (** The canonical cost model is sound for the runtime: proof-only leaves
     erase to the terminal statement and the physical primitives are atomic
     runtime statements.  Together with
     [Certified.contract_cost_model_procedure_sound] this discharges both
-    cost-model conditions once, for every program. *)
+    cost-model conditions once, for every module. *)
 Lemma contract_cost_model_runtime_sound :
   RegionExecution.Primitives.Model.runtime_cost_model_sound
 .
@@ -167,7 +159,7 @@ Definition analyzed_body_normalization_exists {Γ identity}
 
 (** Proof-level procedure bridge for the syntax-only analyzer.  The
     normalization witness stays existential: this theorem destructs it only
-    while proving an Iris proposition, so neither programs nor executable
+    while proving an Iris proposition, so neither modules nor executable
     analysis packages carry proof-relevant normalization data. *)
 Theorem term_analyzed_body_source_valid
     {Γ identity} (procedure : typed_procedure Γ identity)
@@ -181,20 +173,20 @@ Theorem term_analyzed_body_source_valid
       term_registered_invariants ) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args identity))
-    (atoms : atom_env) (ambient : coPset),
+    (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint
         (CertifiedNormalization.analyzed_certificate
           (analyzed_body_triple _ _ body))) ⊆ ambient ->
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient
       (analyzed_body_entry _ _ body)
       (analyzed_body_exit _ _ body)
       (procedure_body _ _ procedure)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex runtime formals empty_binder_env atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure
            (analyzed_body_exit_store _ _ body)
            (analyzed_body_return_reference _ _ body))).
@@ -249,24 +241,24 @@ Theorem term_analyzed_body_exit_mask_valid
       term_registered_invariants ) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args identity))
-    (atoms : atom_env) (ambient : coPset),
+    (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask
         (analyzed_body_exit _ _ body)) ⊆ ambient ->
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient
       (analyzed_body_entry _ _ body)
       (analyzed_body_exit _ _ body)
       (procedure_body _ _ procedure)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex runtime formals empty_binder_env atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure
            (analyzed_body_exit_store _ _ body)
            (analyzed_body_return_reference _ _ body))).
 Proof.
-  intros runtime formals atoms ambient Henvelope.
+  intros runtime formals valuation ambient Henvelope.
   destruct Hnormalizes as [normalization Hworker].
   have Hsource_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint
@@ -279,7 +271,7 @@ Proof.
     - exact (analyzed_body_exit_closed _ _ body). }
   exact (term_analyzed_body_source_valid procedure
     current_mask body (ex_intro _ normalization Hworker) Hregistered
-    runtime formals atoms ambient Hsource_envelope).
+    runtime formals valuation ambient Hsource_envelope).
 Qed.
 
 Definition analyzed_body_valid {Γ identity}
@@ -294,28 +286,28 @@ Definition packed_analyzed_body
       @analyzed_body_valid Γ identity procedure
   end.
 
-(** Program data for the syntax-only analysis path.  In particular this
+(** Module-analysis data for the syntax-only path.  In particular this
     record contains no normalization witness and no alignment proof. *)
-Record analyzed_program : Type := {
-  analyzed_program_bodies : forall packed,
+Record analyzed_module : Type := {
+  analyzed_module_bodies : forall packed,
     List.In packed (procedure_entries Hoare.coherent_procedures) ->
     packed_analyzed_body packed;
-  analyzed_program_registered : forall Γ identity
+  analyzed_module_registered : forall Γ identity
       (procedure : typed_procedure Γ identity)
       (Hin : List.In (pack_typed_procedure procedure)
         (procedure_entries Hoare.coherent_procedures)),
     GenericRegions.Atomicity.certificate_footprint
       (CertifiedNormalization.analyzed_certificate
         (analyzed_body_triple _ _
-          (analyzed_program_bodies
+          (analyzed_module_bodies
             (pack_typed_procedure procedure) Hin))) ⊆
       term_registered_invariants ;
 }.
 
-Arguments analyzed_program_registered _ {_ _} _ _.
+Arguments analyzed_module_registered _ {_ _} _ _.
 
 (** Generic producer completeness.  Successful restricted analysis and the
-    closed procedure-entry state are sufficient; programs and examples carry
+    closed procedure-entry state are sufficient; modules and examples carry
     no normalization or alignment witness. *)
 Definition analyzed_normalization_complete : Prop :=
   forall Γ identity (procedure : typed_procedure Γ identity)
@@ -372,22 +364,22 @@ Record term_registered_body_semantics {Γ F}
       Certified.granted_mask (procedure_identity _ _ procedure);
   term_semantic_body_source_valid : forall
       (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-      (formals : formal_env (Assertion.procedure_args F)) (atoms : atom_env) ambient,
+      (formals : formal_env (Assertion.procedure_args F)) (valuation : symbol_valuation) ambient,
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask term_semantic_body_exit) ⊆
       ambient ->
-    (global_world_context atoms ∗
-     term_interp_resource_prenex runtime formals empty_binder_env atoms
+    (global_world_context valuation ∗
+     term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient term_semantic_body_entry
       term_semantic_body_exit (procedure_body _ _ procedure)
-      (global_world_context atoms ∗
-       term_interp_resource_prenex runtime formals empty_binder_env atoms
+      (global_world_context valuation ∗
+       term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure term_semantic_body_exit_store
            term_semantic_body_return_reference));
 }.
 
-Record term_semantic_program_certificates : Type := {
+Record term_semantic_module_certificates : Type := {
   term_semantic_procedure_bodies : forall Γ F
       (procedure : typed_procedure Γ F),
     List.In (pack_typed_procedure procedure)
@@ -398,14 +390,14 @@ Record term_semantic_program_certificates : Type := {
 (** Semantic projection of the syntax-only analyzer path.  Once the single
     generic normalization-completeness theorem is available, recursive
     call/spawn closure needs no proof-relevant producer data. *)
-Definition term_analyzed_semantic_program
+Definition term_analyzed_semantic_module
     (Hcomplete : analyzed_normalization_complete)
-    (program : analyzed_program ) :
-    term_semantic_program_certificates .
+    (certificates : analyzed_module ) :
+    term_semantic_module_certificates .
 Proof.
   refine {| term_semantic_procedure_bodies := _ |}.
   intros Γ F procedure Hin.
-  set (body := analyzed_program_bodies program
+  set (body := analyzed_module_bodies certificates
     (pack_typed_procedure procedure) Hin).
   refine {| term_semantic_body_entry :=
       analyzed_body_entry _ _ body;
@@ -420,10 +412,10 @@ Proof.
   - exact (analyzed_body_entry_closed _ _ body).
   - exact (analyzed_body_exit_closed _ _ body).
   - exact (analyzed_body_exit_mask _ _ body).
-  - intros runtime formals atoms ambient Henvelope.
+  - intros runtime formals valuation ambient Henvelope.
     eapply term_analyzed_body_exit_mask_valid.
     + exact (Hcomplete Γ F procedure body).
-    + exact (analyzed_program_registered program procedure Hin).
+    + exact (analyzed_module_registered certificates procedure Hin).
     + exact Henvelope.
 Defined.
 
@@ -450,7 +442,7 @@ Lemma term_procedure_discard_assembly
     (Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression caller_frame (RuntimeLang.Val value))
       arguments values) :
-  let Hbody := (▷ (∀ stack_id frame,
+  let Hbody := (▷ □ (∀ stack_id frame,
       ⌜Forall2 (fun variable value => frame.(RuntimeLang.locals) !! variable =
           Some value)
           (RuntimeLang.proc_args
@@ -465,14 +457,14 @@ Lemma term_procedure_discard_assembly
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1 ∪
           list_to_set (RuntimeLang.proc_local_vars
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1⌝ -∗
-      {{{ RuntimeGhost.stack_frame_own stack_id frame ∗ p }}}
-        RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee))) @ mask
-      {{{ RET RuntimeLang.LitUnit; ∃ return_value frame',
+      RuntimeGhost.stack_frame_own stack_id frame ∗ p -∗
+      @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG mask
+        (RuntimeLang.proc_stmt
+          (runtime_procedure_entry  (pack_typed_procedure callee)) stack_id)
+        (fun result => ⌜result = RuntimeLang.LitUnit⌝ ∗ ∃ return_value frame',
           RuntimeGhost.stack_frame_own stack_id frame' ∗
           ⌜frame'.(RuntimeLang.locals) !! "#ret_val" = Some return_value⌝ ∗
-          q return_value }}}))%I in
+          q return_value)))%I in
   Hbody ∗ RuntimeGhost.stack_frame_own caller_id caller_frame ∗
     registered_procedure_chunk  (pack_typed_procedure callee) ∗ p ⊢
   @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG mask
@@ -525,7 +517,7 @@ Lemma term_procedure_store_assembly
     (Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression caller_frame (RuntimeLang.Val value))
       arguments values) :
-  let Hbody := (▷ (∀ stack_id frame,
+  let Hbody := (▷ □ (∀ stack_id frame,
       ⌜Forall2 (fun variable value => frame.(RuntimeLang.locals) !! variable =
           Some value)
           (RuntimeLang.proc_args
@@ -540,14 +532,14 @@ Lemma term_procedure_store_assembly
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1 ∪
           list_to_set (RuntimeLang.proc_local_vars
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1⌝ -∗
-      {{{ RuntimeGhost.stack_frame_own stack_id frame ∗ p }}}
-        RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee))) @ mask
-      {{{ RET RuntimeLang.LitUnit; ∃ return_value frame',
+      RuntimeGhost.stack_frame_own stack_id frame ∗ p -∗
+      @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG mask
+        (RuntimeLang.proc_stmt
+          (runtime_procedure_entry  (pack_typed_procedure callee)) stack_id)
+        (fun result => ⌜result = RuntimeLang.LitUnit⌝ ∗ ∃ return_value frame',
           RuntimeGhost.stack_frame_own stack_id frame' ∗
           ⌜frame'.(RuntimeLang.locals) !! "#ret_val" = Some return_value⌝ ∗
-          q return_value }}}))%I in
+          q return_value)))%I in
   Hbody ∗ RuntimeGhost.stack_frame_own caller_id caller_frame ∗
     registered_procedure_chunk  (pack_typed_procedure callee) ∗ p ⊢
   @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG mask
@@ -602,7 +594,7 @@ Lemma term_procedure_spawn_assembly
     (Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression caller_frame (RuntimeLang.Val value))
       arguments values) :
-  let Hbody := (▷ (∀ stack_id frame,
+  let Hbody := (▷ □ (∀ stack_id frame,
       ⌜Forall2 (fun variable value => frame.(RuntimeLang.locals) !! variable =
           Some value)
           (RuntimeLang.proc_args
@@ -617,11 +609,11 @@ Lemma term_procedure_spawn_assembly
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1 ∪
           list_to_set (RuntimeLang.proc_local_vars
             (runtime_procedure_entry  (pack_typed_procedure callee))).*1⌝ -∗
-      {{{ RuntimeGhost.stack_frame_own stack_id frame ∗ p }}}
-        RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee))) @ ⊤
-      {{{ RET RuntimeLang.LitUnit; True }}}))%I in
+      RuntimeGhost.stack_frame_own stack_id frame ∗ p -∗
+      @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG ⊤
+        (RuntimeLang.proc_stmt
+          (runtime_procedure_entry  (pack_typed_procedure callee)) stack_id)
+        (fun _ => True)))%I in
   Hbody ∗ RuntimeGhost.stack_frame_own caller_id caller_frame ∗
     registered_procedure_chunk  (pack_typed_procedure callee) ∗ p ⊢
   @RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG mask
@@ -657,7 +649,7 @@ Proof.
 Qed.
 
 Theorem term_verified_procedure_bodies_guarded
-    (program : term_semantic_program_certificates ) :
+    (certificates : term_semantic_module_certificates ) :
   all_registered_procedure_chunks  ∗ ▷ verified_procedure_specs  ⊢
     verified_procedure_specs .
 Proof.
@@ -665,7 +657,7 @@ Proof.
   iIntros "[#Hchunks #HIH]".
   iModIntro.
   iIntros (Γ F Δ pre post statement mask_pre mask_post entry exit
-    runtime formals binders atoms ambient) "Hobligation Hmask #Hworld Hpre".
+    runtime formals binders valuation ambient) "Hobligation Hmask #Hworld Hpre".
   iDestruct "Hmask" as %Hmask.
   iDestruct "Hobligation" as %Hobligation.
   destruct Hobligation.
@@ -686,25 +678,25 @@ Proof.
       (IR.symbolize_expr_list store arguments).
     { exact (instantiated_pre_coherent callee _ _ Hlookup Hpre_inst). }
     subst contract_pre.
-    destruct (term_interpreted_expr_list_total formals binders atoms
+    destruct (term_interpreted_expr_list_total formals binders valuation
       (IR.symbolize_expr_list store arguments)) as [values Hvalues].
     have Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression
         (RuntimeLang.StackFrame
           (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store)))
+          (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
         (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure)
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        formals binders atoms store
+        formals binders valuation store
         (RuntimeLang.StackFrame
           (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store))) arguments values).
+          (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
     have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
@@ -719,16 +711,16 @@ Proof.
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-      (term_interp_core formals binders atoms
+      (term_interp_core formals binders valuation
         (Hoare.procedure_pre_instantiation callee
           (IR.symbolize_expr_list store arguments)))
       (fun raw => (∃ return_value : tval (Assertion.procedure_return procedure),
         ⌜raw = @RuntimeErasure.tval_to_val _ (Assertion.procedure_return procedure) return_value⌝ ∗
-        term_interp_core formals (binder_cons return_value binders) atoms
+        term_interp_core formals (binder_cons return_value binders) valuation
           contract_post)%I)
       Hin Hlength Harguments).
     + iIntros (result) "[%Hunit Hpost]".
@@ -747,14 +739,12 @@ Proof.
         (pack_typed_procedure callee) Hin with "Hchunks") as "#Hchunk".
       iFrame "Hstack Hchunk Hcontract".
       iNext.
-      iIntros (stack_id frame) "%Hframe".
-      unfold RegionExecution.Primitives.Model.runtime_wp.
       iModIntro.
-      iIntros (Φ) "Hpre HΦ".
+      iIntros (stack_id frame) "%Hframe [Hcallee_frame Hcallee_contract]".
       pose proof (term_runtime_procedure_layout_configured
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
-      destruct Hlayout as [Hcallee_wf [Hcallee_fresh Hregistered]].
+      destruct Hlayout as [Hcallee_wf Hregistered].
       have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
       { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
@@ -763,31 +753,30 @@ Proof.
         Hframe_arguments, Hframe_locals, Hframe_dom.
       simpl in Hframe_arguments, Hframe_locals, Hframe_dom.
       destruct (@RegionExecution.Primitives.Model.procedure_entry_frame_corresponds _ _
-        callee_variables procedure atoms callee values frame Hcallee_wf
+        callee_variables procedure valuation callee values frame Hcallee_wf
         Hframe_arguments Hframe_locals Hframe_dom)
-        as (callee_atoms & Hagree & Hcorresponds & Hdom).
-      have Hframe_eq := @RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
+        as (callee_valuation & Hagree & Hcorresponds & Hdom).
+      pose proof (@RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)
-        (formal_env_of_values values) empty_binder_env callee_atoms
-        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom.
+        (formal_env_of_values values) empty_binder_env callee_valuation
+        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom) as Hframe_eq.
       subst frame.
       set (callee_runtime := @RegionExecution.Primitives.make_stack_context
         callee_variables stack_id
         (@RuntimeErasure.runtime_procedure_names _ _
           callee_variables procedure callee) Hnames).
-      iDestruct "Hpre" as "[Hcallee_frame Hcallee_contract]".
       iPoseProof (bi.equiv_entails_1_1 _ _
         (procedure_pre_instantiation_interp callee
           (IR.symbolize_expr_list store arguments)
-          formals binders atoms values Hvalues)
+          formals binders valuation values Hvalues)
         with "Hcallee_contract") as "Hcallee_contract".
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (term_interp_core_stable_atoms (formal_env_of_values values)
-          empty_binder_env atoms callee_atoms
+        (term_interp_core_constant_symbols (formal_env_of_values values)
+          empty_binder_env valuation callee_valuation
           (procedure_precondition _ _ callee) Hagree
           (procedure_precondition_entry_free _ Hcallee_wf))
         with "Hcallee_contract") as "Hcallee_contract".
-      set (body := term_semantic_procedure_bodies program
+      set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
         (GenericRegions.Atomicity.analysis_mask
@@ -811,101 +800,85 @@ Proof.
         RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
       { apply RegionExecution.Primitives.Model.active_runtime_mask_closed.
         exact (term_semantic_body_exit_closed _ body). }
-      iAssert (global_world_context atoms) with "[Hworld Hchunks HIH]"
+      iAssert (global_world_context valuation) with "[Hworld Hchunks HIH]"
         as "#Hglobal".
       { rewrite /global_world_context.
         iFrame "Hworld Hchunks HIH". }
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (global_world_context_stable_atoms atoms callee_atoms Hagree)
+        (global_world_context_constant_symbols valuation callee_valuation Hagree)
         with "Hglobal") as "#Hcallee_global".
       iPoseProof (@term_semantic_body_source_valid callee_variables procedure
         callee body
-        callee_runtime (formal_env_of_values values) callee_atoms
+        callee_runtime (formal_env_of_values values) callee_valuation
         (RegionExecution.Primitives.Model.active_runtime_mask ambient entry) Hexit_envelope) as "Hsource".
       iEval (unfold RuleValidity.translated_runtime_wp; rewrite Hregistered;
         rewrite Hentry_active Hexit_active) in "Hsource".
       iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-        (RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)))
+        (term_runtime_procedure_body (pack_typed_procedure callee) stack_id)
         (fun result =>
           (⌜result = RuntimeLang.LitUnit⌝ ∗
            |={RegionExecution.Primitives.Model.active_runtime_mask ambient entry}=>
-             global_world_context callee_atoms ∗
+             global_world_context callee_valuation ∗
              term_interp_resource_prenex
                callee_runtime (formal_env_of_values values) empty_binder_env
-               callee_atoms (Hoare.procedure_body_post callee
+               callee_valuation (Hoare.procedure_body_post callee
                  (term_semantic_body_exit_store _ body)
                  (term_semantic_body_return_reference _ body)))%I))
         with "[Hsource Hcallee_global Hcallee_frame Hcallee_contract]" as "Hwp".
       { iApply ("Hsource" with
           "[$Hcallee_global $Hcallee_frame $Hcallee_contract]"). }
-      have Hnotvalue : to_val
-        ((RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)) :
-            language.expr RuntimeLang.simp_lang)) = None.
-      { apply registered_runtime_procedure_nonvalue; exact Hin. }
-      iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-        (RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee)))) Φ)
-        with "[Hwp HΦ]" as "Htarget".
-      { iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
-        iApply (wp_step_fupd _ _ (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-          _ _ with "[HΦ]").
-        - rewrite Hnotvalue. constructor.
-        - set_solver.
-        - iApply (step_fupd_intro with "HΦ").
-          set_solver.
-        - iApply (wp_wand with "Hwp").
+      iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
+      unfold RegionExecution.Primitives.Model.runtime_wp.
+      iApply wp_fupd.
+      iApply (wp_wand with "Hwp").
           iIntros (result) "[%Hunit Hout]".
           subst result.
-          iIntros "HP".
           iMod "Hout" as "[_ Hbodypost]".
           iModIntro.
-          iApply "HP".
+          iSplit; first done.
           iPoseProof (bi.equiv_entails_1_1 _ _
             (procedure_body_post_interp callee
               (term_semantic_body_exit_store _ body)
               (term_semantic_body_return_reference _ body)
-              callee_runtime (formal_env_of_values values) callee_atoms)
+              callee_runtime (formal_env_of_values values) callee_valuation)
             with "[Hbodypost]") as (exit_values)
               "[Hexit_frame Hcallee_post]".
           { iExact "Hbodypost". }
           set (return_value := interp_ref (formal_env_of_values values)
-            (formal_env_of_values exit_values) callee_atoms
+            (formal_env_of_values exit_values) callee_valuation
             (term_semantic_body_return_reference _ body)).
           have Hreturn_lookup :
             @RegionExecution.Primitives.Model.concrete_locals _ callee_variables
               (@RuntimeErasure.runtime_procedure_names _ _
                 callee_variables procedure callee)
               (interp_store (formal_env_of_values values)
-                (formal_env_of_values exit_values) callee_atoms
+                (formal_env_of_values exit_values) callee_valuation
                 (term_semantic_body_exit_store _ body)) !! "#ret_val" =
             Some (@RuntimeErasure.tval_to_val _ _ return_value).
           { rewrite (@RegionExecution.Primitives.Model.concrete_procedure_return_lookup _ _
               callee_variables procedure _ callee (formal_env_of_values values)
-              (formal_env_of_values exit_values) callee_atoms
+              (formal_env_of_values exit_values) callee_valuation
               (term_semantic_body_exit_store _ body) Hnames).
             rewrite (term_semantic_body_exit_return _ body).
             reflexivity. }
           have Hvalues_weakened : interp_expr_list formals
-            (binder_cons return_value binders) atoms
+            (binder_cons return_value binders) valuation
             (weaken_expr_list (IR.symbolize_expr_list store arguments)) =
             Some values.
           { rewrite interp_weaken_expr_list. exact Hvalues. }
           iPoseProof (bi.equiv_entails_1_2 _ _
-            (term_interp_core_stable_atoms (formal_env_of_values values)
-              (binder_cons return_value empty_binder_env) atoms callee_atoms
+            (term_interp_core_constant_symbols (formal_env_of_values values)
+              (binder_cons return_value empty_binder_env) valuation callee_valuation
               (procedure_postcondition _ _ callee) Hagree
               (procedure_postcondition_entry_free _ Hcallee_wf))
             with "Hcallee_post") as "Hcallee_post".
           (* No [Hreturn] transport and no [UIP_refl]: the caller's result
              binder already has the declared return type. *)
-          have Hpost_equiv := procedure_post_instantiation_interp callee
+          pose proof (procedure_post_instantiation_interp callee
             (weaken_expr_list (IR.symbolize_expr_list store arguments))
             (ERef (RefBound MHere)) contract_post Hlookup Hpost_inst
-            formals binders atoms values return_value
-            Hvalues_weakened.
+            formals binders valuation values return_value
+            Hvalues_weakened) as Hpost_equiv.
           iPoseProof (bi.equiv_entails_1_2 _ _ Hpost_equiv
             with "Hcallee_post") as "Hcaller_post".
           iExists (@RuntimeErasure.tval_to_val _ _ return_value),
@@ -914,7 +887,7 @@ Proof.
            (@RuntimeErasure.runtime_procedure_names _ _
              callee_variables procedure callee)
                 (interp_store (formal_env_of_values values)
-                  (formal_env_of_values exit_values) callee_atoms
+                  (formal_env_of_values exit_values) callee_valuation
                   (term_semantic_body_exit_store _ body)))).
           iSplitL "Hexit_frame".
           { iEval (unfold RegionExecution.Primitives.Model.core_stack_own) in "Hexit_frame".
@@ -924,8 +897,6 @@ Proof.
           iExists return_value.
           iSplit; first done.
           iExact "Hcaller_post".
-      }
-      iExact "Htarget".
   - rename H into Hpre_inst.
     rename H0 into Hpost_inst.
     rename H1 into Hrequired.
@@ -943,21 +914,21 @@ Proof.
       (IR.symbolize_expr_list store arguments).
     { exact (instantiated_pre_coherent callee _ _ Hlookup Hpre_inst). }
     subst contract_pre.
-    destruct (term_interpreted_expr_list_total formals binders atoms
+    destruct (term_interpreted_expr_list_total formals binders valuation
       (IR.symbolize_expr_list store arguments)) as [values Hvalues].
     have Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression
         (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store)))
+          (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        formals binders atoms store
+        formals binders valuation store
         (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store))) arguments values).
+          (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
     have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
@@ -972,18 +943,18 @@ Proof.
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
       (@RuntimeErasure.runtime_variable Γ (Assertion.procedure_return procedure)
         (RegionExecution.Primitives.Model.runtime_names Γ runtime) target)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-      (term_interp_core formals binders atoms
+      (term_interp_core formals binders valuation
         (Hoare.procedure_pre_instantiation callee
           (IR.symbolize_expr_list store arguments)))
       (fun raw => (∃ return_value : tval (Assertion.procedure_return procedure),
         ⌜raw = @RuntimeErasure.tval_to_val _ (Assertion.procedure_return procedure) return_value⌝ ∗
-        term_interp_core formals (binder_cons return_value binders) atoms
+        term_interp_core formals (binder_cons return_value binders) valuation
           contract_post)%I)
       Hin Hlength Harguments).
     + iIntros (result) "[%Hunit Hpost]".
@@ -996,7 +967,7 @@ Proof.
       iSplitL "Hcaller".
       { iEval (unfold RegionExecution.Primitives.Model.core_stack_own) in "Hcaller".
         iApply (bi.equiv_entails_1_2 _ _
-          (term_stack_own_update runtime formals binders atoms store target
+          (term_stack_own_update runtime formals binders valuation store target
             return_value)).
         iExact "Hcaller". }
       iExact "Hpost".
@@ -1004,14 +975,12 @@ Proof.
         (pack_typed_procedure callee) Hin with "Hchunks") as "#Hchunk".
       iFrame "Hstack Hchunk Hcontract".
       iNext.
-      iIntros (stack_id frame) "%Hframe".
-      unfold RegionExecution.Primitives.Model.runtime_wp.
       iModIntro.
-      iIntros (Φ) "Hpre HΦ".
+      iIntros (stack_id frame) "%Hframe [Hcallee_frame Hcallee_contract]".
       pose proof (term_runtime_procedure_layout_configured
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
-      destruct Hlayout as [Hcallee_wf [Hcallee_fresh Hregistered]].
+      destruct Hlayout as [Hcallee_wf Hregistered].
       have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
       { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
@@ -1020,31 +989,30 @@ Proof.
         Hframe_arguments, Hframe_locals, Hframe_dom.
       simpl in Hframe_arguments, Hframe_locals, Hframe_dom.
       destruct (@RegionExecution.Primitives.Model.procedure_entry_frame_corresponds _ _
-        callee_variables procedure atoms callee values frame Hcallee_wf
+        callee_variables procedure valuation callee values frame Hcallee_wf
         Hframe_arguments Hframe_locals Hframe_dom)
-        as (callee_atoms & Hagree & Hcorresponds & Hdom).
-      have Hframe_eq := @RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
+        as (callee_valuation & Hagree & Hcorresponds & Hdom).
+      pose proof (@RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)
-        (formal_env_of_values values) empty_binder_env callee_atoms
-        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom.
+        (formal_env_of_values values) empty_binder_env callee_valuation
+        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom) as Hframe_eq.
       subst frame.
       set (callee_runtime := @RegionExecution.Primitives.make_stack_context
         callee_variables stack_id
         (@RuntimeErasure.runtime_procedure_names _ _
           callee_variables procedure callee) Hnames).
-      iDestruct "Hpre" as "[Hcallee_frame Hcallee_contract]".
       iPoseProof (bi.equiv_entails_1_1 _ _
         (procedure_pre_instantiation_interp callee
           (IR.symbolize_expr_list store arguments)
-          formals binders atoms values Hvalues)
+          formals binders valuation values Hvalues)
         with "Hcallee_contract") as "Hcallee_contract".
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (term_interp_core_stable_atoms (formal_env_of_values values)
-          empty_binder_env atoms callee_atoms
+        (term_interp_core_constant_symbols (formal_env_of_values values)
+          empty_binder_env valuation callee_valuation
           (procedure_precondition _ _ callee) Hagree
           (procedure_precondition_entry_free _ Hcallee_wf))
         with "Hcallee_contract") as "Hcallee_contract".
-      set (body := term_semantic_procedure_bodies program
+      set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
         (GenericRegions.Atomicity.analysis_mask
@@ -1068,101 +1036,85 @@ Proof.
         RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
       { apply RegionExecution.Primitives.Model.active_runtime_mask_closed.
         exact (term_semantic_body_exit_closed _ body). }
-      iAssert (global_world_context atoms) with "[Hworld Hchunks HIH]"
+      iAssert (global_world_context valuation) with "[Hworld Hchunks HIH]"
         as "#Hglobal".
       { rewrite /global_world_context.
         iFrame "Hworld Hchunks HIH". }
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (global_world_context_stable_atoms atoms callee_atoms Hagree)
+        (global_world_context_constant_symbols valuation callee_valuation Hagree)
         with "Hglobal") as "#Hcallee_global".
       iPoseProof (@term_semantic_body_source_valid callee_variables procedure
         callee body
-        callee_runtime (formal_env_of_values values) callee_atoms
+        callee_runtime (formal_env_of_values values) callee_valuation
         (RegionExecution.Primitives.Model.active_runtime_mask ambient entry) Hexit_envelope) as "Hsource".
       iEval (unfold RuleValidity.translated_runtime_wp; rewrite Hregistered;
         rewrite Hentry_active Hexit_active) in "Hsource".
       iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-        (RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)))
+        (term_runtime_procedure_body (pack_typed_procedure callee) stack_id)
         (fun result =>
           (⌜result = RuntimeLang.LitUnit⌝ ∗
            |={RegionExecution.Primitives.Model.active_runtime_mask ambient entry}=>
-             global_world_context callee_atoms ∗
+             global_world_context callee_valuation ∗
              term_interp_resource_prenex
                callee_runtime (formal_env_of_values values) empty_binder_env
-               callee_atoms (Hoare.procedure_body_post callee
+               callee_valuation (Hoare.procedure_body_post callee
                  (term_semantic_body_exit_store _ body)
                  (term_semantic_body_return_reference _ body)))%I))
         with "[Hsource Hcallee_global Hcallee_frame Hcallee_contract]" as "Hwp".
       { iApply ("Hsource" with
           "[$Hcallee_global $Hcallee_frame $Hcallee_contract]"). }
-      have Hnotvalue : to_val
-        ((RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)) :
-            language.expr RuntimeLang.simp_lang)) = None.
-      { apply registered_runtime_procedure_nonvalue; exact Hin. }
-      iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-        (RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee)))) Φ)
-        with "[Hwp HΦ]" as "Htarget".
-      { iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
-        iApply (wp_step_fupd _ _ (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-          _ _ with "[HΦ]").
-        - rewrite Hnotvalue. constructor.
-        - set_solver.
-        - iApply (step_fupd_intro with "HΦ").
-          set_solver.
-        - iApply (wp_wand with "Hwp").
+      iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
+      unfold RegionExecution.Primitives.Model.runtime_wp.
+      iApply wp_fupd.
+      iApply (wp_wand with "Hwp").
           iIntros (result) "[%Hunit Hout]".
           subst result.
-          iIntros "HP".
           iMod "Hout" as "[_ Hbodypost]".
           iModIntro.
-          iApply "HP".
+          iSplit; first done.
           iPoseProof (bi.equiv_entails_1_1 _ _
             (procedure_body_post_interp callee
               (term_semantic_body_exit_store _ body)
               (term_semantic_body_return_reference _ body)
-              callee_runtime (formal_env_of_values values) callee_atoms)
+              callee_runtime (formal_env_of_values values) callee_valuation)
             with "[Hbodypost]") as (exit_values)
               "[Hexit_frame Hcallee_post]".
           { iExact "Hbodypost". }
           set (return_value := interp_ref (formal_env_of_values values)
-            (formal_env_of_values exit_values) callee_atoms
+            (formal_env_of_values exit_values) callee_valuation
             (term_semantic_body_return_reference _ body)).
           have Hreturn_lookup :
             @RegionExecution.Primitives.Model.concrete_locals _ callee_variables
               (@RuntimeErasure.runtime_procedure_names _ _
                 callee_variables procedure callee)
               (interp_store (formal_env_of_values values)
-                (formal_env_of_values exit_values) callee_atoms
+                (formal_env_of_values exit_values) callee_valuation
                 (term_semantic_body_exit_store _ body)) !! "#ret_val" =
             Some (@RuntimeErasure.tval_to_val _ _ return_value).
           { rewrite (@RegionExecution.Primitives.Model.concrete_procedure_return_lookup _ _
               callee_variables procedure _ callee (formal_env_of_values values)
-                    (formal_env_of_values exit_values) callee_atoms
+                    (formal_env_of_values exit_values) callee_valuation
               (term_semantic_body_exit_store _ body) Hnames).
             rewrite (term_semantic_body_exit_return _ body).
             reflexivity. }
           have Hvalues_weakened : interp_expr_list formals
-            (binder_cons return_value binders) atoms
+            (binder_cons return_value binders) valuation
             (weaken_expr_list (IR.symbolize_expr_list store arguments))
             = Some values.
           { rewrite interp_weaken_expr_list. exact Hvalues. }
           iPoseProof (bi.equiv_entails_1_2 _ _
-            (term_interp_core_stable_atoms (formal_env_of_values values)
-              (binder_cons return_value empty_binder_env) atoms callee_atoms
+            (term_interp_core_constant_symbols (formal_env_of_values values)
+              (binder_cons return_value empty_binder_env) valuation callee_valuation
               (procedure_postcondition _ _ callee) Hagree
               (procedure_postcondition_entry_free _ Hcallee_wf))
             with "Hcallee_post") as "Hcallee_post".
           (* No [Hreturn] transport and no [UIP_refl]: the caller's result
              binder already has the declared return type. *)
-          have Hpost_equiv := procedure_post_instantiation_interp callee
+          pose proof (procedure_post_instantiation_interp callee
             (weaken_expr_list (IR.symbolize_expr_list store arguments))
             (ERef (RefBound MHere)) contract_post Hlookup Hpost_inst
-            formals binders atoms values return_value
-            Hvalues_weakened.
+            formals binders valuation values return_value
+            Hvalues_weakened) as Hpost_equiv.
           iPoseProof (bi.equiv_entails_1_2 _ _ Hpost_equiv
             with "Hcallee_post") as "Hcaller_post".
           iExists (@RuntimeErasure.tval_to_val _ _ return_value),
@@ -1171,7 +1123,7 @@ Proof.
               (@RuntimeErasure.runtime_procedure_names _ _
                 callee_variables procedure callee)
                 (interp_store (formal_env_of_values values)
-                  (formal_env_of_values exit_values) callee_atoms
+                  (formal_env_of_values exit_values) callee_valuation
                   (term_semantic_body_exit_store _ body)))).
           iSplitL "Hexit_frame".
           { iEval (unfold RegionExecution.Primitives.Model.core_stack_own) in "Hexit_frame".
@@ -1181,8 +1133,6 @@ Proof.
           iExists return_value.
           iSplit; first done.
           iExact "Hcaller_post".
-      }
-      iExact "Htarget".
   - rename H into Hpre_inst.
     rename H0 into Hrequired.
     iDestruct "Hpre" as "[Hstack Hcontract]".
@@ -1199,21 +1149,21 @@ Proof.
       (IR.symbolize_expr_list store arguments).
     { exact (instantiated_pre_coherent callee _ _ Hlookup Hpre_inst). }
     subst contract_pre.
-    destruct (term_interpreted_expr_list_total formals binders atoms
+    destruct (term_interpreted_expr_list_total formals binders valuation
       (IR.symbolize_expr_list store arguments)) as [values Hvalues].
     have Harguments : Forall2 (fun expression value =>
       RuntimeLang.expr_step expression
         (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store)))
+          (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        formals binders atoms store
+        formals binders valuation store
         (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-          (interp_store formals binders atoms store))) arguments values).
+          (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
     have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
@@ -1228,11 +1178,11 @@ Proof.
       (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (interp_store formals binders atoms store)))
+        (interp_store formals binders valuation store)))
       (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
-      (term_interp_core formals binders atoms
+      (term_interp_core formals binders valuation
         (Hoare.procedure_pre_instantiation callee
           (IR.symbolize_expr_list store arguments)))
       Hin Hlength Harguments).
@@ -1245,14 +1195,12 @@ Proof.
         (pack_typed_procedure callee) Hin with "Hchunks") as "#Hchunk".
       iFrame "Hstack Hchunk Hcontract".
       iNext.
-      iIntros (stack_id frame) "%Hframe".
-      unfold RegionExecution.Primitives.Model.runtime_wp.
       iModIntro.
-      iIntros (Φ) "Hpre HΦ".
+      iIntros (stack_id frame) "%Hframe [Hcallee_frame Hcallee_contract]".
       pose proof (term_runtime_procedure_layout_configured
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
-      destruct Hlayout as [Hcallee_wf [Hcallee_fresh Hregistered]].
+      destruct Hlayout as [Hcallee_wf Hregistered].
       have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
       { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
@@ -1261,31 +1209,30 @@ Proof.
         Hframe_arguments, Hframe_locals, Hframe_dom.
       simpl in Hframe_arguments, Hframe_locals, Hframe_dom.
       destruct (@RegionExecution.Primitives.Model.procedure_entry_frame_corresponds _ _
-        callee_variables procedure atoms callee values frame Hcallee_wf
+        callee_variables procedure valuation callee values frame Hcallee_wf
         Hframe_arguments Hframe_locals Hframe_dom)
-        as (callee_atoms & Hagree & Hcorresponds & Hdom).
-      have Hframe_eq := @RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
+        as (callee_valuation & Hagree & Hcorresponds & Hdom).
+      pose proof (@RegionExecution.Primitives.Model.stack_corresponds_canonical_frame_eq _ callee_variables (Assertion.procedure_args procedure) []
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)
-        (formal_env_of_values values) empty_binder_env callee_atoms
-        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom.
+        (formal_env_of_values values) empty_binder_env callee_valuation
+        (procedure_entry_store _ _ callee) frame Hnames Hcorresponds Hdom) as Hframe_eq.
       subst frame.
       set (callee_runtime := @RegionExecution.Primitives.make_stack_context
         callee_variables stack_id
         (@RuntimeErasure.runtime_procedure_names _ _
           callee_variables procedure callee) Hnames).
-      iDestruct "Hpre" as "[Hcallee_frame Hcallee_contract]".
       iPoseProof (bi.equiv_entails_1_1 _ _
         (procedure_pre_instantiation_interp callee
           (IR.symbolize_expr_list store arguments)
-          formals binders atoms values Hvalues)
+          formals binders valuation values Hvalues)
         with "Hcallee_contract") as "Hcallee_contract".
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (term_interp_core_stable_atoms (formal_env_of_values values)
-          empty_binder_env atoms callee_atoms
+        (term_interp_core_constant_symbols (formal_env_of_values values)
+          empty_binder_env valuation callee_valuation
           (procedure_precondition _ _ callee) Hagree
           (procedure_precondition_entry_free _ Hcallee_wf))
         with "Hcallee_contract") as "Hcallee_contract".
-      set (body := term_semantic_procedure_bodies program
+      set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
         (GenericRegions.Atomicity.analysis_mask
@@ -1299,76 +1246,56 @@ Proof.
         (term_semantic_body_exit _ body) = (⊤ : coPset).
       { apply RegionExecution.Primitives.Model.active_runtime_mask_closed.
         exact (term_semantic_body_exit_closed _ body). }
-      iAssert (global_world_context atoms) with "[Hworld Hchunks HIH]"
+      iAssert (global_world_context valuation) with "[Hworld Hchunks HIH]"
         as "#Hglobal".
       { rewrite /global_world_context.
         iFrame "Hworld Hchunks HIH". }
       iPoseProof (bi.equiv_entails_1_1 _ _
-        (global_world_context_stable_atoms atoms callee_atoms Hagree)
+        (global_world_context_constant_symbols valuation callee_valuation Hagree)
         with "Hglobal") as "#Hcallee_global".
       iPoseProof (@term_semantic_body_source_valid callee_variables procedure
         callee body
-        callee_runtime (formal_env_of_values values) callee_atoms
+        callee_runtime (formal_env_of_values values) callee_valuation
         (⊤ : coPset) Hexit_envelope) as "Hsource".
       iEval (unfold RuleValidity.translated_runtime_wp; rewrite Hregistered;
         rewrite Hentry_active Hexit_active) in "Hsource".
       iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (⊤ : coPset)
-        (RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)))
+        (term_runtime_procedure_body (pack_typed_procedure callee) stack_id)
         (fun result =>
           (⌜result = RuntimeLang.LitUnit⌝ ∗
-           |={⊤}=> global_world_context callee_atoms ∗
+           |={⊤}=> global_world_context callee_valuation ∗
              term_interp_resource_prenex
                callee_runtime (formal_env_of_values values) empty_binder_env
-               callee_atoms (Hoare.procedure_body_post callee
+               callee_valuation (Hoare.procedure_body_post callee
                  (term_semantic_body_exit_store _ body)
                  (term_semantic_body_return_reference _ body)))%I))
         with "[Hsource Hcallee_global Hcallee_frame Hcallee_contract]" as "Hwp".
       { iApply ("Hsource" with
           "[$Hcallee_global $Hcallee_frame $Hcallee_contract]"). }
-      have Hnotvalue : to_val
-        ((RuntimeLang.to_rtstmt stack_id
-          (term_runtime_procedure_statement  (pack_typed_procedure callee)) :
-            language.expr RuntimeLang.simp_lang)) = None.
-      { apply registered_runtime_procedure_nonvalue; exact Hin. }
-      iAssert (@RegionExecution.Primitives.Model.runtime_wp _ _ Σ RG (⊤ : coPset)
-        (RuntimeLang.to_rtstmt stack_id
-          (RuntimeLang.proc_stmt
-            (runtime_procedure_entry  (pack_typed_procedure callee)))) Φ)
-        with "[Hwp HΦ]" as "Htarget".
-      { iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
-        iApply (wp_step_fupd _ _ (⊤ : coPset) _ _ with "[HΦ]").
-        - rewrite Hnotvalue. constructor.
-        - set_solver.
-        - iApply (step_fupd_intro with "HΦ").
-          set_solver.
-        - iApply (wp_wand with "Hwp").
-          iIntros (result) "[%Hunit Hout]".
-          subst result.
-          iIntros "HP".
-          iMod "Hout" as "[Hglobal' Hbodypost']".
-          iModIntro.
-          iApply "HP".
-          done.
-      }
-      iExact "Htarget".
+      iEval (unfold RegionExecution.Primitives.Model.runtime_wp) in "Hwp".
+      unfold RegionExecution.Primitives.Model.runtime_wp.
+      iApply wp_fupd.
+      iApply (wp_wand with "Hwp").
+      iIntros (result) "[%Hunit Hout]". subst result.
+      iMod "Hout" as "[Hglobal' Hbodypost']".
+      done.
 Qed.
 
 (** Public procedure-level soundness theorem.  Its only explicit input is the
-    program's finite family of normalization proofs and certificates; the
+    module's finite family of normalization proofs and certificates; the
     recursive specification environment is constructed and closed here. *)
 
 (** Close the recursive procedure specification environment from the finite
-    program certificate package. *)
+    module certificate package. *)
 Theorem term_analyzed_configured_verified_procedure_specs_valid
     (Hcomplete : analyzed_normalization_complete)
-    (program : analyzed_program ) :
+    (certificates : analyzed_module ) :
   all_registered_procedure_chunks  ⊢
     verified_procedure_specs .
 Proof.
   apply verified_procedure_specs_valid.
   apply term_verified_procedure_bodies_guarded.
-  exact (term_analyzed_semantic_program Hcomplete program).
+  exact (term_analyzed_semantic_module Hcomplete certificates).
 Qed.
 
 End WithRuntime.

@@ -1,4 +1,4 @@
-From Coq Require Import List Program.Equality ZArith Lia
+From Coq Require Import List String Program.Equality ZArith Lia
   Logic.ProofIrrelevance Logic.FunctionalExtensionality.
 From stdpp Require Import gmap sets.
 
@@ -6,6 +6,7 @@ From raven Require Import verification.expressions verification.assertions verif
 
 Import ListNotations.
 Open Scope list_scope.
+Open Scope string_scope.
 
 (** The typed Raven Hoare calculus.  This module contains only
     syntax-directed proof rules; their semantic validation is a separate
@@ -476,9 +477,9 @@ Qed.
 
 Lemma interp_weaken_expr_tail {F Δ t u}
     (formals : formal_env F) (binders : binder_env (u :: Δ))
-    (atoms : atom_env) (expression : expr F Δ t) :
-  interp_expr formals binders atoms (weaken_expr (u := u) expression) =
-    interp_expr formals (tail_binder_env binders) atoms expression.
+    (valuation : symbol_valuation) (expression : expr F Δ t) :
+  interp_expr formals binders valuation (weaken_expr (u := u) expression) =
+    interp_expr formals (tail_binder_env binders) valuation expression.
 Proof.
   rewrite <- rename_bound_expr_weaken_local.
   apply interp_rename_bound_expr.
@@ -495,7 +496,7 @@ Proof.
   intro Hequal. induction Hequal.
   - apply ExprListEqualNil.
   - cbn [weaken_expr_list]. apply ExprListEqualCons.
-    + intros formals binders atoms Hcondition.
+    + intros formals binders valuation Hcondition.
       rewrite interp_weaken_expr_tail in Hcondition.
       rewrite interp_weaken_expr_tail.
       rewrite interp_weaken_expr_tail.
@@ -510,9 +511,9 @@ Definition pullback_binder_env {Δ Δ'}
 
 Lemma interp_rename_bound_expr_pullback {F Δ Δ' t}
     (renaming : bound_renaming Δ Δ') (formals : formal_env F)
-    (binders : binder_env Δ') (atoms : atom_env) (expression : expr F Δ t) :
-  interp_expr formals binders atoms (rename_bound_expr renaming expression) =
-    interp_expr formals (pullback_binder_env renaming binders) atoms expression.
+    (binders : binder_env Δ') (valuation : symbol_valuation) (expression : expr F Δ t) :
+  interp_expr formals binders valuation (rename_bound_expr renaming expression) =
+    interp_expr formals (pullback_binder_env renaming binders) valuation expression.
 Proof.
   apply interp_rename_bound_expr.
   intros. reflexivity.
@@ -530,7 +531,7 @@ Proof.
   intro Hequal. induction Hequal; cbn [rename_bound_expr_list].
   - constructor.
   - constructor.
-    + intros formals binders atoms Hcondition.
+    + intros formals binders valuation Hcondition.
       repeat rewrite interp_rename_bound_expr_pullback in *.
       eapply H; exact Hcondition.
     + exact IHHequal.
@@ -1575,6 +1576,360 @@ Class ProcedureContractCoherence := ProcedureContractCoherenceData {
     ResourceHoare.contract_post identity = procedure_postcondition _ _ procedure;
 }.
 End WithContracts.
+
+(** ** Decidable side conditions
+
+    Entry-freedom and procedure well-formedness are decidable; the boolean
+    checks below let a module's side conditions be established by
+    computation. *)
+Definition ref_entry_freeb {F Δ t} (reference : value_ref F Δ t) : bool :=
+  match reference with
+  | RefSymbol (ProcedureEntrySymbol _ _) => false
+  | _ => true
+  end.
+
+Fixpoint expr_entry_freeb {F Δ t} (expression : expr F Δ t) : bool :=
+  match expression with
+  | ERef reference => ref_entry_freeb reference
+  | EVal _ => true
+  | EUnOp _ operand => expr_entry_freeb operand
+  | EBinOp _ first second => expr_entry_freeb first && expr_entry_freeb second
+  end.
+
+Fixpoint expr_list_entry_freeb {F Δ ts} (expressions : expr_list F Δ ts) :
+    bool :=
+  match expressions with
+  | ExprNil => true
+  | ExprCons head tail => expr_entry_freeb head && expr_list_entry_freeb tail
+  end.
+
+Fixpoint core_entry_freeb {F Δ} (formula : Resource.core_assertion F Δ) :
+    bool :=
+  match formula with
+  | Resource.CExpr condition => expr_entry_freeb condition
+  | Resource.CPure _ => true
+  | Resource.COwn _ location chunk | Resource.CGhostOwn _ location chunk =>
+      expr_entry_freeb location && expr_entry_freeb chunk
+  | Resource.CFpuAllowed _ old_chunk new_chunk =>
+      expr_entry_freeb old_chunk && expr_entry_freeb new_chunk
+  | Resource.CRAValid _ chunk => expr_entry_freeb chunk
+  | Resource.CExists _ body | Resource.CForall _ body => core_entry_freeb body
+  | Resource.CIte condition then_branch else_branch =>
+      expr_entry_freeb condition && core_entry_freeb then_branch &&
+        core_entry_freeb else_branch
+  | Resource.CInvariant _ args | Resource.CPredicate _ args =>
+      expr_list_entry_freeb args
+  | Resource.CAnd left_formula right_formula =>
+      core_entry_freeb left_formula && core_entry_freeb right_formula
+  end.
+
+Lemma expr_entry_freeb_sound {F Δ t} (expression : expr F Δ t) :
+  expr_entry_freeb expression = true -> expr_entry_free expression.
+Proof.
+  induction expression as [t reference | | | ]; simpl.
+  - destruct reference as [| | t [] ]; simpl; done.
+  - done.
+  - done.
+  - rewrite andb_true_iff. tauto.
+Qed.
+
+Lemma expr_list_entry_freeb_sound {F Δ ts} (expressions : expr_list F Δ ts) :
+  expr_list_entry_freeb expressions = true -> expr_list_entry_free expressions.
+Proof.
+  induction expressions; simpl; [done |].
+  rewrite andb_true_iff. intros [Hhead Htail].
+  split; [apply expr_entry_freeb_sound |]; auto.
+Qed.
+
+Lemma core_entry_freeb_sound {F Δ} (formula : Resource.core_assertion F Δ) :
+  core_entry_freeb formula = true -> Resource.core_entry_free formula.
+Proof.
+  induction formula; simpl; rewrite ?andb_true_iff;
+    intuition eauto using expr_entry_freeb_sound, expr_list_entry_freeb_sound.
+Qed.
+
+Local Instance in_nat_decision (index : nat) (indices : list nat) :
+  Decision (In index indices) := in_dec Nat.eq_dec index indices.
+
+Local Instance in_string_decision (name : string) (names : list string) :
+  Decision (In name names) := in_dec string_dec name names.
+
+Definition procedure_wfb {Γ identity} (procedure : typed_procedure Γ identity) :
+    bool :=
+  bool_decide (NoDup (named_context_names (procedure_variables _ _ procedure))) &&
+  bool_decide (~ List.In "#ret_val"
+    (named_context_names (procedure_variables _ _ procedure))) &&
+  bool_decide (NoDup (pvar_list_indices
+    (procedure_formal_variables _ _ procedure))) &&
+  bool_decide (~ In (member_index (procedure_return_variable _ _ procedure))
+    (pvar_list_indices (procedure_formal_variables _ _ procedure))) &&
+  core_entry_freeb (procedure_precondition _ _ procedure) &&
+  core_entry_freeb (procedure_postcondition _ _ procedure).
+
+Lemma procedure_wfb_sound {Γ identity} (procedure : typed_procedure Γ identity) :
+  procedure_wfb procedure = true -> procedure_wf procedure.
+Proof.
+  unfold procedure_wfb. rewrite !andb_true_iff, !bool_decide_eq_true.
+  intros [[[[[Hnames Hreserved] Hformals] Hreturn] Hpre] Hpost].
+  constructor.
+  - apply NoDup_ListNoDup. exact Hnames.
+  - exact Hreserved.
+  - apply NoDup_ListNoDup. exact Hformals.
+  - exact Hreturn.
+  - apply core_entry_freeb_sound. exact Hpre.
+  - apply core_entry_freeb_sound. exact Hpost.
+Qed.
+
+Definition packed_procedure_wfb (procedure : packed_typed_procedure) : bool :=
+  procedure_wfb (projT2 (projT2 procedure)).
+
+Lemma packed_procedures_wfb_sound procedures :
+  forallb packed_procedure_wfb procedures = true ->
+  Forall packed_procedure_wf procedures.
+Proof.
+  rewrite forallb_forall, Forall_forall.
+  intros Hwf procedure Hin. apply procedure_wfb_sound, Hwf. apply elem_of_list_In, Hin.
+Qed.
+
+(** A procedure table from its entries, when their identities are distinct
+    and every entry is well formed. *)
+Definition procedure_table (procedures : list packed_typed_procedure) :
+    option typed_procedure_environment :=
+  match bool_decide (NoDup (map packed_procedure_id procedures)) as ids,
+        forallb packed_procedure_wfb procedures as wf
+    return bool_decide (NoDup (map packed_procedure_id procedures)) = ids ->
+      forallb packed_procedure_wfb procedures = wf ->
+      option typed_procedure_environment with
+  | true, true => fun Hids Hwf =>
+      Some (TypedProcedureEnvironment procedures
+        (proj1 (NoDup_ListNoDup _) (bool_decide_eq_true_1 _ Hids))
+        (packed_procedures_wfb_sound _ Hwf)
+        (procedure_signature_coherent_of_nodup _
+          (proj1 (NoDup_ListNoDup _) (bool_decide_eq_true_1 _ Hids))))
+  | _, _ => fun _ _ => None
+  end eq_refl eq_refl.
+
+(** ** Modules
+
+    A module is its procedure table together with its predicates and
+    invariants and their bodies.  Its contract environment and the coherence
+    of that environment with the table are derived: a procedure's contract
+    is the one its table entry declares. *)
+Definition procedure_contract_invariants_declared
+    (predicates : list pred_id)
+    (predicate_body : forall predicate,
+      Resource.core_assertion (predicate_args predicate) [])
+    (invariants : list inv_id) (packed : packed_typed_procedure) : Prop :=
+  match packed with
+  | existT _ (existT _ procedure) =>
+      ResourceHoare.contract_invariants predicate_body predicates
+        (procedure_precondition _ _ procedure) ⊆ list_to_set invariants /\
+      ResourceHoare.contract_invariants predicate_body predicates
+        (procedure_postcondition _ _ procedure) ⊆ list_to_set invariants
+  end.
+
+#[global] Instance procedure_contract_invariants_declared_decision
+    predicates predicate_body invariants packed :
+    Decision (procedure_contract_invariants_declared
+      predicates predicate_body invariants packed).
+Proof. destruct packed as [Γ [identity procedure]]. apply _. Defined.
+
+Record module := ModuleData {
+  module_procedures : typed_procedure_environment;
+  module_predicates : list pred_id;
+  module_predicate_body : forall predicate,
+    Resource.core_assertion (predicate_args predicate) [];
+  module_predicate_body_entry_free : forall predicate,
+    Resource.core_entry_free (module_predicate_body predicate);
+  module_invariants : list inv_id;
+  module_invariant_body : forall invariant,
+    Resource.core_assertion (invariant_args invariant) [];
+  module_invariant_body_entry_free : forall invariant,
+    Resource.core_entry_free (module_invariant_body invariant);
+  module_contract_invariants_declared :
+    Forall (procedure_contract_invariants_declared module_predicates
+      module_predicate_body module_invariants)
+      (procedure_entries module_procedures);
+}.
+
+Section WithModule.
+Variable M : module.
+
+(** Undeclared procedures are never verified, so their placeholder contracts
+    are never consulted. *)
+Definition module_contract_pre (procedure : proc_id) :
+    Resource.core_assertion (procedure_args procedure) [] :=
+  match lookup_typed_procedure_at procedure
+          (procedure_entries (module_procedures M)) with
+  | Some (existT _ callee) => procedure_precondition _ _ callee
+  | None => Resource.CPure True
+  end.
+
+Definition module_contract_post (procedure : proc_id) :
+    Resource.core_assertion (procedure_args procedure)
+      (return_context (procedure_return procedure)) :=
+  match lookup_typed_procedure_at procedure
+          (procedure_entries (module_procedures M)) with
+  | Some (existT _ callee) => procedure_postcondition _ _ callee
+  | None => Resource.CPure True
+  end.
+
+Definition module_procedure_verified (procedure : proc_id) : Prop :=
+  lookup_typed_procedure (module_procedures M) procedure <> None.
+
+Definition module_contracts : ResourceHoare.ResourceContractEnv :=
+  ResourceHoare.ResourceContractEnvData (module_predicates M)
+    (module_predicate_body M) (module_predicate_body_entry_free M)
+    (module_invariant_body M) (module_invariant_body_entry_free M)
+    module_contract_pre module_contract_post module_procedure_verified.
+
+Definition module_procedure_selects identity :
+    module_procedure_verified identity ->
+    { callee_variables : context &
+      { procedure : typed_procedure callee_variables identity |
+        lookup_typed_procedure (module_procedures M) identity =
+          Some (pack_typed_procedure procedure) } }.
+Proof.
+  intros Hverified.
+  pose proof (lookup_typed_procedure_at_spec identity
+    (procedure_entries (module_procedures M))) as Hspec.
+  destruct (lookup_typed_procedure_at identity
+    (procedure_entries (module_procedures M)))
+    as [[callee_variables callee] |].
+  - exists callee_variables, callee. exact Hspec.
+  - exfalso. apply Hverified. exact Hspec.
+Defined.
+
+Lemma module_lookup_at {Γ identity} (procedure : typed_procedure Γ identity) :
+  lookup_typed_procedure (module_procedures M) identity =
+    Some (pack_typed_procedure procedure) ->
+  lookup_typed_procedure_at identity
+      (procedure_entries (module_procedures M)) =
+    Some (existT Γ procedure).
+Proof.
+  intros Hlookup.
+  pose proof (lookup_typed_procedure_at_spec identity
+    (procedure_entries (module_procedures M))) as Hspec.
+  destruct (lookup_typed_procedure_at identity
+    (procedure_entries (module_procedures M)))
+    as [[callee_variables callee] |].
+  - assert (Hpack : pack_typed_procedure callee =
+      pack_typed_procedure procedure).
+    { apply (lookup_packed_procedure_unique identity
+        (procedure_entries (module_procedures M))).
+      - exact (procedure_ids_unique (module_procedures M)).
+      - exact Hspec.
+      - exact Hlookup. }
+    dependent destruction Hpack. reflexivity.
+  - unfold lookup_typed_procedure in Hlookup.
+    rewrite Hlookup in Hspec. discriminate Hspec.
+Qed.
+
+Lemma module_contract_pre_coherent callee_variables identity
+    (procedure : typed_procedure callee_variables identity) :
+  lookup_typed_procedure (module_procedures M) identity =
+    Some (pack_typed_procedure procedure) ->
+  module_contract_pre identity = procedure_precondition _ _ procedure.
+Proof.
+  intros Hlookup. unfold module_contract_pre.
+  rewrite (module_lookup_at procedure Hlookup). reflexivity.
+Qed.
+
+Lemma module_contract_post_coherent callee_variables identity
+    (procedure : typed_procedure callee_variables identity) :
+  lookup_typed_procedure (module_procedures M) identity =
+    Some (pack_typed_procedure procedure) ->
+  module_contract_post identity = procedure_postcondition _ _ procedure.
+Proof.
+  intros Hlookup. unfold module_contract_post.
+  rewrite (module_lookup_at procedure Hlookup). reflexivity.
+Qed.
+
+Definition module_coherence :
+    @ProcedureContractCoherence module_contracts :=
+  @ProcedureContractCoherenceData module_contracts
+    (module_procedures M) module_procedure_selects
+    module_contract_pre_coherent module_contract_post_coherent.
+End WithModule.
+
+(** Declared bodies, looked up by identity.  Undeclared invariants are
+    trivial and undeclared predicates are false; a body that is not
+    entry-free is replaced by the default, which the elaborator never
+    produces. *)
+Fixpoint lookup_invariant_body
+    (bodies : list { invariant : inv_id &
+      Resource.core_assertion (invariant_args invariant) [] })
+    (invariant : inv_id) : Resource.core_assertion (invariant_args invariant) [] :=
+  match bodies with
+  | [] => Resource.CPure True
+  | existT declared body :: bodies' =>
+      match decide (declared = invariant) with
+      | left equal =>
+          if core_entry_freeb body
+          then eq_rect declared
+            (fun invariant => Resource.core_assertion (invariant_args invariant) [])
+            body invariant equal
+          else Resource.CPure True
+      | right _ => lookup_invariant_body bodies' invariant
+      end
+  end.
+
+Fixpoint lookup_predicate_body
+    (bodies : list { predicate : pred_id &
+      Resource.core_assertion (predicate_args predicate) [] })
+    (predicate : pred_id) : Resource.core_assertion (predicate_args predicate) [] :=
+  match bodies with
+  | [] => Resource.CPure False
+  | existT declared body :: bodies' =>
+      match decide (declared = predicate) with
+      | left equal =>
+          if core_entry_freeb body
+          then eq_rect declared
+            (fun predicate => Resource.core_assertion (predicate_args predicate) [])
+            body predicate equal
+          else Resource.CPure False
+      | right _ => lookup_predicate_body bodies' predicate
+      end
+  end.
+
+Lemma lookup_invariant_body_entry_free bodies invariant :
+  Resource.core_entry_free (lookup_invariant_body bodies invariant).
+Proof.
+  induction bodies as [| [declared body] bodies' IH]; simpl; [exact I |].
+  destruct (decide (declared = invariant)) as [-> |]; [| exact IH].
+  destruct (core_entry_freeb body) eqn:Hfree; [| exact I].
+  exact (core_entry_freeb_sound _ Hfree).
+Qed.
+
+Lemma lookup_predicate_body_entry_free bodies predicate :
+  Resource.core_entry_free (lookup_predicate_body bodies predicate).
+Proof.
+  induction bodies as [| [declared body] bodies' IH]; simpl; [exact I |].
+  destruct (decide (declared = predicate)) as [-> |]; [| exact IH].
+  destruct (core_entry_freeb body) eqn:Hfree; [| exact I].
+  exact (core_entry_freeb_sound _ Hfree).
+Qed.
+
+Definition make_module (procedures : typed_procedure_environment)
+    (predicates : list { predicate : pred_id &
+      Resource.core_assertion (predicate_args predicate) [] })
+    (invariants : list { invariant : inv_id &
+      Resource.core_assertion (invariant_args invariant) [] })
+    (Hdeclared : Forall (procedure_contract_invariants_declared
+      (map (@projT1 _ _) predicates) (lookup_predicate_body predicates)
+      (map (@projT1 _ _) invariants)) (procedure_entries procedures)) : module :=
+  ModuleData procedures (map (@projT1 _ _) predicates)
+    (lookup_predicate_body predicates)
+    (lookup_predicate_body_entry_free predicates)
+    (map (@projT1 _ _) invariants)
+    (lookup_invariant_body invariants)
+    (lookup_invariant_body_entry_free invariants) Hdeclared.
+
+(** The typed procedure a module declares under an identifier. *)
+Definition module_procedure (M : module) (identity : proc_id) :
+    option { Γ : context & typed_procedure Γ identity } :=
+  lookup_typed_procedure_at identity (procedure_entries (module_procedures M)).
+
 End WithSignature.
 
 End Hoare.

@@ -1,6 +1,6 @@
 From Coq Require Import List String ZArith Program.Equality Lia
   Logic.ProofIrrelevance ClassicalEpsilon.
-From stdpp Require Import countable gmap namespaces sets.
+From stdpp Require Import countable gmap namespaces sets strings pretty.
 
 From iris.algebra Require Import auth gset.
 From iris.base_logic Require Import fancy_updates.
@@ -16,10 +16,10 @@ Open Scope list_scope.
 Module RuntimeModel := InvTokens.
 Module RuntimeLang := raven.runtime.lang.
 
-(** The runtime erasure: everything from the typed program to the machine
-    program it runs -- expressions, field initializers, and the total
-    statement erasure [runtime_stmt] -- together with the runtime's resource
-    algebra values and program naming configuration. *)
+(** Runtime erasure maps typed statements, expressions, and field
+    initializers to their runtime forms. This module also defines the
+    runtime resource-algebra values and the runtime names of module
+    declarations. *)
 Module RuntimeErasure.
 
 Import Core IR Translation.
@@ -59,30 +59,35 @@ End WithRAs.
 End RAValues.
 #[global] Existing Instance RAValues.ra_values.
 
-(** Resource-independent program configuration: the runtime names and
-    namespaces a program's declarations map to.  These choices are fixed by
-    the Raven program and remain meaningful before Iris allocates any ghost
-    names. *)
-Class RuntimeConfiguration := RuntimeConfigurationData {
-  field_name : field_id -> RuntimeLang.fld_name;
-  field_name_injective : Inj (=) (=) field_name;
-  invariant_name : inv_id -> RuntimeModel.inv_name;
-  invariant_name_injective : Inj (=) (=) invariant_name;
-  invariant_namespace : inv_id -> namespace;
-  invariant_namespaces_disjoint : forall left right,
-    left ≠ right ->
-    (↑(invariant_namespace left) : coPset) ## ↑(invariant_namespace right);
-  ghost_heap_namespace : namespace;
-  invariant_ghost_namespace_disjoint : forall invariant,
-    (↑(invariant_namespace invariant) : coPset) ## ↑ghost_heap_namespace;
-  procedure_name : proc_id -> RuntimeLang.proc_name;
-  procedure_name_injective : Inj (=) (=) procedure_name;
-}.
+(** Runtime names and namespaces of module declarations. The proofs
+    rely only on the injectivity and disjointness facts below, so the names
+    are fixed here rather than chosen separately by each module. *)
+Definition field_name (field : field_id) : RuntimeLang.fld_name := pretty field.
+Definition invariant_name (invariant : inv_id) : RuntimeModel.inv_name :=
+  pretty invariant.
+Definition procedure_name (procedure : proc_id) : RuntimeLang.proc_name :=
+  pretty procedure.
+Definition invariant_namespace (invariant : inv_id) : namespace :=
+  nroot .@ "invariant" .@ invariant.
+Definition ghost_heap_namespace : namespace := nroot .@ "ghost_heap".
+
+#[global] Instance field_name_injective : Inj (=) (=) field_name := _.
+#[global] Instance invariant_name_injective : Inj (=) (=) invariant_name := _.
+#[global] Instance procedure_name_injective : Inj (=) (=) procedure_name := _.
+
+Lemma invariant_namespaces_disjoint left right :
+  left ≠ right ->
+  (↑(invariant_namespace left) : coPset) ## ↑(invariant_namespace right).
+Proof. apply ndot_ne_disjoint. Qed.
+
+Lemma invariant_ghost_namespace_disjoint invariant :
+  (↑(invariant_namespace invariant) : coPset) ## ↑ghost_heap_namespace.
+Proof. apply ndot_preserve_disjoint_l, ndot_ne_disjoint. done. Qed.
 
 (** Runtime representation of Raven's trusted atomic-block primitive.
 
     Atomic blocks are declarations about the modeled hardware substrate, not
-    obligations attached to individual programs.  The framework therefore
+    obligations attached to individual modules. The framework therefore
     supplies their opaque transition uniformly.  Its semantic content is the
     global [term_trusted_atomic_runtime_refinement] assumption at the
     certified Iris boundary; examples neither define this relation nor prove
@@ -92,9 +97,8 @@ Axiom trusted_atomic_transition : forall {RAs : RAConfig}
   stmt Γ -> RuntimeLang.trusted_atomic_transition.
 
 
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}.
 (** The fixed Iris mask envelope in which a certified region executes. *)
 Definition ambient_mask : Type := coPset.
 
@@ -121,7 +125,7 @@ Definition runtime_type (t : Core.typ) : RuntimeLang.typ :=
 
 (** Every dynamically typed runtime value has a typed representative.  This
     is the bridge used when a freshly-created procedure frame determines the
-    interpretation of that invocation's canonical entry atoms. *)
+    interpretation of that invocation's canonical entry valuation. *)
 Lemma val_has_typ_tval {t} (value : RuntimeLang.val) :
   RuntimeLang.val_has_typ value (runtime_type t) ->
   exists typed_value : tval t, tval_to_val typed_value = value.
@@ -250,17 +254,13 @@ Qed.
 Lemma runtime_procedure_names_nodup {Γ F}
     (procedure : typed_procedure Γ F) :
   procedure_wf procedure ->
-  ~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure)) ->
   NoDup (runtime_variables (runtime_procedure_names procedure)).
 Proof.
-  intros Hwf Hfresh. apply runtime_variables_rename_named_context_at_nodup.
+  intros Hwf. apply runtime_variables_rename_named_context_at_nodup.
   - change (NoDup
       (named_context_names (procedure_variables _ _ procedure))).
     apply NoDup_ListNoDup. exact (procedure_variable_names_unique _ Hwf).
-  - change (~ List.In "#ret_val"
-      (named_context_names (procedure_variables _ _ procedure))).
-    exact Hfresh.
+  - exact (procedure_reserved_return_fresh _ Hwf).
 Qed.
 
 (** The runtime procedure record uses untyped declaration lists.  These
@@ -421,56 +421,96 @@ Proof.
   simpl. exact Hnot.
 Qed.
 
-Definition entry_atom_realizes {Γ} (identity : proc_id)
+Definition entry_symbol_realizes {Γ} (identity : proc_id)
     (names : named_context Γ) (formal_indices : list nat)
-    (frame : RuntimeLang.stack_frame) {t} (symbolic : atom t)
+    (frame : RuntimeLang.stack_frame) {t} (symbolic : symbol t)
     (value : tval t) : Prop :=
   forall variable : pvar Γ t,
-    symbolic = ProcedureEntryAtom identity (member_index variable) ->
+    symbolic = ProcedureEntrySymbol identity (member_index variable) ->
     ~ In (member_index variable) formal_indices ->
     frame.(RuntimeLang.locals) !! runtime_variable names variable =
       Some (tval_to_val value).
 
-Definition frame_entry_atoms {Γ} (caller_atoms : atom_env)
+(** The variable of a given type at a given slot, if there is one. *)
+Fixpoint member_at (Γ : context) (t : typ) (slot : nat) : option (member Γ t) :=
+  match Γ return option (member Γ t) with
+  | [] => None
+  | u :: Γ' =>
+      match slot with
+      | O =>
+          match typ_eq_dec u t with
+          | left equal => Some (eq_rect u (fun v => member (u :: Γ') v) MHere t equal)
+          | right _ => None
+          end
+      | S slot' =>
+          match member_at Γ' t slot' with
+          | Some variable => Some (MThere variable)
+          | None => None
+          end
+      end
+  end.
+
+Lemma member_at_sound Γ t slot (variable : member Γ t) :
+  member_at Γ t slot = Some variable -> member_index variable = slot.
+Proof.
+  revert slot variable. induction Γ as [| u Γ IH]; intros slot variable;
+    simpl; [discriminate |].
+  destruct slot as [| slot].
+  - destruct (typ_eq_dec u t) as [<- |]; [| discriminate].
+    intros [= <-]. reflexivity.
+  - destruct (member_at Γ t slot) as [variable' |] eqn:Hat; [| discriminate].
+    intros [= <-]. simpl. f_equal. exact (IH _ _ Hat).
+Qed.
+
+Lemma member_at_complete Γ t (variable : member Γ t) :
+  member_at Γ t (member_index variable) = Some variable.
+Proof.
+  induction variable as [Γ t | Γ t u variable IH]; simpl.
+  - destruct (typ_eq_dec t t) as [equal |]; [| contradiction].
+    rewrite (Eqdep_dec.UIP_dec typ_eq_dec equal eq_refl). reflexivity.
+  - rewrite IH. reflexivity.
+Qed.
+
+Definition frame_entry_symbol_valuation {Γ} (caller_valuation : symbol_valuation)
     (identity : proc_id) (names : named_context Γ)
     (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
-    (Hrealizable : forall t (symbolic : atom t),
+    (Hrealizable : forall t (symbolic : symbol t),
       exists value : tval t,
-        entry_atom_realizes identity names formal_indices frame symbolic value)
-    : atom_env :=
+        entry_symbol_realizes identity names formal_indices frame symbolic value)
+    : symbol_valuation :=
   fun t symbolic =>
     match symbolic as selected return tval _ with
-    | Atom id => caller_atoms _ (Atom id)
-    | ProcedureEntryAtom procedure slot =>
-        epsilon (inhabits (default_tval t))
-          (entry_atom_realizes identity names formal_indices frame
-            (ProcedureEntryAtom procedure slot))
+    | ConstantSymbol id => caller_valuation _ (ConstantSymbol id)
+    | ProcedureEntrySymbol procedure slot =>
+        proj1_sig (constructive_indefinite_description _
+          (Hrealizable t (ProcedureEntrySymbol procedure slot)))
     end.
 
-Lemma frame_entry_atoms_stable {Γ} (caller_atoms : atom_env)
+Lemma frame_entry_symbol_valuation_stable {Γ} (caller_valuation : symbol_valuation)
     (identity : proc_id) (names : named_context Γ)
     (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
     Hrealizable :
-  stable_atoms_agree caller_atoms
-    (frame_entry_atoms caller_atoms identity names formal_indices frame
+  constant_symbols_agree caller_valuation
+    (frame_entry_symbol_valuation caller_valuation identity names formal_indices frame
       Hrealizable).
 Proof. intros t symbolic. destruct symbolic; simpl; reflexivity. Qed.
 
-Lemma frame_entry_atoms_realize {Γ} (caller_atoms : atom_env)
+Lemma frame_entry_symbol_valuation_realize {Γ} (caller_valuation : symbol_valuation)
     (identity : proc_id) (names : named_context Γ)
     (formal_indices : list nat) (frame : RuntimeLang.stack_frame)
-  Hrealizable t (symbolic : atom t) :
-  entry_atom_realizes identity names formal_indices frame symbolic
-    (frame_entry_atoms caller_atoms identity names formal_indices frame
+  Hrealizable t (symbolic : symbol t) :
+  entry_symbol_realizes identity names formal_indices frame symbolic
+    (frame_entry_symbol_valuation caller_valuation identity names formal_indices frame
       Hrealizable t symbolic).
 Proof.
   destruct symbolic as [id | procedure slot].
   - intros variable Hbad _. discriminate Hbad.
-  - unfold frame_entry_atoms. simpl. apply epsilon_spec. exact (Hrealizable _
-      (ProcedureEntryAtom procedure slot)).
+  - unfold frame_entry_symbol_valuation. simpl.
+    exact (proj2_sig (constructive_indefinite_description _
+      (Hrealizable t (ProcedureEntrySymbol procedure slot)))).
 Qed.
 
-Lemma frame_entry_atoms_exist {Γ} (caller_atoms : atom_env)
+Lemma frame_entry_symbol_valuation_exist {Γ} (caller_valuation : symbol_valuation)
     (identity : proc_id) (names : named_context Γ)
     (formal_indices : list nat) (frame : RuntimeLang.stack_frame) :
   (forall t (variable : pvar Γ t),
@@ -478,63 +518,70 @@ Lemma frame_entry_atoms_exist {Γ} (caller_atoms : atom_env)
     exists value : tval t,
       frame.(RuntimeLang.locals) !! runtime_variable names variable =
         Some (tval_to_val value)) ->
-  exists callee_atoms : atom_env,
-    stable_atoms_agree caller_atoms callee_atoms /\
+  exists callee_valuation : symbol_valuation,
+    constant_symbols_agree caller_valuation callee_valuation /\
     forall t (variable : pvar Γ t),
       ~ In (member_index variable) formal_indices ->
       frame.(RuntimeLang.locals) !! runtime_variable names variable =
         Some (tval_to_val
-          (callee_atoms t
-            (ProcedureEntryAtom identity (member_index variable)))).
+          (callee_valuation t
+            (ProcedureEntrySymbol identity (member_index variable)))).
 Proof.
   intros Htyped.
-  assert (Hrealizable : forall t (symbolic : atom t),
+  assert (Hrealizable : forall t (symbolic : symbol t),
       exists value : tval t,
-        entry_atom_realizes identity names formal_indices frame symbolic value).
+        entry_symbol_realizes identity names formal_indices frame symbolic value).
   { intros t symbolic.
-    destruct (classic (exists variable : pvar Γ t,
-      symbolic = ProcedureEntryAtom identity (member_index variable) /\
-      ~ In (member_index variable) formal_indices)) as [Hexists | Hnone].
-    - destruct Hexists as (variable & Hsymbolic & Hnot).
-      destruct (Htyped t variable Hnot) as (value & Hvalue).
-      exists value. intros other Hother Hother_not.
-      have Hindices : member_index variable = member_index other.
-      { rewrite Hsymbolic in Hother. inversion Hother. reflexivity. }
-      have -> : other = variable.
-      { apply member_index_injective. symmetry. exact Hindices. }
-      exact Hvalue.
-    - exists (default_tval t). intros variable Hsymbolic Hnot.
-      exfalso. apply Hnone. exists variable. auto.
+    destruct symbolic as [id | procedure slot].
+    { exists (default_tval t). intros variable Hbad _. discriminate Hbad. }
+    destruct (decide (procedure = identity)) as [-> | Hother_procedure].
+    2: { exists (default_tval t). intros variable Hsymbolic _.
+         injection Hsymbolic as Hprocedure _. contradiction. }
+    destruct (member_at Γ t slot) as [variable |] eqn:Hat.
+    2: { exists (default_tval t). intros variable Hsymbolic _.
+         injection Hsymbolic as ->.
+         rewrite member_at_complete in Hat. discriminate Hat. }
+    pose proof (member_at_sound _ _ _ _ Hat) as Hslot.
+    destruct (in_dec Nat.eq_dec slot formal_indices) as [Hformal | Hnot].
+    { exists (default_tval t). intros other Hsymbolic Hother_not.
+      injection Hsymbolic as ->. contradiction. }
+    subst slot.
+    destruct (Htyped t variable Hnot) as (value & Hvalue).
+    exists value. intros other Hother Hother_not.
+    injection Hother as Hindices.
+    have -> : other = variable.
+    { apply member_index_injective. symmetry. exact Hindices. }
+    exact Hvalue.
   }
-  exists (frame_entry_atoms caller_atoms identity names formal_indices frame
+  exists (frame_entry_symbol_valuation caller_valuation identity names formal_indices frame
     Hrealizable). split.
-  - apply frame_entry_atoms_stable.
+  - apply frame_entry_symbol_valuation_stable.
   - intros t variable Hnot.
-    apply (frame_entry_atoms_realize caller_atoms identity names formal_indices
+    apply (frame_entry_symbol_valuation_realize caller_valuation identity names formal_indices
       frame Hrealizable t
-      (ProcedureEntryAtom identity (member_index variable)) variable
+      (ProcedureEntrySymbol identity (member_index variable)) variable
       eq_refl Hnot).
 Qed.
 
-Lemma procedure_frame_entry_atoms_exist {Γ F}
-    (caller_atoms : atom_env) (procedure : typed_procedure Γ F)
+Lemma procedure_frame_entry_symbol_valuation_exist {Γ F}
+    (caller_valuation : symbol_valuation) (procedure : typed_procedure Γ F)
     (frame : RuntimeLang.stack_frame) :
   (forall variable type,
     (variable, type) ∈ runtime_procedure_locals procedure ->
     exists value,
       frame.(RuntimeLang.locals) !! variable = Some value /\
       RuntimeLang.val_has_typ value type) ->
-  exists callee_atoms : atom_env,
-    stable_atoms_agree caller_atoms callee_atoms /\
+  exists callee_valuation : symbol_valuation,
+    constant_symbols_agree caller_valuation callee_valuation /\
     forall t (variable : pvar Γ t),
       ~ In (member_index variable)
         (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
       frame.(RuntimeLang.locals) !!
           runtime_variable (runtime_procedure_names procedure) variable =
         Some (tval_to_val
-          (callee_atoms t (ProcedureEntryAtom F (member_index variable)))).
+          (callee_valuation t (ProcedureEntrySymbol F (member_index variable)))).
 Proof.
-  intros Hlocals. apply frame_entry_atoms_exist.
+  intros Hlocals. apply frame_entry_symbol_valuation_exist.
   intros t variable Hnot.
   pose proof (runtime_procedure_local_declaration procedure t variable Hnot)
     as Hdeclaration.
@@ -1060,19 +1107,19 @@ Fixpoint runtime_expr {Γ t} (names : named_context Γ)
     operational simulation proofs. *)
 Definition stack_corresponds {Γ F Δ}
     (names : named_context Γ) (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame) : Prop :=
   forall t (variable : pvar Γ t),
     frame.(RuntimeLang.locals) !! runtime_variable names variable =
       Some (tval_to_val
-        (interp_ref formals binders atoms (lookup_store store t variable))).
+        (interp_ref formals binders valuation (lookup_store store t variable))).
 
 Lemma runtime_expr_sound {Γ F Δ t} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame)
     (expression : pexpr Γ t) (value : tval t) :
-  stack_corresponds names formals binders atoms store frame ->
-  interp_program_expr formals binders atoms store expression = Some value ->
+  stack_corresponds names formals binders valuation store frame ->
+  interp_program_expr formals binders valuation store expression = Some value ->
   RuntimeLang.expr_step (runtime_expr names expression) frame
     (RuntimeLang.Val (tval_to_val value)).
 Proof.
@@ -1080,16 +1127,16 @@ Proof.
   - intros Heq. inversion Heq. subst. apply RuntimeLang.VarStep.
     apply Hstack.
   - intros Heq. inversion Heq. subst. apply RuntimeLang.ExprRefl.
-  - destruct (interp_expr formals binders atoms
+  - destruct (interp_expr formals binders valuation
         (IR.symbolize_expr store expression))
       as [operand_value|] eqn:Hoperand; simpl; [|discriminate].
     intros Heq. inversion Heq. subst. eapply RuntimeLang.UnOpStep.
     + apply IHexpression. reflexivity.
     + apply runtime_unop_sound.
-  - destruct (interp_expr formals binders atoms
+  - destruct (interp_expr formals binders valuation
         (IR.symbolize_expr store expression1))
       as [value1|] eqn:Hvalue1; simpl; [|discriminate].
-    destruct (interp_expr formals binders atoms
+    destruct (interp_expr formals binders valuation
         (IR.symbolize_expr store expression2))
       as [value2|] eqn:Hvalue2; simpl; [|discriminate].
     intros Heq. eapply RuntimeLang.BinOpStep.
@@ -1271,29 +1318,28 @@ Fixpoint runtime_stmt {Γ} (names : named_context Γ)
       RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack
   end.
 
-End WithConfiguration.
+End WithSignature.
 (** The trusted substrate observes an atomic block only through its runtime
     behavior.  Consequently, proof-only rewrites with identical erasure
     select the same opaque hardware transition.  Like the refinement law,
-    this is a framework property, never a program-specific obligation. *)
+    this is a framework property, never a module-specific obligation. *)
 Axiom trusted_atomic_transition_runtime_erasure : forall {RAs : RAConfig}
-    {Logic : Assertion.LogicSignature} {Config : RuntimeConfiguration} {Γ}
+    {Logic : Assertion.LogicSignature} {Γ}
     (body body' : stmt Γ),
   (forall (names : named_context Γ) (stack : RuntimeLang.stack_id),
     runtime_stmt names stack body = runtime_stmt names stack body') ->
   trusted_atomic_transition body = trusted_atomic_transition body'.
 
-Section WithConfiguration.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Config : RuntimeConfiguration}.
+Section WithSignature.
+Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}.
 Lemma runtime_stmt_atomic {Γ} (names : named_context Γ) stack
     (body : stmt Γ) :
   runtime_stmt names stack (TAtomic body) =
     RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack.
 Proof. reflexivity. Qed.
 
-(** The point of the refactor: a proof-only rewrite of an atomic body
-    cannot change the program.  No hypothesis about the transition is
+(** A proof-only rewrite of an atomic body cannot change its runtime
+    statement. No hypothesis about the transition is
     needed -- it simply cannot see the difference. *)
 Lemma runtime_stmt_atomic_congruence {Γ} (names : named_context Γ) stack
     (body body' : stmt Γ) :
@@ -1308,5 +1354,5 @@ Proof.
   reflexivity.
 Qed.
 
-End WithConfiguration.
+End WithSignature.
 End RuntimeErasure.

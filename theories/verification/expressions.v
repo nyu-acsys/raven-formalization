@@ -103,32 +103,32 @@ Proof.
     inversion IHleft. reflexivity.
 Qed.
 
-(** Stable symbolic identities.  Statement-result atoms retain their compact
-    positive identifier, while procedure-entry atoms are generated from the
+(** Typed symbolic identities.  Constant symbols retain their compact
+    positive identifier, while procedure-entry symbols are generated from the
     procedure and frame slot.  Keeping the origins disjoint makes canonical
     entry stores collision-free by construction. *)
-Inductive atom (t : typ) :=
-| Atom (id : positive)
-| ProcedureEntryAtom (procedure : proc_id) (slot : nat).
+Inductive symbol (t : typ) :=
+| ConstantSymbol (id : positive)
+| ProcedureEntrySymbol (procedure : proc_id) (slot : nat).
 
-Arguments Atom {_} _.
-Arguments ProcedureEntryAtom {_} _ _.
+Arguments ConstantSymbol {_} _.
+Arguments ProcedureEntrySymbol {_} _ _.
 
-Global Instance atom_eq_dec t : EqDecision (atom t).
+Global Instance symbol_eq_dec t : EqDecision (symbol t).
 Proof. solve_decision. Defined.
 
-Global Instance atom_countable t : Countable (atom t).
+Global Instance symbol_countable t : Countable (symbol t).
 Proof.
   refine (inj_countable'
-    (fun symbolic : atom t =>
+    (fun symbolic : symbol t =>
       match symbolic with
-      | Atom id => inl id
-      | ProcedureEntryAtom procedure slot => inr (procedure, slot)
+      | ConstantSymbol id => inl id
+      | ProcedureEntrySymbol procedure slot => inr (procedure, slot)
       end)
     (fun encoded =>
       match encoded with
-      | inl id => Atom id
-      | inr (procedure, slot) => ProcedureEntryAtom procedure slot
+      | inl id => ConstantSymbol id
+      | inr (procedure, slot) => ProcedureEntrySymbol procedure slot
       end) _).
   intros []; reflexivity.
 Qed.
@@ -226,15 +226,15 @@ Defined.
 
 (** References available to a symbolic store or typed logical expression.
     Each namespace has a distinct constructor, so formal substitution,
-    binder weakening, and atom renaming cannot interfere with one another. *)
+    binder weakening, and symbol renaming cannot interfere with one another. *)
 Inductive value_ref (F Δ : context) : typ -> Type :=
 | RefFormal t (x : formal F t) : value_ref F Δ t
 | RefBound t (x : bvar Δ t) : value_ref F Δ t
-| RefAtom t (x : atom t) : value_ref F Δ t.
+| RefSymbol t (x : symbol t) : value_ref F Δ t.
 
 #[global] Arguments RefFormal {_ _ _} _.
 #[global] Arguments RefBound {_ _ _} _.
-#[global] Arguments RefAtom {_ _ _} _.
+#[global] Arguments RefSymbol {_ _ _} _.
 
 Inductive unop : typ -> typ -> Type :=
 | UNot : unop TBool TBool
@@ -344,20 +344,20 @@ Proof.
   - right. intros ->. rewrite member_eqb_refl in Heq. discriminate.
 Defined.
 
-Definition atom_eqb {t1} (left : atom t1) {t2} (right : atom t2) : bool :=
+Definition symbol_eqb {t1} (left : symbol t1) {t2} (right : symbol t2) : bool :=
   match left, right with
-  | Atom left_id, Atom right_id => Pos.eqb left_id right_id
-  | ProcedureEntryAtom left_procedure left_slot,
-      ProcedureEntryAtom right_procedure right_slot =>
+  | ConstantSymbol left_id, ConstantSymbol right_id => Pos.eqb left_id right_id
+  | ProcedureEntrySymbol left_procedure left_slot,
+      ProcedureEntrySymbol right_procedure right_slot =>
       Pos.eqb left_procedure right_procedure && Nat.eqb left_slot right_slot
   | _, _ => false
   end.
 
-Lemma atom_eqb_refl t (symbolic : atom t) : atom_eqb symbolic symbolic = true.
+Lemma symbol_eqb_refl t (symbolic : symbol t) : symbol_eqb symbolic symbolic = true.
 Proof. destruct symbolic; simpl; now rewrite ?Pos.eqb_refl, ?Nat.eqb_refl. Qed.
 
-Lemma atom_eqb_eq t (left right : atom t) :
-  atom_eqb left right = true -> left = right.
+Lemma symbol_eqb_eq t (left right : symbol t) :
+  symbol_eqb left right = true -> left = right.
 Proof.
   destruct left, right; simpl; try discriminate.
   - intros Heq. apply Pos.eqb_eq in Heq. now subst.
@@ -370,7 +370,7 @@ Definition value_ref_eqb {F Δ t1} (r1 : value_ref F Δ t1)
   match r1, r2 with
   | RefFormal x, RefFormal y => member_eqb x y
   | RefBound x, RefBound y => member_eqb x y
-  | RefAtom x, RefAtom y => atom_eqb x y
+  | RefSymbol x, RefSymbol y => symbol_eqb x y
   | _, _ => false
   end.
 
@@ -380,7 +380,7 @@ Proof.
   dependent destruction r; simpl.
   - exact (member_eqb_refl x).
   - exact (member_eqb_refl x).
-  - exact (atom_eqb_refl _ x).
+  - exact (symbol_eqb_refl _ x).
 Qed.
 
 Lemma value_ref_eqb_eq {F Δ t} (r1 r2 : value_ref F Δ t) :
@@ -390,7 +390,7 @@ Proof.
     try (intros Hbad; discriminate).
   - intros Heq. f_equal. exact (member_eqb_eq _ _ Heq).
   - intros Heq. f_equal. exact (member_eqb_eq _ _ Heq).
-  - intros Heq. f_equal. exact (atom_eqb_eq _ _ _ Heq).
+  - intros Heq. f_equal. exact (symbol_eqb_eq _ _ _ Heq).
 Qed.
 
 Global Instance value_ref_eq_dec F Δ t : EqDecision (value_ref F Δ t).
@@ -559,42 +559,42 @@ Defined.
 Definition formal_env (F : context) := forall t, formal F t -> tval t.
 Definition binder_env (Δ : context) := forall t, bvar Δ t -> tval t.
 
-Definition atom_env := forall t, atom t -> tval t.
+Definition symbol_valuation := forall t, symbol t -> tval t.
 
-(** Procedure-entry atoms are generated by the verifier and interpreted
-    afresh at every call.  Environments that agree on ordinary atoms may
+(** Procedure-entry symbols are generated by the verifier and interpreted
+    afresh at every call.  Valuations that agree on constant symbols may
     therefore differ on these call-local placeholders. *)
-Definition stable_atoms_agree (left right : atom_env) : Prop :=
-  forall t (symbolic : atom t),
+Definition constant_symbols_agree (left right : symbol_valuation) : Prop :=
+  forall t (symbolic : symbol t),
     match symbolic with
-    | Atom _ => left t symbolic = right t symbolic
-    | ProcedureEntryAtom _ _ => True
+    | ConstantSymbol _ => left t symbolic = right t symbolic
+    | ProcedureEntrySymbol _ _ => True
     end.
 
-Definition stable_atom_env (environment : atom_env) : atom_env :=
+Definition constant_symbol_valuation (environment : symbol_valuation) : symbol_valuation :=
   fun t symbolic =>
     match symbolic with
-    | Atom id => environment t (Atom id)
-    | ProcedureEntryAtom _ _ => default_tval t
+    | ConstantSymbol id => environment t (ConstantSymbol id)
+    | ProcedureEntrySymbol _ _ => default_tval t
     end.
 
-Lemma stable_atom_env_agree left right :
-  stable_atoms_agree left right ->
-  stable_atom_env left = stable_atom_env right.
+Lemma constant_symbol_valuation_agree left right :
+  constant_symbols_agree left right ->
+  constant_symbol_valuation left = constant_symbol_valuation right.
 Proof.
   intros Hagree. apply functional_extensionality_dep. intros t.
   apply functional_extensionality. intros symbolic.
   destruct symbolic as [id | procedure slot]; simpl;
-    first exact (Hagree _ (Atom id)).
+    first exact (Hagree _ (ConstantSymbol id)).
   reflexivity.
 Qed.
 
-Definition atom_stable {t} (symbolic : atom t) : Prop :=
-  match symbolic with Atom _ => True | ProcedureEntryAtom _ _ => False end.
+Definition symbol_is_constant {t} (symbolic : symbol t) : Prop :=
+  match symbolic with ConstantSymbol _ => True | ProcedureEntrySymbol _ _ => False end.
 
 Definition ref_entry_free {F Δ t} (reference : value_ref F Δ t) : Prop :=
   match reference with
-  | RefAtom symbolic => atom_stable symbolic
+  | RefSymbol symbolic => symbol_is_constant symbolic
   | _ => True
   end.
 
@@ -608,12 +608,12 @@ Fixpoint expr_entry_free {F Δ t} (expression : expr F Δ t) : Prop :=
   end.
 
 Definition interp_ref {F Δ t}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (reference : value_ref F Δ t) : tval t :=
   match reference with
   | RefFormal x => formals _ x
   | RefBound x => binders _ x
-  | RefAtom x => atoms _ x
+  | RefSymbol x => valuation _ x
   end.
 
 Definition interp_unop {input output} (op : unop input output) :
@@ -663,41 +663,41 @@ Definition interp_binop {left right output}
   end.
 
 Fixpoint interp_expr {F Δ t}
-    (formals : formal_env F) (binders : binder_env Δ) (atoms : atom_env)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (expression : expr F Δ t) : option (tval t) :=
   match expression with
-  | ERef reference => Some (interp_ref formals binders atoms reference)
+  | ERef reference => Some (interp_ref formals binders valuation reference)
   | EVal value => Some value
   | EUnOp op operand =>
-      match interp_expr formals binders atoms operand with
+      match interp_expr formals binders valuation operand with
       | Some value => Some (interp_unop op value)
       | None => None
       end
   | EBinOp op operand1 operand2 =>
-      match interp_expr formals binders atoms operand1,
-            interp_expr formals binders atoms operand2 with
+      match interp_expr formals binders valuation operand1,
+            interp_expr formals binders valuation operand2 with
       | Some value1, Some value2 => interp_binop op value1 value2
       | _, _ => None
       end
   end.
 
-Lemma interp_ref_stable_atoms {F Δ t}
+Lemma interp_ref_constant_symbols {F Δ t}
     (formals : formal_env F) (binders : binder_env Δ)
-    (left right : atom_env) (reference : value_ref F Δ t) :
-  stable_atoms_agree left right -> ref_entry_free reference ->
+    (left right : symbol_valuation) (reference : value_ref F Δ t) :
+  constant_symbols_agree left right -> ref_entry_free reference ->
   interp_ref formals binders left reference =
     interp_ref formals binders right reference.
 Proof.
   intros Hagree Hfree. destruct reference; simpl; try reflexivity.
   destruct x as [id | procedure slot].
-  - exact (Hagree _ (Atom id)).
+  - exact (Hagree _ (ConstantSymbol id)).
   - contradiction.
 Qed.
 
-Lemma interp_expr_stable_atoms {F Δ t}
+Lemma interp_expr_constant_symbols {F Δ t}
     (formals : formal_env F) (binders : binder_env Δ)
-    (left right : atom_env) (expression : expr F Δ t) :
-  stable_atoms_agree left right -> expr_entry_free expression ->
+    (left right : symbol_valuation) (expression : expr F Δ t) :
+  constant_symbols_agree left right -> expr_entry_free expression ->
   interp_expr formals binders left expression =
   interp_expr formals binders right expression.
 Proof.
@@ -705,8 +705,8 @@ Proof.
   - cbn [expr_entry_free interp_expr] in Hfree |-.
     destruct reference; simpl in Hfree |-; try reflexivity.
     destruct x as [id | procedure slot].
-    + change (Some (left t (Atom id)) = Some (right t (Atom id))).
-      apply f_equal. exact (Hagree _ (Atom id)).
+    + change (Some (left t (ConstantSymbol id)) = Some (right t (ConstantSymbol id))).
+      apply f_equal. exact (Hagree _ (ConstantSymbol id)).
     + contradiction.
   - reflexivity.
   - cbn [expr_entry_free] in Hfree.
@@ -718,8 +718,8 @@ Proof.
 Qed.
 
 Lemma interp_expr_total {F Δ t} (formals : formal_env F)
-    (binders : binder_env Δ) (atoms : atom_env) (expression : expr F Δ t) :
-  exists value, interp_expr formals binders atoms expression = Some value.
+    (binders : binder_env Δ) (valuation : symbol_valuation) (expression : expr F Δ t) :
+  exists value, interp_expr formals binders valuation expression = Some value.
 Proof.
   induction expression.
   - eexists. reflexivity.
@@ -796,7 +796,7 @@ Definition empty_formals : formal_env [] :=
 Definition empty_binders : binder_env [] :=
   fun t variable => match variable with end.
 
-Definition arbitrary_atoms : atom_env :=
+Definition arbitrary_symbol_valuation : symbol_valuation :=
   fun t variable =>
     match t as result return tval result with
     | TBool => VBool false
@@ -810,7 +810,7 @@ Definition one_plus_two : expr [] [] TInt :=
   EBinOp BAdd (EVal (VInt 1)) (EVal (VInt 2)).
 
 Example interp_one_plus_two :
-  interp_expr empty_formals empty_binders arbitrary_atoms one_plus_two =
+  interp_expr empty_formals empty_binders arbitrary_symbol_valuation one_plus_two =
     Some (VInt 3).
 Proof. reflexivity. Qed.
 
