@@ -32,6 +32,7 @@ Definition incr := name "incr".
 
 Definition read := name "read".
 Definition make := name "make".
+Definition client := name "client".
 
 (** The counter module, in Raven syntax.  Everything the verification needs
     is derived from it: the logic signature, the elaboration environment, the
@@ -101,6 +102,15 @@ Definition counter_declarations : source_module :=
         fold counterInv(x);
         ret := x
       }
+
+      proc client() returns (ret : Ref)
+        ensures counterInv(ret)
+      {
+        var v1 : Int;
+        ret := make();
+        spawn incr(ret);
+        v1 := read(ret)
+      }
   }}.
 
 (** The logic signature, the elaboration environment, and the identifiers
@@ -123,6 +133,9 @@ Definition incr_procedure : Core.proc_id :=
   Eval vm_compute in Elaboration.procedure_identity_of counter_declarations incr.
 Definition make_procedure : Core.proc_id :=
   Eval vm_compute in Elaboration.procedure_identity_of counter_declarations make.
+Definition client_procedure : Core.proc_id :=
+  Eval vm_compute in
+    Elaboration.procedure_identity_of counter_declarations client.
 
 Lemma counter_field_type_eq :
   @Assertion.field_type counter_logic counter_field = Core.TInt.
@@ -156,12 +169,17 @@ Definition make_typed_procedure : typed_procedure [TRef; TRef] make_procedure :=
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module make_procedure) ltac:(vm_compute; exact I)).
 
+Definition client_typed_procedure : typed_procedure [TInt; TRef] client_procedure :=
+  Eval vm_compute in projT2 (elaborated
+    (declared_procedure counter_module client_procedure) ltac:(vm_compute; exact I)).
+
 Definition read_variables := procedure_variables _ _ read_typed_procedure.
 Definition incr_variables := procedure_variables _ _ incr_typed_procedure.
 Definition make_variables := procedure_variables _ _ make_typed_procedure.
 Definition read_typed_body := procedure_body _ _ read_typed_procedure.
 Definition incr_typed_body := procedure_body _ _ incr_typed_procedure.
 Definition make_typed_body := procedure_body _ _ make_typed_procedure.
+Definition client_typed_body := procedure_body _ _ client_typed_procedure.
 
 Definition counter_token_core {F Δ} (location : expr F Δ TRef) :
     Resource.core_assertion F Δ :=
@@ -245,6 +263,8 @@ Definition incr_entry_store :=
   procedure_entry_store _ _ incr_typed_procedure.
 Definition make_entry_store :=
   procedure_entry_store _ _ make_typed_procedure.
+Definition client_entry_store :=
+  procedure_entry_store _ _ client_typed_procedure.
 
 Definition counter_mask : RuleValidity.Hoare.mask := {[counter_invariant]}.
 
@@ -590,6 +610,10 @@ Module Rules.
   Notation RTAlloc := (HoareRules.RTAlloc (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTAssign := (HoareRules.RTAssign (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTAtomicBlock := (HoareRules.RTAtomicBlock (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTCallStore := (HoareRules.RTCallStore (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTSpawn := (HoareRules.RTSpawn (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation CESInvariantDup := (RH.CESInvariantDup (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic)).
+  Notation CESAndElimR := (RH.CESAndElimR (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic)).
   Notation RTCallDiscard := (HoareRules.RTCallDiscard (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTConsequence := (HoareRules.RTConsequence (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTDone := (HoareRules.RTDone (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
@@ -1772,8 +1796,8 @@ Proof.
     unfold counter_token_core. apply Rules.resource_prenex_entails_refl.
 Qed.
 
-Lemma counter_resource_instantiated_pre {Delta : context}
-    (location : expr [TRef] Delta TRef) :
+Lemma counter_resource_instantiated_pre {F Delta : context}
+    (location : expr F Delta TRef) :
   HoareRules.instantiated_pre incr_procedure
       (ExprCons location ExprNil) =
     Resource.CInvariant counter_invariant (ExprCons location ExprNil).
@@ -1791,8 +1815,8 @@ Proof.
     Resource.Assertions.subst_formals_expr
     Resource.Assertions.subst_formals_ref].
   assert (Hhead : forall (t : typ) (ts : context)
-      (e : Core.expr [TRef] Delta t)
-      (es : RH.Assertions.expr_list [TRef] Delta ts),
+      (e : Core.expr F Delta t)
+      (es : RH.Assertions.expr_list F Delta ts),
     RH.Assertions.expr_list_formal_subst (RH.Assertions.ExprCons e es)
       t MHere = e);
     [intros; unfold RH.Assertions.expr_list_formal_subst;
@@ -1922,6 +1946,171 @@ Proof.
     apply incr_retry_conditional.
 Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** [client]
+
+    [client] allocates a counter with [make], spawns an [incr] thread on
+    it, and reads it.  The invariant token [make] returns is duplicated
+    twice: one copy goes to the spawned thread, one to [read], and one is
+    returned to the caller. *)
+
+Lemma make_instantiated_pre {F Delta : context} :
+  HoareRules.instantiated_pre (F := F) (Δ := Delta) make_procedure ExprNil =
+    Resource.CTrue.
+Proof. reflexivity. Qed.
+
+Lemma make_instantiated_post {F Delta : context} :
+  HoareRules.instantiated_post (F := F) (Δ := Delta) make_procedure ExprNil =
+    counter_token_core (ERef (RefBound MHere)).
+Proof.
+  unfold HoareRules.instantiated_post.
+  assert (Hpost : HoareRules.contract_post make_procedure
+    = counter_token_core (ERef (RefBound MHere))) by reflexivity.
+  rewrite Hpost.
+  unfold counter_token_core.
+  cbn [Resource.rename_bound_core Resource.subst_formals_core
+    Resource.Assertions.rename_bound_expr_list
+    Resource.Assertions.rename_bound_expr Resource.Assertions.rename_bound_ref
+    Resource.Assertions.subst_formals_expr_list
+    Resource.Assertions.subst_formals_expr
+    Resource.Assertions.subst_formals_ref].
+  unfold Resource.Assertions.return_bound_renaming.
+  rewrite view_member_here. reflexivity.
+Qed.
+
+Lemma read_instantiated_pre {F Delta : context}
+    (location : expr F Delta TRef) :
+  HoareRules.instantiated_pre read_procedure (ExprCons location ExprNil) =
+    counter_token_core location.
+Proof.
+  unfold HoareRules.instantiated_pre.
+  assert (Hpre : HoareRules.contract_pre read_procedure
+    = counter_token_core (ERef (RefFormal MHere))) by reflexivity.
+  rewrite Hpre.
+  unfold counter_token_core, Resource.weaken_core_to.
+  cbn [Resource.subst_bound_core Resource.subst_formals_core].
+  change (Assertion.procedure_args read_procedure) with ([TRef] : context).
+  cbn [Resource.Assertions.subst_bound_expr_list
+    Resource.Assertions.subst_formals_expr_list
+    Resource.Assertions.subst_bound_expr Resource.Assertions.subst_bound_ref
+    Resource.Assertions.subst_formals_expr
+    Resource.Assertions.subst_formals_ref].
+  unfold RH.Assertions.expr_list_formal_subst.
+  rewrite lookup_expr_list_here. reflexivity.
+Qed.
+
+Lemma read_instantiated_post {F Delta : context}
+    (arguments : RH.Assertions.expr_list F (TInt :: Delta) [TRef]) :
+  HoareRules.instantiated_post read_procedure arguments = Resource.CTrue.
+Proof. reflexivity. Qed.
+
+Definition client_made_store :
+    symbolic_store [TInt; TRef] (procedure_args client_procedure) [TRef] :=
+  RuleValidity.IR.update_store_with_bound client_entry_store (MThere MHere).
+
+Definition client_exit_store :
+    symbolic_store [TInt; TRef] (procedure_args client_procedure) [TInt; TRef] :=
+  RuleValidity.IR.update_store_with_bound client_made_store MHere.
+
+Lemma client_made_location :
+  RuleValidity.IR.symbolize_expr client_made_store (PEVar (MThere MHere)) =
+    ERef (RefBound MHere).
+Proof.
+  unfold RuleValidity.IR.symbolize_expr, client_made_store.
+  rewrite lookup_update_store_same. reflexivity.
+Qed.
+
+Lemma client_exit_return :
+  lookup_store client_exit_store _ (MThere MHere) = RefBound (MThere MHere).
+Proof.
+  unfold client_exit_store.
+  rewrite lookup_update_store_other by (cbn; congruence).
+  unfold client_made_store. rewrite lookup_update_store_same. reflexivity.
+Qed.
+
+Lemma client_make_call :
+  HoareRules.RavenHoareTriple
+    (Resource.RState client_entry_store Resource.CTrue)
+    (TCall make_procedure PENil (CTStore (MThere MHere)))
+    (Resource.ResourceExists TRef
+      (Resource.RState client_made_store
+        (counter_token_core (ERef (RefBound MHere))))).
+Proof.
+  eapply Rules.RTConsequence; [eapply Rules.RTCallStore | | ].
+  3: { cbn [RuleValidity.IR.symbolize_expr_list
+         RH.Assertions.weaken_expr_list].
+       rewrite make_instantiated_post.
+       apply Rules.resource_prenex_entails_refl. }
+  2: { cbn [RuleValidity.IR.symbolize_expr_list].
+       rewrite make_instantiated_pre. apply Rules.CEntailsRefl. }
+  vm_compute. discriminate.
+Qed.
+
+Lemma client_spawn :
+  HoareRules.RavenHoareTriple
+    (Resource.RState client_made_store
+      (counter_token_core (ERef (RefBound MHere))))
+    (TSpawn incr_procedure (PECons (PEVar (MThere MHere)) PENil))
+    (Resource.RState client_made_store
+      (counter_token_core (ERef (RefBound MHere)))).
+Proof.
+  eapply Rules.RTConsequence;
+    [eapply Rules.RTFrame; eapply Rules.RTSpawn | | ].
+  2: { cbn [RuleValidity.IR.symbolize_expr_list]. rewrite client_made_location.
+       rewrite counter_resource_instantiated_pre.
+       apply Rules.CEntailsStep. apply Rules.CESInvariantDup. }
+  2: { cbn [RH.Resource.prenex_and].
+       apply Rules.RPEBody. split; [reflexivity |].
+       apply Rules.CEntailsStep. apply Rules.CESAndElimR. }
+  vm_compute. discriminate.
+Qed.
+
+Lemma client_read_call :
+  HoareRules.RavenHoareTriple
+    (Resource.RState client_made_store
+      (counter_token_core (ERef (RefBound MHere))))
+    (TCall read_procedure (PECons (PEVar (MThere MHere)) PENil)
+      (CTStore MHere))
+    (Resource.ResourceExists TInt
+      (Resource.RState client_exit_store
+        (counter_token_core (ERef (RefBound (MThere MHere)))))).
+Proof.
+  eapply Rules.RTConsequence;
+    [eapply Rules.RTFrame; eapply Rules.RTCallStore | | ].
+  2: { cbn [RuleValidity.IR.symbolize_expr_list].
+       change (Assertion.procedure_return read_procedure) with TInt.
+       rewrite client_made_location, read_instantiated_pre.
+       apply Rules.CEntailsStep. apply Rules.CESInvariantDup. }
+  2: { cbn [RH.Resource.prenex_and RH.Resource.weaken_core
+         RH.Assertions.weaken_expr_list RH.Assertions.weaken_expr
+         RH.Assertions.weaken_ref].
+       apply Rules.RPEMono. apply Rules.RPEBody. split; [reflexivity |].
+       apply Rules.CEntailsStep. apply Rules.CESAndElimR. }
+  vm_compute. discriminate.
+Qed.
+
+Lemma client_resource_body_derivation :
+  HoareRules.RavenHoareTriple
+    (RuleValidity.Hoare.procedure_body_pre client_typed_procedure)
+    client_typed_body
+    (RuleValidity.Hoare.procedure_body_post client_typed_procedure
+      client_exit_store (RefBound (MThere MHere))).
+Proof.
+  unfold RuleValidity.Hoare.procedure_body_pre,
+    RuleValidity.Hoare.procedure_body_post,
+    client_typed_procedure, client_typed_body.
+  cbn [procedure_entry_store procedure_precondition
+    procedure_postcondition RuleValidity.Hoare.existentially_close_prenex
+    RuleValidity.Hoare.existentially_close_prenex_at].
+  cbn [IR.Resource.subst_bound_core Assertions.subst_bound_expr_list
+    Assertions.subst_bound_expr Assertions.subst_bound_ref].
+  rewrite Assertions.singleton_bound_subst_here.
+  eapply Rules.RTSeq; [exact client_make_call |].
+  apply Rules.RTPrenexPreserve.
+  eapply Rules.RTSeq; [exact client_spawn |].
+  exact client_read_call.
+Qed.
+
 Lemma read_restricted_fragment_accepted :
   NormalizationBase.restricted_fragment_accepted read_typed_body.
 Proof. vm_compute. reflexivity. Qed.
@@ -1932,6 +2121,10 @@ Proof. vm_compute. reflexivity. Qed.
 
 Lemma make_restricted_fragment_accepted :
   NormalizationBase.restricted_fragment_accepted make_typed_body.
+Proof. vm_compute. reflexivity. Qed.
+
+Lemma client_restricted_fragment_accepted :
+  NormalizationBase.restricted_fragment_accepted client_typed_body.
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma read_restricted_normalization_computes :
@@ -1953,7 +2146,7 @@ Lemma make_restricted_normalization_computes :
 Proof. vm_compute. eexists. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
-(** ** The three analyzed procedure bodies
+(** ** The analyzed procedure bodies
 
     [analyzed_triple] wants three things: an analysis certificate
     (under the framework's [contract_cost_model]), the [RavenHoareRules]
@@ -1982,6 +2175,21 @@ Lemma make_analysis_coherent :
       (counter_closed_state ∅) make_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
+
+Lemma client_analysis_coherent :
+  CounterAtomicity.analyze_coherent_lifo
+      (counter_closed_state ∅) client_typed_body =
+    Some (counter_closed_state counter_mask).
+Proof. reflexivity. Qed.
+
+Definition client_coherent_run :=
+  CounterAtomicity.analyze_coherent_lifo_builds_certificate
+    (counter_closed_state ∅) client_typed_body
+    (counter_closed_state counter_mask) client_analysis_coherent.
+
+Definition client_analyzed_certificate :=
+  CounterAtomicity.coherent_flat_certificate
+    (projT1 client_coherent_run).
 
 Definition read_coherent_run :=
   CounterAtomicity.analyze_coherent_lifo_builds_certificate
@@ -2082,6 +2290,31 @@ Proof.
       (projT1 make_coherent_run)).
 Defined.
 
+Definition client_analyzed_body :
+  ProcedureValidity.analyzed_body_valid client_typed_procedure.
+Proof.
+  unfold ProcedureValidity.analyzed_body_valid.
+  unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
+    [TInt; TRef] client_procedure client_typed_procedure ∅
+    (counter_closed_state ∅)
+    (counter_closed_state counter_mask)
+    [TInt; TRef] client_exit_store (RefBound (MThere MHere))
+    _ _ _ _ _ _ _ _ _).
+  1: { refine {| CN.analyzed_certificate := client_analyzed_certificate;
+                 CN.analyzed_hoare := client_resource_body_derivation;
+                 CN.analyzed_restricted :=
+                   client_restricted_fragment_accepted |}. }
+  - exact client_exit_return.
+  - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
+  - reflexivity.
+  - reflexivity.
+  - reflexivity.
+  - reflexivity.
+  - simpl. set_solver.
+  - exact (CounterAtomicity.coherent_conditional_masks
+      (projT1 client_coherent_run)).
+Defined.
+
 (** The module-soundness instantiation below is stated in Iris; its proof
     mode is imported only here, so the proofs above keep the standard
     [rewrite]. *)
@@ -2159,10 +2392,11 @@ Proof.
   assert (Hexists : exists
       _ : ProcedureValidity.packed_analyzed_body packed, True).
   { simpl in Hin.
-    destruct Hin as [Hin | [Hin | [Hin | []]]].
+    destruct Hin as [Hin | [Hin | [Hin | [Hin | []]]]].
     - dependent destruction Hin. exists read_analyzed_body. exact I.
     - dependent destruction Hin. exists incr_analyzed_body. exact I.
-    - dependent destruction Hin. exists make_analyzed_body. exact I. }
+    - dependent destruction Hin. exists make_analyzed_body. exact I.
+    - dependent destruction Hin. exists client_analyzed_body. exact I. }
   exact (proj1_sig (constructive_indefinite_description _ Hexists)).
 Defined.
 

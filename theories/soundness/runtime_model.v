@@ -1708,6 +1708,7 @@ Definition core_semantic_data : Translation.semantic_config_data (iPropI Σ) := 
   Translation.data_field_own := core_field_own;
   Translation.data_ghost_own := core_ghost_own;
   Translation.data_invariant_own := core_invariant_own;
+  Translation.data_invariant_own_persistent := invariant_own_persistent;
 |}.
 
 End WithRuntime.

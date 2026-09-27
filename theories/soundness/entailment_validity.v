@@ -39,6 +39,9 @@ Context {PROP : bi} (Model : Translation.semantic_config_data PROP).
 Let term_bi_affine : BiAffine PROP :=
   @Translation.data_bi_affine _ _ PROP Model.
 Local Existing Instance term_bi_affine.
+Local Instance term_invariant_own_persistent invariant values :
+  Persistent (Translation.data_invariant_own Model invariant values) :=
+  Translation.data_invariant_own_persistent PROP Model invariant values.
 Local Notation iProp := (bi_car PROP).
 Local Notation interp_assertion :=
   (Translation.TermSemantics.interp_assertion Model).
@@ -178,6 +181,8 @@ Proof.
     apply Translation.interp_expr_list_equal_assuming with
       (condition := condition); assumption.
   - apply Translation.data_stack_own_exclusive.
+  - iIntros "Hinv". iDestruct "Hinv" as (values) "[%Harguments #Hinv]".
+    iSplitL; iExists values; iFrame "#"; done.
 Qed.
 
 Theorem assertion_entails_valid {Γ F Δ}
@@ -405,6 +410,8 @@ Proof.
     rewrite <- Harguments. symmetry.
     apply Translation.interp_expr_list_equal_assuming with
       (condition := condition); assumption.
+  - iIntros "Hinv". iDestruct "Hinv" as (values) "[%Harguments #Hinv]".
+    iSplitL; iExists values; iFrame "#"; done.
 Qed.
 
 Theorem core_entails_valid {F Δ}

@@ -218,7 +218,11 @@ Inductive core_entailment_step {F Δ} :
     expr_list_equal_assuming condition _ left_arguments right_arguments ->
     core_entailment_step
       (CAnd (CPredicate predicate left_arguments) (CExpr condition))
-      (CPredicate predicate right_arguments).
+      (CPredicate predicate right_arguments)
+(** Invariant knowledge is duplicable. *)
+| CESInvariantDup invariant (arguments : expr_list F Δ (invariant_args invariant)) :
+    core_entailment_step (CInvariant invariant arguments)
+      (CAnd (CInvariant invariant arguments) (CInvariant invariant arguments)).
 
 Inductive core_entails {F} : forall {Δ},
     core_assertion F Δ -> core_assertion F Δ -> Prop :=

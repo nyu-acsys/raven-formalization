@@ -644,6 +644,8 @@ Record semantic_config_data (PROP : bi) : Type := SemanticConfigData {
     tval TRef -> tval (field_type field) -> bi_car PROP;
   data_invariant_own : forall invariant,
     tval_list (invariant_args invariant) -> bi_car PROP;
+  data_invariant_own_persistent : forall invariant values,
+    Persistent (data_invariant_own invariant values);
 }.
 
 #[global] Arguments data_stack_context {_} _ _.

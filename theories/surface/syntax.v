@@ -286,6 +286,8 @@ Notation "e . f" := (SEField e f)
    e custom raven_expr, f constr at level 0).
 Notation "p '(' ')'" := (SECall p [])
   (in custom raven_expr at level 0, p constr at level 0).
+Notation "p '()'" := (SECall p [])
+  (in custom raven_expr at level 0, p constr at level 0).
 Notation "p '(' args ')'" := (SECall p args)
   (in custom raven_expr at level 0, p constr at level 0,
    args custom raven_exprs at level 1).
@@ -613,6 +615,10 @@ Example procedure_without_result :
     SourceProc counter [SourceVarDecl c SRef] [] None
       (SAPredicate counter [SEVar c]) SATrue
       (SSFieldWrite (SEVar c) value (SEVal (SVInt 1))).
+Proof. reflexivity. Qed.
+
+Example assign_of_nullary_call :
+  raven_stmt {{ v := counter() }} = SSCall (Some v) counter [].
 Proof. reflexivity. Qed.
 
 End SurfaceSyntaxExamples.

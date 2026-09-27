@@ -1640,7 +1640,11 @@ Inductive entailment_step {Γ F Δ} :
     Expose that semantic fact to structural consequence reasoning so an
     impossible assertion containing two stack owners can close any branch. *)
 | ESStackExclusive (left right : symbolic_store Γ F Δ) :
-    entailment_step (AAnd (AStack left) (AStack right)) (APure False).
+    entailment_step (AAnd (AStack left) (AStack right)) (APure False)
+(** Invariant knowledge is duplicable. *)
+| ESInvariantDup invariant (arguments : expr_list F Δ (invariant_args invariant)) :
+    entailment_step (AInvariant invariant arguments)
+      (AAnd (AInvariant invariant arguments) (AInvariant invariant arguments)).
 
 Inductive assertion_entails {Γ F} : forall {Δ},
     assertion Γ F Δ -> assertion Γ F Δ -> Prop :=
