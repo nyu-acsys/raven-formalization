@@ -10,6 +10,12 @@ and [Iris](https://iris-project.org/) of the program logic and atomicity
 analysis used by [Raven](https://github.com/nyu-acsys/raven), a modeling and
 verification language for concurrent systems.
 
+</td>
+</tr>
+</table>
+
+## Overview
+
 The development connects four levels:
 
 1. a typed, Raven-like verification language with procedures, separation
@@ -31,10 +37,6 @@ registered procedure.
 
 For a guided account of the languages, analyses, trust boundary, and proof
 pipeline, see [Architecture and soundness](docs/architecture.md).
-
-</td>
-</tr>
-</table>
 
 ## Status
 
