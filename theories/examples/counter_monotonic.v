@@ -593,7 +593,7 @@ Module Rules.
   Notation RTAtomicBlock := (HoareRules.RTAtomicBlock (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTCallStore := (HoareRules.RTCallStore (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTSpawn := (HoareRules.RTSpawn (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
-  Notation CESInvariantDup := (RH.CESInvariantDup (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic)).
+  Notation CESDuplicate := (RH.CESDuplicate (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic)).
   Notation CESAndElimR := (RH.CESAndElimR (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic)).
   Notation RTCallDiscard := (HoareRules.RTCallDiscard (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTConsequence := (HoareRules.RTConsequence (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
@@ -2034,7 +2034,7 @@ Proof.
     [eapply Rules.RTFrame; eapply Rules.RTSpawn | | ].
   2: { cbn [RuleValidity.IR.symbolize_expr_list]. rewrite client_made_location.
        rewrite counter_resource_instantiated_pre.
-       apply Rules.CEntailsStep. apply Rules.CESInvariantDup. }
+       apply Rules.CEntailsStep. apply Rules.CESDuplicate. reflexivity. }
   2: { cbn [RH.Resource.prenex_and].
        apply Rules.RPEBody. split; [reflexivity |].
        apply Rules.CEntailsStep. apply Rules.CESAndElimR. }
@@ -2056,7 +2056,7 @@ Proof.
   2: { cbn [RuleValidity.IR.symbolize_expr_list].
        change (Assertion.procedure_return read_procedure) with TInt.
        rewrite client_made_location, read_instantiated_pre.
-       apply Rules.CEntailsStep. apply Rules.CESInvariantDup. }
+       apply Rules.CEntailsStep. apply Rules.CESDuplicate. reflexivity. }
   2: { cbn [RH.Resource.prenex_and RH.Resource.weaken_core
          RH.Assertions.weaken_expr_list RH.Assertions.weaken_expr
          RH.Assertions.weaken_ref].

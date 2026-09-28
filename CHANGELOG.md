@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; the joined mask is their intersection. Module analyses now state
   registry coverage for each procedure's required mask and statically
   allocated invariants instead of its exit mask.
+- Core entailment duplicates any duplicable assertion (pure facts,
+  invariant knowledge, and their conjunctions, existentials, and
+  conditionals) through `CESDuplicate`, which replaces `CESInvariantDup`.
 
 ### Added
 

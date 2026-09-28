@@ -226,7 +226,7 @@ the typed verification objects to the concrete runtime language. It defines:
   operations.
 
 [`soundness/entailment_validity.v`](../theories/soundness/entailment_validity.v)
-proves the assertion entailment calculus sound.
+proves core entailment sound.
 
 [`soundness/rule_validity.v`](../theories/soundness/rule_validity.v) proves
 the structured Hoare rules valid in Iris. Important cases include:

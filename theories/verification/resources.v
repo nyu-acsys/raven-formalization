@@ -169,10 +169,9 @@ Definition weaken_core {F Δ u} (formula : core_assertion F Δ) :
   rename_bound_core weaken_bound_renaming formula.
 
 (** Existential-front normal form for the stack-free half of a resource
-    assertion.  Universal binders remain barriers.  This is the resource
-    counterpart of [existential_prenex], but it contains no stack index: the
-    unique symbolic store is attached only after this telescope has been
-    computed. *)
+    assertion.  Universal binders remain barriers.  It contains no stack
+    index: the unique symbolic store is attached only after this telescope
+    has been computed. *)
 Inductive core_existential_prenex (F Δ : context) : Type :=
 | CorePrenexBody (body : core_assertion F Δ)
 | CorePrenexExists t (body : core_existential_prenex F (t :: Δ)).
@@ -797,11 +796,6 @@ Proof.
     congruence.
 Qed.
 
-Lemma core_to_assertion_weaken {Γ F Δ u} (formula : core_assertion F Δ) :
-  @core_to_assertion Γ F (u :: Δ) (weaken_core formula) =
-    weaken_assertion (core_to_assertion formula).
-Proof. apply core_to_assertion_rename. Qed.
-
 
 
 (** Substitution commutes with the embedding — and in particular the
@@ -880,49 +874,6 @@ Lemma prenex_to_assertion_weaken {Γ F Δ u} (prenex : resource_prenex Γ F Δ) 
   prenex_to_assertion (@weaken_resource_prenex Γ F Δ u prenex) =
     weaken_assertion (prenex_to_assertion prenex).
 Proof. apply prenex_to_assertion_rename. Qed.
-
-(** [prenex_and] pushes a core frame under the telescope, so it is not the
-    syntactic [AAnd] of the embeddings — but the two are interderivable in
-    the assertion entailment, which is what the erasure of [RTFrame] needs. *)
-Lemma prenex_and_to_assertion_in {Γ F Δ} (prenex : resource_prenex Γ F Δ) :
-  forall (frame : core_assertion F Δ),
-  assertion_entails
-    (AAnd (prenex_to_assertion prenex) (@core_to_assertion Γ F Δ frame))
-    (prenex_to_assertion (prenex_and prenex frame)).
-Proof.
-  induction prenex as [Δ state | Δ t rest IH]; intro frame;
-    cbn [prenex_and prenex_to_assertion].
-  - destruct state as [store body].
-    cbn [resource_to_assertion resource_stack resource_body
-      core_to_assertion].
-    eapply EntailsTrans; [apply EntailsStep, ESAndAssocR | apply EntailsRefl].
-  - eapply EntailsTrans; [apply EntailsExistsAndRight |].
-    apply EntailsExistsMono.
-    replace (weaken_assertion (core_to_assertion frame))
-      with (@core_to_assertion Γ F (t :: Δ) (weaken_core frame))
-      by apply core_to_assertion_weaken.
-    apply IH.
-Qed.
-
-Lemma prenex_and_to_assertion_out {Γ F Δ} (prenex : resource_prenex Γ F Δ) :
-  forall (frame : core_assertion F Δ),
-  assertion_entails
-    (prenex_to_assertion (prenex_and prenex frame))
-    (AAnd (prenex_to_assertion prenex) (@core_to_assertion Γ F Δ frame)).
-Proof.
-  induction prenex as [Δ state | Δ t rest IH]; intro frame;
-    cbn [prenex_and prenex_to_assertion].
-  - destruct state as [store body].
-    cbn [resource_to_assertion resource_stack resource_body
-      core_to_assertion].
-    apply EntailsStep, ESAndAssocL.
-  - eapply EntailsTrans; [| apply EntailsExistsAndRightOut].
-    apply EntailsExistsMono.
-    replace (weaken_assertion (core_to_assertion frame))
-      with (@core_to_assertion Γ F (t :: Δ) (weaken_core frame))
-      by apply core_to_assertion_weaken.
-    apply IH.
-Qed.
 
 End WithSignature.
 End Resource.

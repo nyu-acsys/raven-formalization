@@ -11,23 +11,10 @@ Open Scope list_scope.
 
     Statement rules inspect and update an explicit [resource_stack]; frame
     and ordinary consequence accept only a [core_assertion]; resource
-    binders live in a telescope rather than under an [AExists] wrapped
-    around a stack.
-
-    What is absent, by typing rather than by proof:
-
-      - no [assertion_stack_count] or [<= 1] linearity hypothesis;
-      - no [stack_free] side condition on any frame, invariant body,
-        contract or allocation resource;
-      - no [ESStackExclusive]: two stacks in one assertion is unstatable,
-        so the rule that derived [False] from it has nothing to fire on;
-      - no store-join operation.  The baseline conditional requires one
-        common output resource assertion, and the monotonic counter needs
-        no join (measured: zero cases).
-
-    This module sits between [ir] and [procedures] in the chain, so
-    the old and new calculi share one instance of the substrate while both
-    exist. *)
+    binders live in a telescope.  A resource assertion has exactly one
+    symbolic stack by construction, so no linearity or [stack_free] side
+    conditions arise.  The conditional rule requires one common output
+    resource assertion; there is no store join. *)
 
 Module ResourceHoare.
 
@@ -90,10 +77,23 @@ Fixpoint statement_writes {Γ} (statement : stmt Γ) : gset nat :=
 (* ------------------------------------------------------------------ *)
 (** ** 1. Core entailment
 
-    The rules of [Hoare.entailment_step] / [assertion_entails] minus
-    [ESStackExclusive], and with the [Γ] index gone.  [CEntailsExistsIntro]
-    also loses its [= Some _] premise, because instantiation is total on
-    core assertions. *)
+    Entailment on stack-free core assertions.  Instantiation is total on
+    core assertions, so [CEntailsExistsIntro] has no side condition. *)
+
+(** Core assertions that may be used more than once: pure facts, invariant
+    knowledge, and their conjunctions, existentials, and conditionals.
+    Ownership, predicates, and universals are not duplicable. *)
+Fixpoint core_duplicable {F Δ} (formula : core_assertion F Δ) : bool :=
+  match formula with
+  | CExpr _ | CPure _ | CFpuAllowed _ _ _ | CRAValid _ _ | CInvariant _ _ =>
+      true
+  | COwn _ _ _ | CGhostOwn _ _ _ | CPredicate _ _ | CForall _ _ => false
+  | CExists _ body => core_duplicable body
+  | CIte _ then_branch else_branch =>
+      core_duplicable then_branch && core_duplicable else_branch
+  | CAnd left_formula right_formula =>
+      core_duplicable left_formula && core_duplicable right_formula
+  end.
 
 Inductive core_entailment_step {F Δ} :
     core_assertion F Δ -> core_assertion F Δ -> Prop :=
@@ -219,10 +219,9 @@ Inductive core_entailment_step {F Δ} :
     core_entailment_step
       (CAnd (CPredicate predicate left_arguments) (CExpr condition))
       (CPredicate predicate right_arguments)
-(** Invariant knowledge is duplicable. *)
-| CESInvariantDup invariant (arguments : expr_list F Δ (invariant_args invariant)) :
-    core_entailment_step (CInvariant invariant arguments)
-      (CAnd (CInvariant invariant arguments) (CInvariant invariant arguments)).
+| CESDuplicate formula :
+    core_duplicable formula = true ->
+    core_entailment_step formula (CAnd formula formula).
 
 Inductive core_entails {F} : forall {Δ},
     core_assertion F Δ -> core_assertion F Δ -> Prop :=
@@ -530,7 +529,7 @@ Qed.
 
     Ordinary consequence preserves the explicit stack and uses core
     entailment for the remainder.  A change of symbolic store is a
-    separate structural rule, never an assertion entailment. *)
+    separate structural rule, never an entailment. *)
 
 Definition resource_entails {Γ F Δ}
     (left right : resource_assertion Γ F Δ) : Prop :=
@@ -813,10 +812,8 @@ Fixpoint ghost_initializers_valid_core {Γ F Δ}
         (ghost_initializers_valid_core store fields')
   end.
 
-(** A change of symbolic store must be justified structurally, slot by
-    slot, rather than by an assertion entailment.  This replaces the
-    recursive [stack_arguments_agree] search over logical assertion
-    syntax. *)
+(** A change of symbolic store is justified structurally, slot by slot,
+    rather than by an entailment. *)
 Inductive store_equal_under {F Δ} (body : core_assertion F Δ) :
     forall Γ, symbolic_store Γ F Δ -> symbolic_store Γ F Δ -> Prop :=
 | StoreEqualNil : store_equal_under body [] StoreNil StoreNil

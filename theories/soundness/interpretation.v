@@ -959,72 +959,7 @@ Lemma interp_assertion_ite {Γ F Δ} predicates runtime formals binders valuatio
         interp_assertion predicates runtime formals binders valuation else_branch))%I.
 Proof. reflexivity. Qed.
 
-Theorem interp_rename_bound_assertion {Γ F Δ Δ'} predicates
-    (renaming : bound_renaming Δ Δ')
-    (formals : formal_env F) (source_binders : binder_env Δ)
-    (target_binders : binder_env Δ') (valuation : symbol_valuation)
-    (runtime : data_stack_context Model Γ)
-    (Hrenaming : forall t (variable : bvar Δ t),
-      target_binders t (renaming t variable) = source_binders t variable)
-    (formula : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals target_binders valuation
-      (rename_bound_assertion renaming formula) ≡
-    interp_assertion predicates runtime formals source_binders valuation formula.
-Proof.
-  revert Δ' renaming source_binders target_binders Hrenaming.
-  induction formula; intros Δ' renaming source_binders target_binders
-      Hrenaming; simpl.
-  - rewrite (interp_rename_bound_store renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - reflexivity.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming).
-    rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming).
-    rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming).
-    rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - apply bi.exist_proper. intros value.
-    apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
-  - apply bi.forall_proper. intros value.
-    apply IHformula. apply binder_cons_lift_bound_renaming. exact Hrenaming.
-  - rewrite (interp_rename_bound_expr renaming formals source_binders
-      target_binders valuation Hrenaming).
-    apply bi.and_proper; apply bi.wand_proper; try reflexivity.
-    + apply IHformula1. exact Hrenaming.
-    + apply IHformula2. exact Hrenaming.
-  - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - rewrite (interp_rename_bound_expr_list renaming formals source_binders
-      target_binders valuation Hrenaming). reflexivity.
-  - apply bi.sep_proper.
-    + apply IHformula1. exact Hrenaming.
-    + apply IHformula2. exact Hrenaming.
-Qed.
-
-Corollary interp_weaken_assertion {Γ F Δ u} predicates
-    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (runtime : data_stack_context Model Γ)
-    (head : tval u) (formula : assertion Γ F Δ) :
-  interp_assertion predicates runtime formals (binder_cons head binders) valuation
-      (weaken_assertion formula) ≡
-    interp_assertion predicates runtime formals binders valuation formula.
-Proof.
-  apply interp_rename_bound_assertion.
-  intros t variable. apply binder_cons_weaken.
-Qed.
-
-(** *** Renaming and weakening for the resource core.  Same induction as
-    [interp_rename_bound_assertion], one case shorter. *)
+(** *** Renaming and weakening for the resource core. *)
 Theorem interp_rename_bound_core {F Δ Δ'} predicates
     (renaming : bound_renaming Δ Δ')
     (formals : formal_env F) (source_binders : binder_env Δ)
@@ -1300,21 +1235,6 @@ Proof.
     repeat rewrite view_member_here. exact Hwitness.
   - unfold head_bound_subst, binder_cons. rewrite Hview.
     repeat rewrite view_member_there. reflexivity.
-Qed.
-
-Corollary interp_instantiate_bound_assertion {Γ F Δ t} predicates
-    (witness : expr F Δ t) (value : tval t)
-    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (runtime : data_stack_context Model Γ)
-    (body : assertion Γ F (t :: Δ)) (formula : assertion Γ F Δ)
-    (Hwitness : interp_expr formals binders valuation witness = Some value)
-    (Hinstantiate : instantiate_bound_assertion witness body = Some formula) :
-  interp_assertion predicates runtime formals binders valuation formula ≡
-    interp_assertion predicates runtime formals (binder_cons value binders)
-      valuation body.
-Proof.
-  eapply interp_subst_bound_assertion; [|exact Hinstantiate].
-  apply interp_head_bound_subst. exact Hwitness.
 Qed.
 
 (** Core counterpart of [interp_subst_bound_assertion].  [subst_bound_core]
