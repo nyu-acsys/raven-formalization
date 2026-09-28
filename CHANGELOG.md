@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-28
+
 ### Added
 
 - A typed verification-language intermediate representation with symbolic
@@ -127,4 +129,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are discharged generically rather than recreated as example-specific
   soundness obligations.
 
-[Unreleased]: https://github.com/nyu-acsys/raven-formalization/commits/dev
+[Unreleased]: https://github.com/nyu-acsys/raven-formalization/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/nyu-acsys/raven-formalization/releases/tag/v1.0.0
