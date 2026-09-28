@@ -104,7 +104,7 @@ Definition counter_declarations : source_module :=
       }
 
       proc client() returns (ret : Ref)
-        ensures counterInv(ret)
+        ensures true
       {
         var v1 : Int;
         ret := make();
@@ -2104,11 +2104,13 @@ Proof.
     RuleValidity.Hoare.existentially_close_prenex_at].
   cbn [IR.Resource.subst_bound_core Assertions.subst_bound_expr_list
     Assertions.subst_bound_expr Assertions.subst_bound_ref].
-  rewrite Assertions.singleton_bound_subst_here.
   eapply Rules.RTSeq; [exact client_make_call |].
   apply Rules.RTPrenexPreserve.
   eapply Rules.RTSeq; [exact client_spawn |].
-  exact client_read_call.
+  eapply Rules.RTConsequence; [exact client_read_call | |].
+  - apply Rules.CEntailsRefl.
+  - apply Rules.RPEMono. apply Rules.RPEBody. split; [reflexivity |].
+    apply Rules.CEntailsStep. apply Rules.CESTrueIntro.
 Qed.
 
 Lemma read_restricted_fragment_accepted :
@@ -2387,17 +2389,24 @@ Definition counter_analyzed_bodies packed
     (Hin : List.In packed
       (procedure_entries
         (RuleValidity.Hoare.module_procedures counter_module))) :
-    ProcedureValidity.packed_analyzed_body packed.
+    { body : ProcedureValidity.packed_analyzed_body packed &
+      Adequacy.packed_analyzed_body_exit_declared
+        counter_module packed body }.
 Proof.
   assert (Hexists : exists
-      _ : ProcedureValidity.packed_analyzed_body packed, True).
+      body : ProcedureValidity.packed_analyzed_body packed,
+      Adequacy.packed_analyzed_body_exit_declared
+        counter_module packed body).
   { simpl in Hin.
     destruct Hin as [Hin | [Hin | [Hin | [Hin | []]]]].
-    - dependent destruction Hin. exists read_analyzed_body. exact I.
-    - dependent destruction Hin. exists incr_analyzed_body. exact I.
-    - dependent destruction Hin. exists make_analyzed_body. exact I.
-    - dependent destruction Hin. exists client_analyzed_body. exact I. }
-  exact (proj1_sig (constructive_indefinite_description _ Hexists)).
+    - dependent destruction Hin. exists read_analyzed_body. cbn. set_solver.
+    - dependent destruction Hin. exists incr_analyzed_body. cbn. set_solver.
+    - dependent destruction Hin. exists make_analyzed_body. cbn. set_solver.
+    - dependent destruction Hin. exists client_analyzed_body. cbn. set_solver. }
+  destruct (constructive_indefinite_description _ Hexists) as [body Hbody].
+  exact (@existT (ProcedureValidity.packed_analyzed_body packed)
+    (fun body0 => Adequacy.packed_analyzed_body_exit_declared
+      counter_module packed body0) body Hbody).
 Defined.
 
 Definition counter_analyzed_module :

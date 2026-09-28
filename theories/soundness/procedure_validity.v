@@ -116,9 +116,8 @@ Record analyzed_body_certificate {Γ identity}
     GenericRegions.Atomicity.analysis_mask analyzed_body_entry =
       current_mask;
   analyzed_body_exit_mask :
-    GenericRegions.Atomicity.analysis_mask analyzed_body_exit =
-      current_mask ∪ Certified.granted_mask
-        (procedure_identity _ _ procedure);
+    Certified.granted_mask (procedure_identity _ _ procedure) ⊆
+      GenericRegions.Atomicity.analysis_mask analyzed_body_exit;
   analyzed_body_triple :
     @CertifiedNormalization.analyzed_triple _ _ _
  Γ (Assertion.procedure_args identity)
@@ -177,7 +176,8 @@ Theorem term_analyzed_body_source_valid
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint
         (CertifiedNormalization.analyzed_certificate
-          (analyzed_body_triple _ _ body))) ⊆ ambient ->
+          (analyzed_body_triple _ _ body)) ∪ term_registered_invariants) ⊆
+      ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
@@ -244,7 +244,8 @@ Theorem term_analyzed_body_exit_mask_valid
     (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask
-        (analyzed_body_exit _ _ body)) ⊆ ambient ->
+        (analyzed_body_exit _ _ body) ∪ term_registered_invariants) ⊆
+      ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
@@ -263,12 +264,17 @@ Proof.
   have Hsource_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint
         (CertifiedNormalization.analyzed_certificate
-          (analyzed_body_triple _ _ body))) ⊆ ambient.
+          (analyzed_body_triple _ _ body)) ∪ term_registered_invariants) ⊆
+      ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    eapply GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-    - exact (analyzed_body_conditionals _ _ body).
-    - exact (analyzed_body_exit_closed _ _ body). }
+    intros invariant Hin. rewrite !elem_of_union in Hin |- *.
+    destruct Hin as [Hin | Hin].
+    - left. eapply GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
+      + exact (analyzed_body_conditionals _ _ body).
+      + exact (analyzed_body_exit_closed _ _ body).
+      + exact Hin.
+    - now right. }
   exact (term_analyzed_body_source_valid procedure
     current_mask body (ex_intro _ normalization Hworker) Hregistered
     runtime formals valuation ambient Hsource_envelope).
@@ -359,14 +365,12 @@ Record term_registered_body_semantics {Γ F}
   term_semantic_body_exit_closed :
     GenericRegions.Atomicity.analysis_open term_semantic_body_exit = ∅;
   term_semantic_body_exit_mask :
-    GenericRegions.Atomicity.analysis_mask term_semantic_body_exit =
-      Certified.required_mask (procedure_identity _ _ procedure) ∪
-      Certified.granted_mask (procedure_identity _ _ procedure);
+    Certified.granted_mask (procedure_identity _ _ procedure) ⊆
+      GenericRegions.Atomicity.analysis_mask term_semantic_body_exit;
   term_semantic_body_source_valid : forall
       (runtime : RegionExecution.Primitives.Model.stack_context Γ)
       (formals : formal_env (Assertion.procedure_args F)) (valuation : symbol_valuation) ambient,
-    RegionExecution.Primitives.Model.runtime_mask
-      (GenericRegions.Atomicity.analysis_mask term_semantic_body_exit) ⊆
+    RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
       ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
@@ -413,10 +417,14 @@ Proof.
   - exact (analyzed_body_exit_closed _ _ body).
   - exact (analyzed_body_exit_mask _ _ body).
   - intros runtime formals valuation ambient Henvelope.
-    eapply term_analyzed_body_exit_mask_valid.
+    eapply term_analyzed_body_source_valid.
     + exact (Hcomplete Γ F procedure body).
     + exact (analyzed_module_registered certificates procedure Hin).
-    + exact Henvelope.
+    + etrans; last exact Henvelope.
+      apply RegionExecution.Primitives.Model.runtime_mask_mono.
+      intros invariant Hmember. apply elem_of_union in Hmember as [Hfootprint | Hregistered].
+      * exact (analyzed_module_registered certificates procedure Hin _ Hfootprint).
+      * exact Hregistered.
 Defined.
 
 (** The assembly lemmas below use the executable runtime WP directly. *)
@@ -657,8 +665,10 @@ Proof.
   iIntros "[#Hchunks #HIH]".
   iModIntro.
   iIntros (Γ F Δ pre post statement mask_pre mask_post entry exit
-    runtime formals binders valuation ambient) "Hobligation Hmask #Hworld Hpre".
+    runtime formals binders valuation ambient)
+    "Hobligation Hmask Hregistry #Hworld Hpre".
   iDestruct "Hmask" as %Hmask.
+  iDestruct "Hregistry" as %Hregistry.
   iDestruct "Hobligation" as %Hobligation.
   destruct Hobligation.
   - rename H into Hpre_inst.
@@ -779,15 +789,9 @@ Proof.
       set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (GenericRegions.Atomicity.analysis_mask
-          (term_semantic_body_exit _ body)) ⊆
-        RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
-      { rewrite term_semantic_body_exit_mask.
-        etrans; last exact Hmask.
-        apply RegionExecution.Primitives.Model.runtime_mask_mono.
-        intros invariant Hmember. rewrite !elem_of_union in Hmember |- *.
-        destruct Hmember as [Hrequired_member | Hgranted];
-          [left; exact (Hrequired _ Hrequired_member) | right; exact Hgranted]. }
+          term_registered_invariants ⊆
+        RegionExecution.Primitives.Model.active_runtime_mask ambient entry :=
+        Hregistry.
       have Hentry_active : RegionExecution.Primitives.Model.active_runtime_mask
         (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
         (term_semantic_body_entry _ body) =
@@ -1015,15 +1019,9 @@ Proof.
       set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (GenericRegions.Atomicity.analysis_mask
-          (term_semantic_body_exit _ body)) ⊆
-        RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
-      { rewrite term_semantic_body_exit_mask.
-        etrans; last exact Hmask.
-        apply RegionExecution.Primitives.Model.runtime_mask_mono.
-        intros invariant Hmember. rewrite !elem_of_union in Hmember |- *.
-        destruct Hmember as [Hrequired_member | Hgranted];
-          [left; exact (Hrequired _ Hrequired_member) | right; exact Hgranted]. }
+          term_registered_invariants ⊆
+        RegionExecution.Primitives.Model.active_runtime_mask ambient entry :=
+        Hregistry.
       have Hentry_active : RegionExecution.Primitives.Model.active_runtime_mask
         (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
         (term_semantic_body_entry _ body) =
@@ -1235,8 +1233,7 @@ Proof.
       set (body := term_semantic_procedure_bodies certificates
         callee_variables procedure callee Hin).
       have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (GenericRegions.Atomicity.analysis_mask
-          (term_semantic_body_exit _ body)) ⊆ (⊤ : coPset).
+          term_registered_invariants ⊆ (⊤ : coPset).
       { set_solver. }
       have Hentry_active : RegionExecution.Primitives.Model.active_runtime_mask (⊤ : coPset)
         (term_semantic_body_entry _ body) = (⊤ : coPset).

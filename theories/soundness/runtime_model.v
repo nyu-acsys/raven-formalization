@@ -1064,6 +1064,26 @@ Proof.
   - intros left right result _ _ _. set_solver.
 Qed.
 
+Lemma invariant_mask_union (left right : Hoare.mask) :
+  invariant_mask (left ∪ right) =
+    invariant_mask left ∪ invariant_mask right.
+Proof.
+  induction left using set_ind_L.
+  - replace ((∅ : Hoare.mask) ∪ right) with right by set_solver.
+    rewrite invariant_mask_empty. set_solver.
+  - replace (({[x]} ∪ X) ∪ right) with
+      ({[x]} ∪ (X ∪ right)) by set_solver.
+    rewrite !invariant_mask_union_singleton.
+    rewrite IHleft.
+    set_solver.
+Qed.
+
+Lemma runtime_mask_union (left right : Hoare.mask) :
+  runtime_mask (left ∪ right) = runtime_mask left ∪ runtime_mask right.
+Proof.
+  unfold runtime_mask. rewrite invariant_mask_union. set_solver.
+Qed.
+
 Lemma active_runtime_mask_open ambient invariant outer state :
   GenericRegions.Atomicity.analysis_open state = {[invariant]} ∪ outer ->
   active_runtime_mask ambient state =

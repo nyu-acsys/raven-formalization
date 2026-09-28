@@ -29,16 +29,35 @@ Definition module_registration {RAs : ra_base.RAConfig}
     (Hoare.module_contracts M) (Hoare.module_coherence M)
     (list_to_set (Hoare.module_invariants M)).
 
-(** Analysis evidence indexed by the module.  Registry coverage is derived
-    from module well-formedness and is therefore not supplied by clients. *)
+(** Analysis evidence indexed by the module.  Registry coverage is checked
+    per procedure against the module declarations.  It deliberately ranges
+    over the analyzed body footprint, rather than over the invariants exposed
+    by the procedure contract: a body may allocate or use an invariant
+    internally without exporting its capability to callers. *)
+Definition packed_analyzed_body_exit_declared {RAs : ra_base.RAConfig}
+    {Logic : Assertion.LogicSignature} (M : Hoare.module)
+    (packed : packed_typed_procedure)
+    (body : @packed_analyzed_body RAs Logic (Hoare.module_contracts M)
+      packed) : Prop :=
+  match packed as packed0 return
+      @packed_analyzed_body RAs Logic (Hoare.module_contracts M) packed0 ->
+      Prop with
+  | existT Γ (existT identity procedure) => fun body0 =>
+      GenericRegions.Atomicity.analysis_mask
+        (analyzed_body_exit procedure
+          (Certified.required_mask identity) body0) ⊆
+      list_to_set (Hoare.module_invariants M)
+  end body.
+
 Record module_analysis {RAs : ra_base.RAConfig}
     {Logic : Assertion.LogicSignature} (M : Hoare.module) : Type :=
   ModuleAnalysis {
-    module_analysis_bodies : forall packed,
-      List.In packed
-        (procedure_entries (Hoare.module_procedures M)) ->
-      @packed_analyzed_body RAs Logic (Hoare.module_contracts M)
-        packed;
+    module_analysis_bodies : forall packed
+        (Hin : List.In packed
+          (procedure_entries (Hoare.module_procedures M))),
+      { body : @packed_analyzed_body RAs Logic (Hoare.module_contracts M)
+          packed &
+        packed_analyzed_body_exit_declared M packed body };
   }.
 
 Section WithContracts.
@@ -136,40 +155,15 @@ Context (factory : runtime_ghost_resource_factory Σ ghost_heap_namespace)
 Definition module_analyzed_certificates : analyzed_module Registration.
 Proof.
   unshelve econstructor.
-  - exact (module_analysis_bodies M certificates).
+  - intros packed Hin.
+    exact (projT1 (module_analysis_bodies M certificates packed Hin)).
   - intros Γ identity procedure Hin.
-    set (body := module_analysis_bodies M certificates
+    set (selected := module_analysis_bodies M certificates
       (pack_typed_procedure procedure) Hin).
-    etrans.
-    + eapply
-        GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-      * exact (analyzed_body_conditionals _ _ body).
-      * exact (analyzed_body_exit_closed _ _ body).
-    + rewrite (analyzed_body_exit_mask _ _ body).
-      pose proof (proj1 (List.Forall_forall _ _)
-        (Hoare.module_contract_invariants_declared M)
-        (pack_typed_procedure procedure) Hin) as Hdeclared.
-      destruct Hdeclared as [Hpre Hpost].
-      pose proof (lookup_typed_procedure_of_member
-        (Hoare.module_procedures M) (pack_typed_procedure procedure) Hin)
-        as Hlookup.
-      unfold Certified.required_mask, Certified.granted_mask,
-        term_registered_invariants, Registration, module_registration.
-      intros invariant Hinvariant.
-      apply elem_of_union in Hinvariant as [Hinvariant | Hinvariant].
-      * change (invariant ∈ Hoare.ResourceHoare.contract_invariants
-          (Hoare.module_predicate_body M) (Hoare.module_predicates M)
-          (Hoare.module_contract_pre M identity)) in Hinvariant.
-        rewrite (Hoare.module_contract_pre_coherent M Γ identity procedure Hlookup)
-          in Hinvariant.
-        exact (Hpre invariant Hinvariant).
-      * apply elem_of_difference in Hinvariant as [Hinvariant _].
-        change (invariant ∈ Hoare.ResourceHoare.contract_invariants
-          (Hoare.module_predicate_body M) (Hoare.module_predicates M)
-          (Hoare.module_contract_post M identity)) in Hinvariant.
-        rewrite (Hoare.module_contract_post_coherent M Γ identity procedure Hlookup)
-          in Hinvariant.
-        exact (Hpost invariant Hinvariant).
+    etrans; last exact (projT2 selected).
+    eapply GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
+    + exact (analyzed_body_conditionals _ _ (projT1 selected)).
+    + exact (analyzed_body_exit_closed _ _ (projT1 selected)).
 Defined.
 
 Theorem raven_module_soundness

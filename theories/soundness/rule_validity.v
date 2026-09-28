@@ -1671,6 +1671,8 @@ Definition verified_procedure_specs : iProp :=
     ⌜procedure_leaf_obligation mask_pre mask_post pre statement post⌝ -∗
     ⌜RegionExecution.Primitives.Model.runtime_mask mask_post ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry⌝ -∗
+    ⌜RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+      RegionExecution.Primitives.Model.active_runtime_mask ambient entry⌝ -∗
     term_world_context valuation -∗
     term_interp_resource_prenex runtime formals binders valuation pre -∗
     concrete_operation_wp runtime ambient entry statement exit
@@ -1870,18 +1872,21 @@ Lemma procedure_leaf_operation_valid {Γ F Δ}
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask mask_post ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
+    RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+      RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
     (global_world_context valuation ∗
       term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     concrete_operation_wp runtime ambient entry statement exit
       (term_interp_resource_prenex runtime formals binders valuation post).
 Proof.
-  intros runtime formals binders valuation ambient Henvelope.
+  intros runtime formals binders valuation ambient Henvelope Hregistered.
   iIntros "[#Hglobal Hpre]".
   iPoseProof (global_world_procedure_specs valuation with "Hglobal")
     as "[#Hworld #Hprocedures]".
-  iApply ("Hprocedures" with "[] [] Hworld Hpre").
+  iApply ("Hprocedures" with "[] [] [] Hworld Hpre").
   - iPureIntro. exact Hprocedure.
   - iPureIntro. exact Henvelope.
+  - iPureIntro. exact Hregistered.
 Qed.
 
 Lemma concrete_operation_wp_mono {Γ}
@@ -2353,7 +2358,8 @@ Definition term_structured_runtime_valid
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint certificate) ⊆ ambient ->
+      (Structured.structured_certificate_footprint certificate ∪
+        term_registered_invariants) ⊆ ambient ->
     (global_world_context valuation ∗
       term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     term_structured_runtime_wp certificate runtime ambient
@@ -2377,7 +2383,8 @@ Definition term_structured_runtime_arguments_valid
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint certificate) ⊆ ambient ->
+      (Structured.structured_certificate_footprint certificate ∪
+        term_registered_invariants) ⊆ ambient ->
     (global_world_context valuation ∗
       term_interp_resource_prenex_at_arguments runtime formals binders valuation
         arguments values pre) ⊢
@@ -2829,7 +2836,8 @@ Proof.
   have Hraw_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint raw) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros candidate Hin. simpl in Hin |- *. repeat rewrite elem_of_union in *.
+    intros candidate Hin. apply elem_of_union_l.
+    simpl in Hin |- *. repeat rewrite elem_of_union in *.
     tauto. }
   have Hexit_member : invariant ∈ GenericRegions.Atomicity.analysis_mask
       (GenericRegions.Atomicity.fold_invariant invariant entry).
@@ -3784,10 +3792,16 @@ Proof.
   have Hopen_facts := Hopen.
   apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
     (Hfresh & Hmember & _ & Hopened).
+  have Hfootprint_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint
+        (Structured.StructuredInvAccess Γ entry invariant arguments body
+          opened inner Hopen body_certificate Hpreserved)) ⊆ ambient.
+  { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    simpl. intros candidate Hcandidate. apply elem_of_union_l. exact Hcandidate. }
   have Hnamespace := term_structured_invariant_namespace_active_from_footprint
     (Structured.StructuredInvAccess Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
-    ambient invariant Hmember Hfresh Henvelope.
+    ambient invariant Hmember Hfresh Hfootprint_envelope.
   have Hinner_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient inner =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ∖
         ↑(invariant_namespace invariant).
@@ -3812,10 +3826,12 @@ Proof.
   - exact Hinner_mask.
   - have Hbody_wp := Hbody runtime formals binders valuation ambient.
     have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
+        (Structured.structured_certificate_footprint body_certificate ∪
+          term_registered_invariants) ⊆ ambient.
     { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      simpl. intros candidate Hcandidate.
-      repeat rewrite elem_of_union. tauto. }
+      intros candidate Hcandidate. apply elem_of_union in Hcandidate as [Hcandidate | Hregistered'].
+      - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+      - apply elem_of_union_r. exact Hregistered'. }
     specialize (Hbody_wp Hbody_envelope).
     unfold term_structured_runtime_wp in Hbody_wp.
     rewrite translated_runtime_wp_as_masked in Hbody_wp.
@@ -3875,10 +3891,16 @@ Proof.
   have Hopen_facts := Hopen.
   apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
     (Hfresh & Hmember & _ & Hopened).
+  have Hfootprint_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint
+        (Structured.StructuredInvAccess Γ entry invariant arguments body
+          opened inner Hopen body_certificate Hpreserved)) ⊆ ambient.
+  { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    simpl. intros candidate Hcandidate. apply elem_of_union_l. exact Hcandidate. }
   have Hnamespace := term_structured_invariant_namespace_active_from_footprint
     (Structured.StructuredInvAccess Γ entry invariant arguments body
       opened inner Hopen body_certificate Hpreserved)
-    ambient invariant Hmember Hfresh Henvelope.
+    ambient invariant Hmember Hfresh Hfootprint_envelope.
   have Hinner_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient inner =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ∖
         ↑(invariant_namespace invariant).
@@ -3903,11 +3925,13 @@ Proof.
   - exact Hinner_mask.
   - have Hbody_wp := Hbody Hstable tracked_values runtime formals binders valuation ambient.
     have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
+        (Structured.structured_certificate_footprint body_certificate ∪
+          term_registered_invariants) ⊆ ambient.
     { etrans; last exact Henvelope.
       apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      simpl. intros candidate Hcandidate.
-      repeat rewrite elem_of_union. tauto. }
+      intros candidate Hcandidate. apply elem_of_union in Hcandidate as [Hcandidate | Hregistered'].
+      - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+      - apply elem_of_union_r. exact Hregistered'. }
     specialize (Hbody_wp Hbody_envelope).
     unfold term_structured_runtime_wp in Hbody_wp.
     rewrite translated_runtime_wp_as_masked in Hbody_wp.
@@ -3969,10 +3993,16 @@ Proof.
   have Hopen_facts := Hopen.
   apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
     (Hfresh & Hmember & _ & Hopened).
+  have Hfootprint_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint
+        (Structured.StructuredInvAccess Γ entry invariant program_arguments
+          body opened inner Hopen body_certificate Hpreserved)) ⊆ ambient.
+  { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    simpl. intros candidate Hcandidate. apply elem_of_union_l. exact Hcandidate. }
   have Hnamespace := term_structured_invariant_namespace_active_from_footprint
     (Structured.StructuredInvAccess Γ entry invariant program_arguments
       body opened inner Hopen body_certificate Hpreserved)
-    ambient invariant Hmember Hfresh Henvelope.
+    ambient invariant Hmember Hfresh Hfootprint_envelope.
   have Hinner_mask : RegionExecution.Primitives.Model.active_runtime_mask
       ambient inner =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ∖
@@ -3997,12 +4027,14 @@ Proof.
   - exact Hnamespace.
   - intros invariant_values.
     have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
-        (Structured.structured_certificate_footprint body_certificate) ⊆
-        ambient.
+        (Structured.structured_certificate_footprint body_certificate ∪
+          term_registered_invariants) ⊆ ambient.
     { etrans; last exact Henvelope.
       apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      simpl. intros candidate Hcandidate.
-      repeat rewrite elem_of_union. tauto. }
+      intros candidate Hcandidate.
+      apply elem_of_union in Hcandidate as [Hcandidate | Hregistered'].
+      - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+      - apply elem_of_union_r. exact Hregistered'. }
     have Hbody_wp := Hbody Hcombined_stable
       (Translation.tval_list_append tracked_values invariant_values)
       runtime formals binders valuation ambient Hbody_envelope.
@@ -4042,10 +4074,13 @@ Lemma term_structured_runtime_atomic_valid
 Proof.
   intros Hbody runtime formals binders valuation ambient Henvelope.
   have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint body_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   iIntros "Hpre".
   iPoseProof (Hbody runtime formals binders valuation ambient Hbody_envelope
     with "Hpre") as "Hwp".
@@ -4079,10 +4114,13 @@ Proof.
     Henvelope.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint body_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint body_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   iIntros "Hpre".
   iPoseProof (Hbody Hdisjoint values runtime formals binders valuation ambient
     Hbody_envelope with "Hpre") as "Hwp".
@@ -4187,13 +4225,19 @@ Lemma term_structured_runtime_sequence_valid
 Proof.
   intros Hfirst Hsecond runtime formals binders valuation ambient Henvelope.
   have Hfirst_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint first_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint first_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   have Hsecond_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint second_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint second_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   iIntros "Hpre".
   iApply term_translated_runtime_wp_sequence.
   - exact (eq_sym
@@ -4234,15 +4278,21 @@ Proof.
   { intros slot Harg Hwrite. apply (Hdisjoint slot Harg).
     apply elem_of_union_r. exact Hwrite. }
   have Hfirst_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint first_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint first_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   have Hsecond_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint second_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint second_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   iIntros "Hpre". iApply term_translated_runtime_wp_sequence.
   - exact (eq_sym
       (term_structured_certificate_preserves_open first_certificate)).
@@ -4554,15 +4604,21 @@ Proof.
   { intros slot Hargument Hwrite. apply (Hdisjoint slot Hargument).
     apply elem_of_union_r. exact Hwrite. }
   have Hthen_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint then_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint then_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   have Helse_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (Structured.structured_certificate_footprint else_certificate) ⊆ ambient.
+      (Structured.structured_certificate_footprint else_certificate ∪
+        term_registered_invariants) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. simpl. repeat rewrite elem_of_union. tauto. }
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "[#Hglobal [[Hstack Hbody] %Harguments]]".
   destruct (interp_expr_total formals binders valuation
@@ -4871,6 +4927,34 @@ Qed.
     assertion representation.  The call and spawn rules go through
     [procedure_leaf_operation_valid] with the obligations of
     [call_discard_obligation] and its siblings. *)
+Lemma term_ordinary_call_registered_mask_active {Γ} procedure arguments target
+    entry exit ambient :
+  GenericRegions.Atomicity.take_step
+      (RegionSyntax.cost Γ (TCall procedure arguments target)) entry = inr exit ->
+  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+    ambient ->
+  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+    RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
+Proof.
+  intros Hstep Henvelope.
+  rewrite (RegionExecution.Primitives.Model.active_runtime_mask_closed ambient
+    entry (GenericRegions.Atomicity.procedure_call_step_success_closed
+      _ _ _ _ Hstep)).
+  exact Henvelope.
+Qed.
+
+Lemma term_registered_mask_active_closed entry ambient :
+  GenericRegions.Atomicity.analysis_open entry = ∅ ->
+  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+    ambient ->
+  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+    RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
+Proof.
+  intros Hclosed Henvelope.
+  rewrite (RegionExecution.Primitives.Model.active_runtime_mask_closed ambient
+    entry Hclosed). exact Henvelope.
+Qed.
+
 Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
     (pre post : Translation.Resource.resource_prenex Γ F Δ)
     statement entry exit,
@@ -4884,6 +4968,8 @@ Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask exit) ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry ->
+    RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
+      ambient ->
     (global_world_context valuation ∗
       term_interp_resource_prenex runtime formals binders valuation pre) ⊢
     concrete_operation_wp runtime ambient entry statement exit
@@ -4891,13 +4977,14 @@ Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
 Proof.
   intros Γ F Δ pre post statement entry exit Hview Hstep Hcost
     Htriple.
-  induction Htriple; intros runtime formals binders valuation ambient Henvelope;
+  induction Htriple; intros runtime formals binders valuation ambient Henvelope
+    Hregistry;
     simpl in Hview; try discriminate.
   - (* telescope preservation *)
     rewrite !term_interp_resource_exists.
     iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
     iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) valuation ambient Henvelope
+      (binder_cons value binders) valuation ambient Henvelope Hregistry
       with "[$Hglobal $Hbody]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     iIntros "Hpost". iExists value. iExact "Hpost".
@@ -4915,7 +5002,7 @@ Proof.
       (term_semantic_runtime runtime) Hrenaming).
     iIntros "[#Hglobal Hpre]".
     iPoseProof (IHHtriple Hview Hstep runtime formals source_binders valuation
-      ambient Henvelope with "[$Hglobal $Hpre]") as "Hwp".
+      ambient Henvelope Hregistry with "[$Hglobal $Hpre]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     unfold term_interp_resource_prenex.
     rewrite (Translation.TermSemantics.interp_rename_resource_prenex
@@ -4927,7 +5014,7 @@ Proof.
     rewrite term_interp_resource_exists.
     iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
     iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) valuation ambient Henvelope
+      (binder_cons value binders) valuation ambient Henvelope Hregistry
       with "[$Hglobal $Hbody]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     unfold term_interp_resource_prenex.
@@ -4939,7 +5026,7 @@ Proof.
       semantic_data (term_predicates valuation) _ _ H runtime formals binders
       valuation with "Hpre") as "Hpre".
     iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope with "[$Hglobal $Hpre]") as "Hwp".
+      Henvelope Hregistry with "[$Hglobal $Hpre]") as "Hwp".
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     iApply (Validation.TermSemantics.resource_prenex_entails_valid
       semantic_data (term_predicates valuation) _ _ H0 runtime formals binders
@@ -4957,7 +5044,8 @@ Proof.
     iApply (RegionExecution.Primitives.operation_frame with
       "[Hstack Hbody Hframe]").
     iFrame "Hframe".
-    iApply IHHtriple; [exact Hview | exact Hstep | exact Henvelope |].
+    iApply IHHtriple; [exact Hview | exact Hstep | exact Henvelope |
+      exact Hregistry |].
     rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
   - (* consequence *)
     rewrite term_interp_rstate.
@@ -4966,7 +5054,7 @@ Proof.
       (term_predicates valuation) _ _ H formals binders valuation with "Hbody")
       as "Hbody".
     iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope with "[Hstack Hbody]") as "Hwp".
+      Henvelope Hregistry with "[Hstack Hbody]") as "Hwp".
     { rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody". }
     iApply (RegionExecution.Primitives.operation_mono with "Hwp").
     apply (Validation.TermSemantics.resource_prenex_entails_valid
@@ -4981,7 +5069,7 @@ Proof.
     { iApply (interp_store_equal_under body store store' H). iExact "Hbody". }
     rewrite Hequal.
     iApply (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope).
+      Henvelope Hregistry).
     rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
   - (* assert *)
     iIntros "[_ Hpre]". iApply term_ambient_assert_rule_valid.
@@ -5029,9 +5117,13 @@ Proof.
       (call_discard_obligation procedure store typed_arguments
         (GenericRegions.Atomicity.analysis_mask entry) H Hrequired)
       with "[$Hglobal $Hpre]").
-    etrans; last exact Henvelope.
-    apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    rewrite Hmask. reflexivity.
+    + etrans; last exact Henvelope.
+      apply RegionExecution.Primitives.Model.runtime_mask_mono.
+      rewrite Hmask. reflexivity.
+    + eapply term_registered_mask_active_closed.
+      * eapply GenericRegions.Atomicity.procedure_call_step_success_closed.
+        exact Hstep.
+      * exact Hregistry.
   - (* call, result stored *)
     have Hfacts := Certified.certified_call_step_effect Hcost Γ
       procedure typed_arguments (Hoare.IR.CTStore target) entry exit
@@ -5046,9 +5138,13 @@ Proof.
         typed_arguments (GenericRegions.Atomicity.analysis_mask entry) H
         Hrequired)
       with "[$Hglobal $Hpre]").
-    etrans; last exact Henvelope.
-    apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    rewrite Hmask. reflexivity.
+    + etrans; last exact Henvelope.
+      apply RegionExecution.Primitives.Model.runtime_mask_mono.
+      rewrite Hmask. reflexivity.
+    + eapply term_registered_mask_active_closed.
+      * eapply GenericRegions.Atomicity.procedure_call_step_success_closed.
+        exact Hstep.
+      * exact Hregistry.
   - (* spawn *)
     have Hfacts := Certified.certified_spawn_step_effect Hcost
       _ _ _ _ _ Hstep.
@@ -5060,9 +5156,13 @@ Proof.
       (spawn_obligation procedure store typed_arguments
         (GenericRegions.Atomicity.analysis_mask entry) H Hrequired)
       with "[$Hglobal $Hpre]").
-    etrans; last exact Henvelope.
-    apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    rewrite Hmask. reflexivity.
+    + etrans; last exact Henvelope.
+      apply RegionExecution.Primitives.Model.runtime_mask_mono.
+      rewrite Hmask. reflexivity.
+    + eapply term_registered_mask_active_closed.
+      * eapply GenericRegions.Atomicity.procedure_spawn_step_success_closed.
+        exact Hstep.
+      * exact Hregistry.
   Unshelve. all: eauto.
 Qed.
 
@@ -5089,7 +5189,8 @@ Proof.
       (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
   { etrans; last exact Henvelope.
     apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    apply Structured.structured_certificate_exit_subset_footprint. }
+    intros invariant Hin. apply elem_of_union_l.
+    apply Structured.structured_certificate_exit_subset_footprint. exact Hin. }
   have Hactive_exit :=
     RegionExecution.Primitives.Model.runtime_mask_subset_active ambient exit
       Hexit_wf Hexit_envelope.
@@ -5105,11 +5206,17 @@ Proof.
       ambient ∖ RegionExecution.Primitives.Model.invariant_mask
         (GenericRegions.Atomicity.analysis_open entry)).
     rewrite <- Hopen. exact Hactive_exit. }
+  have Hregistry : RegionExecution.Primitives.Model.runtime_mask
+      term_registered_invariants ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros invariant Hin. apply elem_of_union_r. exact Hin. }
   unfold term_structured_runtime_valid, term_structured_runtime_wp.
   iIntros "[#Hglobal Hpre]".
   iPoseProof (term_resource_prenex_ordinary_leaf_operation_valid
     pre post statement entry exit view step Hprocedure derivation runtime
-    formals binders valuation ambient Hactive with "[$Hglobal $Hpre]") as "Hleaf".
+    formals binders valuation ambient Hactive Hregistry
+      with "[$Hglobal $Hpre]") as "Hleaf".
   iPoseProof (@concrete_operation_wp_frame Γ runtime ambient entry statement
     exit (term_interp_resource_prenex runtime formals binders valuation post)
     (global_world_context valuation) with "[$Hleaf $Hglobal]") as "Hleaf".
@@ -5461,7 +5568,7 @@ Theorem term_procedure_body_source_valid
     RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint
         (CertifiedNormalization.normalization_target_certificate
-          normalization)) ⊆ ambient ->
+          normalization) ∪ term_registered_invariants) ⊆ ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
@@ -5523,8 +5630,8 @@ Theorem term_procedure_body_source_valid_footprinted
     (formals : formal_env (Assertion.procedure_args identity))
     (valuation : symbol_valuation) (ambient : coPset),
     RegionExecution.Primitives.Model.runtime_mask
-      (GenericRegions.Atomicity.certificate_footprint source_certificate) ⊆
-      ambient ->
+      (GenericRegions.Atomicity.certificate_footprint source_certificate ∪
+        term_registered_invariants) ⊆ ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
@@ -5542,8 +5649,12 @@ Proof.
     Hsource Hvalid).
   etrans; [| exact Henvelope].
   apply RegionExecution.Primitives.Model.runtime_mask_mono.
-  exact (CertifiedNormalization.footprinted_normalization_subset
-    normalization).
+  intros invariant Hin.
+  apply elem_of_union in Hin as [Hin | Hin].
+  - apply elem_of_union_l.
+    eapply CertifiedNormalization.footprinted_normalization_subset.
+    exact Hin.
+  - apply elem_of_union_r. exact Hin.
 Qed.
 
 
