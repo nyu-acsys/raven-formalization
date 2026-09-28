@@ -7,7 +7,7 @@ From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants ghost_map.
 
 From raven Require Import runtime.lang runtime.ghost_state runtime.invariant_tokens runtime.erasure.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics analysis.structured_certificates.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.structured_certificates.
 
 Import ListNotations.
 Import weakestpre.
@@ -30,7 +30,9 @@ Module Assertions := Translation.Assertions.
 Module Core := Translation.Core.
 Import Core IR Core IR Translation.
 
-Module GenericRegions := Region.
+Module GenericRegions.
+Module Atomicity := AnalysisView.
+End GenericRegions.
 
 (** Public projection of analyzer-certificate uniqueness for clients of this
     runtime module. *)
@@ -63,9 +65,8 @@ Definition ghost_chunk_valid (field : field_id)
 
 End WithSignature.
 
-(** Canonical pairing used by certified-region soundness.  Unlike the generic
-    pairing in [certificate_semantics], every component below is stated over
-    the runtime IR.  The explicit LIFO boundary stacks let
+(** Canonical pairing used by certified-region soundness.  Every component
+    below is stated over the runtime IR.  The explicit LIFO boundary stacks let
     the semantic induction split sequences without losing an accessor that
     was opened by the first component and is closed by the second. *)
 Module CertifiedRegions.
@@ -482,84 +483,6 @@ Import RuntimeErasure.
 
 Section WithSignature.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
-(** Proof-only statements may be distributed across a conditional without
-    changing the generated runtime statement. The operational refinement uses
-    this equality for an invariant unfold/fold pair: branch selection happens
-    first, and only the selected arm enters the Iris invariant. *)
-Lemma runtime_stmt_distribute_erased_before_if {Γ}
-    (names : named_context Γ) stack
-    (before : stmt Γ) condition
-    (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack before = runtime_noop ->
-  runtime_stmt names stack
-    (TSeq before
-      (TIf condition then_branch else_branch)) =
-  runtime_stmt names stack
-    (TIf condition
-      (TSeq before then_branch)
-      (TSeq before else_branch)).
-Proof.
-  intros Hbefore. simpl. rewrite Hbefore. reflexivity.
-Qed.
-
-Corollary runtime_stmt_distribute_unfold_before_if {Γ}
-    (names : named_context Γ) stack
-    invariant arguments condition
-    (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack
-    (TSeq (TUnfold invariant arguments)
-      (TIf condition then_branch else_branch)) =
-  runtime_stmt names stack
-    (TIf condition
-      (TSeq (TUnfold invariant arguments)
-        then_branch)
-      (TSeq (TUnfold invariant arguments)
-        else_branch)).
-Proof.
-  apply runtime_stmt_distribute_erased_before_if. reflexivity.
-Qed.
-
-Lemma runtime_stmt_distribute_erased_around_if {Γ}
-    (names : named_context Γ) stack
-    (before after : stmt Γ) condition (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack before = runtime_noop ->
-  runtime_stmt names stack after = runtime_noop ->
-  runtime_stmt names stack
-    (TSeq before
-      (TSeq
-        (TIf condition then_branch else_branch) after)) =
-  runtime_stmt names stack
-    (TIf condition
-      (TSeq before
-        (TSeq then_branch after))
-      (TSeq before
-        (TSeq else_branch after))).
-Proof.
-  intros Hbefore Hafter. simpl. rewrite Hbefore Hafter.
-  rewrite !runtime_seq_noop_l !runtime_seq_noop_r. reflexivity.
-Qed.
-
-Corollary runtime_stmt_distribute_unfold_fold_if {Γ}
-    (names : named_context Γ) stack
-    invariant unfold_arguments fold_arguments condition
-    (then_branch else_branch : stmt Γ) :
-  runtime_stmt names stack
-    (TSeq (TUnfold invariant unfold_arguments)
-      (TSeq
-        (TIf condition then_branch else_branch)
-        (TFold invariant fold_arguments))) =
-  runtime_stmt names stack
-    (TIf condition
-      (TSeq (TUnfold invariant unfold_arguments)
-        (TSeq then_branch
-          (TFold invariant fold_arguments)))
-      (TSeq (TUnfold invariant unfold_arguments)
-        (TSeq else_branch
-          (TFold invariant fold_arguments)))).
-Proof.
-  apply runtime_stmt_distribute_erased_around_if; reflexivity.
-Qed.
-
 (** Soundness condition for the leaf costs at the concrete runtime
     boundary.  Proof-only leaves must erase to the terminal
     statement; a leaf classified as one atomic step must translate to an
@@ -1965,47 +1888,16 @@ End WithModel.
 End WithContracts.
 End TermSemanticLeafContracts.
 
-(** Term-level interface for the one region primitive whose implementation is
-    specific to invariant transitions.  Keeping it separate lets adequacy
-    construct it after allocating [runtimeG]. *)
-Module TermInvariantRegionOperations.
-Section WithSignature.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
-  {Cost : AnalysisView.LeafCost}.
-Section WithModel.
-Context {PROP : bi} (Model : GenericRegions.region_model_data PROP).
-Local Notation iProp := (bi_car PROP).
-
-Record invariant_region_operations_data := InvariantRegionOperationsData {
-  term_invariant_operation_wp : forall Γ,
-    GenericRegions.term_region_stack_context Model Γ ->
-    GenericRegions.term_region_ambient_mask Model ->
-    GenericRegions.Atomicity.analysis_state -> stmt Γ ->
-    GenericRegions.Atomicity.analysis_state -> iProp -> iProp;
-  term_invariant_operation_mono : forall Γ runtime ambient entry statement exit P Q,
-    (P ⊢ Q) ->
-    term_invariant_operation_wp Γ runtime ambient entry statement exit P ⊢
-      term_invariant_operation_wp Γ runtime ambient entry statement exit Q;
-  term_invariant_operation_frame : forall Γ runtime ambient entry statement exit P R,
-    term_invariant_operation_wp Γ runtime ambient entry statement exit P ∗ R ⊢
-      term_invariant_operation_wp Γ runtime ambient entry statement exit (P ∗ R)
-}.
-End WithModel.
-End WithSignature.
-End TermInvariantRegionOperations.
-
-(** Dynamic counterpart of [OperationalGenericRegionPrimitives].  It turns
-    the term-level control and invariant-operation records into the generic
-    certificate interpreter primitives. *)
+(** Concrete operation semantics used by rule validity.  This retains the
+    runtime-facing certificate boundary without reconstructing the unused
+    generic certificate interpreter. *)
 Module OperationalGenericRegionPrimitivesCore.
 Module Control := ConcreteControlCore.
 Module Model := Control.Model.
 
 Section WithSignature.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
-(** Construct a runtime stack context through the model's public alias, so
-    clients need not rely on reduction through the nested [Control.Model]
-    alias. *)
+
 Definition make_stack_context {Γ} (stack_id : RuntimeLang.stack_id)
     (names : named_context Γ) (Hnames : NoDup (RuntimeErasure.runtime_variables names)) :
     Model.stack_context Γ :=
@@ -2071,18 +1963,6 @@ Proof.
   rewrite Model.concrete_locals_update_store; [reflexivity|].
   apply Model.runtime_names_nodup.
 Qed.
-Definition region_model : GenericRegions.region_model_data (iPropI Σ) :=
-  @GenericRegions.RegionModelData (iPropI Σ)
-    (fun Γ => Model.stack_context Γ) RuntimeErasure.ambient_mask.
-
-Lemma region_model_stack_context_eq Γ :
-  GenericRegions.term_region_stack_context region_model Γ =
-    Model.stack_context Γ.
-Proof. reflexivity. Qed.
-
-Lemma region_model_ambient_mask_eq :
-  GenericRegions.term_region_ambient_mask region_model = RuntimeErasure.ambient_mask.
-Proof. reflexivity. Qed.
 
 Definition ambient_physical_leaf_wp {Γ} (runtime : Model.stack_context Γ)
     (ambient : coPset) (entry : GenericRegions.Atomicity.analysis_state)
@@ -2179,31 +2059,19 @@ Qed.
 
 Definition operation_wp {Γ}
     (Operations : @TermControlOperations.control_operations_data _ _ (iPropI Σ)
-      semantic_data)
-    (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
-        region_model)
+      semantic_data) (_ : unit)
     (runtime : Model.stack_context Γ) (ambient : RuntimeErasure.ambient_mask)
     (entry : GenericRegions.Atomicity.analysis_state) (statement : stmt Γ)
     (exit : GenericRegions.Atomicity.analysis_state) (post : iProp) : iProp :=
   match RegionSyntax.view statement with
   | AnalysisView.ViewLeaf => ambient_leaf_wp runtime ambient entry statement post
   | AnalysisView.ViewUnfold _ | AnalysisView.ViewFold _ =>
-      TermInvariantRegionOperations.term_invariant_operation_wp region_model
-        InvariantOps Γ runtime ambient entry statement exit post
+      (|={Model.active_runtime_mask ambient entry,
+          Model.active_runtime_mask ambient exit}=> post)%I
   | AnalysisView.ViewAtomic body =>
       TermControlOperations.term_atomic_wp semantic_data Operations Γ runtime body
         (GenericRegions.Atomicity.analysis_mask entry)
         (GenericRegions.Atomicity.analysis_mask exit) post
-  | _ => False%I
-  end.
-
-Definition branch_wp {Γ}
-    (runtime : Model.stack_context Γ) (_ : RuntimeErasure.ambient_mask)
-    (entry : GenericRegions.Atomicity.analysis_state) (statement : stmt Γ)
-    (_ _ : GenericRegions.Atomicity.analysis_state) (then_wp else_wp : iProp) : iProp :=
-  match statement with
-  | TIf _ _ _ => (then_wp ∨ else_wp)%I
   | _ => False%I
   end.
 
@@ -2215,8 +2083,6 @@ Proof.
   intros HPQ. unfold operation_wp, RegionSyntax.view.
   destruct statement; simpl; try exact HPQ; try reflexivity;
     try (apply ambient_leaf_mono; exact HPQ);
-    try (apply (TermInvariantRegionOperations.term_invariant_operation_mono
-      region_model InvariantOps); exact HPQ);
     try (apply (TermControlOperations.term_atomic_mono semantic_data Operations); exact HPQ).
   all: try (apply ambient_physical_leaf_mono; exact HPQ).
   all: try destruct target; simpl;
@@ -2230,8 +2096,6 @@ Lemma operation_frame Operations InvariantOps Γ runtime ambient entry statement
 Proof.
   unfold operation_wp, RegionSyntax.view. destruct statement; simpl;
     try reflexivity; try apply ambient_leaf_frame;
-    try apply (TermInvariantRegionOperations.term_invariant_operation_frame
-      region_model InvariantOps);
     try apply (TermControlOperations.term_atomic_frame semantic_data Operations);
     try (iIntros "[H _]"; done).
   all: try apply ambient_physical_leaf_frame.
@@ -2239,102 +2103,17 @@ Proof.
   all: iIntros "[HP HR]"; iMod "HP"; iModIntro; iFrame.
 Qed.
 
-Lemma branch_mono Γ runtime ambient entry statement then_exit else_exit P P' Q Q' :
-  (P ⊢ P') -> (Q ⊢ Q') ->
-  branch_wp (Γ := Γ) runtime ambient entry statement then_exit else_exit P Q ⊢
-    branch_wp runtime ambient entry statement then_exit else_exit P' Q'.
-Proof.
-  intros HP HQ. unfold branch_wp. destruct statement; simpl; try reflexivity.
-  iIntros "[HP|HQ]".
-  - iLeft. iApply HP. iExact "HP".
-  - iRight. iApply HQ. iExact "HQ".
-Qed.
-
-Lemma branch_frame Γ runtime ambient entry statement then_exit else_exit P Q R :
-  branch_wp (Γ := Γ) runtime ambient entry statement then_exit else_exit P Q ∗ R ⊢
-    branch_wp runtime ambient entry statement then_exit else_exit (P ∗ R) (Q ∗ R).
-Proof.
-  unfold branch_wp. destruct statement; simpl; try (iIntros "[H _]"; done).
-  iIntros "[[HP|HQ] HR]"; [iLeft|iRight]; iFrame.
-Qed.
-
-Definition primitives (Operations :
-    @TermControlOperations.control_operations_data _ _ (iPropI Σ) semantic_data)
-    (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
-        region_model) :
-    @GenericRegions.TermSemantics.region_primitives_data _ (iPropI Σ) region_model :=
-  @GenericRegions.TermSemantics.RegionPrimitivesData _ (iPropI Σ) region_model
-    (fun Γ => @operation_wp Γ Operations InvariantOps) (@branch_wp)
-    (operation_mono Operations InvariantOps) (operation_frame Operations InvariantOps)
-    branch_mono branch_frame.
-
-(** The fancy-update record for invariant operations, stated against the
-    interpreter's model. *)
-Definition concrete_invariant_operation_wp {Γ} (_ : Model.stack_context Γ)
-    (ambient : RuntimeErasure.ambient_mask) (entry : GenericRegions.Atomicity.analysis_state)
-    (statement : stmt Γ) (exit : GenericRegions.Atomicity.analysis_state)
-    (post : iProp) : iProp :=
-  match statement with
-  | TUnfold _ _ | TFold _ _ =>
-      (|={Model.active_runtime_mask ambient entry,
-           Model.active_runtime_mask ambient exit}=> post)%I
-  | _ => False%I
-  end.
-
-Lemma concrete_invariant_operation_mono Γ runtime ambient entry statement exit P Q :
-  (P ⊢ Q) ->
-  @concrete_invariant_operation_wp Γ runtime ambient entry statement exit P ⊢
-    @concrete_invariant_operation_wp Γ runtime ambient entry statement exit Q.
-Proof.
-  intros HPQ. unfold concrete_invariant_operation_wp.
-  destruct statement; simpl; try reflexivity.
-  all: iIntros "HP"; iMod "HP"; iModIntro; iApply HPQ; iExact "HP".
-Qed.
-
-Lemma concrete_invariant_operation_frame Γ runtime ambient entry statement exit P R :
-  @concrete_invariant_operation_wp Γ runtime ambient entry statement exit P ∗ R ⊢
-    @concrete_invariant_operation_wp Γ runtime ambient entry statement exit (P ∗ R).
-Proof.
-  unfold concrete_invariant_operation_wp. destruct statement; simpl;
-    try (iIntros "[H _]"; done).
-  all: iIntros "[HP HR]"; iMod "HP"; iModIntro; iFrame.
-Qed.
-
-Definition concrete_invariant_operations :
-    @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
-      region_model :=
-  @TermInvariantRegionOperations.InvariantRegionOperationsData _ _ (iPropI Σ)
-    region_model (@concrete_invariant_operation_wp)
-    concrete_invariant_operation_mono concrete_invariant_operation_frame.
-
-Definition interpreter (Operations :
-    @TermControlOperations.control_operations_data _ _ (iPropI Σ) semantic_data)
-    (InvariantOps :
-      @TermInvariantRegionOperations.invariant_region_operations_data _ _ (iPropI Σ)
-        region_model) :
-    @GenericRegions.TermSemantics.interpreter_data _ _ (iPropI Σ) region_model :=
-  GenericRegions.TermSemantics.interpreter region_model
-    (primitives Operations InvariantOps).
+Definition concrete_invariant_operations
+    (_ : RAConfig) (_ : Assertion.LogicSignature)
+    (Σ0 : gFunctors) (_ : runtimeG Σ0) : unit := tt.
 End WithRuntime.
 End WithSignature.
 End OperationalGenericRegionPrimitivesCore.
 
-(** Fully concrete dynamic generic-region interpreter, suitable for a
-    proof-time allocated [runtimeG] instance. *)
+(** Namespace retained for the runtime operations imported by rule validity. *)
 Module ConcreteGenericRegionExecutionCore.
 Module Primitives := OperationalGenericRegionPrimitivesCore.
 Module Control := Primitives.Control.
-Section WithSignature.
-Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
-Section WithRuntime.
-Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
-
-Definition interpreter := @Primitives.interpreter _ _ _ Σ RG
-  (@Control.concrete_control_operations _ _ Σ RG)
-  (@Primitives.concrete_invariant_operations _ _ Σ RG).
-End WithRuntime.
-End WithSignature.
 End ConcreteGenericRegionExecutionCore.
 
 End Runtime.

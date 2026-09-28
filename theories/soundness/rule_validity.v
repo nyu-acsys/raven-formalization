@@ -6,7 +6,7 @@ From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants.
 
 From raven Require Import runtime.erasure analysis.structured_certificates runtime.lang runtime.ghost_state.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics soundness.runtime_model analysis.normalization_base analysis.normalization.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity soundness.runtime_model analysis.normalization_base analysis.normalization.
 
 Import ListNotations.
 Import weakestpre.
@@ -538,31 +538,6 @@ Definition term_predicates (valuation : symbol_valuation) :=
   @TermLeaf.term_predicates _ _ _ (iPropI Σ) semantic_data Leaf
     valuation.
 
-Definition dynamic_region_interpreter := @RegionExecution.interpreter _ _ _ Σ RG.
-
-Definition to_region_runtime {Γ} (runtime : RegionExecution.Primitives.Model.stack_context Γ) :
-    GenericRegions.term_region_stack_context
-      (@RegionExecution.Primitives.region_model Σ) Γ :=
-  eq_rect _ (fun T => T) runtime _
-    (eq_sym (@RegionExecution.Primitives.region_model_stack_context_eq
-      Σ Γ)).
-
-Definition to_region_ambient (ambient : RuntimeErasure.ambient_mask) :
-    GenericRegions.term_region_ambient_mask
-      (@RegionExecution.Primitives.region_model Σ) :=
-  eq_rect _ (fun T => T) ambient _
-    (eq_sym (@RegionExecution.Primitives.region_model_ambient_mask_eq Σ)).
-
-Definition aligned_runtime_region_wp
-    {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) :
-    RegionExecution.Primitives.Model.stack_context Γ -> coPset -> iProp -> iProp :=
-  fun runtime ambient post =>
-    GenericRegions.TermSemantics.term_region_wp
-      (@RegionExecution.Primitives.region_model Σ) dynamic_region_interpreter
-      certificate (to_region_runtime runtime) (to_region_ambient ambient) post.
-
 (** Static zipper payload for the later structured-refinement proof.  It is
     deliberately independent of the runtime model, so the certificates and
     resource derivations do not depend on the configuration or on Σ. *)
@@ -806,10 +781,7 @@ Proof.
   apply RegionExecution.Primitives.semantic_stack_own_update.
 Qed.
 
-(** The ordinary-leaf boundary is expressed against the operations packaged
-    by the same interpreter used in [aligned_runtime_region_wp].  Keeping it
-    as a definition (rather than a fresh operation axiom) lets the remaining
-    Raven-rule induction be ported incrementally. *)
+(** Interpretation of an assertion at a concrete runtime stack context. *)
 Definition term_interp_assertion {Γ F Δ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
@@ -4927,22 +4899,6 @@ Qed.
     assertion representation.  The call and spawn rules go through
     [procedure_leaf_operation_valid] with the obligations of
     [call_discard_obligation] and its siblings. *)
-Lemma term_ordinary_call_registered_mask_active {Γ} procedure arguments target
-    entry exit ambient :
-  GenericRegions.Atomicity.take_step
-      (RegionSyntax.cost Γ (TCall procedure arguments target)) entry = inr exit ->
-  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
-    ambient ->
-  RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
-    RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
-Proof.
-  intros Hstep Henvelope.
-  rewrite (RegionExecution.Primitives.Model.active_runtime_mask_closed ambient
-    entry (GenericRegions.Atomicity.procedure_call_step_success_closed
-      _ _ _ _ Hstep)).
-  exact Henvelope.
-Qed.
-
 Lemma term_registered_mask_active_closed entry ambient :
   GenericRegions.Atomicity.analysis_open entry = ∅ ->
   RegionExecution.Primitives.Model.runtime_mask term_registered_invariants ⊆
@@ -5375,149 +5331,6 @@ Proof.
   iPureIntro. exact Harguments'.
 Qed.
 
-
-(** *** The same path with a continuation
-
-    Source `unfold; atomic body; fold; work` -- the flattened,
-    right-nested shape a real program produces -- through the
-    normalization judgment to structured runtime validity.  The
-    conclusion is again about the certificate read off the
-    [normalization_result], and the continuation enters only as
-    its own structured validity, so the access half and the tail compose
-    rather than being re-proved together. *)
-Lemma term_terminal_access_then_normalization_valid
-    {Γ F Δ entry exit invariant arguments atomic_body
-     opened atomic_outer atomic_inner}
-    {post : Translation.Resource.resource_prenex Γ F Δ}
-    (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (step : GenericRegions.Atomicity.take_step
-      GenericRegions.Atomicity.AtomicStep opened = inr atomic_outer)
-    (atomic_certificate : Structured.structured_certificate Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask atomic_outer)
-        (GenericRegions.Atomicity.analysis_open atomic_outer)
-        (GenericRegions.Atomicity.analysis_step_taken atomic_outer) true)
-      atomic_body atomic_inner)
-    (open_equal : GenericRegions.Atomicity.analysis_open atomic_inner =
-      GenericRegions.Atomicity.analysis_open atomic_outer)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask atomic_inner)
-          (GenericRegions.Atomicity.analysis_open atomic_inner)
-          (GenericRegions.Atomicity.analysis_step_taken atomic_outer ||
-            GenericRegions.Atomicity.analysis_step_taken atomic_inner)
-          (GenericRegions.Atomicity.analysis_in_atomic atomic_outer)) =
-      GenericRegions.Atomicity.analysis_open opened)
-    (input_store output_store : symbolic_store Γ F Δ)
-    (frame remainder : Translation.Resource.core_assertion F Δ)
-    (closing_arguments : pexpr_list Γ (Assertion.invariant_args invariant))
-    (work work_target : stmt Γ)
-    (source_derivation :
-      CertifiedNormalization.RavenHoareRules.RavenHoareTriple
-        (Translation.Resource.RState input_store
-          (Translation.Resource.CAnd
-            (Translation.Resource.CInvariant invariant
-              (IR.symbolize_expr_list input_store arguments)) frame))
-        (TSeq (TUnfold invariant arguments)
-          (TSeq (TAtomic atomic_body)
-            (TSeq
-              (TFold invariant closing_arguments) work)))
-        post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry
-      (TSeq (TUnfold invariant arguments)
-        (TSeq (TAtomic atomic_body)
-          (TSeq
-            (TFold invariant closing_arguments) work)))
-      exit)
-    (Hbody : CertifiedNormalization.RavenHoareRules.RavenHoareTriple
-      (Translation.Resource.RState input_store
-        (Translation.Resource.CAnd
-          (ResourceInstances.instantiated_invariant invariant
-            (IR.symbolize_expr_list input_store arguments)) frame))
-      (TAtomic atomic_body)
-      (Translation.Resource.RState output_store
-        (Translation.Resource.CAnd
-          (ResourceInstances.instantiated_invariant invariant
-            (IR.symbolize_expr_list input_store arguments)) remainder)))
-    (work_certificate : Structured.structured_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask atomic_inner)
-          (GenericRegions.Atomicity.analysis_open atomic_inner)
-          (GenericRegions.Atomicity.analysis_step_taken atomic_outer ||
-            GenericRegions.Atomicity.analysis_step_taken atomic_inner)
-          (GenericRegions.Atomicity.analysis_in_atomic atomic_outer)))
-      work_target exit)
-    (work_derivation :
-      CertifiedNormalization.RavenHoareRules.RavenHoareTriple
-        (Translation.Resource.RState output_store
-          (Translation.Resource.CAnd
-            (Translation.Resource.CInvariant invariant
-              (IR.symbolize_expr_list input_store arguments)) remainder))
-        work_target post)
-    (Hwork_erasure : forall names stack,
-      CertifiedNormalization.Erasure.runtime_stmt names stack work =
-        CertifiedNormalization.Erasure.runtime_stmt names stack work_target) :
-  term_structured_runtime_valid atomic_certificate
-    (Translation.Resource.RState input_store
-      (Translation.Resource.CAnd
-        (ResourceInstances.instantiated_invariant invariant
-          (IR.symbolize_expr_list input_store arguments)) frame))
-    (Translation.Resource.RState output_store
-      (Translation.Resource.CAnd
-        (ResourceInstances.instantiated_invariant invariant
-          (IR.symbolize_expr_list input_store arguments)) remainder)) ->
-  (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
-    @Atomic RuntimeLang.simp_lang WeaklyAtomic
-      (@RuntimeErasure.runtime_stmt _ _ Γ
-        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
-        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
-        (TAtomic atomic_body))) ->
-  term_structured_runtime_valid work_certificate
-    (Translation.Resource.RState output_store
-      (Translation.Resource.CAnd
-        (Translation.Resource.CInvariant invariant
-          (IR.symbolize_expr_list input_store arguments)) remainder))
-    post ->
-  let normalization :=
-    CertifiedNormalization.normalization_terminal_atomic_access_then
-      invariant arguments closing_arguments input_store output_store
-      frame remainder
-      atomic_body work
-      work_target source_derivation source_certificate Hopen
-      (Structured.StructuredAtomic Γ opened atomic_body
-        atomic_outer atomic_inner step atomic_certificate open_equal)
-      Hpreserved Hbody work_certificate work_derivation Hwork_erasure in
-  term_structured_runtime_valid
-    (CertifiedNormalization.normalization_target_certificate
-      normalization)
-    (Translation.Resource.RState input_store
-      (Translation.Resource.CAnd
-        (Translation.Resource.CInvariant invariant
-          (IR.symbolize_expr_list input_store arguments)) frame))
-    post.
-Proof.
-  intros Hbody_runtime Hatomicity Hwork_runtime normalization.
-  apply (term_structured_runtime_sequence_valid _
-    work_certificate _
-    (Translation.Resource.RState output_store
-      (Translation.Resource.CAnd
-        (Translation.Resource.CInvariant invariant
-          (IR.symbolize_expr_list input_store arguments)) remainder)));
-    [| exact Hwork_runtime].
-  apply (term_structured_runtime_terminal_access_valid
-    Hregistered Hopen step atomic_certificate open_equal Hpreserved
-    input_store frame _ _
-    (CertifiedNormalization.RavenHoareRules.AccessBase invariant Δ
-      (IR.symbolize_expr_list input_store arguments)
-      (ResourceInstances.instantiated_invariant invariant
-        (IR.symbolize_expr_list input_store arguments))
-      output_store remainder));
-    [exact Hbody_runtime | exact Hatomicity].
-Qed.
 
 (** *** The procedure boundary
 

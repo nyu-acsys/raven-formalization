@@ -6,7 +6,7 @@ From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants.
 
 From raven Require Import runtime.erasure analysis.structured_certificates runtime.lang runtime.ghost_state.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics soundness.runtime_model analysis.normalization_base analysis.normalization soundness.rule_validity soundness.procedure_validity.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity soundness.runtime_model analysis.normalization_base analysis.normalization soundness.rule_validity soundness.procedure_validity.
 
 Import ListNotations.
 Import weakestpre.

@@ -66,7 +66,7 @@ Section lifting.
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [  |  |  |  |
         | σ0 stk_id0 stk_frm0 e1 fld e' l0 v0 Hstk_frm0  Hl0 Hv0
-      |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 fld stk_id0 e' e1 e2; simpl; iFrame.
+      |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 fld stk_id0 e' e1 e2; simpl; iFrame.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. {
           rewrite HstkPure in Hstk_frm0.
@@ -128,7 +128,7 @@ Section lifting.
     - iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [  |  |  |
         σ0 stk_id0 stk_frm0 e1 v0 e0 Hstk_frm0 Hv0
-      |  |  |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl.
+      |  |  |  |  |  |  |  |  |  |  ]; subst κ efs σ2 σ0 v0 e1 e2; simpl.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. {
           rewrite HstkPure in Hstk_frm0.
@@ -179,7 +179,7 @@ Section lifting.
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
       inversion H as [ | | | | | |
           σ0 stk_id0 stk_frm0 v0 e0 fld0 l0 v2 Hstk_frm0 HexSt HlookUp
-        |  |  |  |  |  |  |  |  |  ]; subst v0 e0 fld0 stk_id0 σ0 κ e2 σ2 efs. simpl.
+        |  |  |  |  |  |  |  ]; subst v0 e0 fld0 stk_id0 σ0 κ e2 σ2 efs. simpl.
       iSplitR; try done.
 
       assert (stk_frm0 = stk_frm) as Hstkfrm_subst. {
@@ -296,8 +296,8 @@ Section lifting.
       apply (AllocStep σ stk_id stk_frm x initializers fs); done.
 
     - iModIntro. iNext. iIntros (e2 σ2 efs) "%H Hcred".
-    inversion H as [  |  |  |  |  |  |  |  |
-        | σ0 stk_id0 stk_frm0 x0 initializers0 fs0 Hstack0 Hinitializers0
+    inversion H as [  |  |  |  |  |  |  |
+        σ0 stk_id0 stk_frm0 x0 initializers0 fs0 Hstack0 Hinitializers0
         |  |  |  |  |  |  ]; subst x0 initializers0 stk_id0 σ0 κ e2 σ2 efs; simpl;
         iRevert "Hgdom"; iFrame; iIntros "Hgdom".
         iSplitR; try done.
@@ -532,124 +532,6 @@ Section lifting.
   Proof.
     iIntros "Hwp". iApply (wp_bind (fill_item (SeqCtx s2)) _ _ _ _).
     iApply (wp_wand with "Hwp"). iIntros (v) "Hwp". iExact "Hwp".
-  Qed.
-
-  Lemma wp_cas_succ x e1 fld e2 e3 stk_id stk_frm l v v' mask:
-  expr_step e1 stk_frm (Val (LitLoc l)) ->
-  expr_step e2 stk_frm (Val v) ->
-  expr_step e3 stk_frm (Val v') ->
-  {{{ stack_own[ stk_id, stk_frm ] ∗ l#fld ↦{1} v }}}
-    RTCAS x e1 fld e2 e3 stk_id @ mask
-  {{{ RET lang.LitUnit; stack_own[ stk_id, StackFrame (<[x:=LitBool true]> stk_frm.(locals)) ] ∗ l#fld ↦{1} v' ∗ £1 }}}.
-  Proof.
-    intros He1 He2 He3.
-    iIntros (Φ) "[Hstk Hl] HΦ".
-    iApply wp_lift_atomic_base_step_no_fork; first done.
-    iIntros (σ ns κ κs nt) "Hstate".
-    iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
-    iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
-    iPoseProof (heap_interp_agreement with "Hhp Hl") as "%HHeapPure".
-
-    iModIntro. iSplitR.
-    - iPureIntro. unfold base_reducible. exists [], (RTVal LitUnit), (update_lvar (update_heap σ l fld v') x stk_id (LitBool true)), [].
-    apply (CASSuccStep σ stk_id stk_frm x e1 fld e2 e3 l v v'); try done.
-
-    - iNext. iIntros (e0 σ2 efs) "%H Hcred".
-    inversion H; subst v0 e4 fld0 e5 e6 stk_id0 σ0 κ e0 efs.
-
-      +
-        rewrite HstkPure in H11. inversion H11; subst stk_frm0.
-        assert (v' = v3) as Hv. { apply (expr_step_val_unique e3 stk_frm); try done. } subst v3.
-        assert (l0 = l) as Hl. { assert (LitLoc l0 = LitLoc l). {apply (expr_step_val_unique e1 stk_frm (LitLoc l0) (LitLoc l)); try done. } inversion H0; done. } subst l0.
-        clear H11 H12.
-        subst σ''.
-        iPoseProof (heap_l_upd σ l fld v v' with "[Hl Hhp]") as "Hhp_upd"; first iFrame.
-        iPoseProof (stack_lvar_upd _ _ _ x (LitBool true) with "[Hstk Hstack]") as "Hstk_upd"; try iFrame.
-
-        iDestruct "Hhp_upd" as ">[Hl Hhp]".
-        iDestruct "Hstk_upd" as ">[Hstk Hstack]".
-        iModIntro.
-        iSplitR; try auto.
-
-        have Hstk' : stack σ' !! stk_id = Some stk_frm.
-        { unfold σ'. simpl. exact HstkPure. }
-        change (weakestpre.state_interp (update_lvar σ' x stk_id (LitBool true)) (S ns) κs nt) with
-          (ghost_state.state_interp (update_lvar σ' x stk_id (LitBool true))).
-        unfold ghost_state.state_interp.
-        replace (global_heap (update_lvar σ' x stk_id (LitBool true))) with (global_heap σ') by
-          (unfold update_lvar, σ'; simpl; rewrite HstkPure; done).
-        replace (procs (update_lvar σ' x stk_id (LitBool true))) with (procs σ) by
-          (unfold update_lvar, σ'; simpl; rewrite HstkPure; done).
-        replace (stack (update_lvar σ' x stk_id (LitBool true))) with (stack (update_lvar σ x stk_id (LitBool true))) by
-          (unfold update_lvar, σ'; simpl; rewrite HstkPure; done).
-        iFrame "Hhp Hstack Hproc".
-        have Hwf_σ' : state_wf σ' := state_wf_update_heap_overwrite σ l fld v' v HHeapPure Hwf.
-        have Hwf_cas : state_wf (update_lvar σ' x stk_id (LitBool true)) :=
-          state_wf_update_lvar σ' x stk_id (LitBool true) Hwf_σ'.
-        have HgdomB_σ' : ∀ a, a ∈ D → ((heap_addr_loc a).(loc_car) < Z.of_nat (size (global_heap σ')))%Z :=
-          ghost_dom_bound_update_heap_overwrite σ l fld v' v D HHeapPure HgdomB.
-        iFrame (HgdomB_σ' Hwf_cas).
-        simpl. iApply "HΦ". iFrame.
-
-      + rewrite HstkPure in H11. inversion H11; subst stk_frm0.
-        assert (l0 = l) as Hl. { assert (LitLoc l0 = LitLoc l). { apply (expr_step_val_unique e1 stk_frm (LitLoc l0) (LitLoc l)); try done. } inversion H0; done. } subst l0.
-        rewrite HHeapPure in H14. inversion H14; subst v1.
-        assert (v = v2). { apply (expr_step_val_unique e2 stk_frm); try done. }
-        contradiction.
-  Qed.
-
-  Lemma wp_cas_fail x e1 fld e2 e3 stk_id stk_frm l v v0 mask:
-    expr_step e1 stk_frm (Val (LitLoc l)) ->
-    expr_step e2 stk_frm (Val v) ->
-    not (v = v0) ->
-    {{{ stack_own[ stk_id, stk_frm ] ∗ l#fld ↦{1} v0 }}}
-      RTCAS x e1 fld e2 e3 stk_id @ mask
-    {{{ RET lang.LitUnit; stack_own[ stk_id, StackFrame (<[x:=LitBool false]> stk_frm.(locals)) ] ∗ l#fld ↦{1} v0 ∗ £1 }}}.
-  Proof.
-    intros He1 He2 Hneq.
-    iIntros (Φ) "[Hstk Hl] HΦ".
-
-    iApply wp_lift_atomic_base_step_no_fork; first done.
-    iIntros (σ ns κ κs nt) "Hstate".
-    iDestruct "Hstate" as "[Hhp [Hproc [Hstack [[%D [Hgdom %HgdomB]] %Hwf]]]]".
-    iPoseProof (stack_interp_agreement with "Hstack Hstk") as "%HstkPure".
-    iPoseProof (heap_interp_agreement with "Hhp Hl") as "%HHeapPure".
-
-    iModIntro. iSplitR.
-    - iPureIntro. unfold base_reducible. exists [], (RTVal LitUnit), (update_lvar σ x stk_id (LitBool false)), [].
-    apply (CASFailStep σ stk_id stk_frm x e1 fld e2 e3 l v0 v); try done.
-
-    - iNext. iIntros (e0 σ2 efs) "%H Hcred".
-    inversion H; subst v1 e4 fld0 e5 e6 stk_id0 σ0 κ e0 efs.
-
-      + assert (stk_frm = stk_frm0) as Hstk_frm.
-        { rewrite HstkPure in H11. injection H11 as H11. done. }
-        subst stk_frm0.
-        assert (LitLoc l = LitLoc l0) as Hl_l0. { apply (expr_step_val_unique e1 stk_frm); try done. } injection Hl_l0 as Hl_l0. subst l0. rewrite HHeapPure in H15. injection H15 as H15. subst v2.
-        assert (v = v0) as Hv_v0. { apply (expr_step_val_unique e2 stk_frm); try done. } contradiction.
-
-      + subst σ2.
-        assert (stk_frm = stk_frm0) as Hstk_frm.
-          { rewrite HstkPure in H11. injection H11 as H11. done. }
-        subst stk_frm0.
-        assert (LitLoc l = LitLoc l0) as Hl_l0. { apply (expr_step_val_unique e1 stk_frm); try done. } injection Hl_l0 as Hl_l0. subst l0. rewrite HHeapPure in H14. injection H14 as H14. subst v2.
-        clear H15 H13 H12 v3.
-
-        iPoseProof (stack_lvar_upd _ _ _ x (LitBool false) with "[Hstk Hstack]") as "Hstk_upd"; try iFrame.
-
-        iDestruct "Hstk_upd" as ">[Hstk Hstack]".
-        iModIntro. iSplitR; try done.
-        change (weakestpre.state_interp σ' (S ns) κs nt) with
-          (ghost_state.state_interp σ').
-        unfold ghost_state.state_interp.
-        replace (global_heap σ') with (global_heap σ) by
-          (unfold σ', update_lvar; rewrite HstkPure; done).
-        replace (procs σ') with (procs σ) by
-          (unfold σ', update_lvar; rewrite HstkPure; done).
-        iFrame "Hhp Hstack Hproc".
-        have Hwf_fail : state_wf σ' := state_wf_update_lvar σ x stk_id (LitBool false) Hwf.
-        iFrame (HgdomB Hwf_fail).
-        simpl. iApply "HΦ". iFrame.
   Qed.
 
   Lemma wp_if_t e s1 s2 stk_id stk_frm p q v mask :

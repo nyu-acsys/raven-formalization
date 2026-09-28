@@ -525,38 +525,7 @@ Proof.
     + apply core_existential_prenex_and_entails_back.
     + apply CEntailsAndMono; eassumption.
 Qed.
-(** *** Erasure into the assertion entailment
 
-    Each core rule is the corresponding assertion rule on the embedded
-    image.  This is what lets the validity slice reuse
-    [Validity.assertion_entails_valid] — a 260-line semantic theorem —
-    instead of reproving entailment soundness for the core grammar. *)
-
-Lemma core_entailment_step_erases {F Δ} (left right : core_assertion F Δ) :
-  core_entailment_step left right ->
-  forall Γ, entailment_step (@core_to_assertion _ _ Γ F Δ left)
-    (core_to_assertion right).
-Proof.
-  intro Hstep; induction Hstep; intro Γ; cbn [core_to_assertion];
-    econstructor; eauto using core_to_assertion_stack_free.
-Qed.
-
-Lemma core_entails_erases {F Δ} (left right : core_assertion F Δ) :
-  core_entails left right ->
-  forall Γ, assertion_entails (@core_to_assertion _ _ Γ F Δ left)
-    (core_to_assertion right).
-Proof.
-  intro Hentails; induction Hentails; intro Γ; cbn [core_to_assertion];
-    rewrite ?core_to_assertion_weaken, ?core_to_assertion_rename in *.
-  all: try (econstructor;
-    eauto using core_entailment_step_erases, core_to_assertion_stack_free;
-    fail).
-  - eapply EntailsExistsIntro. apply instantiate_bound_core_to_assertion.
-  - apply EntailsExistsElim. rewrite <- core_to_assertion_weaken.
-    apply IHHentails.
-Qed.
-
-(* ------------------------------------------------------------------ *)
 (** ** 2. The resource entailment boundary
 
     Ordinary consequence preserves the explicit stack and uses core

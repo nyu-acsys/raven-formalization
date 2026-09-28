@@ -173,9 +173,7 @@ Definition client_typed_procedure : typed_procedure [TInt; TRef] client_procedur
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module client_procedure) ltac:(vm_compute; exact I)).
 
-Definition read_variables := procedure_variables _ _ read_typed_procedure.
 Definition incr_variables := procedure_variables _ _ incr_typed_procedure.
-Definition make_variables := procedure_variables _ _ make_typed_procedure.
 Definition read_typed_body := procedure_body _ _ read_typed_procedure.
 Definition incr_typed_body := procedure_body _ _ incr_typed_procedure.
 Definition make_typed_body := procedure_body _ _ make_typed_procedure.
@@ -519,23 +517,6 @@ Proof.
   induction store; cbn [rename_bound_store weaken_store].
   - reflexivity.
   - f_equal. exact IHstore.
-Qed.
-
-Lemma lookup_update_store_preserves_third
-    {tail_context F Δ first_type second_type third_type target_type}
-    (store : symbolic_store
-      (first_type :: second_type :: third_type :: tail_context) F Δ)
-    (target : pvar tail_context target_type) :
-  lookup_store
-      (RuleValidity.IR.update_store_with_bound store
-        (MThere (MThere (MThere target)))) third_type
-      (MThere (MThere MHere)) =
-    weaken_ref (lookup_store store third_type (MThere (MThere MHere))).
-Proof.
-  dependent destruction store. dependent destruction store.
-  dependent destruction store.
-  rewrite !update_store_there, !lookup_store_there, !lookup_store_here.
-  reflexivity.
 Qed.
 
 Lemma read_field_location :
@@ -1999,11 +1980,6 @@ Proof.
   rewrite lookup_expr_list_here. reflexivity.
 Qed.
 
-Lemma read_instantiated_post {F Delta : context}
-    (arguments : RH.Assertions.expr_list F (TInt :: Delta) [TRef]) :
-  HoareRules.instantiated_post read_procedure arguments = Resource.CTrue.
-Proof. reflexivity. Qed.
-
 Definition client_made_store :
     symbolic_store [TInt; TRef] (procedure_args client_procedure) [TRef] :=
   RuleValidity.IR.update_store_with_bound client_entry_store (MThere MHere).
@@ -2128,24 +2104,6 @@ Proof. vm_compute. reflexivity. Qed.
 Lemma client_restricted_fragment_accepted :
   NormalizationBase.restricted_fragment_accepted client_typed_body.
 Proof. vm_compute. reflexivity. Qed.
-
-Lemma read_restricted_normalization_computes :
-  exists normalized,
-    NormalizationBase.restricted_analyze_and_normalize read_typed_body =
-      Some normalized.
-Proof. vm_compute. eexists. reflexivity. Qed.
-
-Lemma incr_restricted_normalization_computes :
-  exists normalized,
-    NormalizationBase.restricted_analyze_and_normalize incr_typed_body =
-      Some normalized.
-Proof. vm_compute. eexists. reflexivity. Qed.
-
-Lemma make_restricted_normalization_computes :
-  exists normalized,
-    NormalizationBase.restricted_analyze_and_normalize make_typed_body =
-      Some normalized.
-Proof. vm_compute. eexists. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** The analyzed procedure bodies

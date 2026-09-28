@@ -6,7 +6,7 @@ From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants.
 
 From raven Require Import runtime.erasure analysis.structured_certificates runtime.lang runtime.ghost_state.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.certificate_semantics soundness.runtime_model analysis.normalization_base analysis.normalization soundness.rule_validity.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity soundness.runtime_model analysis.normalization_base analysis.normalization soundness.rule_validity.
 
 Import ListNotations.
 Import weakestpre.
@@ -228,58 +228,6 @@ Proof.
     normalization eq_refl Hvalid).
 Qed.
 
-(** Exit-mask envelope used by recursive call/spawn closure. *)
-Theorem term_analyzed_body_exit_mask_valid
-    {Γ identity} (procedure : typed_procedure Γ identity)
-    (current_mask : Hoare.mask)
-    (body : analyzed_body_certificate procedure current_mask)
-    (Hnormalizes : analyzed_body_normalization_exists procedure
-      current_mask body)
-    (Hregistered : GenericRegions.Atomicity.certificate_footprint
-      (CertifiedNormalization.analyzed_certificate
-        (analyzed_body_triple _ _ body)) ⊆
-      term_registered_invariants ) :
-  forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
-    (formals : formal_env (Assertion.procedure_args identity))
-    (valuation : symbol_valuation) (ambient : coPset),
-    RegionExecution.Primitives.Model.runtime_mask
-      (GenericRegions.Atomicity.analysis_mask
-        (analyzed_body_exit _ _ body) ∪ term_registered_invariants) ⊆
-      ambient ->
-    (global_world_context valuation ∗
-     term_interp_resource_prenex runtime formals empty_binder_env valuation
-       (Hoare.procedure_body_pre procedure)) ⊢
-    translated_runtime_wp runtime ambient
-      (analyzed_body_entry _ _ body)
-      (analyzed_body_exit _ _ body)
-      (procedure_body _ _ procedure)
-      (global_world_context valuation ∗
-       term_interp_resource_prenex runtime formals empty_binder_env valuation
-         (Hoare.procedure_body_post procedure
-           (analyzed_body_exit_store _ _ body)
-           (analyzed_body_return_reference _ _ body))).
-Proof.
-  intros runtime formals valuation ambient Henvelope.
-  destruct Hnormalizes as [normalization Hworker].
-  have Hsource_envelope : RegionExecution.Primitives.Model.runtime_mask
-      (GenericRegions.Atomicity.certificate_footprint
-        (CertifiedNormalization.analyzed_certificate
-          (analyzed_body_triple _ _ body)) ∪ term_registered_invariants) ⊆
-      ambient.
-  { etrans; last exact Henvelope.
-    apply RegionExecution.Primitives.Model.runtime_mask_mono.
-    intros invariant Hin. rewrite !elem_of_union in Hin |- *.
-    destruct Hin as [Hin | Hin].
-    - left. eapply GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-      + exact (analyzed_body_conditionals _ _ body).
-      + exact (analyzed_body_exit_closed _ _ body).
-      + exact Hin.
-    - now right. }
-  exact (term_analyzed_body_source_valid procedure
-    current_mask body (ex_intro _ normalization Hworker) Hregistered
-    runtime formals valuation ambient Hsource_envelope).
-Qed.
-
 Definition analyzed_body_valid {Γ identity}
     (procedure : typed_procedure Γ identity) : Type :=
   analyzed_body_certificate procedure
@@ -364,9 +312,6 @@ Record term_registered_body_semantics {Γ F}
     GenericRegions.Atomicity.analysis_open term_semantic_body_entry = ∅;
   term_semantic_body_exit_closed :
     GenericRegions.Atomicity.analysis_open term_semantic_body_exit = ∅;
-  term_semantic_body_exit_mask :
-    Certified.granted_mask (procedure_identity _ _ procedure) ⊆
-      GenericRegions.Atomicity.analysis_mask term_semantic_body_exit;
   term_semantic_body_source_valid : forall
       (runtime : RegionExecution.Primitives.Model.stack_context Γ)
       (formals : formal_env (Assertion.procedure_args F)) (valuation : symbol_valuation) ambient,
@@ -415,7 +360,6 @@ Proof.
   - exact (analyzed_body_exit_return _ _ body).
   - exact (analyzed_body_entry_closed _ _ body).
   - exact (analyzed_body_exit_closed _ _ body).
-  - exact (analyzed_body_exit_mask _ _ body).
   - intros runtime formals valuation ambient Henvelope.
     eapply term_analyzed_body_source_valid.
     + exact (Hcomplete Γ F procedure body).

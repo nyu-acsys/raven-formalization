@@ -233,8 +233,6 @@ Inductive runtime_stmt :=
 | RTActiveCallNoStore (s : runtime_stmt) (callee_stk_id : stack_id)
 | RTFldWr (base : expr) (fld : fld_name) (e : expr) (stk_id : stack_id)
 | RTFldRd (v : var) (e : expr) (fld : fld_name) (stk_id : stack_id)
-| RTCAS (v : var) (e1 : expr) (fld : fld_name) (e2 e3 : expr)
-    (stk_id : stack_id)
 | RTAlloc (v : var) (fs : list (fld_name * expr)) (stk_id : stack_id)
 | RTSpawn (proc : proc_name) (args : list expr) (stk_id : stack_id)
 | RTTrustedAtomic (transition : trusted_atomic_transition) (stk_id : stack_id).
@@ -535,24 +533,6 @@ Inductive runtime_step : runtime_stmt → state → list Empty_set → runtime_s
   let σ' := update_lvar σ v stk_id v2 in
   runtime_step (RTFldRd v e fld stk_id) σ [] (RTVal LitUnit) σ' []
 
-| CASSuccStep σ stk_id stk_frm v e1 fld e2 e3 l v2 v3 :
-  σ.(stack) !! stk_id = Some stk_frm ->
-  expr_step e1 stk_frm (Val (LitLoc l)) ->
-  expr_step e2 stk_frm (Val v2) ->
-  expr_step e3 stk_frm (Val v3) ->
-  lookup_heap σ l fld = Some v2 ->
-  let σ' := update_heap σ l fld v3 in
-  let σ'' := update_lvar σ' v stk_id (LitBool true) in
-  runtime_step (RTCAS v e1 fld e2 e3 stk_id) σ [] (RTVal LitUnit) σ'' []
-
-| CASFailStep σ stk_id stk_frm v e1 fld e2 e3 l v0 v2 :
-  σ.(stack) !! stk_id = Some stk_frm ->expr_step e1 stk_frm (Val (LitLoc l)) ->
-  expr_step e2 stk_frm (Val v2) ->
-  lookup_heap σ l fld = Some v0 ->
-  not (v0 = v2) ->
-  let σ' := update_lvar σ v stk_id (LitBool false) in
-  runtime_step (RTCAS v e1 fld e2 e3 stk_id) σ [] (RTVal LitUnit) σ' []
-
 | AllocStep σ stk_id stk_frm v initializers fs :
   σ.(stack) !! stk_id = Some stk_frm ->
   Forall2 (fun initializer field_value =>
@@ -832,7 +812,6 @@ Definition is_atomic_redex (r : runtime_stmt) : Prop :=
   | RTStuckS => True
   | RTFldWr _ _ _ _ => True
   | RTFldRd _ _ _ _ => True
-  | RTCAS _ _ _ _ _ _ => True
   | RTAlloc _ _ _ => True
   | RTSpawn _ _ _ => True
   | RTTrustedAtomic _ _ => True
@@ -956,23 +935,6 @@ Proof.
   + simpl in *; subst. inversion H2. apply val_irreducible. simpl. done.
   + simpl in *.
     pose proof (fill_not_atomic K e0 e1' (RTFldRd v e fld stk_id)).
-    simpl in H3.
-    specialize (H3 I).
-    symmetry in H0. contradiction.
-Qed.
-
-Lemma atomic_cas v e1 fld e2 e3 stk_id :
-  Atomic WeaklyAtomic (RTCAS v e1 fld e2 e3 stk_id).
-Proof.
-  unfold Atomic. intros.
-  inversion H.
-
-  destruct K.
-  + simpl in *; subst. inversion H2.
-    ++ apply val_irreducible. simpl. done.
-    ++ apply val_irreducible. simpl. done.
-  + simpl in *.
-    pose proof (fill_not_atomic K e e1' (RTCAS v e1 fld e2 e3 stk_id)).
     simpl in H3.
     specialize (H3 I).
     symmetry in H0. contradiction.
