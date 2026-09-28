@@ -76,7 +76,6 @@ Inductive analysis_error :=
 | AtomicBlockLeaksAccess
 | StructuredAccessRequiresCertificate
 | IncompatibleBranches
-| IncoherentConditionalMasks
 | FuelExhausted.
 
 Record analysis_state := AnalysisState {
@@ -466,59 +465,6 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
 Definition analyze {Γ} state (statement : syntax_statement Γ) :=
   analyze_fuel (syntax_size Γ statement) state statement.
 
-(** Executable branch-coherence check layered over the existing flat
-    analyzer.  It follows the same recursive states but additionally requires
-    equal branch masks at every conditional.  Keeping this as a separate pass
-    preserves the current Raven analysis result while making the baseline
-    normalizer's stronger acceptance criterion explicit and computable. *)
-Fixpoint check_conditional_masks_fuel {Γ} (fuel : nat)
-    (state : analysis_state) (statement : syntax_statement Γ) : bool :=
-  match fuel with
-  | 0 => false
-  | S fuel' =>
-      match syntax_view Γ statement with
-      | ViewSequence first second =>
-          match analyze_fuel fuel' state first with
-          | inr middle =>
-              check_conditional_masks_fuel fuel' state first &&
-              check_conditional_masks_fuel fuel' middle second
-          | inl _ => false
-          end
-      | ViewConditional then_branch else_branch =>
-          match analyze_fuel fuel' state then_branch,
-              analyze_fuel fuel' state else_branch with
-          | inr then_exit, inr else_exit =>
-              check_conditional_masks_fuel fuel' state then_branch &&
-              check_conditional_masks_fuel fuel' state else_branch &&
-              bool_decide (analysis_mask then_exit = analysis_mask else_exit)
-          | _, _ => false
-          end
-      | ViewAtomic body =>
-          match take_step AtomicStep state with
-          | inr outer =>
-              check_conditional_masks_fuel fuel'
-                (AnalysisState (analysis_mask outer) (analysis_open outer)
-                  (analysis_step_taken outer) true) body
-          | inl _ => false
-          end
-      | ViewStructuredAccess _ _ => false
-      | _ => true
-      end
-  end.
-
-Definition check_conditional_masks {Γ} state
-    (statement : syntax_statement Γ) : bool :=
-  check_conditional_masks_fuel (syntax_size Γ statement) state statement.
-
-Definition analyze_coherent {Γ} state
-    (statement : syntax_statement Γ) : analysis_error + analysis_state :=
-  match analyze state statement with
-  | inl error => inl error
-  | inr exit =>
-      if check_conditional_masks state statement
-      then inr exit else inl IncoherentConditionalMasks
-  end.
-
 Lemma open_invariant_success invariant state exit :
   open_invariant invariant state = inr exit ->
   invariant ∉ analysis_open state /\
@@ -757,9 +703,8 @@ Qed.
     [replay_lifo_certificate], this pass follows the syntax directly while
     carrying both the analyzer state and the access stack.  Consequently its
     computation never unfolds the proof term returned by
-    [analyze_builds_certificate].  Successful conditional nodes additionally
-    retain equal masks, so the result subsumes [analyze_coherent]. *)
-Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat)
+    [analyze_builds_certificate]. *)
+Fixpoint analyze_lifo_fuel {Γ} (fuel : nat)
     (state : analysis_state) (stack : list access_marker)
     (statement : syntax_statement Γ) :
     option (analysis_state * list access_marker) :=
@@ -794,19 +739,18 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat)
               then Some (exit, []) else None
           end
       | ViewSequence first second =>
-          match analyze_coherent_lifo_fuel fuel' state stack first with
+          match analyze_lifo_fuel fuel' state stack first with
           | Some (middle, stack_middle) =>
-              analyze_coherent_lifo_fuel fuel' middle stack_middle second
+              analyze_lifo_fuel fuel' middle stack_middle second
           | None => None
           end
       | ViewConditional then_branch else_branch =>
-          match analyze_coherent_lifo_fuel fuel' state stack then_branch,
-              analyze_coherent_lifo_fuel fuel' state stack else_branch with
+          match analyze_lifo_fuel fuel' state stack then_branch,
+              analyze_lifo_fuel fuel' state stack else_branch with
           | Some (then_exit, then_stack), Some (else_exit, else_stack) =>
               if decide
                   (analysis_open then_exit = analysis_open else_exit /\
                    analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-                   analysis_mask then_exit = analysis_mask else_exit /\
                    then_stack = else_stack)
               then Some (AnalysisState
                 (analysis_mask then_exit ∩ analysis_mask else_exit)
@@ -823,7 +767,7 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat)
           | inr outer =>
               let inner_entry := AnalysisState (analysis_mask outer)
                 (analysis_open outer) (analysis_step_taken outer) true in
-              match analyze_coherent_lifo_fuel fuel' inner_entry stack body with
+              match analyze_lifo_fuel fuel' inner_entry stack body with
               | Some (inner, body_stack) =>
                   if decide (analysis_open inner = analysis_open outer /\
                     body_stack = stack)
@@ -838,19 +782,19 @@ Fixpoint analyze_coherent_lifo_fuel {Γ} (fuel : nat)
       end
   end.
 
-Definition analyze_coherent_lifo {Γ}
+Definition analyze_lifo {Γ}
     (state : analysis_state) (statement : syntax_statement Γ) :
     option analysis_state :=
-  match analyze_coherent_lifo_fuel (syntax_size Γ statement) state []
+  match analyze_lifo_fuel (syntax_size Γ statement) state []
       statement with
   | Some (exit, []) => Some exit
   | _ => None
   end.
 
-Lemma analyze_coherent_lifo_fuel_projects {Γ} fuel
+Lemma analyze_lifo_fuel_projects {Γ} fuel
     (state : analysis_state) (stack : list access_marker)
     (statement : syntax_statement Γ) exit stack_out :
-  analyze_coherent_lifo_fuel fuel state stack statement =
+  analyze_lifo_fuel fuel state stack statement =
     Some (exit, stack_out) ->
   analyze_fuel fuel state statement = inr exit.
 Proof.
@@ -875,19 +819,18 @@ Proof.
         try destruct (decide (invariant ∉ analysis_open state));
         try discriminate;
         inversion Hrun; subst; simpl; rewrite Hview; reflexivity.
-  - destruct (analyze_coherent_lifo_fuel fuel state stack first) as
+  - destruct (analyze_lifo_fuel fuel state stack first) as
       [[middle stack_middle]|] eqn:Hfirst; try discriminate.
     specialize (IH _ state stack first middle stack_middle Hfirst) as Hfirst'.
     specialize (IH _ middle stack_middle second exit stack_out Hrun) as Hsecond'.
     simpl. rewrite Hview, Hfirst'. exact Hsecond'.
-  - destruct (analyze_coherent_lifo_fuel fuel state stack then_branch) as
+  - destruct (analyze_lifo_fuel fuel state stack then_branch) as
       [[then_exit then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel state stack else_branch) as
+    destruct (analyze_lifo_fuel fuel state stack else_branch) as
       [[else_exit else_stack]|] eqn:Helse; try discriminate.
     destruct (decide
       (analysis_open then_exit = analysis_open else_exit /\
        analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-       analysis_mask then_exit = analysis_mask else_exit /\
        then_stack = else_stack)) as [Hjoin|Hjoin]; try discriminate.
     inversion Hrun; subst exit stack_out.
     specialize (IH _ state stack then_branch then_exit then_stack Hthen)
@@ -900,7 +843,7 @@ Proof.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer]
       eqn:Hstep; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel
+    destruct (analyze_lifo_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) stack body) as
       [[inner body_stack]|] eqn:Hbody; try discriminate.
@@ -913,158 +856,18 @@ Proof.
     rewrite bool_decide_true; [reflexivity|exact Hopen].
 Qed.
 
-Lemma analyze_coherent_lifo_fuel_conditional_masks {Γ} fuel (state : analysis_state)
-    (stack : list access_marker) (statement : syntax_statement Γ)
-    exit stack_out :
-  analyze_coherent_lifo_fuel fuel state stack statement =
-    Some (exit, stack_out) ->
-  check_conditional_masks_fuel fuel state statement = true.
-Proof.
-  revert Γ state stack statement exit stack_out.
-  induction fuel as [|fuel IH];
-    intros Γ state stack statement exit stack_out Hrun; simpl in Hrun;
-    first discriminate.
-  destruct (syntax_view Γ statement) eqn:Hview; simpl.
-  - rewrite Hview. reflexivity.
-  - rewrite Hview. reflexivity.
-  - rewrite Hview. reflexivity.
-  - rewrite Hview. reflexivity.
-  - simpl in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel state stack first) as
-      [[middle stack_middle]|] eqn:Hfirst; try discriminate.
-    pose proof (IH _ state stack first middle stack_middle Hfirst) as Hfirst'.
-    pose proof (IH _ middle stack_middle second exit stack_out Hrun)
-      as Hsecond'.
-    pose proof (analyze_coherent_lifo_fuel_projects _ state stack first
-      middle stack_middle Hfirst) as Hfirst_run.
-    rewrite Hview, Hfirst_run, Hfirst', Hsecond'. reflexivity.
-  - simpl in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel state stack then_branch) as
-      [[then_exit then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel state stack else_branch) as
-      [[else_exit else_stack]|] eqn:Helse; try discriminate.
-    destruct (decide
-      (analysis_open then_exit = analysis_open else_exit /\
-       analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-       analysis_mask then_exit = analysis_mask else_exit /\
-       then_stack = else_stack)) as [Hjoin|Hjoin]; try discriminate.
-    pose proof (IH _ state stack then_branch then_exit then_stack Hthen)
-      as Hthen'.
-    pose proof (IH _ state stack else_branch else_exit else_stack Helse)
-      as Helse'.
-    pose proof (analyze_coherent_lifo_fuel_projects _ state stack
-      then_branch then_exit then_stack Hthen) as Hthen_run.
-    pose proof (analyze_coherent_lifo_fuel_projects _ state stack
-      else_branch else_exit else_stack Helse) as Helse_run.
-    destruct Hjoin as [_ [_ [Hmasks _]]].
-    rewrite Hview, Hthen_run, Helse_run, Hthen', Helse'.
-    rewrite bool_decide_true; [reflexivity|exact Hmasks].
-  - discriminate.
-  - simpl in Hrun.
-    destruct (take_step AtomicStep state) as [error|outer]
-      eqn:Hstep; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
-        (analysis_step_taken outer) true) stack body) as
-      [[inner body_stack]|] eqn:Hbody; try discriminate.
-    destruct (decide (analysis_open inner = analysis_open outer /\
-      body_stack = stack)) as [Hclose|Hclose]; try discriminate.
-    pose proof (IH _ _ stack body inner body_stack Hbody) as Hbody'.
-    rewrite Hview, Hbody'. reflexivity.
-Qed.
-
-Lemma analyze_coherent_lifo_projects {Γ}
+Lemma analyze_lifo_projects {Γ}
     (state : analysis_state) (statement : syntax_statement Γ) exit :
-  analyze_coherent_lifo state statement = Some exit ->
-  analyze_coherent state statement = inr exit.
+  analyze_lifo state statement = Some exit ->
+  analyze state statement = inr exit.
 Proof.
-  unfold analyze_coherent_lifo.
-  destruct (analyze_coherent_lifo_fuel (syntax_size Γ statement) state []
+  unfold analyze_lifo.
+  destruct (analyze_lifo_fuel (syntax_size Γ statement) state []
     statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
   destruct stack_out as [|marker stack_out]; try discriminate.
   intros Hsuccess. inversion Hsuccess; subst actual.
-  unfold analyze_coherent, analyze.
-  rewrite (analyze_coherent_lifo_fuel_projects _ state [] statement
-    exit [] Hrun).
-  unfold check_conditional_masks.
-  rewrite (analyze_coherent_lifo_fuel_conditional_masks _ state []
-    statement exit [] Hrun).
-  reflexivity.
+  exact (analyze_lifo_fuel_projects _ state [] statement exit [] Hrun).
 Qed.
-
-(** Branch coherence required by the first certified normalizer.  The flat
-    analyzer deliberately computes the intersection of branch masks; this
-    additional success evidence records when that conservative join loses no
-    branch-local invariant allocation.  Keeping it separate from
-    [analysis_certificate] preserves the current executable analysis while
-    allowing a future per-instance mask analysis to refine the compared key. *)
-Fixpoint conditional_masks_coherent {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit) :
-    Prop :=
-  match certificate with
-  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
-      conditional_masks_coherent first_certificate /\
-      conditional_masks_coherent second_certificate
-  | CertConditional _ _ _ _ _ then_exit else_exit _
-      then_certificate else_certificate _ _ =>
-      analysis_mask then_exit = analysis_mask else_exit /\
-      conditional_masks_coherent then_certificate /\
-      conditional_masks_coherent else_certificate
-  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
-      conditional_masks_coherent body_certificate
-  | _ => True
-  end.
-
-Lemma conditional_masks_coherent_sequence {Γ entry statement first middle
-    second exit}
-    (view : syntax_view Γ statement = ViewSequence first second)
-    (first_certificate : analysis_certificate Γ entry first middle)
-    (second_certificate : analysis_certificate Γ middle second exit) :
-  conditional_masks_coherent
-      (CertSequence Γ entry statement first middle second exit view
-        first_certificate second_certificate) ->
-  conditional_masks_coherent first_certificate /\
-  conditional_masks_coherent second_certificate.
-Proof. exact (fun H => H). Qed.
-
-Lemma conditional_masks_coherent_conditional {Γ entry statement
-    then_branch else_branch then_exit else_exit}
-    (view : syntax_view Γ statement =
-      ViewConditional then_branch else_branch)
-    (then_certificate : analysis_certificate Γ entry then_branch
-      then_exit)
-    (else_certificate : analysis_certificate Γ entry else_branch
-      else_exit)
-    (Hopen : analysis_open then_exit = analysis_open else_exit)
-    (Hatomic : analysis_in_atomic then_exit = analysis_in_atomic else_exit) :
-  conditional_masks_coherent
-      (CertConditional Γ entry statement then_branch else_branch
-        then_exit else_exit view then_certificate else_certificate Hopen
-        Hatomic) ->
-  analysis_mask then_exit = analysis_mask else_exit /\
-  conditional_masks_coherent then_certificate /\
-  conditional_masks_coherent else_certificate.
-Proof. exact (fun H => H). Qed.
-
-(** Enriched control-flow result exported by the baseline analyzer.  It
-    projects definitionally to the existing flat certificate, so all current
-    LIFO and replay theorems remain reusable.  Later enrichment with
-    per-instance keys is orthogonal to this branch-coherence component. *)
-Record coherent_analysis_certificate {Γ entry statement exit} : Type := {
-  coherent_flat_certificate :
-    analysis_certificate Γ entry statement exit;
-  coherent_conditional_masks :
-    conditional_masks_coherent coherent_flat_certificate;
-}.
-
-Definition coherent_statement_certificate {Γ} entry
-    (statement : syntax_statement Γ) exit : Type :=
-  @coherent_analysis_certificate Γ entry statement exit.
-
-Definition coherent_analysis_lifo {Γ entry statement exit}
-    (certificate : @coherent_analysis_certificate Γ entry statement exit) stack_in stack_out : Prop :=
-  lifo_certificate (coherent_flat_certificate certificate)
-    stack_in stack_out.
 
 (** [lifo_certificate] is deterministic: for one fixed certificate and input
     stack, the execution it describes has exactly one output stack, not
@@ -1146,172 +949,6 @@ Lemma certificate_exit_open_subset_footprint
     (certificate : analysis_certificate Γ entry statement exit) :
   analysis_open exit ⊆ certificate_footprint certificate.
 Proof. destruct certificate; simpl; set_solver. Qed.
-
-(** Coherence is exactly the missing analyzer-side premise needed to recover
-    the old global footprint bound without consulting mask indices on a
-    Hoare derivation. *)
-Lemma coherent_certificate_footprint_subset_exit_resources
-    {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit) :
-  conditional_masks_coherent certificate ->
-  certificate_footprint certificate ⊆
-    analysis_mask exit ∪ analysis_open exit.
-Proof.
-  induction certificate; simpl; intros Hcoherent.
-  - pose proof (take_step_resources_monotone _ _ _ e0) as Hstart.
-    intros other Hmember.
-    specialize (Hstart other).
-    repeat rewrite elem_of_union in Hmember.
-    rewrite elem_of_empty in Hmember.
-    destruct Hmember as [[[[Hmask | Hopen] | Hexit_mask] | Hexit_open] | []].
-    + apply Hstart. apply elem_of_union_l. exact Hmask.
-    + apply Hstart. apply elem_of_union_r. exact Hopen.
-    + apply elem_of_union_l. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-  - set_solver.
-  - apply open_invariant_success in e0 as
-      (Hfresh & Havailable & Hmask & Hopen).
-    rewrite Hmask, Hopen.
-    intros other Hmember.
-    repeat rewrite elem_of_union in Hmember.
-    rewrite elem_of_empty in Hmember.
-    destruct Hmember as
-      [[[[Hentry_mask | Hentry_open] | Hexit_mask] | Hexit_open] | []].
-    + destruct (decide (other = invariant)) as [-> | Hneq].
-      * apply elem_of_union_r, elem_of_union_l, elem_of_singleton_2. reflexivity.
-      * apply elem_of_union_l, elem_of_difference. split.
-        -- exact Hentry_mask.
-        -- intros Hsingleton. apply elem_of_singleton_1 in Hsingleton.
-           exact (Hneq Hsingleton).
-    + apply elem_of_union_r, elem_of_union_r. exact Hentry_open.
-    + apply elem_of_union_l. exact Hexit_mask.
-    + apply elem_of_union_r, elem_of_union. exact Hexit_open.
-  - unfold fold_invariant.
-    destruct (bool_decide (invariant ∈ analysis_open state)); simpl;
-      intros other Hmember;
-      repeat rewrite elem_of_union in Hmember;
-      rewrite elem_of_empty in Hmember;
-      destruct Hmember as
-        [[[[Hentry_mask | Hentry_open] | Hexit_mask] | Hexit_open] | []].
-    + apply elem_of_union_l, elem_of_union_r. exact Hentry_mask.
-    + destruct (decide (other = invariant)) as [-> | Hneq].
-      * apply elem_of_union_l, elem_of_union_l, elem_of_singleton_2. reflexivity.
-      * apply elem_of_union_r, elem_of_difference. split.
-        -- exact Hentry_open.
-        -- intros Hsingleton. apply elem_of_singleton_1 in Hsingleton.
-           exact (Hneq Hsingleton).
-    + apply elem_of_union_l, elem_of_union. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-    + apply elem_of_union_l, elem_of_union_r. exact Hentry_mask.
-    + apply elem_of_union_r. exact Hentry_open.
-    + apply elem_of_union_l, elem_of_union. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-  - destruct Hcoherent as [Hfirst_coherent Hsecond_coherent].
-    specialize (IHcertificate1 Hfirst_coherent).
-    specialize (IHcertificate2 Hsecond_coherent).
-    assert (Hmiddle : analysis_mask middle ∪ analysis_open middle ⊆
-        analysis_mask exit ∪ analysis_open exit).
-    { etrans.
-      - intros invariant Hmember.
-        rewrite elem_of_union in Hmember.
-        destruct Hmember as [Hmask|Hopen].
-        + apply (certificate_entry_subset_footprint certificate2). exact Hmask.
-        + apply (certificate_entry_open_subset_footprint certificate2).
-          exact Hopen.
-      - exact IHcertificate2. }
-    assert (Hstart : analysis_mask state ∪ analysis_open state ⊆
-        analysis_mask middle ∪ analysis_open middle).
-    { etrans.
-      - intros invariant Hmember.
-        rewrite elem_of_union in Hmember.
-        destruct Hmember as [Hmask|Hopen].
-        + apply (certificate_entry_subset_footprint certificate1). exact Hmask.
-        + apply (certificate_entry_open_subset_footprint certificate1).
-          exact Hopen.
-      - exact IHcertificate1. }
-    intros other Hmember.
-    repeat rewrite elem_of_union in Hmember.
-    destruct Hmember as
-      [[[[Hentry_mask | Hentry_open] | Hexit_mask] | Hexit_open] |
-        [Hfirst | Hsecond]].
-    + apply Hmiddle, Hstart, elem_of_union_l. exact Hentry_mask.
-    + apply Hmiddle, Hstart, elem_of_union_r. exact Hentry_open.
-    + apply elem_of_union_l. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-    + apply Hmiddle, IHcertificate1. exact Hfirst.
-    + apply IHcertificate2. exact Hsecond.
-  - destruct Hcoherent as [Hmasks [Hthen_coherent Helse_coherent]].
-    specialize (IHcertificate1 Hthen_coherent).
-    specialize (IHcertificate2 Helse_coherent).
-    rewrite Hmasks.
-    assert (Hmask_idem : analysis_mask else_exit ∩ analysis_mask else_exit =
-        analysis_mask else_exit).
-    { apply set_eq. intros invariant.
-      rewrite elem_of_intersection. tauto. }
-    rewrite Hmask_idem.
-    match goal with
-    | Hopen : analysis_open then_exit = analysis_open else_exit |- _ =>
-        rewrite <- Hopen in IHcertificate2
-    end.
-    assert (Hstart : analysis_mask state ∪ analysis_open state ⊆
-        analysis_mask else_exit ∪ analysis_open then_exit).
-    { etrans.
-      - intros invariant Hmember.
-        rewrite elem_of_union in Hmember.
-        destruct Hmember as [Hmask|Hopen].
-        + apply (certificate_entry_subset_footprint certificate1). exact Hmask.
-        + apply (certificate_entry_open_subset_footprint certificate1).
-          exact Hopen.
-      - rewrite Hmasks in IHcertificate1. exact IHcertificate1. }
-    intros other Hmember.
-    repeat rewrite elem_of_union in Hmember.
-    destruct Hmember as
-      [[[[Hentry_mask | Hentry_open] | Hexit_mask] | Hexit_open] |
-        [Hthen | Helse]].
-    + apply Hstart, elem_of_union_l. exact Hentry_mask.
-    + apply Hstart, elem_of_union_r. exact Hentry_open.
-    + apply elem_of_union_l. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-    + rewrite Hmasks in IHcertificate1. apply IHcertificate1. exact Hthen.
-    + apply IHcertificate2. exact Helse.
-  - specialize (IHcertificate Hcoherent).
-    pose proof (atomic_step_preserves_sets _ _ e0) as Hsets.
-    destruct Hsets as [Hmask Hopen].
-    assert (Hentry : analysis_mask state ∪ analysis_open state ⊆
-        analysis_mask inner ∪ analysis_open inner).
-    { rewrite <- Hmask, <- Hopen.
-      etrans.
-      - intros invariant Hmember.
-        rewrite elem_of_union in Hmember.
-        destruct Hmember as [Hmask'|Hopen'].
-        + apply (certificate_entry_subset_footprint certificate). exact Hmask'.
-        + apply (certificate_entry_open_subset_footprint certificate).
-          exact Hopen'.
-      - exact IHcertificate. }
-    intros other Hmember.
-    repeat rewrite elem_of_union in Hmember.
-    destruct Hmember as
-      [[[[Hentry_mask | Hentry_open] | Hexit_mask] | Hexit_open] | Hbody].
-    + apply Hentry, elem_of_union_l. exact Hentry_mask.
-    + apply Hentry, elem_of_union_r. exact Hentry_open.
-    + apply elem_of_union_l. exact Hexit_mask.
-    + apply elem_of_union_r. exact Hexit_open.
-    + apply IHcertificate. exact Hbody.
-Qed.
-
-Lemma closed_coherent_certificate_footprint_subset_exit_mask
-    {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit) :
-  conditional_masks_coherent certificate ->
-  analysis_open exit = ∅ ->
-  certificate_footprint certificate ⊆ analysis_mask exit.
-Proof.
-  intros Hcoherent Hclosed invariant Hmember.
-  pose proof (coherent_certificate_footprint_subset_exit_resources certificate
-    Hcoherent invariant Hmember) as Hresources.
-  rewrite Hclosed, elem_of_union, elem_of_empty in Hresources.
-  tauto.
-Qed.
 
 Fixpoint certificate_height {Γ entry statement exit}
     (certificate : analysis_certificate Γ entry statement exit) : nat :=
@@ -1465,6 +1102,102 @@ Proof.
     lia.
 Qed.
 
+(** Invariants a statement may add to the available mask: fold targets and
+    procedure-call grants. *)
+Definition step_cost_grants (cost : step_cost) : gset inv_id :=
+  match cost with
+  | ProcedureCallStep _ granted => granted
+  | _ => ∅
+  end.
+
+Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
+    (statement : syntax_statement Γ) : gset inv_id :=
+  match fuel with
+  | 0 => ∅
+  | S fuel' =>
+      match syntax_view Γ statement with
+      | ViewLeaf => step_cost_grants (leaf_cost Γ statement)
+      | ViewFold invariant => {[invariant]}
+      | ViewSequence first second =>
+          statement_allocations_fuel fuel' first ∪
+            statement_allocations_fuel fuel' second
+      | ViewConditional then_branch else_branch =>
+          statement_allocations_fuel fuel' then_branch ∪
+            statement_allocations_fuel fuel' else_branch
+      | ViewStructuredAccess _ body | ViewAtomic body =>
+          statement_allocations_fuel fuel' body
+      | ViewDone | ViewUnfold _ => ∅
+      end
+  end.
+
+Definition statement_allocations {Γ} (statement : syntax_statement Γ) :
+    gset inv_id :=
+  statement_allocations_fuel (syntax_size Γ statement) statement.
+
+Lemma take_step_resources_bound cost state exit :
+  take_step cost state = inr exit ->
+  analysis_mask exit ∪ analysis_open exit ⊆
+    analysis_mask state ∪ analysis_open state ∪ step_cost_grants cost.
+Proof.
+  intros Hstep. destruct cost; simpl.
+  1-3: apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen];
+    rewrite Hmask, Hopen; set_solver.
+  - apply procedure_call_step_success in Hstep as (_ & _ & Hmask & Hopen).
+    rewrite Hmask, Hopen. set_solver.
+  - apply procedure_spawn_step_success in Hstep as (_ & Hmask & Hopen).
+    rewrite Hmask, Hopen. set_solver.
+Qed.
+
+Lemma certificate_footprint_allocations_fuel {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) fuel :
+  certificate_height certificate <= fuel ->
+  certificate_footprint certificate ⊆
+    analysis_mask entry ∪ analysis_open entry ∪
+      statement_allocations_fuel fuel statement.
+Proof.
+  revert fuel.
+  induction certificate; intros [|fuel] Hheight; simpl in Hheight;
+    try lia; cbn [statement_allocations_fuel certificate_footprint];
+    rewrite e.
+  - pose proof (take_step_resources_bound _ _ _ e0). set_solver.
+  - set_solver.
+  - apply open_invariant_success in e0 as (_ & Havailable & Hmask & Hopen).
+    rewrite Hmask, Hopen. set_solver.
+  - unfold fold_invariant.
+    destruct (bool_decide (invariant ∈ analysis_open state)); simpl;
+      set_solver.
+  - pose proof (IHcertificate1 fuel ltac:(lia)) as Hfirst.
+    pose proof (IHcertificate2 fuel ltac:(lia)) as Hsecond.
+    pose proof (certificate_exit_subset_footprint certificate1).
+    pose proof (certificate_exit_open_subset_footprint certificate1).
+    pose proof (certificate_exit_subset_footprint certificate2).
+    pose proof (certificate_exit_open_subset_footprint certificate2).
+    set_solver.
+  - pose proof (IHcertificate1 fuel ltac:(lia)) as Hthen.
+    pose proof (IHcertificate2 fuel ltac:(lia)) as Helse.
+    pose proof (certificate_exit_subset_footprint certificate1).
+    pose proof (certificate_exit_open_subset_footprint certificate1).
+    simpl. set_solver.
+  - pose proof (IHcertificate fuel ltac:(lia)) as Hbody.
+    apply atomic_step_preserves_sets in e0 as [Hmask Hopen].
+    pose proof (certificate_exit_subset_footprint certificate).
+    pose proof (certificate_exit_open_subset_footprint certificate).
+    simpl in *. set_solver.
+Qed.
+
+(** Every invariant in a certificate footprint is available or open on entry,
+    or allocated by the statement.  This bound is independent of how
+    conditional joins restrict the exit mask. *)
+Lemma certificate_footprint_allocations {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
+  certificate_footprint certificate ⊆
+    analysis_mask entry ∪ analysis_open entry ∪
+      statement_allocations statement.
+Proof.
+  apply certificate_footprint_allocations_fuel.
+  apply certificate_height_le_size.
+Qed.
+
 Theorem certificate_replays {Γ} state
     (statement : syntax_statement Γ) exit :
   analysis_certificate Γ state statement exit ->
@@ -1503,10 +1236,10 @@ Proof.
   congruence.
 Qed.
 
-Lemma analyze_coherent_lifo_fuel_replays {Γ fuel entry statement exit}
+Lemma analyze_lifo_fuel_replays {Γ fuel entry statement exit}
     (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
-  analyze_coherent_lifo_fuel fuel entry stack_in statement =
+  analyze_lifo_fuel fuel entry stack_in statement =
     Some (exit, stack_out) ->
   replay_lifo_certificate certificate stack_in = Some stack_out.
 Proof.
@@ -1539,10 +1272,10 @@ Proof.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
     rewrite e in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel state stack_in first) as
+    destruct (analyze_lifo_fuel fuel state stack_in first) as
       [[actual_middle stack_middle]|] eqn:Hfirst; try discriminate.
     assert (Hmiddle : actual_middle = middle).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
+    { pose proof (analyze_lifo_fuel_projects _ state stack_in
         first actual_middle stack_middle Hfirst) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate1). }
     subst actual_middle.
@@ -1552,26 +1285,25 @@ Proof.
   - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
       [discriminate|].
     rewrite e in Hrun.
-    destruct (analyze_coherent_lifo_fuel fuel state stack_in then_branch) as
+    destruct (analyze_lifo_fuel fuel state stack_in then_branch) as
       [[actual_then then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_coherent_lifo_fuel fuel state stack_in else_branch) as
+    destruct (analyze_lifo_fuel fuel state stack_in else_branch) as
       [[actual_else else_stack]|] eqn:Helse; try discriminate.
     assert (Hthen_exit : actual_then = then_exit).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
+    { pose proof (analyze_lifo_fuel_projects _ state stack_in
         then_branch actual_then then_stack Hthen) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate1). }
     assert (Helse_exit : actual_else = else_exit).
-    { pose proof (analyze_coherent_lifo_fuel_projects _ state stack_in
+    { pose proof (analyze_lifo_fuel_projects _ state stack_in
         else_branch actual_else else_stack Helse) as Hactual.
       exact (analyze_fuel_certificate_exit Hactual certificate2). }
     subst actual_then. subst actual_else.
     destruct (decide
       (analysis_open then_exit = analysis_open else_exit /\
        analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-       analysis_mask then_exit = analysis_mask else_exit /\
        then_stack = else_stack)) as [Hjoin|Hjoin]; try discriminate.
     inversion Hrun; subst stack_out.
-    destruct Hjoin as [_ [_ [_ Hstacks]]].
+    destruct Hjoin as [_ [_ Hstacks]].
     subst else_stack.
     specialize (IHcertificate1 _ _ _ Hthen) as Hthen_replay.
     specialize (IHcertificate2 _ _ _ Helse) as Helse_replay.
@@ -1585,12 +1317,12 @@ Proof.
     assert (Houter : actual_outer = outer).
     { rewrite e0 in Hstep. congruence. }
     subst actual_outer.
-    destruct (analyze_coherent_lifo_fuel fuel
+    destruct (analyze_lifo_fuel fuel
       (AnalysisState (analysis_mask outer) (analysis_open outer)
         (analysis_step_taken outer) true) stack_in body) as
       [[actual_inner body_stack]|] eqn:Hbody; try discriminate.
     assert (Hinner : actual_inner = inner).
-    { pose proof (analyze_coherent_lifo_fuel_projects _
+    { pose proof (analyze_lifo_fuel_projects _
         (AnalysisState (analysis_mask outer) (analysis_open outer)
           (analysis_step_taken outer) true) stack_in body actual_inner
         body_stack Hbody) as Hactual.
@@ -1604,80 +1336,16 @@ Proof.
     rewrite Hbody_replay. rewrite decide_True; [reflexivity|reflexivity].
 Qed.
 
-Lemma analyze_coherent_lifo_fuel_sound {Γ fuel entry statement exit}
+Lemma analyze_lifo_fuel_sound {Γ fuel entry statement exit}
     (certificate : analysis_certificate Γ entry statement exit)
     stack_in stack_out :
-  analyze_coherent_lifo_fuel fuel entry stack_in statement =
+  analyze_lifo_fuel fuel entry stack_in statement =
     Some (exit, stack_out) ->
   lifo_certificate certificate stack_in stack_out.
 Proof.
   intros Hrun.
   apply replay_lifo_certificate_sound.
-  eapply analyze_coherent_lifo_fuel_replays; exact Hrun.
-Qed.
-
-Lemma check_conditional_masks_fuel_sound
-    {Γ fuel entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit) :
-  certificate_height certificate <= fuel ->
-  check_conditional_masks_fuel fuel entry statement = true ->
-  conditional_masks_coherent certificate.
-Proof.
-  revert fuel.
-  induction certificate; simpl; intros fuel Hheight Hcheck.
-  - exact I.
-  - exact I.
-  - exact I.
-  - exact I.
-  - destruct fuel as [|fuel]; [lia|].
-    cbn in Hcheck. rewrite e in Hcheck.
-    assert (Hfirst_run : analyze_fuel fuel state first = inr middle).
-    { apply (analyze_fuel_monotone (fuel := certificate_height certificate1)
-        (target := fuel) state first middle); [lia|].
-      exact (certificate_replays_height certificate1). }
-    rewrite Hfirst_run in Hcheck.
-    apply andb_true_iff in Hcheck as [Hfirst Hsecond].
-    split; [apply (IHcertificate1 fuel) | apply (IHcertificate2 fuel)];
-      lia || assumption.
-  - destruct fuel as [|fuel]; [lia|].
-    cbn in Hcheck. rewrite e in Hcheck.
-    assert (Hthen_run : analyze_fuel fuel state then_branch = inr then_exit).
-    { apply (analyze_fuel_monotone (fuel := certificate_height certificate1)
-        (target := fuel) state then_branch then_exit); [lia|].
-      exact (certificate_replays_height certificate1). }
-    assert (Helse_run : analyze_fuel fuel state else_branch = inr else_exit).
-    { apply (analyze_fuel_monotone (fuel := certificate_height certificate2)
-        (target := fuel) state else_branch else_exit); [lia|].
-      exact (certificate_replays_height certificate2). }
-    rewrite Hthen_run, Helse_run in Hcheck.
-    apply andb_true_iff in Hcheck as [Hbranches Hmask].
-    apply andb_true_iff in Hbranches as [Hthen Helse].
-    apply bool_decide_eq_true in Hmask.
-    repeat split; try assumption.
-    + apply (IHcertificate1 fuel); [lia|exact Hthen].
-    + apply (IHcertificate2 fuel); [lia|exact Helse].
-  - destruct fuel as [|fuel]; [lia|].
-    cbn in Hcheck. rewrite e, e0 in Hcheck.
-    apply (IHcertificate fuel); [lia|exact Hcheck].
-Qed.
-
-Definition coherent_analysis_certificate_of_success
-    {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    (Hcoherent : check_conditional_masks_fuel (syntax_size Γ statement)
-      entry statement = true) :
-    @coherent_analysis_certificate Γ entry statement exit :=
-  {| coherent_flat_certificate := certificate;
-     coherent_conditional_masks :=
-       check_conditional_masks_fuel_sound certificate
-         (certificate_height_le_size certificate) Hcoherent |}.
-
-Lemma coherent_certificate_replays {Γ entry statement exit}
-    (certificate : @coherent_analysis_certificate Γ entry statement exit) :
-  analyze entry statement = inr exit.
-Proof.
-  apply certificate_replays.
-  exact (coherent_flat_certificate certificate).
+  eapply analyze_lifo_fuel_replays; exact Hrun.
 Qed.
 
 (** For fixed public indices, successful analyzer certificates carry no additional
@@ -1796,46 +1464,26 @@ Corollary analyze_builds_certificate {Γ} state
   analysis_certificate Γ state statement exit.
 Proof. apply analyze_fuel_builds_certificate. Defined.
 
-Theorem analyze_coherent_builds_certificate {Γ} entry
-    (statement : syntax_statement Γ) exit :
-  analyze_coherent entry statement = inr exit ->
-  coherent_statement_certificate entry statement exit.
-Proof.
-  unfold analyze_coherent, check_conditional_masks.
-  destruct (analyze entry statement) as [error|flat_exit] eqn:Hflat;
-    first discriminate.
-  destruct (check_conditional_masks_fuel (syntax_size Γ statement) entry
-    statement) eqn:Hcoherent; last discriminate.
-  intros Hresult. inversion Hresult; subst flat_exit.
-  apply coherent_analysis_certificate_of_success.
-  - apply analyze_builds_certificate. exact Hflat.
-  - exact Hcoherent.
-Defined.
-
 (** The proof-facing bridge for the fused executable pass.  Certificate
     construction is deliberately confined to this theorem: the executable
     checker above never unfolds [analyze_builds_certificate]. *)
-Lemma analyze_coherent_lifo_builds_certificate {Γ}
+Lemma analyze_lifo_builds_certificate {Γ}
     entry (statement : syntax_statement Γ) exit :
-  analyze_coherent_lifo entry statement = Some exit ->
-  { certificate : coherent_statement_certificate entry statement exit &
-    coherent_analysis_lifo certificate [] [] }.
+  analyze_lifo entry statement = Some exit ->
+  { certificate : analysis_certificate Γ entry statement exit &
+    lifo_certificate certificate [] [] }.
 Proof.
-  unfold analyze_coherent_lifo.
-  destruct (analyze_coherent_lifo_fuel (syntax_size Γ statement) entry []
+  unfold analyze_lifo.
+  destruct (analyze_lifo_fuel (syntax_size Γ statement) entry []
     statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
   destruct stack_out as [|marker stack_out]; try discriminate.
   intros Hsuccess. inversion Hsuccess; subst actual.
-  pose proof (analyze_coherent_lifo_projects entry statement exit) as
-    Hcoherent.
-  assert (Hclosed : analyze_coherent_lifo entry statement = Some exit).
-  { unfold analyze_coherent_lifo. rewrite Hrun. reflexivity. }
-  specialize (Hcoherent Hclosed).
-  pose (certificate := analyze_coherent_builds_certificate entry
-    statement exit Hcoherent).
+  assert (Hclosed : analyze_lifo entry statement = Some exit).
+  { unfold analyze_lifo. rewrite Hrun. reflexivity. }
+  pose (certificate := analyze_builds_certificate entry statement exit
+    (analyze_lifo_projects entry statement exit Hclosed)).
   exists certificate.
-  unfold coherent_analysis_lifo.
-  eapply analyze_coherent_lifo_fuel_sound.
+  eapply analyze_lifo_fuel_sound.
   exact Hrun.
 Qed.
 

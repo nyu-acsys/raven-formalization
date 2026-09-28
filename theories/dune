@@ -20,3 +20,9 @@
  (alias examples)
  (deps examples/counter_monotonic.vo)
  (action (progn)))
+
+; [dune build @tests]: analyzer regression tests.
+(rule
+ (alias tests)
+ (deps tests/conditional_masks.vo)
+ (action (progn)))

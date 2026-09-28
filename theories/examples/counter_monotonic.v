@@ -2111,70 +2111,64 @@ Proof. vm_compute. reflexivity. Qed.
     [analyzed_triple] wants three things: an analysis certificate
     (under the framework's [contract_cost_model]), the [RavenHoareRules]
     derivation, and the executable restricted-fragment check.  Nothing else -- no alignment,
-    no LIFO witness, no normalization.  Taking the certificate from
-    [analyze_coherent_lifo_builds_certificate] means the record's
-    branch-coherence field comes packaged with it, so the certificate
-    itself never has to be inspected. *)
+    no LIFO witness, no normalization.  The certificate comes from
+    [analyze_lifo_builds_certificate], so it never has to be inspected. *)
 
 Module CN := RuleValidity.CertifiedNormalization.
 
-Lemma read_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo
+Lemma read_analysis_lifo :
+  CounterAtomicity.analyze_lifo
       (counter_closed_state counter_mask) read_typed_body =
     Some read_exit_state.
 Proof. reflexivity. Qed.
 
-Lemma incr_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo
+Lemma incr_analysis_lifo :
+  CounterAtomicity.analyze_lifo
       (counter_closed_state counter_mask) incr_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
-Lemma make_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo
+Lemma make_analysis_lifo :
+  CounterAtomicity.analyze_lifo
       (counter_closed_state ∅) make_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
-Lemma client_analysis_coherent :
-  CounterAtomicity.analyze_coherent_lifo
+Lemma client_analysis_lifo :
+  CounterAtomicity.analyze_lifo
       (counter_closed_state ∅) client_typed_body =
     Some (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
-Definition client_coherent_run :=
-  CounterAtomicity.analyze_coherent_lifo_builds_certificate
+Definition client_lifo_run :=
+  CounterAtomicity.analyze_lifo_builds_certificate
     (counter_closed_state ∅) client_typed_body
-    (counter_closed_state counter_mask) client_analysis_coherent.
+    (counter_closed_state counter_mask) client_analysis_lifo.
 
 Definition client_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate
-    (projT1 client_coherent_run).
+  projT1 client_lifo_run.
 
-Definition read_coherent_run :=
-  CounterAtomicity.analyze_coherent_lifo_builds_certificate
+Definition read_lifo_run :=
+  CounterAtomicity.analyze_lifo_builds_certificate
     (counter_closed_state counter_mask) read_typed_body
-    read_exit_state read_analysis_coherent.
+    read_exit_state read_analysis_lifo.
 
-Definition incr_coherent_run :=
-  CounterAtomicity.analyze_coherent_lifo_builds_certificate
+Definition incr_lifo_run :=
+  CounterAtomicity.analyze_lifo_builds_certificate
     (counter_closed_state counter_mask) incr_typed_body
-    (counter_closed_state counter_mask) incr_analysis_coherent.
+    (counter_closed_state counter_mask) incr_analysis_lifo.
 
-Definition make_coherent_run :=
-  CounterAtomicity.analyze_coherent_lifo_builds_certificate
+Definition make_lifo_run :=
+  CounterAtomicity.analyze_lifo_builds_certificate
     (counter_closed_state ∅) make_typed_body
-    (counter_closed_state counter_mask) make_analysis_coherent.
+    (counter_closed_state counter_mask) make_analysis_lifo.
 
 Definition read_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate
-    (projT1 read_coherent_run).
+  projT1 read_lifo_run.
 Definition incr_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate
-    (projT1 incr_coherent_run).
+  projT1 incr_lifo_run.
 Definition make_analyzed_certificate :=
-  CounterAtomicity.coherent_flat_certificate
-    (projT1 make_coherent_run).
+  projT1 make_lifo_run.
 
 Definition read_analyzed_body :
   ProcedureValidity.analyzed_body_valid read_typed_procedure.
@@ -2184,8 +2178,8 @@ Proof.
     [TRef; TInt; TInt] read_procedure read_typed_procedure counter_mask
     (counter_closed_state counter_mask) read_exit_state
     [TInt; TInt; TInt] read_exit_store (RefBound MHere)
-    _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
+    _ _ _ _ _ _ _ _).
+  8: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
                  CN.analyzed_hoare := read_resource_body_derivation;
                  CN.analyzed_restricted :=
                    read_restricted_fragment_accepted |}. }
@@ -2196,8 +2190,6 @@ Proof.
   - reflexivity.
   - reflexivity.
   - unfold read_exit_state. simpl. rewrite counter_mask_close. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks
-      (projT1 read_coherent_run)).
 Defined.
 
 Definition incr_analyzed_body :
@@ -2210,8 +2202,8 @@ Proof.
     (counter_closed_state counter_mask)
     (counter_closed_state counter_mask)
     [TBool; TInt; TInt; TInt; TInt; TInt] incr_exit_store
-    incr_return_reference _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.analyzed_certificate := incr_analyzed_certificate;
+    incr_return_reference _ _ _ _ _ _ _ _).
+  8: { refine {| CN.analyzed_certificate := incr_analyzed_certificate;
                  CN.analyzed_hoare := incr_resource_body_derivation;
                  CN.analyzed_restricted :=
                    incr_restricted_fragment_accepted |}. }
@@ -2222,8 +2214,6 @@ Proof.
   - reflexivity.
   - reflexivity.
   - simpl. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks
-      (projT1 incr_coherent_run)).
 Defined.
 
 Definition make_analyzed_body :
@@ -2234,8 +2224,8 @@ Proof.
     [TRef; TRef] make_procedure make_typed_procedure ∅
     (counter_closed_state ∅)
     (counter_closed_state counter_mask)
-    [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
+    [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _).
+  8: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
                  CN.analyzed_hoare := make_resource_body_derivation;
                  CN.analyzed_restricted :=
                    make_restricted_fragment_accepted |}. }
@@ -2246,8 +2236,6 @@ Proof.
   - reflexivity.
   - reflexivity.
   - simpl. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks
-      (projT1 make_coherent_run)).
 Defined.
 
 Definition client_analyzed_body :
@@ -2259,8 +2247,8 @@ Proof.
     (counter_closed_state ∅)
     (counter_closed_state counter_mask)
     [TInt; TRef] client_exit_store (RefBound (MThere MHere))
-    _ _ _ _ _ _ _ _ _).
-  1: { refine {| CN.analyzed_certificate := client_analyzed_certificate;
+    _ _ _ _ _ _ _ _).
+  8: { refine {| CN.analyzed_certificate := client_analyzed_certificate;
                  CN.analyzed_hoare := client_resource_body_derivation;
                  CN.analyzed_restricted :=
                    client_restricted_fragment_accepted |}. }
@@ -2271,8 +2259,6 @@ Proof.
   - reflexivity.
   - reflexivity.
   - simpl. set_solver.
-  - exact (CounterAtomicity.coherent_conditional_masks
-      (projT1 client_coherent_run)).
 Defined.
 
 (** The module-soundness instantiation below is stated in Iris; its proof
@@ -2347,31 +2333,35 @@ Definition counter_analyzed_bodies packed
     (Hin : List.In packed
       (procedure_entries
         (RuleValidity.Hoare.module_procedures counter_module))) :
-    { body : ProcedureValidity.packed_analyzed_body packed &
-      Adequacy.packed_analyzed_body_exit_declared
-        counter_module packed body }.
+    ProcedureValidity.packed_analyzed_body packed.
 Proof.
-  assert (Hexists : exists
-      body : ProcedureValidity.packed_analyzed_body packed,
-      Adequacy.packed_analyzed_body_exit_declared
-        counter_module packed body).
-  { simpl in Hin.
-    destruct Hin as [Hin | [Hin | [Hin | [Hin | []]]]].
-    - dependent destruction Hin. exists read_analyzed_body. cbn. set_solver.
-    - dependent destruction Hin. exists incr_analyzed_body. cbn. set_solver.
-    - dependent destruction Hin. exists make_analyzed_body. cbn. set_solver.
-    - dependent destruction Hin. exists client_analyzed_body. cbn. set_solver. }
-  destruct (constructive_indefinite_description _ Hexists) as [body Hbody].
-  exact (@existT (ProcedureValidity.packed_analyzed_body packed)
-    (fun body0 => Adequacy.packed_analyzed_body_exit_declared
-      counter_module packed body0) body Hbody).
+  apply (fun Hexists => proj1_sig (constructive_indefinite_description
+    (fun _ : ProcedureValidity.packed_analyzed_body packed => True) Hexists)).
+  simpl in Hin.
+  destruct Hin as [Hin | [Hin | [Hin | [Hin | []]]]];
+    dependent destruction Hin.
+  - exists read_analyzed_body. exact I.
+  - exists incr_analyzed_body. exact I.
+  - exists make_analyzed_body. exact I.
+  - exists client_analyzed_body. exact I.
 Defined.
 
-Definition counter_analyzed_module :
-  Adequacy.module_analysis counter_module.
+(** Every invariant a procedure requires or may allocate is declared. *)
+Lemma counter_allocations_declared packed
+    (Hin : List.In packed
+      (procedure_entries
+        (RuleValidity.Hoare.module_procedures counter_module))) :
+  Adequacy.packed_allocations_declared counter_module packed.
 Proof.
-  refine {| Adequacy.module_analysis_bodies := counter_analyzed_bodies |}.
-Defined.
+  simpl in Hin.
+  destruct Hin as [Hin | [Hin | [Hin | [Hin | []]]]];
+    dependent destruction Hin; vm_compute; set_solver.
+Qed.
+
+Definition counter_analyzed_module :
+  Adequacy.module_analysis counter_module :=
+  {| Adequacy.module_analysis_bodies := counter_analyzed_bodies;
+     Adequacy.module_analysis_declared := counter_allocations_declared |}.
 
 (** ** The module boundary, instantiated
 

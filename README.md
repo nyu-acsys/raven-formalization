@@ -78,6 +78,7 @@ sub-namespaces:
 | [`theories/runtime`](theories/runtime) | Concurrent runtime language, erasure, ghost state, and Iris lifting |
 | [`theories/soundness`](theories/soundness) | Semantic interpretation, rule validity, procedure validity, and adequacy |
 | [`theories/examples`](theories/examples) | Verified monotonic-counter module and its resource algebra |
+| [`theories/tests`](theories/tests) | Analyzer regression tests |
 
 ## Building
 
@@ -99,6 +100,7 @@ Useful focused targets are:
 ```console
 dune build -j 2 @soundness  # generic development through module soundness
 dune build -j 2 @examples   # verified examples and their dependencies
+dune build -j 2 @tests      # analyzer regression tests
 ```
 
 Rocq compilation can consume substantial memory. On machines with limited

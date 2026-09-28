@@ -128,10 +128,6 @@ Record analyzed_body_certificate {Γ identity}
       (Hoare.procedure_body_post procedure
         analyzed_body_exit_store
         analyzed_body_return_reference);
-  analyzed_body_conditionals :
-    GenericRegions.Atomicity.conditional_masks_coherent
-      (CertifiedNormalization.analyzed_certificate
-        analyzed_body_triple);
 }.
 
 Arguments analyzed_body_triple {_ _} _ _ _.
@@ -145,7 +141,6 @@ Arguments analyzed_body_exit_return {_ _} _ _ _.
 Arguments analyzed_body_entry_closed {_ _} _ _ _.
 Arguments analyzed_body_exit_closed {_ _} _ _ _.
 Arguments analyzed_body_exit_mask {_ _} _ _ _.
-Arguments analyzed_body_conditionals {_ _} _ _ _.
 
 Definition analyzed_body_normalization_exists {Γ identity}
     (procedure : typed_procedure Γ identity) (current_mask : Hoare.mask)

@@ -29,35 +29,37 @@ Definition module_registration {RAs : ra_base.RAConfig}
     (Hoare.module_contracts M) (Hoare.module_coherence M)
     (list_to_set (Hoare.module_invariants M)).
 
-(** Analysis evidence indexed by the module.  Registry coverage is checked
-    per procedure against the module declarations.  It deliberately ranges
-    over the analyzed body footprint, rather than over the invariants exposed
-    by the procedure contract: a body may allocate or use an invariant
+(** Registry coverage for one procedure: its required mask and every
+    invariant its body may allocate are declared by the module.  This covers
+    the analyzed body footprint, rather than only the invariants exposed by
+    the procedure contract: a body may allocate or use an invariant
     internally without exporting its capability to callers. *)
-Definition packed_analyzed_body_exit_declared {RAs : ra_base.RAConfig}
+Definition packed_allocations_declared {RAs : ra_base.RAConfig}
     {Logic : Assertion.LogicSignature} (M : Hoare.module)
-    (packed : packed_typed_procedure)
-    (body : @packed_analyzed_body RAs Logic (Hoare.module_contracts M)
-      packed) : Prop :=
-  match packed as packed0 return
-      @packed_analyzed_body RAs Logic (Hoare.module_contracts M) packed0 ->
-      Prop with
-  | existT Γ (existT identity procedure) => fun body0 =>
-      GenericRegions.Atomicity.analysis_mask
-        (analyzed_body_exit procedure
-          (Certified.required_mask identity) body0) ⊆
+    (packed : packed_typed_procedure) : Prop :=
+  match packed with
+  | existT Γ (existT identity procedure) =>
+      Certified.required_mask (Contracts := Hoare.module_contracts M)
+        identity ∪
+      GenericRegions.Atomicity.statement_allocations
+        (Syntax := RegionSyntax.syntax)
+        (Cost := Certified.leaf_costs (Contracts := Hoare.module_contracts M))
+        (procedure_body _ _ procedure) ⊆
       list_to_set (Hoare.module_invariants M)
-  end body.
+  end.
 
+(** Analysis evidence indexed by the module. *)
 Record module_analysis {RAs : ra_base.RAConfig}
     {Logic : Assertion.LogicSignature} (M : Hoare.module) : Type :=
   ModuleAnalysis {
     module_analysis_bodies : forall packed
         (Hin : List.In packed
           (procedure_entries (Hoare.module_procedures M))),
-      { body : @packed_analyzed_body RAs Logic (Hoare.module_contracts M)
-          packed &
-        packed_analyzed_body_exit_declared M packed body };
+      @packed_analyzed_body RAs Logic (Hoare.module_contracts M) packed;
+    module_analysis_declared : forall packed
+        (Hin : List.In packed
+          (procedure_entries (Hoare.module_procedures M))),
+      packed_allocations_declared M packed;
   }.
 
 Section WithContracts.
@@ -155,15 +157,17 @@ Context (factory : runtime_ghost_resource_factory Σ ghost_heap_namespace)
 Definition module_analyzed_certificates : analyzed_module Registration.
 Proof.
   unshelve econstructor.
-  - intros packed Hin.
-    exact (projT1 (module_analysis_bodies M certificates packed Hin)).
+  - exact (module_analysis_bodies M certificates).
   - intros Γ identity procedure Hin.
-    set (selected := module_analysis_bodies M certificates
+    pose proof (module_analysis_declared M certificates
+      (pack_typed_procedure procedure) Hin) as Hdeclared.
+    cbn in Hdeclared.
+    set (body := module_analysis_bodies M certificates
       (pack_typed_procedure procedure) Hin).
-    etrans; last exact (projT2 selected).
-    eapply GenericRegions.Atomicity.closed_coherent_certificate_footprint_subset_exit_mask.
-    + exact (analyzed_body_conditionals _ _ (projT1 selected)).
-    + exact (analyzed_body_exit_closed _ _ (projT1 selected)).
+    etrans; [apply GenericRegions.Atomicity.certificate_footprint_allocations|].
+    rewrite (analyzed_body_entry_mask _ _ body).
+    rewrite (analyzed_body_entry_closed _ _ body).
+    etrans; [|exact Hdeclared]. set_solver.
 Defined.
 
 Theorem raven_module_soundness

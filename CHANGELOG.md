@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Conditionals whose branches finish with different available masks are
+  accepted; the joined mask is their intersection. Module analyses now state
+  registry coverage for each procedure's required mask and statically
+  allocated invariants instead of its exit mask.
+
+### Added
+
+- Analyzer regression tests for asymmetric allocation in conditionals
+  (`dune build @tests`).
+
 ## [1.0.0] - 2026-09-28
 
 ### Added

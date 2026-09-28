@@ -196,23 +196,6 @@ Proof.
     [Hmask _]. exact Hmask.
 Qed.
 
-Lemma conditional_analysis_mask (state then_exit else_exit : Atomicity.analysis_state)
-    branch_mask
-    (then_mask : Atomicity.analysis_mask then_exit =
-      branch_mask)
-    (else_mask : Atomicity.analysis_mask else_exit =
-      branch_mask) :
-  branch_mask = Atomicity.analysis_mask
-    (Atomicity.AnalysisState
-      (Atomicity.analysis_mask then_exit ∩ Atomicity.analysis_mask else_exit)
-      (Atomicity.analysis_open then_exit)
-      (Atomicity.analysis_step_taken then_exit ||
-        Atomicity.analysis_step_taken else_exit)
-      (Atomicity.analysis_in_atomic then_exit)).
-Proof.
-  simpl. rewrite then_mask else_mask. set_solver.
-Qed.
-
 End WithContracts.
 End CertifiedRegions.
 #[global] Existing Instance CertifiedRegions.leaf_costs.

@@ -157,7 +157,8 @@ The essential policy is:
 - a non-atomic physical operation is forbidden while an invariant is open;
 - closing the last open invariant resets step accounting;
 - both conditional branches start from the same state;
-- branch masks are joined by intersection;
+- branch masks are joined by intersection, so an invariant allocated in only
+  one branch is unavailable after the conditional;
 - branch step flags are joined by disjunction; and
 - procedures must return with no invariant left open.
 
@@ -259,8 +260,9 @@ distinguished entry procedure.
 
 [`soundness/adequacy.v`](../theories/soundness/adequacy.v) packages the module
 boundary. A `module_analysis M` contains successful analyzed bodies for every
-declared procedure and proves that their exit footprints are covered by the
-module's invariant declarations. Contract coherence, predicate semantics,
+declared procedure and proves that the invariants each procedure requires or
+may allocate (by folding or through call grants) are covered by the module's
+invariant declarations. Contract coherence, predicate semantics,
 normalization completeness, and executable registration are derived
 internally.
 
