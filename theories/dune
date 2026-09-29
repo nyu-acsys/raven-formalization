@@ -25,5 +25,5 @@
 (rule
  (alias tests)
  (deps tests/conditional_masks.vo tests/conditional_accesses.vo
-   tests/argument_snapshots.vo)
+   tests/argument_snapshots.vo tests/conditional_normalization.vo)
  (action (progn)))

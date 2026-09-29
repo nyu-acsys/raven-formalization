@@ -192,6 +192,28 @@ is related to a structured verification statement morally of the form:
 TInvAccess I(x) body
 ```
 
+An access may also be closed in each branch of a conditional. When nothing
+physical precedes the conditional, the access moves into the branches:
+
+```raven
+unfold I(x); q;
+if (b) { t; fold I(x); k1 } else { e; fold I(x); k2 }
+```
+
+becomes, morally, `if (b) { TInvAccess I(x) (q; t); k1 } else { TInvAccess
+I(x) (q; e); k2 }`. After a physical step `p`, the branch prefixes `t` and
+`e` must be proof-only, and the access is factored out of the conditional:
+`TInvAccess I(x) (p; if (b) {t} else {e}); if (b) {k1} else {k2}`, where
+the access closes through the guard and the guard is tested again for the
+continuations. Access bodies and prefixes may themselves contain balanced
+invariant accesses, which are normalized recursively. Procedure elaboration
+first puts every access into this canonical layout: it groups the
+statements before the access's close into one body or prefix, groups a
+closing conditional with its unfold when further statements follow, and
+inserts `done` for missing pieces, in each case only where the runtime
+erasure is unchanged
+([`verification/access_layout.v`](../theories/verification/access_layout.v)).
+
 The transformation is proof-producing. It retains:
 
 - the source Hoare derivation;
@@ -346,9 +368,11 @@ analysis:
 - masks identify invariant declarations, not argument-indexed instances;
 - only one instance of a declaration can effectively be open at once;
 - the normalizer does not yet cover every branch-local fold/unfold placement
-  accepted by Raven;
-- access arguments use a conservative stability check rather than Raven's
-  general snapshot and generated-equality transformation;
+  accepted by Raven: after the common prefix has consumed an access's
+  physical-step budget, the branch prefixes of the resulting factored access
+  must be proof-only and may not open invariants;
+- ghost locals are immutable (`ghost val`); Raven's ghost `var`s are not
+  yet supported;
 - invariant accesses nested inside a trusted atomic block are not yet
   supported; and
 - logically atomic procedure specifications and atomic-update tokens are not

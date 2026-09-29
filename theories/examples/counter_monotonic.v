@@ -39,9 +39,9 @@ Definition client := name "client".
     identifiers, the typed procedures with their variable layouts and
     contracts, the procedure table and the contract environment.
 
-    In [incr], the invariant is closed once, after the success-only ghost
-    update, and retry is selected only after the close; the first
-    conditional is entirely inside the trusted atomic access. *)
+    In [incr], the second access is closed in each branch of the
+    conditional after the atomic block: after the ghost update on success,
+    and before the retry on failure. *)
 Definition CounterRA : source_typ := SNamed h_ra.
 
 Definition counter_declarations : source_module :=
@@ -76,20 +76,20 @@ Definition counter_declarations : source_module :=
         fold counterInv(x);
         new_v1 := v1 + 1;
         unfold counterInv(x);
-        (atomic {
-           v2 := x . c;
-           if (v2 == v1) {
-             x . c := new_v1;
-             res := true
-           } else {
-             res := false
-           }
-         };
-         if (res) {
-           fpu(x . h, v1, v1 + 1)
-         });
-        fold counterInv(x);
-        if (! res) {
+        atomic {
+          v2 := x . c;
+          if (v2 == v1) {
+            x . c := new_v1;
+            res := true
+          } else {
+            res := false
+          }
+        };
+        if (res) {
+          fpu(x . h, v1, v1 + 1);
+          fold counterInv(x)
+        } else {
+          fold counterInv(x);
           incr(x)
         }
       }
@@ -211,37 +211,6 @@ Definition cas_typed_body :
 (** An explicit atomic block is Raven's trust declaration; the resource
     rule for [TAtomic] has no separate per-block trust premise to
     discharge. *)
-
-(** Superseded source shape, retained as documentation while the generic
-    normalizer does not yet implement branch-local closes followed by
-    branch-local continuations.
-
-Definition incr_source_branch_local_close : source_stmt :=
-  raven_stmt {{
-    unfold counterInv(x);
-    v1 := x . c;
-    fold counterInv(x);
-    new_v1 := v1 + 1;
-    unfold counterInv(x);
-    atomic {
-      v2 := x . c;
-      if (v2 == v1) {
-        x . c := new_v1;
-        res := true
-      } else {
-        res := false
-      }
-    };
-    if (! res) {
-      fold counterInv(x);
-      incr(x)
-    } else {
-      fpu(x . h, v1, v1 + 1);
-      fold counterInv(x)
-    };
-    ret := tt
-  }}.
-*)
 
 (** Cache the intrinsic syntax produced by elaboration.  Structural proofs
     below can unfold this VM-normalized term without re-running the surface
@@ -1439,12 +1408,11 @@ Qed.
 
 (** *** Step 5: the post-CAS conditional
 
-    The two branches join on the *unfolded* invariant body, ready for the
-    second fold.  Success reaches it at [new_v1] and failure at the value
-    the block observed; the carried equality is what identifies
-    [ghost(v1 + 1)] with [ghost(new_v1)] on the success side, which is why
-    the frame around the atomic block has to extend over this conditional
-    as well. *)
+    Each branch reaches the *unfolded* invariant body before its fold.
+    Success reaches it at [new_v1] and failure at the value the block
+    observed; the carried equality is what identifies [ghost(v1 + 1)] with
+    [ghost(new_v1)] on the success side, which is why the frame around the
+    atomic block has to extend over this conditional as well. *)
 
 Definition incr_threaded_equality_core :
     Resource.core_assertion [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] :=
@@ -1576,7 +1544,7 @@ Proof.
   apply Rules.CEntailsRefl.
 Qed.
 
-(** *** Steps 6-8: the second fold, the retry conditional, the return *)
+(** *** Steps 6-8: the second fold in each branch, and the retry *)
 
 Lemma incr_fold2 :
   HoareRules.RavenHoareTriple
@@ -1638,8 +1606,7 @@ Qed.
 Lemma incr_retry_call :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
-      (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
-        (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
+      (counter_token_core (ERef (RefFormal MHere))))
     (TCall incr_procedure (PECons (PEVar (LThere (LThere (LHere eq_refl)))) PENil)
       (@CTDiscard _ TUnit))
     (Resource.RState incr_res_store Resource.CTrue).
@@ -1658,22 +1625,21 @@ Proof.
          [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro]. }
   2: { cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_res_x_location.
        rewrite counter_resource_instantiated_pre.
-       unfold counter_token_core.
-       apply Rules.CEntailsStep. apply Rules.CESAndElimL. }
+       unfold counter_token_core. apply Rules.CEntailsRefl. }
   vm_compute. discriminate.
 Qed.
 
-Lemma incr_retry_done :
+(** The success branch ends with the snapshot check; the postcondition
+    drops the token. *)
+Lemma incr_success_check :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
-      (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
-        (Resource.CExpr (EUnOp UNot
-          (EUnOp UNot (ERef (RefBound MHere)))))))
-    TDone
+      (counter_token_core (ERef (RefFormal MHere))))
+    (TAssert (PEBinOp (BEq TRef) (PEVar (LHere eq_refl)) (PEVar (LThere (LThere (LHere eq_refl))))))
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
-  eapply Rules.RTConsequence;
-    [eapply Rules.RTDone | apply Rules.CEntailsRefl |].
+  eapply Rules.RTPrenexConsequence;
+    [apply incr_check2 | apply Rules.resource_prenex_entails_refl |].
   apply Rules.RPEBody. split;
     [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro].
 Qed.
@@ -1689,26 +1655,10 @@ Definition incr_return_reference :
 
 (** *** Step 9: assembly
 
-    The carried equality is framed around the atomic block alone, not
-    around the group: the post-CAS conditional consumes it, so it has to
-    be visible in the conditional's body.  [prenex_and] weakens it once
-    per binder the block introduces, which is exactly
-    [incr_threaded_equality_core]. *)
-
-Lemma incr_retry_conditional :
-  HoareRules.RavenHoareTriple
-    (Resource.RState incr_res_store
-      (counter_token_core (ERef (RefFormal MHere))))
-    (TIf (PEUnOp UNot (PEVar (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))))
-      (TCall incr_procedure (PECons (PEVar (LThere (LThere (LHere eq_refl)))) PENil)
-        (@CTDiscard _ TUnit))
-      TDone)
-    (Resource.RState incr_res_store Resource.CTrue).
-Proof.
-  eapply Rules.RTIf.
-  - exact incr_retry_call.
-  - exact incr_retry_done.
-Qed.
+    The carried equality is framed around the atomic block alone: the
+    post-CAS conditional consumes it, so it has to be visible in the
+    conditional's body.  [prenex_and] weakens it once per binder the block
+    introduces, which is exactly [incr_threaded_equality_core]. *)
 
 Lemma incr_resource_body_derivation :
   HoareRules.RavenHoareTriple
@@ -1739,18 +1689,15 @@ Proof.
     apply Rules.RTGhostValVar.
     eapply Rules.RTSeq; [apply incr_unfold2 |].
     apply Rules.RTPrenexPreserve.
-    eapply Rules.RTSeq.
-    - eapply Rules.RTSeq.
-      + eapply Rules.RTFrame. apply incr_atomic_cas.
-      + apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
-        eapply (Rules.RTIf incr_res_store incr_cas_result_core
-          (PEVar (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))) _ _ _).
-        * exact incr_fpu_branch.
-        * exact incr_done_branch.
-    - apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
+    eapply Rules.RTSeq; [eapply Rules.RTFrame; apply incr_atomic_cas |].
+    apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
+    eapply (Rules.RTIf incr_res_store incr_cas_result_core
+      (PEVar (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))) _ _ _).
+    - eapply Rules.RTSeq; [exact incr_fpu_branch |].
+      eapply Rules.RTSeq; [apply incr_fold2 | apply incr_success_check].
+    - eapply Rules.RTSeq; [exact incr_done_branch |].
       eapply Rules.RTSeq; [apply incr_fold2 |].
-      eapply Rules.RTSeq; [apply incr_check2 |].
-      apply incr_retry_conditional. }
+      eapply Rules.RTSeq; [apply incr_check2 | apply incr_retry_call]. }
   apply Rules.resource_prenex_entails_refl.
 Qed.
 

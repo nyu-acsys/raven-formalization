@@ -2,7 +2,7 @@ From Coq Require Import List String ZArith PArith Program.Equality
   ProofIrrelevance Lia.
 From stdpp Require Import sets.
 
-From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir verification.procedures verification.snapshots.
+From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir verification.procedures verification.snapshots verification.access_layout.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -973,7 +973,8 @@ Definition elaborate_procedure (environment : elaboration_environment)
                       (LHere (keep := keep_all) (d := runtime_var return_type)
                         (D := []) eq_refl)))
                     precondition postcondition
-                    (Snapshots.snapshot_accesses body)))
+                    (AccessLayout.layout_accesses
+                      (Snapshots.snapshot_accesses body))))
             end
           else inl (EETypeMismatch return_type
             (elaborate_typ (source_var_type return_declaration)))

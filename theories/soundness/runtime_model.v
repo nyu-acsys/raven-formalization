@@ -135,6 +135,12 @@ Lemma contract_cost_model_procedure_sound :
   procedure_cost_model_sound.
 Proof. intros Γ statement. destruct statement; exact I || reflexivity. Qed.
 
+(** Proof-only leaves take no step. *)
+Lemma proof_only_leaf_cost Γ (statement : stmt Γ) :
+  proof_onlyb statement = true ->
+  AnalysisView.leaf_cost Γ statement = Atomicity.NoStep.
+Proof. destruct statement; cbn; congruence. Qed.
+
 Lemma certified_call_step_effect
     (Hcost : procedure_cost_model_sound)
     Γ procedure

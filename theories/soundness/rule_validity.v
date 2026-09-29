@@ -941,6 +941,77 @@ Proof.
   intros t variable. apply binder_cons_weaken.
 Qed.
 
+Lemma track_values_iff {F Δ t ts} (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (value tracked : Core.expr F Δ t) (rest : expr_list F Δ ts)
+    (tracked_value : tval t) (values : tval_list ts) :
+  interp_expr formals binders valuation value = Some tracked_value ->
+  (interp_expr formals binders valuation (EBinOp (BEq t) value tracked) =
+      Some (VBool true) /\
+    interp_expr_list formals binders valuation rest = Some values) <->
+  interp_expr_list formals binders valuation (ExprCons tracked rest) =
+    Some (TVCons tracked_value values).
+Proof.
+  intros Hvalue. cbn [interp_expr interp_expr_list]. rewrite Hvalue.
+  destruct (interp_expr_total formals binders valuation tracked)
+    as [actual Hactual].
+  rewrite Hactual. cbn [interp_binop].
+  destruct (interp_expr_list formals binders valuation rest) as [actuals|].
+  - split.
+    + intros [Hequal Hrest]. injection Hequal as Hequal.
+      apply tval_eqb_eq in Hequal. subst. injection Hrest as ->. reflexivity.
+    + intros Hcons. inversion Hcons as [[Hhead Htail]].
+      repeat match goal with
+      | H : existT _ _ = existT _ _ |- _ =>
+          apply Eqdep.EqdepTheory.inj_pair2 in H
+      end. subst.
+      rewrite (proj2 (tval_eqb_eq t tracked_value tracked_value) eq_refl).
+      split; reflexivity.
+  - split; [intros [_ Hrest]; discriminate | discriminate].
+Qed.
+
+(** Tracking an expression in the telescope is tracking it in the argument
+    vector. *)
+Lemma term_interp_resource_prenex_at_arguments_track {Γ F Δ ts t}
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (valuation : symbol_valuation)
+    (arguments : gexpr_list Γ ts) (values : tval_list ts)
+    (expression : gexpr Γ t)
+    (prenex : Translation.Resource.resource_prenex Γ F Δ) :
+  forall (binders : binder_env Δ) (value : Core.expr F Δ t)
+    (tracked_value : tval t),
+  interp_expr formals binders valuation value = Some tracked_value ->
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      arguments values
+      (Hoare.ResourceHoare.track_prenex expression prenex value) ⊣⊢
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      (PECons expression arguments) (TVCons tracked_value values) prenex.
+Proof.
+  induction prenex as [Δ [stack body] | Δ u rest IH];
+    intros binders value tracked_value Hvalue.
+  - cbn [Hoare.ResourceHoare.track_prenex term_interp_resource_prenex_at_arguments
+      Translation.Resource.resource_stack Translation.Resource.resource_body
+      IR.symbolize_expr_list].
+    change (Translation.Resource.ResourceBody
+      (Translation.Resource.ResourceState ?store ?core)) with
+      (Translation.Resource.RState store core).
+    rewrite !term_interp_rstate.
+    unfold term_interp_core. cbn [Translation.TermSemantics.interp_core].
+    pose proof (track_values_iff formals binders valuation value
+      (IR.symbolize_expr stack expression)
+      (IR.symbolize_expr_list stack arguments) tracked_value values Hvalue)
+      as Hiff.
+    iSplit.
+    + iIntros "[[Hstack [Hbody %Hequal]] %Hrest]". iFrame. iPureIntro.
+      apply Hiff. split; assumption.
+    + iIntros "[[Hstack Hbody] %Hcons]".
+      apply Hiff in Hcons as [Hequal Hrest]. iFrame. iPureIntro.
+      split; assumption.
+  - cbn [Hoare.ResourceHoare.track_prenex term_interp_resource_prenex_at_arguments].
+    apply bi.exist_proper. intros head. apply IH.
+    rewrite interp_weaken_expr. exact Hvalue.
+Qed.
+
 Lemma term_interp_resource_prenex_at_arguments_entails {Γ F Δ ts}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
@@ -2985,8 +3056,9 @@ Lemma term_access_opening_arguments_valid {Γ F Δ} invariant
       @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
         invariant_values.
 Proof.
-  intros Hnamespace. revert binders.
-  induction Hopening; intros binders; iIntros "#Hworld Hpre".
+  intros Hnamespace. revert binders tracked_types tracked tracked_values.
+  induction Hopening; intros binders tracked_types tracked tracked_values;
+    iIntros "#Hworld Hpre".
   - cbn [term_interp_resource_prenex_at_arguments].
     iDestruct "Hpre" as "[[Hstack Htoken] %Htracked]".
     iDestruct "Htoken" as (values) "[%Harguments #Htoken]".
@@ -3086,6 +3158,89 @@ Proof.
     iApply (IHHopening binders with "Hworld [Hstack Hbody]").
     cbn [term_interp_resource_prenex_at_arguments]. iFrame.
     iPureIntro. symmetry. exact Hargument_interp.
+  - destruct (interp_expr_total formals binders valuation value)
+      as [tracked_value Htracked_value].
+    iEval (rewrite (term_interp_resource_prenex_at_arguments_track runtime
+      formals valuation tracked tracked_values expression external binders
+      value tracked_value Htracked_value)) in "Hpre".
+    iMod (IHHopening binders _ (PECons expression tracked)
+      (TVCons tracked_value tracked_values) with "Hworld Hpre") as
+      (values) "[Hbody [Hclose Htoken]]".
+    iModIntro. iExists values. iFrame "Hclose Htoken".
+    rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation (IR.pexpr_list_append tracked program_arguments)
+      (Translation.tval_list_append tracked_values values) expression body_pre
+      binders value tracked_value Htracked_value).
+    iExact "Hbody".
+Qed.
+
+(** Structural [TDone] steps preserve the argument-indexed interpretation. *)
+Lemma term_done_triple_arguments_valid {Γ F Δ}
+    (pre post : Translation.Resource.resource_prenex Γ F Δ)
+    (Hdone : CertifiedNormalization.RavenHoareRules.done_triple pre post)
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    {tracked_types} (tracked : gexpr_list Γ tracked_types)
+    (tracked_values : tval_list tracked_types) :
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      tracked tracked_values pre ⊢
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      tracked tracked_values post.
+Proof.
+  revert binders tracked_types tracked tracked_values.
+  induction Hdone; intros binders tracked_types tracked tracked_values.
+  - done.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "Hpre". iDestruct "Hpre" as (value) "Hpre".
+    iExists value. iApply (IHHdone with "Hpre").
+  - pose (source_binders := fun u (variable : bvar Δ u) =>
+      binders u (MThere variable)).
+    have Hrenaming : forall u (variable : bvar Δ u),
+        binders u (Assertions.weaken_bound_renaming u variable) =
+          source_binders u variable.
+    { intros. reflexivity. }
+    rewrite !(term_interp_resource_prenex_at_arguments_rename runtime formals
+      valuation tracked tracked_values _ _ Assertions.weaken_bound_renaming
+      source_binders binders Hrenaming).
+    apply IHHdone.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "Hpre". iDestruct "Hpre" as (value) "Hpre".
+    iPoseProof (IHHdone (binder_cons value binders) with "Hpre") as "Hpost".
+    iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
+      formals binders valuation tracked tracked_values value post)) in "Hpost".
+    iExact "Hpost".
+  - iIntros "Hpre".
+    iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
+      formals binders valuation tracked tracked_values pre' pre H with "Hpre")
+      as "Hpre".
+    iPoseProof (IHHdone binders with "Hpre") as "Hpost".
+    iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
+      binders valuation tracked tracked_values post post' H0 with "Hpost").
+  - change (Translation.Resource.RState store
+      (Translation.Resource.CAnd pre_body frame)) with
+      (Translation.Resource.prenex_and (Translation.Resource.RState store pre_body)
+        frame).
+    rewrite !term_interp_resource_prenex_at_arguments_and.
+    iIntros "[Hpre Hframe]". iFrame "Hframe". iApply (IHHdone with "Hpre").
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "[[Hstack Hbody] %Harguments]".
+    iPoseProof (interp_store_equal_under body store store' H formals binders
+      valuation with "Hbody") as "%Hstores".
+    iEval (rewrite Hstores) in "Hstack".
+    have Hargument_interp := interp_program_expr_list_store_ext formals
+      binders valuation store' store tracked Hstores.
+    unfold interp_program_expr_list in Hargument_interp.
+    rewrite Harguments in Hargument_interp.
+    iApply (IHHdone binders with "[Hstack Hbody]").
+    cbn [term_interp_resource_prenex_at_arguments]. iFrame.
+    iPureIntro. symmetry. exact Hargument_interp.
+  - destruct (interp_expr_total formals binders valuation value)
+      as [tracked_value Htracked_value].
+    rewrite !(term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation tracked tracked_values expression _ binders value tracked_value
+      Htracked_value).
+    apply (IHHdone binders _ (PECons expression tracked)
+      (TVCons tracked_value tracked_values)).
 Qed.
 
 (** Closing-side interpretation for the canonical independent access.  The
@@ -3117,8 +3272,8 @@ Lemma term_access_closing_arguments_valid {Γ F Δ} invariant
     term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values external_post.
 Proof.
-  revert binders.
-  induction Hclosing; intros binders.
+  revert binders tracked_types tracked tracked_values.
+  induction Hclosing; intros binders tracked_types tracked tracked_values.
   - cbn [term_interp_resource_prenex_at_arguments].
     iIntros "[[Hstack Hbody] %Hcombined] Hclose Htoken".
     rewrite IR.symbolize_expr_list_append in Hcombined.
@@ -3205,6 +3360,38 @@ Proof.
     iApply (IHHclosing binders with "[Hstack Hbody] Hclose Htoken").
     cbn [term_interp_resource_prenex_at_arguments]. iFrame.
     iPureIntro. symmetry. exact Hargument_interp.
+  - destruct (interp_expr_total formals binders valuation value)
+      as [tracked_value Htracked_value].
+    rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation (IR.pexpr_list_append tracked program_arguments)
+      (Translation.tval_list_append tracked_values invariant_values) expression
+      body_post binders value tracked_value Htracked_value).
+    iIntros "Hpost Hclose Htoken".
+    iPoseProof (IHHclosing binders _ (PECons expression tracked)
+      (TVCons tracked_value tracked_values) with "Hpost Hclose Htoken") as
+      "Hclosed".
+    iMod "Hclosed". iModIntro.
+    rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation tracked tracked_values expression external_post binders value
+      tracked_value Htracked_value).
+    iExact "Hclosed".
+  - iIntros "Hpost Hclose Htoken".
+    iMod (IHHclosing binders with "Hpost Hclose Htoken") as "Hmiddle".
+    iModIntro.
+    iApply (term_done_triple_arguments_valid _ _ H with "Hmiddle").
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "[[Hstack Hbody] %Harguments] Hclose Htoken".
+    destruct (interp_expr_total formals binders valuation
+      (IR.symbolize_expr store condition)) as [value Hvalue].
+    dependent destruction value. destruct b.
+    + iApply (IHHclosing1 binders with "[Hstack Hbody] Hclose Htoken").
+      cbn [term_interp_resource_prenex_at_arguments].
+      iFrame "Hstack Hbody". iPureIntro. split; [exact Hvalue | exact Harguments].
+    + iApply (IHHclosing2 binders with "[Hstack Hbody] Hclose Htoken").
+      cbn [term_interp_resource_prenex_at_arguments].
+      iFrame "Hstack Hbody". iPureIntro. split.
+      * simpl. rewrite Hvalue. reflexivity.
+      * exact Harguments.
 Qed.
 
 (** The semantic seam for [RTInvAccessIndependent].  The body is invoked
@@ -4939,10 +5126,8 @@ Lemma term_structured_runtime_inv_access_focus_base_framed_arguments_valid
     (focus_arguments : expr_list F Δ (Assertion.invariant_args invariant))
     (external body_pre body_post external_post :
       Translation.Resource.resource_prenex Γ F Δ)
-    (Hopening : CertifiedNormalization.RavenHoareRules.access_opening
-      invariant arguments
-      (@CertifiedNormalization.RavenHoareRules.AccessFocusBase _ _
-        Γ F invariant arguments Δ focus_arguments) external body_pre)
+    (Hbase : CertifiedNormalization.RavenHoareRules.access_base_opening
+      invariant arguments focus_arguments external body_pre)
     (Hclosure : CertifiedNormalization.RavenHoareRules.access_closure
       invariant Δ focus_arguments
       (ResourceInstances.instantiated_invariant invariant focus_arguments)
@@ -4962,9 +5147,7 @@ Lemma term_structured_runtime_inv_access_focus_base_framed_arguments_valid
     tracked (Translation.Resource.prenex_and external frame) external_post.
 Proof.
   intros Hbody Hatomic.
-  pose proof (CertifiedNormalization.RavenHoareRules.access_opening_base_view
-    invariant arguments focus_arguments external body_pre Hopening) as Hbase.
-  clear Hopening. revert frame Hbody. induction Hbase; intros extra Hbody.
+  revert frame Hbody. induction Hbase; intros extra Hbody.
   - eapply (term_structured_runtime_inv_access_arguments_valid
       Hregistered Hopen body_certificate Hpreserved store extra body_post
       external_post Hclosure tracked); [exact Hbody | exact Hatomic].
@@ -5208,7 +5391,7 @@ Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
   RegionSyntax.view statement = AnalysisView.ViewLeaf ->
   GenericRegions.Atomicity.take_step (RegionSyntax.cost Γ statement) entry = inr exit ->
   Certified.procedure_cost_model_sound ->
-  CertifiedNormalization.RavenHoareRules.RavenHoareTriple pre statement post ->
+  CertifiedNormalization.RavenHoareRules.leaf_triple pre statement post ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (ambient : coPset),
@@ -5227,97 +5410,6 @@ Proof.
   induction Htriple; intros runtime formals binders valuation ambient Henvelope
     Hregistry;
     simpl in Hview; try discriminate.
-  - (* telescope preservation *)
-    rewrite !term_interp_resource_exists.
-    iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
-    iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) valuation ambient Henvelope Hregistry
-      with "[$Hglobal $Hbody]") as "Hwp".
-    iApply (RegionExecution.Primitives.operation_mono with "Hwp").
-    iIntros "Hpost". iExists value. iExact "Hpost".
-  - (* bound weakening *)
-    pose (source_binders := fun u (variable : bvar Δ u) =>
-      binders u (MThere variable)).
-    have Hrenaming : forall u (variable : bvar Δ u),
-        binders u (Assertions.weaken_bound_renaming u variable) =
-          source_binders u variable.
-    { intros. reflexivity. }
-    unfold term_interp_resource_prenex at 1.
-    rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates valuation) pre _
-      Assertions.weaken_bound_renaming formals source_binders binders valuation
-      (term_semantic_runtime runtime) Hrenaming).
-    iIntros "[#Hglobal Hpre]".
-    iPoseProof (IHHtriple Hview Hstep runtime formals source_binders valuation
-      ambient Henvelope Hregistry with "[$Hglobal $Hpre]") as "Hwp".
-    iApply (RegionExecution.Primitives.operation_mono with "Hwp").
-    unfold term_interp_resource_prenex.
-    rewrite (Translation.TermSemantics.interp_rename_resource_prenex
-      semantic_data (term_predicates valuation) post _
-      Assertions.weaken_bound_renaming formals source_binders binders valuation
-      (term_semantic_runtime runtime) Hrenaming).
-    done.
-  - (* telescope elimination *)
-    rewrite term_interp_resource_exists.
-    iIntros "[#Hglobal Hpre]". iDestruct "Hpre" as (value) "Hbody".
-    iPoseProof (IHHtriple Hview Hstep runtime formals
-      (binder_cons value binders) valuation ambient Henvelope Hregistry
-      with "[$Hglobal $Hbody]") as "Hwp".
-    iApply (RegionExecution.Primitives.operation_mono with "Hwp").
-    unfold term_interp_resource_prenex.
-    rewrite (Translation.TermSemantics.interp_weaken_resource_prenex
-      semantic_data). done.
-  - (* prenex consequence *)
-    iIntros "[#Hglobal Hpre]".
-    iPoseProof (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates valuation) _ _ H runtime formals binders
-      valuation with "Hpre") as "Hpre".
-    iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope Hregistry with "[$Hglobal $Hpre]") as "Hwp".
-    iApply (RegionExecution.Primitives.operation_mono with "Hwp").
-    iApply (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates valuation) _ _ H0 runtime formals binders
-      valuation).
-  - (* frame *)
-    etrans; [| apply concrete_operation_wp_mono with
-      (P := (term_interp_resource_prenex runtime formals binders valuation post ∗
-             term_interp_core formals binders valuation frame)%I)].
-    2: { unfold term_interp_resource_prenex.
-         rewrite (Translation.TermSemantics.interp_prenex_and semantic_data).
-         done. }
-    rewrite term_interp_rstate.
-    cbn [Translation.TermSemantics.interp_core].
-    iIntros "[#Hglobal [Hstack [Hbody Hframe]]]".
-    iApply (RegionExecution.Primitives.operation_frame with
-      "[Hstack Hbody Hframe]").
-    iFrame "Hframe".
-    iApply IHHtriple; [exact Hview | exact Hstep | exact Henvelope |
-      exact Hregistry |].
-    rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
-  - (* consequence *)
-    rewrite term_interp_rstate.
-    iIntros "[#Hglobal [Hstack Hbody]]".
-    iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
-      (term_predicates valuation) _ _ H formals binders valuation with "Hbody")
-      as "Hbody".
-    iPoseProof (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope Hregistry with "[Hstack Hbody]") as "Hwp".
-    { rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody". }
-    iApply (RegionExecution.Primitives.operation_mono with "Hwp").
-    apply (Validation.TermSemantics.resource_prenex_entails_valid
-      semantic_data (term_predicates valuation) post post' H0 runtime formals
-      binders valuation).
-  - (* store rewrite *)
-    rewrite term_interp_rstate.
-    iIntros "[#Hglobal [Hstack Hbody]]".
-    iAssert (⌜interp_store formals binders valuation store' =
-               interp_store formals binders valuation store⌝)%I
-      with "[Hbody]" as "%Hequal".
-    { iApply (interp_store_equal_under body store store' H). iExact "Hbody". }
-    rewrite Hequal.
-    iApply (IHHtriple Hview Hstep runtime formals binders valuation ambient
-      Henvelope Hregistry).
-    rewrite term_interp_rstate. iFrame "Hglobal Hstack Hbody".
   - (* assert *)
     iIntros "[_ Hpre]". iApply term_ambient_assert_rule_valid.
     iExact "Hpre".
@@ -5419,7 +5511,7 @@ Lemma term_structured_runtime_resource_prenex_leaf_valid
     (step : GenericRegions.Atomicity.take_step (RegionSyntax.cost Γ statement) entry =
       inr exit)
     (pre post : Translation.Resource.resource_prenex Γ F Δ)
-    (derivation : CertifiedNormalization.RavenHoareRules.RavenHoareTriple
+    (derivation : CertifiedNormalization.RavenHoareRules.leaf_triple
       pre statement post)
     (Hwf : GenericRegions.Atomicity.state_wf entry)
     (Hprocedure : Certified.procedure_cost_model_sound) :
@@ -6779,6 +6871,36 @@ Proof.
       end.
     + intros runtime. simpl. split;
         [apply Hthen_trusted | apply Helse_trusted].
+  - (* tracked expression *)
+    destruct (IHderivation entry exit certificate Hwf Hcost Hprocedure_cost
+      Hregistered Hsafe) as [Hvalid Htrusted].
+    split; [|exact Htrusted].
+    intros ts tracked Hdisjoint values runtime formals binders valuation
+      ambient Henvelope.
+    match goal with
+    | Hstable : Hoare.ResourceHoare.pexpr_dependencies expression ## _ |- _ =>
+        have Hdisjoint' : Hoare.ResourceHoare.pexpr_list_dependencies
+            (PECons expression tracked) ##
+          Hoare.ResourceHoare.statement_writes statement
+          by (cbn [Hoare.ResourceHoare.pexpr_list_dependencies];
+              apply disjoint_union_l; split; assumption)
+    end.
+    destruct (interp_expr_total formals binders valuation value)
+      as [tracked_value Htracked_value].
+    iIntros "[#Hglobal Hpre]".
+    iEval (rewrite (term_interp_resource_prenex_at_arguments_track runtime
+      formals valuation tracked values expression pre binders value
+      tracked_value Htracked_value)) in "Hpre".
+    iPoseProof (Hvalid _ (PECons expression tracked) Hdisjoint'
+      (TVCons tracked_value values) runtime formals binders valuation ambient
+      Henvelope with "[$Hglobal $Hpre]") as "Hwp".
+    unfold term_structured_runtime_wp.
+    iApply (translated_runtime_wp_mono with "Hwp").
+    iIntros "[$ Hpost]".
+    rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation tracked values expression post binders value tracked_value
+      Htracked_value).
+    iExact "Hpost".
 Qed.
 
 Theorem term_structured_certificate_resource_prenex_valid

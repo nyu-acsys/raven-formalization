@@ -43,8 +43,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `val x : T := e;` or `val x : T := new(...);`, elaborated to a runtime
   `val` local and its initializing write. The counter example's `make`
   declares its allocated counter this way.
+- Ghost conditionals: an `if` whose guard reads a ghost local elaborates to
+  `TGhostIf`, whose branches must be proof-only; it erases to nothing, with
+  a Hoare rule, analysis and normalization support, and an Iris soundness
+  proof.
+- The Hoare rule `RTTrack` carries the value of an expression across a
+  statement that writes none of the locals it reads.
+- Conditional invariant accesses: an access may be closed in each branch of
+  a conditional, with a runtime or a ghost guard. Procedure elaboration lays
+  such accesses out canonically (`AccessLayout.layout_accesses`, which only
+  inserts `done`); the normalizer distributes the access into the branches
+  when nothing physical precedes the conditional, and otherwise factors it
+  out, closing through a guarded ghost conditional (`AccessClosingIte`) and
+  re-testing the guard for the branch continuations. The counter example's
+  `incr` closes its second access in each branch.
+- Nested invariant accesses: access bodies, the prefix before a closing
+  conditional, and distributed branch prefixes may contain balanced
+  invariant accesses of their own, normalized recursively. Procedure
+  elaboration groups the statements of an access up to its close into one
+  body, and groups a closing conditional with its unfold when further
+  statements follow, where the runtime erasure is unchanged.
 - Analyzer regression tests for asymmetric allocation in conditionals and
-  for snapshotted invariant arguments (`dune build @tests`).
+  for snapshotted invariant arguments, and normalization tests for
+  conditional accesses (`dune build @tests`).
 
 ## [1.0.0] - 2026-09-28
 

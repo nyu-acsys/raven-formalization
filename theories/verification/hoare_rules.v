@@ -1200,6 +1200,21 @@ Qed.
     the canonical unfold and its telescope path, but deliberately carries no
     assertion endpoints: opening and closing may use different structural
     wrappers around the same scoped access. *)
+(** [value == e] at every leaf of a telescope, [e] read through that leaf's
+    own store. *)
+Fixpoint track_prenex {Γ F Δ t} (expression : gexpr Γ t)
+    (prenex : resource_prenex Γ F Δ) : expr F Δ t -> resource_prenex Γ F Δ :=
+  match prenex in resource_prenex _ _ Δ0
+    return expr F Δ0 t -> resource_prenex Γ F Δ0 with
+  | ResourceBody state => fun value =>
+      RState (resource_stack state)
+        (CAnd (resource_body state)
+          (CExpr (EBinOp (BEq t) value
+            (symbolize_expr (resource_stack state) expression))))
+  | ResourceExists u rest => fun value =>
+      ResourceExists u (track_prenex expression rest (weaken_expr value))
+  end.
+
 Inductive access_focus {Γ F} (invariant : inv_id)
     (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     context -> Type :=
@@ -1276,7 +1291,48 @@ Inductive access_opening {Γ F} (invariant : inv_id)
       (RState store pre_body) body_pre ->
     store_equal_under pre_body Γ store' store ->
     access_opening invariant program_arguments focus
-      (RState store' pre_body) body_pre.
+      (RState store' pre_body) body_pre
+| AccessOpeningTrack Δ focus t (expression : gexpr Γ t) (value : expr F Δ t)
+    external body_pre :
+    access_opening invariant program_arguments focus external body_pre ->
+    access_opening invariant program_arguments focus
+      (track_prenex expression external value)
+      (track_prenex expression body_pre value).
+
+(** The structural rules, as they apply to [TDone]. *)
+Inductive done_triple {Γ F} :
+    forall {Δ}, resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
+| DoneRefl Δ (prenex : resource_prenex Γ F Δ) : done_triple prenex prenex
+| DonePreserve Δ t (pre post : resource_prenex Γ F (t :: Δ)) :
+    done_triple pre post ->
+    done_triple (ResourceExists t pre) (ResourceExists t post)
+| DoneBoundWeaken Δ t (pre post : resource_prenex Γ F Δ) :
+    done_triple pre post ->
+    done_triple (weaken_resource_prenex (u := t) pre)
+      (weaken_resource_prenex (u := t) post)
+| DoneElim Δ t (pre : resource_prenex Γ F (t :: Δ))
+    (post : resource_prenex Γ F Δ) :
+    done_triple pre (weaken_resource_prenex post) ->
+    done_triple (ResourceExists t pre) post
+| DoneConsequence Δ (pre pre' post post' : resource_prenex Γ F Δ) :
+    done_triple pre post ->
+    resource_prenex_entails pre' pre ->
+    resource_prenex_entails post post' ->
+    done_triple pre' post'
+| DoneFrame Δ (store : symbolic_store Γ F Δ) (pre_body frame : core_assertion F Δ)
+    (post : resource_prenex Γ F Δ) :
+    done_triple (RState store pre_body) post ->
+    done_triple (RState store (CAnd pre_body frame)) (prenex_and post frame)
+| DoneStackRewrite Δ (store store' : symbolic_store Γ F Δ)
+    (body : core_assertion F Δ) (post : resource_prenex Γ F Δ) :
+    done_triple (RState store body) post ->
+    store_equal_under body Γ store' store ->
+    done_triple (RState store' body) post
+| DoneTrack Δ t (expression : gexpr Γ t) (value : expr F Δ t)
+    (pre post : resource_prenex Γ F Δ) :
+    done_triple pre post ->
+    done_triple (track_prenex expression pre value)
+      (track_prenex expression post value).
 
 Inductive access_closing {Γ F} (invariant : inv_id)
     (program_arguments : gexpr_list Γ (invariant_args invariant)) :
@@ -1331,7 +1387,29 @@ Inductive access_closing {Γ F} (invariant : inv_id)
       (RState store body) external_post ->
     store_equal_under body Γ store' store ->
     access_closing invariant program_arguments focus
-      (RState store' body) external_post.
+      (RState store' body) external_post
+| AccessClosingTrack Δ focus t (expression : gexpr Γ t) (value : expr F Δ t)
+    body_post external_post :
+    access_closing invariant program_arguments focus body_post external_post ->
+    access_closing invariant program_arguments focus
+      (track_prenex expression body_post value)
+      (track_prenex expression external_post value)
+| AccessClosingThenDone Δ focus body_post middle external_post :
+    access_closing invariant program_arguments (Δ := Δ) focus body_post middle ->
+    done_triple middle external_post ->
+    access_closing invariant program_arguments focus body_post external_post
+(** A closing selected by a guard; either branch's focus may be reported. *)
+| AccessClosingIte Δ focus else_focus (store : symbolic_store Γ F Δ)
+    (body : core_assertion F Δ) (condition : gexpr Γ TBool) external_post :
+    access_closing invariant program_arguments focus
+      (RState store (CAnd body (CExpr (symbolize_expr store condition))))
+      external_post ->
+    access_closing invariant program_arguments else_focus
+      (RState store
+        (CAnd body (CExpr (EUnOp UNot (symbolize_expr store condition)))))
+      external_post ->
+    access_closing invariant program_arguments focus (RState store body)
+      external_post.
 
 (** A non-dependent view of an opening whose shared focus is canonical.
     Keeping this small inversion view in the resource layer prevents the
@@ -1382,34 +1460,6 @@ Inductive access_base_opening {Γ F Δ} (invariant : inv_id)
     store_equal_under pre_body Γ store' store ->
     access_base_opening invariant program_arguments focus_arguments
       (RState store' pre_body) body_pre.
-
-Lemma access_opening_base_view {Γ F Δ} invariant
-    (program_arguments : gexpr_list Γ (invariant_args invariant))
-    (focus_arguments : expr_list F Δ (invariant_args invariant))
-    (external body_pre : resource_prenex Γ F Δ) :
-  access_opening invariant program_arguments
-    (@AccessFocusBase Γ F invariant program_arguments Δ
-      focus_arguments)
-    external body_pre ->
-  access_base_opening invariant program_arguments focus_arguments
-    external body_pre.
-Proof.
-  intro Hopening. dependent induction Hopening generalizing focus_arguments.
-  - apply AccessBaseOpening.
-  - eapply AccessBaseOpeningPrenexConsequence.
-    { apply (IHHopening focus_arguments eq_refl). }
-    { exact H. }
-    { exact H0. }
-  - apply AccessBaseOpeningFrame.
-    apply (IHHopening focus_arguments eq_refl).
-  - eapply AccessBaseOpeningConsequence.
-    + apply (IHHopening focus_arguments eq_refl).
-    + exact H.
-    + exact H0.
-  - eapply AccessBaseOpeningStackRewrite.
-    + apply (IHHopening focus_arguments eq_refl).
-    + exact H.
-Qed.
 
 Inductive access_boundary {Γ F} (invariant : inv_id)
     (program_arguments : gexpr_list Γ (invariant_args invariant)) :
@@ -1528,8 +1578,7 @@ Lemma access_boundary_base_view {Γ F Δ} invariant
     external_pre body_pre body_post external_post ->
   exists focus_arguments : expr_list F Δ
       (invariant_args invariant),
-    access_opening invariant arguments
-      (@AccessFocusBase Γ F invariant arguments Δ focus_arguments)
+    access_base_opening invariant arguments focus_arguments
       external_pre body_pre /\
     access_closure invariant Δ focus_arguments
       (instantiated_invariant invariant focus_arguments)
@@ -1537,9 +1586,8 @@ Lemma access_boundary_base_view {Γ F Δ} invariant
 Proof.
   intro Hboundary. induction Hboundary.
   - exists (symbolize_expr_list store arguments). split.
-    + change (access_opening invariant arguments
-        (AccessFocusBase invariant arguments Δ
-          (symbolize_expr_list store arguments))
+    + change (access_base_opening invariant arguments
+        (symbolize_expr_list store arguments)
         (RState store
           (CAnd (CInvariant invariant
             (symbolize_expr_list store arguments)) frame))
@@ -1547,20 +1595,20 @@ Proof.
           (RState store
             (instantiated_invariant invariant
               (symbolize_expr_list store arguments))) frame)).
-      apply AccessOpeningFrame. apply AccessOpeningBase.
+      apply AccessBaseOpeningFrame. apply AccessBaseOpening.
     + exact H.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply AccessOpeningPrenexConsequence; eassumption.
+    eapply AccessBaseOpeningPrenexConsequence; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    apply AccessOpeningFrame. exact Hopening.
+    apply AccessBaseOpeningFrame. exact Hopening.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply AccessOpeningConsequence; eassumption.
+    eapply AccessBaseOpeningConsequence; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [|exact Hclosing].
-    eapply AccessOpeningStackRewrite; eassumption.
+    eapply AccessBaseOpeningStackRewrite; eassumption.
   - destruct IHHboundary as (focus_arguments & Hopening & Hclosing).
     exists focus_arguments. split; [exact Hopening |].
     eapply AccessConsequence; eassumption.
@@ -1840,7 +1888,136 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
         (CAnd body (CExpr (EUnOp UNot (symbolize_expr store condition)))))
       else_branch post ->
     RavenHoareTriple (RState store body)
-      (TGhostIf condition then_branch else_branch) post.
+      (TGhostIf condition then_branch else_branch) post
+
+(** *** Stack-stable expressions.  An expression reading no local the
+    statement writes keeps its value across it. *)
+| RTTrack {Δ} t (expression : gexpr Γ t) (value : expr F Δ t) statement
+    (pre post : resource_prenex Γ F Δ) :
+    pexpr_dependencies expression ## statement_writes statement ->
+    RavenHoareTriple pre statement post ->
+    RavenHoareTriple (track_prenex expression pre value) statement
+      (track_prenex expression post value).
+
+(** The rules for statements the analyzer treats as single leaves. *)
+Inductive leaf_triple {Γ F} : forall {Δ},
+    resource_prenex Γ F Δ -> stmt Γ -> resource_prenex Γ F Δ -> Prop :=
+| LTAssert {Δ} (store : symbolic_store Γ F Δ)
+    (body : core_assertion F Δ) condition :
+    leaf_triple
+      (RState store (CAnd body (CExpr (symbolize_expr store condition))))
+      (TAssert condition)
+      (RState store (CAnd body (CExpr (symbolize_expr store condition))))
+| LTAssign {Δ} init t (store : symbolic_store Γ F Δ)
+    (target : write_target init Γ t) value :
+    leaf_triple
+      (RState store CTrue)
+      (TAssign init target value)
+      (ResourceExists t
+        (RState (update_store_with_bound store target)
+          (CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
+            (weaken_expr (symbolize_expr store value))))))
+| LTFieldRead {Δ} (store : symbolic_store Γ F Δ) field init
+    (target : write_target init Γ (field_type field)) base chunk :
+    leaf_triple
+      (RState store (COwn field (symbolize_expr store base) chunk))
+      (TFieldRead init field target base)
+      (ResourceExists (field_type field)
+        (RState (update_store_with_bound store target)
+          (CAnd
+            (COwn field (weaken_expr (symbolize_expr store base))
+              (weaken_expr chunk))
+            (CExpr (EBinOp (BEq (field_type field))
+              (ERef (RefBound MHere)) (weaken_expr chunk))))))
+| LTFieldWrite {Δ} (store : symbolic_store Γ F Δ) field base
+    (value : rexpr Γ (field_type field)) old_chunk :
+    leaf_triple
+      (RState store (COwn field (symbolize_expr store base) old_chunk))
+      (TFieldWrite field base value)
+      (RState store
+        (COwn field (symbolize_expr store base)
+          (symbolize_expr store value)))
+| LTAlloc {Δ} (store : symbolic_store Γ F Δ) init
+    (target : write_target init Γ TRef) fields :
+    NoDup (map field_init_id fields) ->
+    NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
+    ghost_initializers_require_physical fields ->
+    leaf_triple
+      (RState store
+        (ghost_initializers_valid_core store
+          (ghost_field_initializers fields)))
+      (TAlloc init target fields)
+      (ResourceExists TRef
+        (RState (update_store_with_bound store target)
+          (allocated_fields_core store fields)))
+| LTGhostUpdate {Δ} (store : symbolic_store Γ F Δ)
+    field base old_value new_value :
+    leaf_triple
+      (RState store
+        (CAnd
+          (CGhostOwn field (symbolize_expr store base)
+            (symbolize_expr store old_value))
+          (CFpuAllowed (field_type field)
+            (symbolize_expr store old_value)
+            (symbolize_expr store new_value))))
+      (TGhostUpdate field base old_value new_value)
+      (RState store
+        (CGhostOwn field (symbolize_expr store base)
+          (symbolize_expr store new_value)))
+| LTUnfoldPredicate {Δ} predicate (store : symbolic_store Γ F Δ) arguments :
+    leaf_triple
+      (RState store
+        (CPredicate predicate (symbolize_expr_list store arguments)))
+      (TPredicateUnfold predicate arguments)
+      (RState store
+        (instantiated_predicate predicate
+          (symbolize_expr_list store arguments)))
+| LTFoldPredicate {Δ} predicate (store : symbolic_store Γ F Δ) arguments :
+    leaf_triple
+      (RState store
+        (instantiated_predicate predicate
+          (symbolize_expr_list store arguments)))
+      (TPredicateFold predicate arguments)
+      (RState store
+        (CPredicate predicate (symbolize_expr_list store arguments)))
+| LTCallDiscard {Δ} procedure (store : symbolic_store Γ F Δ)
+    (typed_arguments : rexpr_list Γ (procedure_args procedure)) :
+    procedure_verified procedure ->
+    leaf_triple
+      (RState store
+        (instantiated_pre procedure
+          (symbolize_expr_list store typed_arguments)))
+      (TCall procedure typed_arguments
+        (@CTDiscard Γ (procedure_return procedure)))
+      (ResourceExists (procedure_return procedure)
+        (RState (weaken_store store)
+          (instantiated_post procedure
+            (weaken_expr_list
+              (symbolize_expr_list store typed_arguments)))))
+| LTCallStore {Δ} procedure (store : symbolic_store Γ F Δ)
+    (typed_arguments : rexpr_list Γ (procedure_args procedure))
+    init (target : write_target init Γ (procedure_return procedure)) :
+    procedure_verified procedure ->
+    leaf_triple
+      (RState store
+        (instantiated_pre procedure
+          (symbolize_expr_list store typed_arguments)))
+      (TCall procedure typed_arguments (CTStore init target))
+      (ResourceExists (procedure_return procedure)
+        (RState (update_store_with_bound store target)
+          (instantiated_post procedure
+            (weaken_expr_list
+              (symbolize_expr_list store typed_arguments)))))
+| LTSpawn {Δ} procedure (store : symbolic_store Γ F Δ)
+    (typed_arguments : rexpr_list Γ (procedure_args procedure)) :
+    procedure_verified procedure ->
+    leaf_triple
+      (RState store
+        (instantiated_pre procedure
+          (symbolize_expr_list store typed_arguments)))
+      (TSpawn procedure typed_arguments)
+      (RState store CTrue).
+
 
 (** An assertion whose symbolic condition always holds leaves the state
     unchanged. *)
@@ -1942,6 +2119,7 @@ Proof.
   - apply RTFrame. exact IHHopening.
   - eapply RTConsequence; eassumption.
   - eapply RTStackRewrite; eassumption.
+  - apply RTTrack; [set_solver | exact IHHopening].
 Qed.
 
 Lemma access_opening_complete {Γ F Δ invariant}
@@ -1987,6 +2165,9 @@ Proof.
   - exists (@AccessFocusBase Γ F invariant program_arguments Δ
       (symbolize_expr_list store program_arguments)).
     apply AccessOpeningBase.
+  - destruct (IHderivation invariant program_arguments eq_refl)
+      as (focus & Hopening). exists focus.
+    apply AccessOpeningTrack. exact Hopening.
 Qed.
 
 (** Fold-side counterpart of [access_opening_complete].  The focus
@@ -2036,7 +2217,28 @@ Proof.
   - exists (@AccessFocusBase Γ F invariant program_arguments Δ
       (symbolize_expr_list store program_arguments)).
     apply AccessClosingBase.
+  - destruct (IHderivation invariant program_arguments eq_refl)
+      as (focus & Hclosing). exists focus.
+    apply AccessClosingTrack. exact Hclosing.
 Qed.
+
+Lemma done_triple_complete {Γ F Δ} (pre post : resource_prenex Γ F Δ) :
+  RavenHoareTriple pre TDone post -> done_triple pre post.
+Proof.
+  intro derivation. dependent induction derivation.
+  - apply DonePreserve. exact (IHderivation eq_refl).
+  - apply DoneBoundWeaken. exact (IHderivation eq_refl).
+  - apply DoneElim. exact (IHderivation eq_refl).
+  - eapply DoneConsequence; [exact (IHderivation eq_refl) | eassumption..].
+  - apply DoneFrame. exact (IHderivation eq_refl).
+  - eapply DoneConsequence;
+      [exact (IHderivation eq_refl) | | exact H0].
+    apply RPEBody. split; [reflexivity | exact H].
+  - eapply DoneStackRewrite; [exact (IHderivation eq_refl) | exact H].
+  - apply DoneRefl.
+  - apply DoneTrack. exact (IHderivation eq_refl).
+Qed.
+
 
 (** Canonical surface rule, now derived from the four-ended boundary rather
     than built into the calculus. *)
@@ -2187,6 +2389,7 @@ Proof.
   - apply RTCallStore. assumption.
   - apply RTSpawn. assumption.
   - eapply RTGhostIf; eassumption.
+  - eapply RTTrack; eassumption.
 Defined.
 
 (** *** Derived rule: move a postcondition's core existential into the
@@ -2501,6 +2704,10 @@ Proof.
     + eapply RTStackRewrite; eassumption.
     + exact Hsecond.
   - exists middle. split; assumption.
+  - destruct (IHderivation first second eq_refl) as (middle & Hfirst & Hsecond).
+    exists (track_prenex expression middle value).
+    cbn [statement_writes] in H.
+    split; apply RTTrack; first [assumption | set_solver].
 Qed.
 
 (** The syntactic spine selected by the restricted normalizer can therefore
@@ -2558,6 +2765,23 @@ Proof.
     post Hfold) as (closing_focus & Hclosing).
   exists opened, opened_post, opening_focus, closing_focus.
   repeat split; assumption.
+Qed.
+
+Lemma access_closing_fold_done_complete {Γ F Δ invariant}
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
+    (body_post external_post : resource_prenex Γ F Δ) :
+  RavenHoareTriple body_post
+    (TSeq (TFold invariant program_arguments) TDone) external_post ->
+  exists focus : access_focus invariant program_arguments Δ,
+    access_closing invariant program_arguments focus body_post external_post.
+Proof.
+  intro derivation.
+  destruct (RavenHoareTriple_sequence_decompose _ _ derivation)
+    as (middle & Hfold & Hdone).
+  destruct (access_closing_complete program_arguments body_post middle Hfold)
+    as (focus & Hclosing).
+  exists focus. eapply AccessClosingThenDone; [exact Hclosing|].
+  apply done_triple_complete. exact Hdone.
 Qed.
 
 (** Cut a binder-preserving prefix against an arbitrary outer consumer.

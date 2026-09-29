@@ -2,13 +2,17 @@ From Coq Require Import ClassicalEpsilon FunctionalExtensionality Lia
   Program.Equality.
 From stdpp Require Import gmap sets.
 
-From raven Require Import runtime.erasure analysis.structured_certificates analysis.normalization_base verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model.
+From raven Require Import runtime.erasure analysis.structured_certificates analysis.normalization_base verification.expressions analysis.atomicity verification.assertions verification.ir soundness.runtime_model
+  verification.access_layout verification.conditional_derivations
+  runtime.conditional_erasure.
 
 Module NormalizationConditional.
 
 Import NormalizationBase.
 Import Core IR Runtime IR Core Runtime.Translation.
 Import StructuredCertificates.
+Import ConditionalDerivations ConditionalErasure.
+Import AccessLayout (canonical_branch).
 Module ConditionalNormalizationPrefix.
 (* Only the erasure is needed here, not the concrete model. *)
 Module Erasure := RuntimeErasure.
@@ -178,309 +182,6 @@ Definition restricted_footprinted_normalization_exists
     restricted_analyze_and_normalize source =
       Some (normalized_statement
         result.(footprinted_normalization)).
-
-
-(** *** Producing a [normalization_result]
-
-    The source-to-target seam.  [normalization_identity] only
-    says the record is inhabited; this is the first constructor that
-    actually normalizes, taking an explicit `unfold; body; fold` source
-    together with its ordinary analyzer certificate and returning the
-    matched [TInvAccess] target with a structured certificate.
-
-    Compare [normalization_close_one_marker_with_results]: the
-    [Contracts.instantiated_invariant … invariant_body] premise is gone,
-    because [RTInvAccess] takes the opened body to *be*
-    [instantiated_invariant] applied to the access arguments. *)
-Definition normalization_close_one_marker_target
-    {Γ F Δ entry opened inner}
-    {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body : stmt Γ)
-    (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry source (GenericRegions.Atomicity.fold_invariant invariant inner))
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (Hbody_certificate : structured_certificate Γ opened body inner)
-    (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
-    (Htarget : RavenHoareRules.RavenHoareTriple pre
-      (TInvAccess invariant arguments body) post)
-    (Herasure : forall names stack,
-      Erasure.runtime_stmt names stack source =
-        Erasure.runtime_stmt names stack body) :
-  @normalization_result Γ F Δ entry
-    (GenericRegions.Atomicity.fold_invariant invariant inner)
-    pre post source source_derivation source_certificate :=
-  {| normalized_statement := TInvAccess invariant arguments body;
-     normalization_target_derivation := Htarget;
-     normalization_target_certificate :=
-       StructuredInvAccess Γ entry invariant arguments body opened inner
-         Hopen Hbody_certificate Hopen_preserved;
-     normalization_runtime_erasure := Herasure |}.
-
-(** Continued form of the target-oriented matched-access constructor.  The
-    derivation cut is performed entirely before this boundary: [Htarget]
-    already contains every logical telescope and structural wrapper around
-    the complete access-plus-continuation statement.  Consequently this
-    constructor only assembles syntax, the structured certificate, and
-    runtime erasure; it never inspects the derivation. *)
-Definition normalization_close_one_marker_target_then
-    {Γ F Δ entry opened inner exit}
-    {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body work normalized_work : stmt Γ)
-    (source_derivation : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments)
-            work))) post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments)
-            work))) exit)
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (Hbody_certificate : structured_certificate Γ opened body inner)
-    (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
-    (Htarget : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TInvAccess invariant arguments body) normalized_work)
-      post)
-    (Hwork_certificate : structured_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant inner)
-      normalized_work exit)
-    (Hwork_erasure : forall names stack,
-      Erasure.runtime_stmt names stack work =
-        Erasure.runtime_stmt names stack normalized_work) :
-  @normalization_result Γ F Δ entry exit pre post
-    (TSeq (TUnfold invariant arguments)
-      (TSeq body
-        (TSeq (TFold invariant arguments) work)))
-    source_derivation source_certificate.
-Proof.
-  refine {| normalized_statement :=
-      TSeq (TInvAccess invariant arguments body) normalized_work;
-    normalization_target_derivation := Htarget;
-    normalization_target_certificate :=
-      StructuredSequence Γ entry _
-        (GenericRegions.Atomicity.fold_invariant invariant inner) _ exit
-        (StructuredInvAccess Γ entry invariant arguments body opened inner
-          Hopen Hbody_certificate Hopen_preserved)
-        Hwork_certificate |}.
-  intros names stack. rewrite runtime_stmt_linear_access_then.
-  now rewrite Hwork_erasure.
-Defined.
-
-(** Raw analyzer certificate for the general continued-access source.  This
-    is the non-atomic counterpart of the earlier baseline constructor: the
-    body and continuation certificates are arbitrary analyzer results. *)
-Definition access_then_source_certificate
-    {Γ entry opened inner exit} invariant
-    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body work : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      opened body inner)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened) :
-  GenericRegions.Atomicity.analysis_certificate Γ entry
-    (TSeq (TUnfold invariant arguments)
-      (TSeq body
-        (TSeq (TFold invariant arguments) work)))
-    exit :=
-  GenericRegions.Atomicity.CertSequence Γ entry
-    (TSeq (TUnfold invariant arguments)
-      (TSeq body
-        (TSeq (TFold invariant arguments) work)))
-    (TUnfold invariant arguments) opened
-    (TSeq body
-      (TSeq (TFold invariant arguments) work))
-    exit eq_refl
-    (GenericRegions.Atomicity.CertUnfold Γ entry
-      (TUnfold invariant arguments) invariant opened eq_refl Hopen)
-    (GenericRegions.Atomicity.CertSequence Γ opened
-      (TSeq body
-        (TSeq (TFold invariant arguments) work))
-      body inner
-      (TSeq (TFold invariant arguments) work)
-      exit eq_refl body_analysis
-      (GenericRegions.Atomicity.CertSequence Γ inner
-        (TSeq (TFold invariant arguments) work)
-        (TFold invariant arguments)
-        (GenericRegions.Atomicity.fold_invariant invariant inner) work exit
-        eq_refl
-        (GenericRegions.Atomicity.CertFold Γ inner
-          (TFold invariant arguments) invariant eq_refl)
-        work_analysis)).
-
-(** Footprinted package for the general continued-access target.  Its
-    premises are exactly the recursively available facts for the body and
-    continuation; no fact about the Hoare proof is required. *)
-Definition normalization_close_one_marker_target_then_footprinted
-    {Γ F Δ entry opened inner exit}
-    {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body work normalized_work : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      opened body inner)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (Hbody_certificate : structured_certificate Γ opened body inner)
-    (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
-    (Htarget : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TInvAccess invariant arguments body) normalized_work)
-      post)
-    (Hwork_certificate : structured_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant inner)
-      normalized_work exit)
-    (Hwork_erasure : forall names stack,
-      Erasure.runtime_stmt names stack work =
-        Erasure.runtime_stmt names stack normalized_work)
-    (Hbody_subset : structured_certificate_footprint Hbody_certificate ⊆
-      GenericRegions.Atomicity.certificate_footprint body_analysis)
-    (Hwork_subset : structured_certificate_footprint Hwork_certificate ⊆
-      GenericRegions.Atomicity.certificate_footprint work_analysis)
-    (Hbody_safe : GenericRegions.Atomicity.analysis_in_atomic opened = false ->
-      structured_accesses_outside_atomic Hbody_certificate)
-    (Hwork_safe : GenericRegions.Atomicity.analysis_in_atomic
-        (GenericRegions.Atomicity.fold_invariant invariant inner) = false ->
-      structured_accesses_outside_atomic Hwork_certificate)
-    (source_derivation : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments) work)))
-      post) :
-  let source_certificate := access_then_source_certificate invariant
-    arguments
-    body work body_analysis work_analysis Hopen in
-  @footprinted_normalization_result Γ F Δ entry exit pre post
-    (TSeq (TUnfold invariant arguments)
-      (TSeq body
-        (TSeq (TFold invariant arguments) work)))
-    source_derivation source_certificate.
-Proof.
-  intros source_certificate.
-  refine {| footprinted_normalization :=
-    normalization_close_one_marker_target_then invariant arguments
-      body work normalized_work source_derivation source_certificate Hopen
-      Hbody_certificate Hopen_preserved Htarget Hwork_certificate
-      Hwork_erasure |}.
-  - intros marker Hmember.
-    specialize (Hbody_subset marker). specialize (Hwork_subset marker).
-    simpl in Hmember |- *.
-    set_unfold.
-    tauto.
-  - intros Hentry. cbn [normalization_close_one_marker_target_then
-      structured_accesses_outside_atomic]. split.
-    + split; [exact Hentry |]. apply Hbody_safe.
-      rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-        invariant entry opened Hopen). exact Hentry.
-    + apply Hwork_safe.
-      unfold GenericRegions.Atomicity.fold_invariant.
-      destruct (bool_decide
-        (invariant ∈ GenericRegions.Atomicity.analysis_open inner)); simpl.
-      all: rewrite (GenericRegions.Atomicity.analysis_certificate_preserves_in_atomic
-        body_analysis).
-      all: rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-        invariant entry opened Hopen); exact Hentry.
-Defined.
-
-(** Worker-indexed continued-access assembly for the completeness induction.
-    The recursive continuation result is consumed at the exact fuel supplied
-    by the parent run, avoiding any fuel-irrelevance side theorem. *)
-Lemma footprinted_normalization_continued_access_from_worker
-    {Γ F Δ entry opened inner exit}
-    {pre middle post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body work normalized : stmt Γ)
-    (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      opened body inner)
-    (work_derivation : RavenHoareRules.RavenHoareTriple middle work post)
-    (work_analysis : GenericRegions.Atomicity.analysis_certificate Γ
-      (GenericRegions.Atomicity.fold_invariant invariant inner) work exit)
-    (work_result : @footprinted_normalization_result Γ F Δ
-      (GenericRegions.Atomicity.fold_invariant invariant inner) exit
-      middle post work work_derivation work_analysis)
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (Hbody_certificate : structured_certificate Γ opened body inner)
-    (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
-    (Htarget : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TInvAccess invariant arguments body)
-        (normalized_statement
-          work_result.(footprinted_normalization))) post)
-    (Hbody_subset : structured_certificate_footprint Hbody_certificate ⊆
-      GenericRegions.Atomicity.certificate_footprint body_analysis)
-    (Hbody_safe : GenericRegions.Atomicity.analysis_in_atomic opened = false ->
-      structured_accesses_outside_atomic Hbody_certificate)
-    (source_derivation : RavenHoareRules.RavenHoareTriple pre
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments) work)))
-      post)
-    fuel
-    (Hboundary : restricted_access_boundary_check arguments arguments body =
-      true)
-    (Hwork_worker : restricted_normalize_statement_fuel fuel work =
-      Some (normalized_statement
-        work_result.(footprinted_normalization)))
-    (Hworker : restricted_normalize_statement_fuel (S fuel)
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments) work)))
-      = Some normalized) :
-  let source_certificate := access_then_source_certificate invariant
-    arguments
-    body work body_analysis work_analysis Hopen in
-  exists result : @footprinted_normalization_result Γ F Δ
-      entry exit pre post
-      (TSeq (TUnfold invariant arguments)
-        (TSeq body
-          (TSeq (TFold invariant arguments) work)))
-      source_derivation source_certificate,
-    normalized_statement
-      result.(footprinted_normalization) = normalized.
-Proof.
-  intros source_certificate.
-  pose (result :=
-    normalization_close_one_marker_target_then_footprinted
-      invariant arguments
-      body work
-      (normalized_statement
-        work_result.(footprinted_normalization))
-      body_analysis work_analysis Hopen Hbody_certificate Hopen_preserved
-      Htarget
-      (normalization_target_certificate
-        work_result.(footprinted_normalization))
-      (normalization_runtime_erasure
-        work_result.(footprinted_normalization))
-      Hbody_subset
-      work_result.(footprinted_normalization_subset)
-      Hbody_safe work_result.(footprinted_normalization_safe)
-      source_derivation).
-  exists result.
-  pose proof (restricted_normalize_continued_access fuel
-    invariant arguments body
-    work _ Hboundary Hwork_worker) as Hnormalized.
-  rewrite Hworker in Hnormalized. inversion Hnormalized. reflexivity.
-Qed.
-
-
-(** Complete base case for the continued matched-access cut.  All logical
-    work at the fold is explicit in [Hclosure] and [Hcut]; this lemma builds
-    the complete normalized target and immediately installs it in the
-    footprinted worker result.  Structural wrappers around the source belong
-    outside this seam and are transported by the existing normalization
-    constructors. *)
 
 
 (** Structural composition of two resource normalizations across a
@@ -696,6 +397,35 @@ Definition normalization_bound_weaken
        normalization.(normalized_statement);
      normalization_target_derivation :=
        RavenHoareRules.RTBoundWeaken t _ pre post
+         normalization.(normalization_target_derivation);
+     normalization_target_certificate :=
+       normalization.(normalization_target_certificate);
+     normalization_runtime_erasure :=
+       normalization.(normalization_runtime_erasure) |}.
+
+Definition normalization_track
+    {Γ F Δ entry exit}
+    {pre post : Resource.resource_prenex Γ F Δ} {source}
+    t (expression : gexpr Γ t) (value : Core.expr F Δ t)
+    (stable : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes source)
+    (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry source exit)
+    (normalization : @normalization_result Γ F Δ entry exit
+      pre post source source_derivation source_certificate)
+    (target_stable : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes normalization.(normalized_statement)) :
+  @normalization_result Γ F Δ entry exit
+    (RavenHoareRules.track_prenex expression pre value)
+    (RavenHoareRules.track_prenex expression post value) source
+    (RavenHoareRules.RTTrack t expression value source pre post stable
+      source_derivation)
+    source_certificate :=
+  {| normalized_statement :=
+       normalization.(normalized_statement);
+     normalization_target_derivation :=
+       RavenHoareRules.RTTrack t expression value _ pre post target_stable
          normalization.(normalization_target_derivation);
      normalization_target_certificate :=
        normalization.(normalization_target_certificate);
@@ -989,6 +719,34 @@ Definition footprinted_normalization_bound_weaken
      footprinted_normalization_safe :=
        result.(footprinted_normalization_safe) |}.
 
+Definition footprinted_normalization_track
+    {Γ F Δ entry exit}
+    {pre post : Resource.resource_prenex Γ F Δ} {source}
+    t (expression : gexpr Γ t) (value : Core.expr F Δ t)
+    (stable : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes source)
+    (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
+    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry source exit)
+    (result : @footprinted_normalization_result Γ F Δ entry exit
+      pre post source source_derivation source_certificate)
+    (target_stable : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes
+        result.(footprinted_normalization).(normalized_statement)) :
+  @footprinted_normalization_result Γ F Δ entry exit
+    (RavenHoareRules.track_prenex expression pre value)
+    (RavenHoareRules.track_prenex expression post value) source
+    (RavenHoareRules.RTTrack t expression value source pre post stable
+      source_derivation)
+    source_certificate :=
+  {| footprinted_normalization :=
+       normalization_track t expression value stable source_derivation
+         source_certificate result.(footprinted_normalization) target_stable;
+     footprinted_normalization_subset :=
+       result.(footprinted_normalization_subset);
+     footprinted_normalization_safe :=
+       result.(footprinted_normalization_safe) |}.
+
 Definition footprinted_normalization_prenex_consequence
     {Γ F Δ entry exit}
     {pre pre' post post' : Resource.resource_prenex Γ F Δ} {source}
@@ -1271,7 +1029,20 @@ Inductive certificate_aligned :
         then_exit else_exit view then_certificate else_certificate
         open_equal atomic_equal)
       (RavenHoareRules.RTGhostIf store body condition then_branch else_branch
-        post then_proof_only else_proof_only then_derivation else_derivation).
+        post then_proof_only else_proof_only then_derivation else_derivation)
+| AlignedTrack : forall Γ F Δ t entry exit statement
+    (expression : gexpr Γ t) (value : Core.expr F Δ t)
+    (pre post : Resource.resource_prenex Γ F Δ)
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry statement exit)
+    (stable : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes statement)
+    (derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
+      pre statement post),
+    certificate_aligned certificate derivation ->
+    certificate_aligned certificate
+      (RavenHoareRules.RTTrack t expression value statement pre post stable
+        derivation).
 
 (** *** Alignment is complete
 
@@ -1307,7 +1078,8 @@ Proof.
                       | eapply AlignedFrame; exact A
                       | eapply AlignedConsequence; exact A
                       | eapply AlignedStackRewrite; exact A
-                      | eapply AlignedPrenexConsequence; exact A ]
+                      | eapply AlignedPrenexConsequence; exact A
+                      | eapply AlignedTrack; exact A ]
               | exact I ]).
   (* Every remaining rule fixes the statement's shape, so the certificate
      is determined up to the cases whose view premise is contradictory. *)
@@ -1909,96 +1681,6 @@ Proof.
   - exact body_result.(footprinted_normalization_safe).
 Defined.
 
-(** The matched access, footprinted.  The two extra hypotheses are what
-    the recognizer can supply and the packaging needs: the body's
-    structured footprint is dominated by the *source* certificate's, and
-    the body is access-safe whenever the opened state is outside an
-    atomic block.  The access node's own boundary is dominated for free,
-    since [certificate_footprint] always contains the masks and open sets
-    at its two ends. *)
-Definition footprinted_normalization_close_one_marker_target
-    {Γ F Δ entry opened inner}
-    {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body : stmt Γ)
-    (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry source (GenericRegions.Atomicity.fold_invariant invariant inner))
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
-      inr opened)
-    (Hbody_certificate : structured_certificate Γ opened body inner)
-    (Hopen_preserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
-    (Htarget : RavenHoareRules.RavenHoareTriple pre
-      (TInvAccess invariant arguments body) post)
-    (Herasure : forall names stack,
-      Erasure.runtime_stmt names stack source =
-        Erasure.runtime_stmt names stack body)
-    (Hbody_subset : structured_certificate_footprint Hbody_certificate ⊆
-      GenericRegions.Atomicity.certificate_footprint source_certificate)
-    (Hbody_safe : GenericRegions.Atomicity.analysis_in_atomic opened = false ->
-      structured_accesses_outside_atomic Hbody_certificate) :
-  @footprinted_normalization_result Γ F Δ entry
-    (GenericRegions.Atomicity.fold_invariant invariant inner)
-    pre post source source_derivation source_certificate.
-Proof.
-  refine {| footprinted_normalization :=
-    normalization_close_one_marker_target invariant arguments body
-      source_derivation source_certificate Hopen Hbody_certificate
-      Hopen_preserved Htarget Herasure |}.
-  - intros marker Hmember.
-    simpl in Hmember.
-    repeat rewrite elem_of_union in Hmember.
-    destruct Hmember as [[[[Hmask | Hopened] | Hexit_mask] | Hexit_open]
-      | Hbody_member].
-    + exact (GenericRegions.Atomicity.certificate_entry_subset_footprint
-        source_certificate marker Hmask).
-    + exact (GenericRegions.Atomicity.certificate_entry_open_subset_footprint
-        source_certificate marker Hopened).
-    + exact (GenericRegions.Atomicity.certificate_exit_subset_footprint
-        source_certificate marker Hexit_mask).
-    + exact (GenericRegions.Atomicity.certificate_exit_open_subset_footprint
-        source_certificate marker Hexit_open).
-    + exact (Hbody_subset marker Hbody_member).
-  - intros Hentry. simpl. split.
-    + exact Hentry.
-    + apply Hbody_safe.
-      rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-        invariant entry opened Hopen). exact Hentry.
-Defined.
-
-
-(** Proof-normalization cut for one raw matched access.  This statement is
-    kept immediately beside its normalization consumer so the generic
-    completeness induction depends on exactly one proof-theoretic seam. *)
-Lemma raw_access_target : forall
-    {Γ F Δ}
-    (invariant : inv_id)
-    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (body : stmt Γ) (pre post : Resource.resource_prenex Γ F Δ),
-  pexpr_list_dependencies arguments ## statement_writes body ->
-  RavenHoareRules.RavenHoareTriple pre
-    (TSeq (TUnfold invariant arguments)
-      (TSeq body
-        (TFold invariant arguments))) post ->
-  RavenHoareRules.RavenHoareTriple pre
-    (TInvAccess invariant arguments body) post.
-Proof.
-  intros Γ F Δ invariant arguments
-    body pre post Hstable Hraw.
-  destruct (RavenHoareRules.RavenHoareTriple_unfold_body_fold_spines
-    invariant arguments
-    body pre post Hraw)
-    as (body_pre & body_post & opening_focus & closing_focus &
-      Hopening & Hbody & Hclosing).
-  eapply RavenHoareRules.RTInvAccessIndependent.
-  - exact Hstable.
-  - exact Hopening.
-  - exact Hbody.
-  - exact Hclosing.
-Qed.
-
-
 (** Inversion facts for the executable worker used by the completeness
     induction below.  These expose the recursive fuel and normalized shape
     without adding any proof-side structure to the worker. *)
@@ -2036,14 +1718,17 @@ Proof.
     exists normalized_second; repeat split; try reflexivity; eauto.
 Qed.
 
-Lemma baseline_normalizable_unfold_absurd {Γ} invariant
+Lemma baseline_normalizable_unfold_absurd {Γ} nested invariant
     (arguments : gexpr_list Γ (Assertion.invariant_args invariant)) :
-  baseline_normalizable (TUnfold invariant arguments) -> False.
-Proof. intro H. inversion H; cbn in *; contradiction. Qed.
+  baseline_normalizable nested (TUnfold invariant arguments) -> False.
+Proof.
+  intro H. inversion H; subst; cbn in *; try contradiction.
+  destruct nested; contradiction.
+Qed.
 
-Lemma restricted_normalize_baseline_sequence_inv {Γ} fuel
+Lemma restricted_normalize_baseline_sequence_inv {Γ} nested fuel
     (first second normalized : stmt Γ) :
-  baseline_normalizable first ->
+  baseline_normalizable nested first ->
   restricted_normalize_statement_fuel (S fuel) (TSeq first second) =
     Some normalized ->
   exists normalized_first normalized_second,
@@ -2073,10 +1758,11 @@ Lemma restricted_normalize_terminal_access_inv {Γ} fuel
     (TSeq (TUnfold invariant arguments)
       (TSeq body (TFold invariant arguments))) =
     Some normalized ->
-  exists remaining,
+  exists remaining normalized_body,
     fuel = S remaining /\
     restricted_access_boundary_check arguments arguments body = true /\
-    normalized = TInvAccess invariant arguments body.
+    restricted_normalize_statement_fuel remaining body = Some normalized_body /\
+    normalized = TInvAccess invariant arguments normalized_body.
 Proof.
   destruct fuel as [|remaining]; cbn [restricted_normalize_statement_fuel];
     try discriminate.
@@ -2084,11 +1770,12 @@ Proof.
     [|contradiction].
   replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn.
-  remember (restricted_access_boundary_check arguments arguments body)
-    as boundary eqn:Hboundary.
-  destruct boundary; try discriminate.
+  destruct (restricted_access_boundary_check arguments arguments body)
+    eqn:Hboundary; try discriminate.
+  destruct (restricted_normalize_statement_fuel remaining body)
+    as [normalized_body|] eqn:Hbody; try discriminate.
   intro Hworker. inversion Hworker; subst.
-  exists remaining. repeat split; auto.
+  exists remaining, normalized_body. repeat split; auto.
 Qed.
 
 Lemma restricted_normalize_continued_access_inv {Γ} fuel
@@ -2100,11 +1787,12 @@ Lemma restricted_normalize_continued_access_inv {Γ} fuel
       (TSeq body
         (TSeq (TFold invariant arguments) work))) =
     Some normalized ->
-  exists remaining normalized_work,
+  exists remaining normalized_body normalized_work,
     fuel = S remaining /\
     restricted_access_boundary_check arguments arguments body = true /\
+    restricted_normalize_statement_fuel remaining body = Some normalized_body /\
     restricted_normalize_statement_fuel remaining work = Some normalized_work /\
-    normalized = TSeq (TInvAccess invariant arguments body)
+    normalized = TSeq (TInvAccess invariant arguments normalized_body)
       normalized_work.
 Proof.
   destruct fuel as [|remaining]; cbn [restricted_normalize_statement_fuel];
@@ -2113,18 +1801,18 @@ Proof.
     [|contradiction].
   replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
   cbn.
-  remember (restricted_access_boundary_check arguments arguments body)
-    as boundary eqn:Hboundary.
-  destruct boundary; try discriminate.
-  remember (restricted_normalize_statement_fuel remaining work)
-    as work_result eqn:Hwork.
-  destruct work_result as [normalized_work|]; try discriminate.
+  destruct (restricted_access_boundary_check arguments arguments body)
+    eqn:Hboundary; try discriminate.
+  destruct (restricted_normalize_statement_fuel remaining body)
+    as [normalized_body|] eqn:Hbody; try discriminate.
+  destruct (restricted_normalize_statement_fuel remaining work)
+    as [normalized_work|] eqn:Hwork; try discriminate.
   intro Hworker. inversion Hworker; subst.
-  exists remaining, normalized_work. repeat split; auto.
+  exists remaining, normalized_body, normalized_work. repeat split; auto.
 Qed.
 
 Lemma conditional_normalization_complete_from_worker
-    {Γ F Δ entry exit condition then_branch else_branch}
+    {Γ F Δ entry exit stack condition then_branch else_branch}
     {pre post : Resource.resource_prenex Γ F Δ}
     (derivation : RavenHoareRules.RavenHoareTriple pre
       (TIf condition then_branch else_branch) post)
@@ -2136,7 +1824,7 @@ Lemma conditional_normalization_complete_from_worker
         then_branch then_post)
       (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry then_branch then_exit),
-      GenericRegions.Atomicity.lifo_certificate then_certificate [] [] ->
+      GenericRegions.Atomicity.lifo_certificate then_certificate stack stack ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel then_branch = Some normalized ->
       exists result : @footprinted_normalization_result Γ F0 Δ0
@@ -2150,7 +1838,7 @@ Lemma conditional_normalization_complete_from_worker
         else_branch else_post)
       (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry else_branch else_exit),
-      GenericRegions.Atomicity.lifo_certificate else_certificate [] [] ->
+      GenericRegions.Atomicity.lifo_certificate else_certificate stack stack ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel else_branch = Some normalized ->
       exists result : @footprinted_normalization_result Γ F0 Δ0
@@ -2158,7 +1846,7 @@ Lemma conditional_normalization_complete_from_worker
           else_certificate,
         normalized_statement
           result.(footprinted_normalization) = normalized) :
-  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
   forall fuel normalized,
   restricted_normalize_statement_fuel fuel
     (TIf condition then_branch else_branch) = Some normalized ->
@@ -2231,10 +1919,20 @@ Proof.
       fuel normalized Hworker) as (result & Hresult).
     exists (footprinted_normalization_bound_weaken derivation0
       certificate result). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    assert (Htarget : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes
+        result.(footprinted_normalization).(normalized_statement)).
+    { rewrite Hresult, (restricted_normalize_statement_writes _ _ _ Hworker).
+      exact stable. }
+    exists (footprinted_normalization_track _ expression value stable
+      derivation0 certificate result Htarget). exact Hresult.
 Qed.
 
 Lemma ghost_conditional_normalization_complete_from_worker
-    {Γ F Δ entry exit condition then_branch else_branch}
+    {Γ F Δ entry exit stack condition then_branch else_branch}
     {pre post : Resource.resource_prenex Γ F Δ}
     (derivation : RavenHoareRules.RavenHoareTriple pre
       (TGhostIf condition then_branch else_branch) post)
@@ -2246,7 +1944,7 @@ Lemma ghost_conditional_normalization_complete_from_worker
         then_branch then_post)
       (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry then_branch then_exit),
-      GenericRegions.Atomicity.lifo_certificate then_certificate [] [] ->
+      GenericRegions.Atomicity.lifo_certificate then_certificate stack stack ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel then_branch = Some normalized ->
       exists result : @footprinted_normalization_result Γ F0 Δ0
@@ -2260,7 +1958,7 @@ Lemma ghost_conditional_normalization_complete_from_worker
         else_branch else_post)
       (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
         entry else_branch else_exit),
-      GenericRegions.Atomicity.lifo_certificate else_certificate [] [] ->
+      GenericRegions.Atomicity.lifo_certificate else_certificate stack stack ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel else_branch = Some normalized ->
       exists result : @footprinted_normalization_result Γ F0 Δ0
@@ -2268,7 +1966,7 @@ Lemma ghost_conditional_normalization_complete_from_worker
           else_certificate,
         normalized_statement
           result.(footprinted_normalization) = normalized) :
-  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
   forall fuel normalized,
   restricted_normalize_statement_fuel fuel
     (TGhostIf condition then_branch else_branch) = Some normalized ->
@@ -2341,12 +2039,22 @@ Proof.
     + symmetry. exact Helse_worker.
     + cbn [restricted_normalize_statement_fuel].
       rewrite <- Hthen_worker, <- Helse_worker. exact Hworker.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    assert (Htarget : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes
+        result.(footprinted_normalization).(normalized_statement)).
+    { rewrite Hresult, (restricted_normalize_statement_writes _ _ _ Hworker).
+      exact stable. }
+    exists (footprinted_normalization_track _ expression value stable
+      derivation0 certificate result Htarget). exact Hresult.
 Qed.
 
 (** Completeness for a ghost value binder, given completeness for its body.
     Proof wrappers around the binder rule are transported unchanged. *)
 Lemma ghost_val_normalization_complete_from_worker
-    {Γ F Δ entry exit name t initializer body}
+    {Γ F Δ entry exit stack name t initializer body}
     {pre post : Resource.resource_prenex Γ F Δ}
     (derivation : RavenHoareRules.RavenHoareTriple pre
       (TGhostVal name t initializer body) post)
@@ -2358,7 +2066,7 @@ Lemma ghost_val_normalization_complete_from_worker
         body body_post)
       (body_certificate : GenericRegions.Atomicity.analysis_certificate
         (ghost_val t :: Γ) entry body body_exit),
-      GenericRegions.Atomicity.lifo_certificate body_certificate [] [] ->
+      GenericRegions.Atomicity.lifo_certificate body_certificate stack stack ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel body = Some normalized ->
       exists result : @footprinted_normalization_result (ghost_val t :: Γ)
@@ -2366,7 +2074,7 @@ Lemma ghost_val_normalization_complete_from_worker
           body_certificate,
         normalized_statement
           result.(footprinted_normalization) = normalized) :
-  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
   forall fuel normalized,
   restricted_normalize_statement_fuel fuel
     (TGhostVal name t initializer body) = Some normalized ->
@@ -2432,98 +2140,692 @@ Proof.
       fuel normalized Hworker) as (result & Hresult).
     exists (footprinted_normalization_bound_weaken derivation0
       certificate result). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    assert (Htarget : RavenHoareRules.pexpr_dependencies expression ##
+      RavenHoareRules.statement_writes
+        result.(footprinted_normalization).(normalized_statement)).
+    { rewrite Hresult, (restricted_normalize_statement_writes _ _ _ Hworker).
+      exact stable. }
+    exists (footprinted_normalization_track _ expression value stable
+      derivation0 certificate result Htarget). exact Hresult.
 Qed.
 
 (** Worker-indexed completeness.  The syntax witness supplies the induction
     principle; the Hoare derivation is decomposed extensionally, so its proof
     wrappers do not become a second executable normalizer. *)
-Lemma baseline_normalization_complete_from_worker
-    {Γ} (source : stmt Γ) (Hbaseline : baseline_normalizable source) :
-  forall F Δ entry exit
-    (pre post : Resource.resource_prenex Γ F Δ)
-    (derivation : RavenHoareRules.RavenHoareTriple pre source post)
-    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry source exit),
-  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
-  forall fuel normalized,
-  restricted_normalize_statement_fuel fuel source = Some normalized ->
-  exists result : @footprinted_normalization_result Γ F Δ
-      entry exit pre post source derivation certificate,
-    normalized_statement
-      result.(footprinted_normalization) = normalized.
+(** ** Conditional accesses *)
+
+(** [X ⊆ U] for a union [U] containing [X], or a superset of [X] recorded in
+    a hypothesis. *)
+Ltac subset_of_union :=
+  match goal with
+  | |- ∅ ⊆ _ => apply empty_subseteq
+  | |- ?X ⊆ ?X => reflexivity
+  | |- _ ∩ _ ⊆ _ =>
+      etransitivity; [apply intersection_subseteq_l|]; subset_of_union
+  | |- _ ⊆ _ ∪ _ =>
+      first [apply union_subseteq_l'; subset_of_union
+            | apply union_subseteq_r'; subset_of_union]
+  | H : ?X ⊆ _ |- ?X ⊆ _ => etransitivity; [exact H|]; subset_of_union
+  end.
+
+Ltac view_inversion :=
+  match goal with
+  | Hview : @AnalysisView.syntax_view _ _ _ = _ |- _ =>
+      cbn in Hview; inversion Hview; subst; try clear Hview
+  end.
+
+Ltac footprint_subset :=
+  repeat apply union_least; subset_of_union.
+
+
+Definition structured_guard_if {Γ entry} (guard : access_guard Γ)
+    {then_branch else_branch : stmt Γ} {then_exit else_exit}
+    (then_certificate : structured_certificate Γ entry then_branch then_exit)
+    (else_certificate : structured_certificate Γ entry else_branch else_exit)
+    (Hopen : Atom.analysis_open then_exit = Atom.analysis_open else_exit)
+    (Hatomic : Atom.analysis_in_atomic then_exit =
+      Atom.analysis_in_atomic else_exit) :
+    structured_certificate Γ entry (guard_if guard then_branch else_branch)
+      (Atom.AnalysisState
+        (Atom.analysis_mask then_exit ∩ Atom.analysis_mask else_exit)
+        (Atom.analysis_open then_exit)
+        (Atom.analysis_step_taken then_exit || Atom.analysis_step_taken else_exit)
+        (Atom.analysis_in_atomic then_exit)) :=
+  match guard as guard0 return structured_certificate Γ entry
+    (guard_if guard0 then_branch else_branch) _ with
+  | GuardRuntime condition =>
+      StructuredConditional Γ entry condition then_branch else_branch
+        then_exit else_exit then_certificate else_certificate Hopen Hatomic
+  | GuardGhost condition =>
+      StructuredGhostConditional Γ entry condition then_branch else_branch
+        then_exit else_exit then_certificate else_certificate Hopen Hatomic
+  end.
+
+Lemma structured_guard_if_footprint {Γ entry} (guard : access_guard Γ)
+    {then_branch else_branch : stmt Γ} {then_exit else_exit}
+    (then_certificate : structured_certificate Γ entry then_branch then_exit)
+    (else_certificate : structured_certificate Γ entry else_branch else_exit)
+    Hopen Hatomic :
+  structured_certificate_footprint
+    (structured_guard_if guard then_certificate else_certificate Hopen Hatomic) =
+  Atom.analysis_mask entry ∪ Atom.analysis_open entry ∪
+    (Atom.analysis_mask then_exit ∩ Atom.analysis_mask else_exit) ∪
+    Atom.analysis_open then_exit ∪
+    (structured_certificate_footprint then_certificate ∪
+      structured_certificate_footprint else_certificate).
+Proof. destruct guard; reflexivity. Qed.
+
+Lemma structured_guard_if_safe {Γ entry} (guard : access_guard Γ)
+    {then_branch else_branch : stmt Γ} {then_exit else_exit}
+    (then_certificate : structured_certificate Γ entry then_branch then_exit)
+    (else_certificate : structured_certificate Γ entry else_branch else_exit)
+    Hopen Hatomic :
+  structured_accesses_outside_atomic then_certificate ->
+  structured_accesses_outside_atomic else_certificate ->
+  structured_accesses_outside_atomic
+    (structured_guard_if guard then_certificate else_certificate Hopen Hatomic).
+Proof. destruct guard; cbn; tauto. Qed.
+
+Definition structured_cast {Γ entry statement exit exit'} (Hexit : exit = exit')
+    (certificate : structured_certificate Γ entry statement exit) :
+    structured_certificate Γ entry statement exit' :=
+  eq_rect exit (structured_certificate Γ entry statement) certificate exit' Hexit.
+
+Lemma structured_cast_footprint {Γ entry statement exit exit'}
+    (Hexit : exit = exit')
+    (certificate : structured_certificate Γ entry statement exit) :
+  structured_certificate_footprint (structured_cast Hexit certificate) =
+    structured_certificate_footprint certificate.
+Proof. destruct Hexit. reflexivity. Qed.
+
+Lemma structured_cast_safe {Γ entry statement exit exit'} (Hexit : exit = exit')
+    (certificate : structured_certificate Γ entry statement exit) :
+  structured_accesses_outside_atomic certificate ->
+  structured_accesses_outside_atomic (structured_cast Hexit certificate).
+Proof. destruct Hexit. auto. Qed.
+
+Lemma analysis_state_join_self (state : Atom.analysis_state) :
+  Atom.AnalysisState (Atom.analysis_mask state ∩ Atom.analysis_mask state)
+    (Atom.analysis_open state)
+    (Atom.analysis_step_taken state || Atom.analysis_step_taken state)
+    (Atom.analysis_in_atomic state) = state.
 Proof.
-  induction Hbaseline; intros F Δ entry exit pre post derivation
-    certificate Hlifo fuel normalized Hworker.
-  - pose (balanced := unfold_free_balanced_structured_result certificate []
-      u Hlifo).
-    pose (normalization := normalization_identity derivation
-      certificate balanced.(balanced_structured_certificate)).
-    pose (result := {| footprinted_normalization := normalization;
-      footprinted_normalization_subset :=
-        balanced.(balanced_structured_footprint);
-      footprinted_normalization_safe :=
-        fun _ => balanced.(balanced_structured_safe) |}).
-    exists result.
-    pose proof (unfold_free_normalize_statement_identity statement fuel normalized
-      u Hworker) as Heq.
-    cbn. symmetry. exact Heq.
-  - dependent destruction certificate; try discriminate.
-    cbn in e. inversion e; subst.
+  destruct state as [mask opened step atomic]. cbn.
+  rewrite Bool.orb_diag. f_equal. set_solver.
+Qed.
+
+Lemma fold_invariant_in_atomic invariant state :
+  Atom.analysis_in_atomic (Atom.fold_invariant invariant state) =
+    Atom.analysis_in_atomic state.
+Proof.
+  unfold Atom.fold_invariant.
+  destruct (bool_decide (invariant ∈ Atom.analysis_open state)); reflexivity.
+Qed.
+
+(** Proof-only code leaves the analysis state unchanged. *)
+Lemma proof_only_neutral_state {Γ entry statement exit}
+    (certificate : Atom.analysis_certificate Γ entry statement exit) :
+  proof_onlyb statement = true -> access_neutral statement -> exit = entry.
+Proof.
+  induction certificate; intros Hproof Hneutral.
+  - rewrite (Certified.proof_only_leaf_cost Γ statement Hproof) in e0.
+    unfold Atom.take_step, Atom.take_plain_step in e0.
+    destruct (_ || _); injection e0 as <-; reflexivity.
+  - reflexivity.
+  - destruct statement; cbn in e; try discriminate. contradiction.
+  - destruct statement; cbn in e; try discriminate. contradiction.
+  - destruct statement; cbn in e; try discriminate. inversion e; subst.
+    apply andb_prop in Hproof as [Hfirst Hsecond].
+    destruct Hneutral as [Hfirst_neutral Hsecond_neutral].
+    rewrite IHcertificate2, IHcertificate1; auto.
+  - destruct statement; cbn in e; try discriminate; inversion e; subst;
+      apply andb_prop in Hproof as [Hthen Helse];
+      destruct Hneutral as [Hthen_neutral Helse_neutral];
+      rewrite IHcertificate1, IHcertificate2 by assumption;
+      apply analysis_state_join_self.
+  - destruct statement; cbn in e; try discriminate.
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hbody. subst.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst.
+    apply IHcertificate; assumption.
+Qed.
+
+(** Completeness of the worker for [statement], in any access stack that a
+    statement of the given nesting may run in. *)
+Definition normalization_complete {Γ} (nested : bool) (statement : stmt Γ) :
+    Prop :=
+  forall F Δ entry exit (pre post : Resource.resource_prenex Γ F Δ)
+    (derivation : RavenHoareRules.RavenHoareTriple pre statement post)
+    (certificate : Atom.analysis_certificate Γ entry statement exit) stack,
+  (if nested then True else stack = []) ->
+  Atom.lifo_certificate certificate stack stack ->
+  forall fuel normalized,
+  restricted_normalize_statement_fuel fuel statement = Some normalized ->
+  exists result : @footprinted_normalization_result Γ F Δ entry exit pre post
+      statement derivation certificate,
+    normalized_statement result.(footprinted_normalization) = normalized.
+
+Lemma unfold_free_normalization_complete {Γ} nested (statement : stmt Γ) :
+  unfold_free statement -> normalization_complete nested statement.
+Proof.
+  intros u F Δ entry exit pre post derivation certificate stack _ Hlifo fuel
+    normalized Hworker.
+  pose (balanced := unfold_free_balanced_structured_result certificate stack
+    u Hlifo).
+  pose (normalization := normalization_identity derivation
+    certificate balanced.(balanced_structured_certificate)).
+  exists {| footprinted_normalization := normalization;
+    footprinted_normalization_subset :=
+      balanced.(balanced_structured_footprint);
+    footprinted_normalization_safe :=
+      fun _ => balanced.(balanced_structured_safe) |}.
+  pose proof (unfold_free_normalize_statement_identity statement fuel normalized
+    u Hworker) as Heq.
+  cbn. symmetry. exact Heq.
+Qed.
+
+(** What a normalized piece of a larger statement provides. *)
+Lemma piece_normalization_facts {Γ} nested (statement normalized : stmt Γ)
+    {entry exit} (certificate : Atom.analysis_certificate Γ entry statement exit)
+    stack fuel F Δ (pre post : Resource.resource_prenex Γ F Δ) :
+  normalization_complete nested statement ->
+  RavenHoareRules.RavenHoareTriple pre statement post ->
+  (if nested then True else stack = []) ->
+  Atom.lifo_certificate certificate stack stack ->
+  restricted_normalize_statement_fuel fuel statement = Some normalized ->
+  exists target : structured_certificate Γ entry normalized exit,
+    structured_certificate_footprint target ⊆
+      Atom.certificate_footprint certificate /\
+    (Atom.analysis_in_atomic entry = false ->
+      structured_accesses_outside_atomic target) /\
+    (forall names stack,
+      Erasure.runtime_stmt names stack normalized =
+        Erasure.runtime_stmt names stack statement) /\
+    simulates statement normalized /\
+    statement_writes normalized = statement_writes statement /\
+    proof_onlyb normalized = proof_onlyb statement.
+Proof.
+  intros IH derivation Hstack Hlifo Hworker.
+  destruct (IH F Δ _ _ pre post derivation certificate stack Hstack Hlifo fuel
+    normalized Hworker) as (result & Hresult).
+  pose proof (restricted_normalize_statement_writes _ _ _ Hworker).
+  pose proof (restricted_normalize_statement_proof_only _ _ _ Hworker).
+  subst normalized.
+  exists (normalization_target_certificate (footprinted_normalization result)).
+  repeat split; try assumption.
+  - apply footprinted_normalization_subset.
+  - apply footprinted_normalization_safe.
+  - intros names stack'. symmetry. apply normalization_runtime_erasure.
+  - intros F' Δ' P Q D.
+    destruct (IH F' Δ' _ _ P Q D certificate stack Hstack Hlifo fuel _ Hworker)
+      as (result' & Hresult').
+    rewrite <- Hresult'.
+    exact (normalization_target_derivation (footprinted_normalization result')).
+Qed.
+
+(** A linear access: its body is normalized in the stack extended by the
+    access's marker. *)
+Lemma terminal_access_normalization_complete_from_worker {Γ} nested invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (body : stmt Γ) :
+  baseline_normalizable true body ->
+  pexpr_list_dependencies arguments ## statement_writes body ->
+  normalization_complete true body ->
+  normalization_complete nested
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body (TFold invariant arguments))).
+Proof.
+  intros Hbody_baseline Hstable IHbody F Δ entry exit pre post derivation
+    certificate stack _ Hlifo fuel normalized Hworker.
+  destruct (restricted_normalize_terminal_access_inv _ _ _ _ _ Hworker)
+    as (remaining & body' & -> & _ & Hbody_worker & ->).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ derivation)
+    as (opened_pre & Hunfold & Htail).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Htail)
+    as (body_post & Hbody & Hfold).
+  dependent destruction certificate; try discriminate. try view_inversion.
+  dependent destruction certificate1; try discriminate. try view_inversion.
+  dependent destruction certificate2; try discriminate. try view_inversion.
+  dependent destruction certificate2_2; try discriminate. try view_inversion.
+  rename e0 into Hopen, certificate2_1 into body_certificate.
+  destruct (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
+    body_certificate) as [Hbody_lifo Hbody_open].
+  destruct (IHbody F Δ _ _ _ _ Hbody body_certificate _
+    I (Hbody_lifo []) remaining body'
+    Hbody_worker) as (body_result & Hbody_result).
+  subst body'.
+  pose proof (restricted_normalize_statement_writes _ _ _ Hbody_worker)
+    as Hbody_writes.
+  pose proof (footprinted_normalization_subset body_result) as Hbody_subset.
+  pose proof (footprinted_normalization_safe body_result) as Hbody_safe.
+  set (body_normalization := footprinted_normalization body_result) in *.
+  set (body' := normalized_statement body_normalization) in *.
+  assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+    (TInvAccess invariant arguments body') post).
+  { apply RavenHoareTriple_access_of_raw; [rewrite Hbody_writes; exact Hstable|].
+    eapply RavenHoareRules.RTSeq; [exact Hunfold|].
+    eapply RavenHoareRules.RTSeq; [|exact Hfold].
+    exact (normalization_target_derivation body_normalization). }
+  pose (target := StructuredInvAccess Γ state invariant arguments body' state0
+    state1 Hopen (normalization_target_certificate body_normalization)
+    Hbody_open).
+  unshelve eexists {| footprinted_normalization :=
+    {| normalized_statement := TInvAccess invariant arguments body';
+       normalization_target_derivation := Hderivation;
+       normalization_target_certificate := target |} |}.
+  - intros names stack'. rewrite runtime_stmt_linear_access. cbn.
+    apply normalization_runtime_erasure.
+  - cbn [target structured_certificate_footprint Atom.certificate_footprint].
+    footprint_subset.
+  - intros Hentry. cbn [target structured_accesses_outside_atomic].
+    split; [exact Hentry|]. apply Hbody_safe.
+    rewrite (Atom.open_invariant_preserves_in_atomic _ _ _ Hopen). exact Hentry.
+  - reflexivity.
+Qed.
+
+Lemma continued_access_normalization_complete_from_worker {Γ} nested invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (body work : stmt Γ) :
+  baseline_normalizable true body ->
+  pexpr_list_dependencies arguments ## statement_writes body ->
+  normalization_complete true body ->
+  normalization_complete nested work ->
+  normalization_complete nested
+    (TSeq (TUnfold invariant arguments)
+      (TSeq body (TSeq (TFold invariant arguments) work))).
+Proof.
+  intros Hbody_baseline Hstable IHbody IHwork F Δ entry exit pre post derivation
+    certificate stack Hstack Hlifo fuel normalized Hworker.
+  destruct (restricted_normalize_continued_access_inv _ _ _ _ _ _ Hworker)
+    as (remaining & body' & work' & -> & _ & Hbody_worker & Hwork_worker & ->).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ derivation)
+    as (opened_pre & Hunfold & Htail).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Htail)
+    as (body_post & Hbody & Hrest).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Hrest)
+    as (closed_pre & Hfold & Hwork).
+  dependent destruction certificate; try discriminate. try view_inversion.
+  dependent destruction certificate1; try discriminate. try view_inversion.
+  dependent destruction certificate2; try discriminate. try view_inversion.
+  dependent destruction certificate2_2; try discriminate. try view_inversion.
+  dependent destruction certificate2_2_1; try discriminate. try view_inversion.
+  rename e0 into Hopen, certificate2_1 into body_certificate,
+    certificate2_2_2 into work_certificate.
+  pose proof (Atom.open_invariant_success _ _ _ Hopen)
+    as (_ & _ & _ & Hopened).
+  destruct (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
+    body_certificate) as [Hbody_lifo Hbody_open].
+  assert (Hwork_lifo : Atom.lifo_certificate work_certificate stack stack).
+  { cbn [Atom.lifo_certificate] in Hlifo.
+    destruct Hlifo as (m1 & -> & m2 & Hbody_run & m3 & Hfold_run & Hwork_run).
+    assert (m2 = (invariant, Atom.analysis_open state) :: stack) as ->
+      by (eapply Atom.lifo_certificate_functional;
+        [exact Hbody_run | apply Hbody_lifo]).
+    destruct Hfold_run as [(outer_open & Hm & _)|[_ Hclosed]].
+    - inversion Hm; subst. exact Hwork_run.
+    - exfalso. apply Hclosed. rewrite Hbody_open, Hopened. set_solver. }
+  destruct (IHbody F Δ _ _ _ _ Hbody body_certificate _
+    I (Hbody_lifo []) remaining body'
+    Hbody_worker) as (body_result & Hbody_result).
+  destruct (IHwork F Δ _ _ _ _ Hwork work_certificate _ Hstack Hwork_lifo
+    remaining work' Hwork_worker) as (work_result & Hwork_result).
+  subst body' work'.
+  pose proof (restricted_normalize_statement_writes _ _ _ Hbody_worker)
+    as Hbody_writes.
+  pose proof (footprinted_normalization_subset body_result) as Hbody_subset.
+  pose proof (footprinted_normalization_safe body_result) as Hbody_safe.
+  pose proof (footprinted_normalization_subset work_result) as Hwork_subset.
+  pose proof (footprinted_normalization_safe work_result) as Hwork_safe.
+  set (body_normalization := footprinted_normalization body_result) in *.
+  set (work_normalization := footprinted_normalization work_result) in *.
+  set (body' := normalized_statement body_normalization) in *.
+  set (work' := normalized_statement work_normalization) in *.
+  assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+    (TSeq (TInvAccess invariant arguments body') work') post).
+  { eapply RavenHoareRules.RTSeq;
+      [| exact (normalization_target_derivation work_normalization)].
+    apply RavenHoareTriple_access_of_raw; [rewrite Hbody_writes; exact Hstable|].
+    eapply RavenHoareRules.RTSeq; [exact Hunfold|].
+    eapply RavenHoareRules.RTSeq; [|exact Hfold].
+    exact (normalization_target_derivation body_normalization). }
+  pose (target := StructuredSequence Γ state _ _ _ _
+    (StructuredInvAccess Γ state invariant arguments body' state0 state1 Hopen
+      (normalization_target_certificate body_normalization) Hbody_open)
+    (normalization_target_certificate work_normalization)).
+  unshelve eexists {| footprinted_normalization :=
+    {| normalized_statement :=
+         TSeq (TInvAccess invariant arguments body') work';
+       normalization_target_derivation := Hderivation;
+       normalization_target_certificate := target |} |}.
+  - intros names stack'. rewrite runtime_stmt_linear_access_then. cbn.
+    rewrite (normalization_runtime_erasure body_normalization),
+      (normalization_runtime_erasure work_normalization).
+    reflexivity.
+  - cbn [target structured_certificate_footprint Atom.certificate_footprint].
+    footprint_subset.
+  - intros Hentry. cbn [target structured_accesses_outside_atomic].
+    split; [split; [exact Hentry|]|].
+    + apply Hbody_safe.
+      rewrite (Atom.open_invariant_preserves_in_atomic _ _ _ Hopen). exact Hentry.
+    + apply Hwork_safe. rewrite fold_invariant_in_atomic,
+        (Atom.analysis_certificate_preserves_in_atomic body_certificate),
+        (Atom.open_invariant_preserves_in_atomic _ _ _ Hopen).
+      exact Hentry.
+  - reflexivity.
+Qed.
+
+Lemma conditional_access_normalization_complete_from_worker {Γ} nested invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (prefix : stmt Γ) (guard : access_guard Γ)
+    (then_prefix then_continuation else_prefix else_continuation : stmt Γ) :
+  baseline_normalizable true prefix ->
+  baseline_normalizable true then_prefix ->
+  baseline_normalizable true else_prefix ->
+  (if proof_onlyb prefix
+   then guard_proof_only guard
+     (canonical_branch invariant arguments then_prefix then_continuation)
+     (canonical_branch invariant arguments else_prefix else_continuation) = true
+   else access_neutral then_prefix /\ access_neutral else_prefix /\
+     proof_onlyb then_prefix = true /\ proof_onlyb else_prefix = true /\
+     guard_proof_only guard then_continuation else_continuation = true) ->
+  pexpr_list_dependencies arguments ##
+    statement_writes (TSeq prefix (TSeq TDone then_prefix)) ->
+  pexpr_list_dependencies arguments ##
+    statement_writes (TSeq prefix (TSeq TDone else_prefix)) ->
+  normalization_complete true prefix ->
+  normalization_complete true then_prefix ->
+  normalization_complete true else_prefix ->
+  normalization_complete nested then_continuation ->
+  normalization_complete nested else_continuation ->
+  normalization_complete nested
+    (conditional_access invariant arguments prefix guard then_prefix
+      then_continuation else_prefix else_continuation).
+Proof.
+  intros Hq_base Htp_base Hep_base Hmode Hthen_stable Helse_stable
+    IHq IHtp IHep IHtc IHec F Δ entry exit pre post derivation certificate
+    stack Hstack Hlifo fuel normalized Hworker.
+  destruct fuel as [|fuel]; [discriminate|].
+  rewrite restricted_normalize_conditional_access_step in Hworker.
+  destruct (restricted_normalize_conditional_access_inv _ _ _ _ _ _ _ _ _ _ _ _
+    Hworker) as (q' & tp' & ep' & tc' & ec' & Hq_w & Htp_w & Hep_w & Htc_w &
+      Hec_w & _ & _ & _ & ->).
+  destruct (conditional_access_certificate_parts _ _ _ _ _ _ _ _ _ _
+    certificate) as [opened joined then_closed then_exit else_closed else_exit
+      Hopen cq ctp ctc cep cec Hopen_equal Hatomic_equal Hexit].
+  subst exit.
+  pose proof (Atom.analysis_certificate_unique certificate
+    (conditional_access_certificate _ _ _ _ _ _ _ _ Hopen cq ctp ctc cep cec
+      Hopen_equal Hatomic_equal)) as Hcertificate.
+  subst certificate.
+  pose proof (Atom.open_invariant_success _ _ _ Hopen)
+    as (Hfresh & _ & _ & Hopened).
+  destruct (baseline_nested_balanced _ _ Hq_base eq_refl _ _ cq)
+    as [Hq_lifo Hjoined_open].
+  destruct (baseline_nested_balanced _ _ Htp_base eq_refl _ _ ctp)
+    as [Htp_lifo Htp_open].
+  destruct (baseline_nested_balanced _ _ Hep_base eq_refl _ _ cep)
+    as [Hep_lifo Hep_open].
+  cbn [conditional_access_certificate Atom.lifo_certificate] in Hlifo.
+  destruct Hlifo as (m1 & -> & m2 & Hq_run & Hthen_run & Helse_run).
+  assert (m2 = (invariant, Atom.analysis_open entry) :: stack) as ->
+    by (eapply Atom.lifo_certificate_functional; [exact Hq_run | apply Hq_lifo]).
+  assert (Hmember : invariant ∈ Atom.analysis_open joined)
+    by (rewrite Hjoined_open, Hopened; set_solver).
+  pose proof (closing_branch_lifo _ _ _ _ _ _ _ _ _ Htp_lifo Htp_open Hmember
+    Hthen_run) as Hthen_lifo.
+  pose proof (closing_branch_lifo _ _ _ _ _ _ _ _ _ Hep_lifo Hep_open Hmember
+    Helse_run) as Helse_lifo.
+  destruct (conditional_access_piece_derivations _ _ _ _ _ _ _ _ _ _
+    derivation) as ((Pq & Qq & Dq) & (Ptp & Qtp & Dtp) & (Pep & Qep & Dep) &
+      (Ptc & Qtc & Dtc) & (Pec & Qec & Dec)).
+  destruct (piece_normalization_facts true _ _ cq _ fuel F Δ Pq Qq IHq Dq I
+    (Hq_lifo []) Hq_w) as (sq & Hsq_subset & Hsq_safe & Hq_erasure & Hq_sim &
+      Hq_writes & Hq_proof').
+  destruct (piece_normalization_facts true _ _ ctp _ fuel F Δ Ptp Qtp IHtp Dtp I
+    (Htp_lifo []) Htp_w) as (stp & Hstp_subset & Hstp_safe & Htp_erasure &
+      Htp_sim & Htp_writes & Htp_proof').
+  destruct (piece_normalization_facts true _ _ cep _ fuel F Δ Pep Qep IHep Dep I
+    (Hep_lifo []) Hep_w) as (sep & Hsep_subset & Hsep_safe & Hep_erasure &
+      Hep_sim & Hep_writes & Hep_proof').
+  destruct (piece_normalization_facts nested _ _ ctc _ fuel F Δ Ptc Qtc IHtc Dtc
+    Hstack Hthen_lifo Htc_w) as (stc & Hstc_subset & Hstc_safe &
+      Htc_erasure & Htc_sim & Htc_writes & Htc_proof).
+  destruct (piece_normalization_facts nested _ _ cec _ fuel F Δ Pec Qec IHec Dec
+    Hstack Helse_lifo Hec_w) as (sec & Hsec_subset & Hsec_safe &
+      Hec_erasure & Hec_sim & Hec_writes & Hec_proof).
+  pose proof (Atom.open_invariant_preserves_in_atomic _ _ _ Hopen)
+    as Hopened_atomic.
+  pose proof (Atom.analysis_certificate_preserves_in_atomic cq)
+    as Hjoined_atomic.
+  destruct (proof_onlyb prefix) eqn:Hq_proof; cbv beta iota in Hmode.
+  - (* Distributed: the access moves into both branches. *)
+    assert (Hthen_open : Atom.analysis_open then_closed =
+      Atom.analysis_open opened) by congruence.
+    assert (Helse_open : Atom.analysis_open else_closed =
+      Atom.analysis_open opened) by congruence.
+    pose (branch := fun (branch_prefix : stmt Γ) closed
+        (prefix_certificate : structured_certificate Γ joined branch_prefix
+          closed) Hclosed_open =>
+      StructuredInvAccess Γ entry invariant arguments
+        (TSeq q' (TSeq TDone branch_prefix)) opened closed Hopen
+        (StructuredSequence Γ opened q' joined (TSeq TDone branch_prefix)
+          closed sq
+          (StructuredSequence Γ joined TDone joined branch_prefix closed
+            (StructuredDone Γ joined TDone eq_refl) prefix_certificate))
+        Hclosed_open).
+    pose (target := structured_guard_if guard
+      (StructuredSequence Γ entry _ _ _ _
+        (branch tp' then_closed stp Hthen_open) stc)
+      (StructuredSequence Γ entry _ _ _ _
+        (branch ep' else_closed sep Helse_open) sec)
+      Hopen_equal Hatomic_equal).
+    assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+      (distributed_access invariant arguments q' guard tp' tc' ep' ec') post).
+    { eapply RavenHoareTriple_distributed_access;
+        [exact Hq_proof | exact Hmode | | exact Hthen_stable | exact Helse_stable
+        | exact Hq_sim | exact Htp_sim | exact Hep_sim | exact Htc_sim
+        | exact Hec_sim | rewrite Hq_writes; set_solver
+        | rewrite Htp_writes; set_solver | rewrite Hep_writes; set_solver
+        | rewrite Htc_writes; set_solver | rewrite Hec_writes; set_solver
+        | exact derivation].
+      destruct guard; [reflexivity|].
+      cbn [guard_proof_only canonical_branch proof_onlyb] in Hmode |- *.
+      rewrite ?Hq_proof', ?Htp_proof', ?Hep_proof', ?Htc_proof, ?Hec_proof,
+        ?Hq_proof.
+      destruct (proof_onlyb then_prefix), (proof_onlyb else_prefix),
+        (proof_onlyb then_continuation), (proof_onlyb else_continuation);
+        cbn in *; congruence. }
+    assert (Herasure : forall names stack,
+      Erasure.runtime_stmt names stack
+        (conditional_access invariant arguments prefix guard then_prefix
+          then_continuation else_prefix else_continuation) =
+      Erasure.runtime_stmt names stack
+        (distributed_access invariant arguments q' guard tp' tc' ep' ec')).
+    { intros names stack'. symmetry. apply distributed_access_erasure;
+        [exact Hq_proof | apply Hq_erasure | apply Htp_erasure
+        | apply Hep_erasure | apply Htc_erasure | apply Hec_erasure]. }
+    assert (Hsubset : structured_certificate_footprint target ⊆
+      Atom.certificate_footprint (conditional_access_certificate invariant arguments prefix
+        guard then_prefix then_continuation else_prefix else_continuation Hopen
+        cq ctp ctc cep cec Hopen_equal Hatomic_equal)).
+    { unfold target. rewrite structured_guard_if_footprint.
+      cbn [structured_certificate_footprint Atom.certificate_footprint
+        conditional_access_certificate closing_branch_certificate branch].
+      footprint_subset. }
+    assert (Hsafe : Atom.analysis_in_atomic entry = false ->
+      structured_accesses_outside_atomic target).
+    { intros Hentry. unfold target.
+      apply structured_guard_if_safe;
+        cbn [structured_accesses_outside_atomic branch];
+        (split; [split; [exact Hentry|]; split;
+          [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|];
+          split; [exact I|] |]).
+      * apply Hstp_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
+      * apply Hstc_safe. rewrite fold_invariant_in_atomic,
+          (Atom.analysis_certificate_preserves_in_atomic ctp), Hjoined_atomic,
+          Hopened_atomic. exact Hentry.
+      * apply Hsep_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
+      * apply Hsec_safe. rewrite fold_invariant_in_atomic,
+          (Atom.analysis_certificate_preserves_in_atomic cep), Hjoined_atomic,
+          Hopened_atomic. exact Hentry. }
+    exists {| footprinted_normalization :=
+      {| normalized_statement := distributed_access invariant arguments q' guard tp' tc'
+           ep' ec';
+         normalization_target_derivation := Hderivation;
+         normalization_target_certificate := target;
+         normalization_runtime_erasure := Herasure |};
+      footprinted_normalization_subset := Hsubset;
+      footprinted_normalization_safe := Hsafe |}.
+    reflexivity.
+  - (* Factored: the access closes through a ghost conditional. *)
+    destruct Hmode as (Htp_neutral & Hep_neutral & Htp_proof & Hep_proof &
+      Hguard).
+    pose proof (unfold_free_normalize_statement_identity _ _ _
+      (restricted_access_neutral_unfold_free _ Htp_neutral) Htp_w).
+    pose proof (unfold_free_normalize_statement_identity _ _ _
+      (restricted_access_neutral_unfold_free _ Hep_neutral) Hep_w).
+    subst tp' ep'.
+    pose proof (proof_only_neutral_state ctp Htp_proof Htp_neutral).
+    pose proof (proof_only_neutral_state cep Hep_proof Hep_neutral).
+    subst then_closed else_closed.
+    pose (inner := structured_guard_if guard
+      (StructuredSequence Γ joined then_prefix joined TDone joined stp
+        (StructuredDone Γ joined TDone eq_refl))
+      (StructuredSequence Γ joined else_prefix joined TDone joined sep
+        (StructuredDone Γ joined TDone eq_refl))
+      eq_refl eq_refl).
+    pose (body := StructuredSequence Γ opened q' joined _ joined sq
+      (StructuredSequence Γ joined TDone joined _ joined
+        (StructuredDone Γ joined TDone eq_refl)
+        (structured_cast (analysis_state_join_self joined) inner))).
+    pose (target := StructuredSequence Γ entry _ _ _ _
+      (StructuredInvAccess Γ entry invariant arguments _ opened joined Hopen
+        body Hjoined_open)
+      (structured_guard_if guard stc sec Hopen_equal Hatomic_equal)).
+    assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+      (factored_access invariant arguments q' guard then_prefix tc'
+        else_prefix ec') post).
+    { eapply RavenHoareTriple_factored_access;
+        [exact Htp_proof | exact Hep_proof | exact Hguard | |
+        | exact Hq_sim | rewrite Hq_writes; set_solver | exact Htc_sim
+        | exact Hec_sim | rewrite Htc_writes; set_solver
+        | rewrite Hec_writes; set_solver | exact derivation].
+      - destruct guard; [reflexivity|].
+        cbn [guard_proof_only] in Hguard |- *.
+        rewrite Htc_proof, Hec_proof. exact Hguard.
+      - cbn [statement_writes] in Hthen_stable. set_solver. }
+    assert (Herasure : forall names stack,
+      Erasure.runtime_stmt names stack
+        (conditional_access invariant arguments prefix guard then_prefix
+          then_continuation else_prefix else_continuation) =
+      Erasure.runtime_stmt names stack
+        (factored_access invariant arguments q' guard then_prefix tc'
+          else_prefix ec')).
+    { intros names stack'. symmetry. apply factored_access_erasure;
+        [exact Htp_proof | exact Hep_proof | apply Hq_erasure
+        | apply Htc_erasure | apply Hec_erasure]. }
+    assert (Hsubset : structured_certificate_footprint target ⊆
+      Atom.certificate_footprint (conditional_access_certificate invariant arguments prefix
+        guard then_prefix then_continuation else_prefix else_continuation Hopen
+        cq ctp ctc cep cec Hopen_equal Hatomic_equal)).
+    { unfold target, body.
+      cbn [structured_certificate_footprint].
+      rewrite structured_cast_footprint, structured_guard_if_footprint.
+      unfold inner. rewrite structured_guard_if_footprint.
+      cbn [structured_certificate_footprint Atom.certificate_footprint
+        conditional_access_certificate closing_branch_certificate].
+      footprint_subset. }
+    assert (Hsafe : Atom.analysis_in_atomic entry = false ->
+      structured_accesses_outside_atomic target).
+    { intros Hentry. unfold target, body.
+      cbn [structured_accesses_outside_atomic].
+      split; [split; [exact Hentry|]; split;
+        [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|]; split;
+        [exact I|] |].
+      * apply structured_cast_safe. unfold inner.
+        apply structured_guard_if_safe; cbn; split; try exact I.
+        -- apply Hstp_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
+        -- apply Hsep_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
+      * apply structured_guard_if_safe.
+        -- apply Hstc_safe. rewrite fold_invariant_in_atomic, Hjoined_atomic,
+             Hopened_atomic. exact Hentry.
+        -- apply Hsec_safe. rewrite fold_invariant_in_atomic, Hjoined_atomic,
+             Hopened_atomic. exact Hentry. }
+    exists {| footprinted_normalization :=
+      {| normalized_statement := factored_access invariant arguments q' guard then_prefix
+           tc' else_prefix ec';
+         normalization_target_derivation := Hderivation;
+         normalization_target_certificate := target;
+         normalization_runtime_erasure := Herasure |};
+      footprinted_normalization_subset := Hsubset;
+      footprinted_normalization_safe := Hsafe |}.
+    reflexivity.
+Qed.
+
+Lemma baseline_normalization_complete_from_worker
+    {Γ} nested (source : stmt Γ)
+    (Hbaseline : baseline_normalizable nested source) :
+  normalization_complete nested source.
+Proof.
+  induction Hbaseline.
+  - apply unfold_free_normalization_complete.
+    destruct nested; [apply restricted_access_neutral_unfold_free|]; exact y.
+  - intros F Δ entry exit pre post derivation certificate stack Hstack Hlifo
+      fuel normalized Hworker.
+    dependent destruction certificate; try discriminate. try view_inversion.
     destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
       derivation) as (middle_assertion & Hfirst & Hsecond).
     destruct Hlifo as (middle_stack & Hfirst_lifo & Hsecond_lifo).
-    assert (Hfirst_same : GenericRegions.Atomicity.lifo_certificate
-      certificate1 [] []).
-    { apply access_neutral_lifo. exact a. }
-    assert (Hmiddle_stack : middle_stack = []).
-    { eapply GenericRegions.Atomicity.lifo_certificate_functional;
-        eassumption. }
-    subst middle_stack.
+    assert (middle_stack = stack) as ->.
+    { eapply Atom.lifo_certificate_functional; [exact Hfirst_lifo|].
+      apply access_neutral_lifo. exact a. }
     destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
       in Hworker; try discriminate.
     destruct (restricted_normalize_access_neutral_sequence_inv fuel
       first0 second0 normalized a Hworker)
       as (normalized_second & Hfirst_worker & Hsecond_worker & ->).
-    pose (first_balanced := unfold_free_balanced_structured_result
-      certificate1 [] (restricted_access_neutral_unfold_free first0 a)
-      Hfirst_lifo).
-    pose (first_normalization := normalization_identity Hfirst
-      certificate1 first_balanced.(balanced_structured_certificate)).
-    pose (first_result :=
-      {| footprinted_normalization := first_normalization;
-         footprinted_normalization_subset :=
-           first_balanced.(balanced_structured_footprint);
-         footprinted_normalization_safe :=
-           fun _ => first_balanced.(balanced_structured_safe) |}).
-    destruct (IHHbaseline F Δ middle exit middle_assertion post Hsecond
-      certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
+    destruct (unfold_free_normalization_complete true first0
+      (restricted_access_neutral_unfold_free first0 a) F Δ _ _ _ _ Hfirst
+      certificate1 stack I Hfirst_lifo fuel first0 Hfirst_worker)
+      as (first_result & Hfirst_result).
+    destruct (IHHbaseline F Δ _ _ _ _ Hsecond certificate2 stack Hstack
+      Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
       first0 second0 Hfirst Hsecond) by apply ProofIrrelevance.proof_irrelevance.
     eapply footprinted_normalization_sequence_from_worker
       with (first_result := first_result) (second_result := second_result);
       try eassumption.
-    + reflexivity.
-    + destruct first0; cbn in a |- *; try contradiction; exact I.
-  - dependent destruction certificate; try discriminate.
-    cbn in e. inversion e; subst.
+    all: first [reflexivity
+      | destruct first0; cbn in a |- *; try contradiction; exact I].
+  - intros F Δ entry exit pre post derivation certificate stack Hstack Hlifo
+      fuel normalized Hworker.
+    dependent destruction certificate; try discriminate. try view_inversion.
     destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
       derivation) as (middle_assertion & Hfirst & Hsecond).
     destruct Hlifo as (middle_stack & Hfirst_lifo & Hsecond_lifo).
-    pose proof (baseline_normalizable_empty_output first0 Hbaseline1
-      state middle certificate1 middle_stack Hfirst_lifo) as Hmiddle_stack.
-    subst middle_stack.
+    assert (middle_stack = stack) as ->.
+    { destruct nested.
+      - eapply Atom.lifo_certificate_functional; [exact Hfirst_lifo|].
+        apply (proj1 (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _
+          certificate1)).
+      - subst stack.
+        exact (baseline_normalizable_empty_output _ _ Hbaseline1 eq_refl _ _
+          certificate1 _ Hfirst_lifo). }
     destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
       in Hworker; try discriminate.
-    destruct (restricted_normalize_baseline_sequence_inv fuel first0
+    destruct (restricted_normalize_baseline_sequence_inv _ fuel first0
       second0 normalized Hbaseline1 Hworker)
       as (normalized_first & normalized_second & Hfirst_worker &
         Hsecond_worker & ->).
-    destruct (IHHbaseline1 F Δ state middle pre middle_assertion Hfirst
-      certificate1 Hfirst_lifo fuel normalized_first Hfirst_worker)
+    destruct (IHHbaseline1 F Δ _ _ _ _ Hfirst certificate1 stack Hstack
+      Hfirst_lifo fuel normalized_first Hfirst_worker)
       as (first_result & Hfirst_result).
-    destruct (IHHbaseline2 F Δ middle exit middle_assertion post Hsecond
-      certificate2 Hsecond_lifo fuel normalized_second Hsecond_worker)
+    destruct (IHHbaseline2 F Δ _ _ _ _ Hsecond certificate2 stack Hstack
+      Hsecond_lifo fuel normalized_second Hsecond_worker)
       as (second_result & Hsecond_result).
     replace derivation with (RavenHoareRules.RTSeq pre middle_assertion post
       first0 second0 Hfirst Hsecond) by apply ProofIrrelevance.proof_irrelevance.
@@ -2532,7 +2834,9 @@ Proof.
       try eassumption.
     destruct first0; cbn; try exact I.
     exfalso. eapply baseline_normalizable_unfold_absurd. exact Hbaseline1.
-  - eapply conditional_normalization_complete_from_worker;
+  - intros F Δ entry exit pre post derivation certificate stack Hstack Hlifo
+      fuel normalized Hworker.
+    eapply conditional_normalization_complete_from_worker;
       try eassumption.
     + intros F0 Δ0 then_exit then_pre then_post then_derivation
         then_certificate Hthen_lifo fuel0 normalized0 Hthen_worker.
@@ -2541,156 +2845,18 @@ Proof.
         else_certificate Helse_lifo fuel0 normalized0 Helse_worker.
       eapply IHHbaseline2; eassumption.
   - subst closing_arguments.
-    dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    destruct Hlifo as (opened_stack & _ & Htail).
-    destruct Htail as (body_stack & Hbody_lifo & Hfold_lifo).
-    assert (Hbody_same : GenericRegions.Atomicity.lifo_certificate
-      certificate2_1 opened_stack opened_stack).
-    { apply access_neutral_lifo. exact a. }
-    assert (Hbody_stack : body_stack = opened_stack).
-    { eapply GenericRegions.Atomicity.lifo_certificate_functional;
-        eassumption. }
-    subst body_stack.
-    pose (balanced := unfold_free_balanced_structured_result certificate2_1
-      opened_stack (restricted_access_neutral_unfold_free first a)
-      Hbody_lifo).
-    pose (target := raw_access_target invariant opening_arguments
-      first pre post d
-      derivation).
-    match goal with
-    | |- exists _ : footprinted_normalization_result _ _ _ _ _ _ ?sc, _ =>
-        pose (source_certificate := sc)
-    end.
-    pose (result := footprinted_normalization_close_one_marker_target
-      invariant opening_arguments first derivation source_certificate
-      e0 balanced.(balanced_structured_certificate)
-      (access_neutral_preserves_open certificate2_1 a) target
-      (fun names stack => runtime_stmt_linear_access names stack
-        invariant opening_arguments
-        opening_arguments first)
-      ltac:(intros marker Hmember;
-        pose proof (balanced.(balanced_structured_footprint) marker Hmember);
-        cbn [source_certificate GenericRegions.Atomicity.certificate_footprint];
-        set_solver)
-      (fun _ => balanced.(balanced_structured_safe))).
-    destruct (restricted_normalize_terminal_access_inv fuel
-      invariant opening_arguments
-      first normalized Hworker) as (remaining & -> & Hboundary & ->).
-    exists result. cbn [result footprinted_normalization_close_one_marker_target
-      normalization_close_one_marker_target]. reflexivity.
+    apply terminal_access_normalization_complete_from_worker; assumption.
   - subst closing_arguments.
-    dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    match goal with
-    | Hfold_certificate : GenericRegions.Atomicity.analysis_certificate
-        _ _ (TFold _ _) _ |- _ =>
-        dependent destruction Hfold_certificate
-    end; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    destruct Hlifo as (opened_stack & Hopen_lifo & Htail).
-    destruct Htail as (body_stack & Hbody_lifo & Hfold_work).
-    assert (Hbody_same : GenericRegions.Atomicity.lifo_certificate
-      certificate2_1 opened_stack opened_stack).
-    { apply access_neutral_lifo. exact a. }
-    assert (Hbody_stack : body_stack = opened_stack).
-    { eapply GenericRegions.Atomicity.lifo_certificate_functional;
-        eassumption. }
-    subst body_stack.
-    destruct Hfold_work as (closed_stack & Hfold_lifo & Hwork_lifo).
-    unfold GenericRegions.Atomicity.lifo_certificate in Hfold_lifo.
-    destruct Hfold_lifo as
-      [(outer_open & Hstack & _)|[Hsame Hnot_open]].
-    + cbn in Hopen_lifo. subst opened_stack.
-      inversion Hstack; subst outer_open closed_stack.
-      destruct (restricted_normalize_continued_access_inv fuel
-        invariant
-        opening_arguments first second normalized Hworker)
-        as (remaining & normalized_work & -> & Hboundary & Hwork_worker & ->).
-      destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
-        derivation) as (opened_assertion & Hunfold & Htail_derivation).
-      destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
-        Htail_derivation) as (opened_post & Hbody & Hfold_work_derivation).
-      destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
-        Hfold_work_derivation) as (closed_assertion & Hfold & Hwork).
-      destruct (IHHbaseline F Δ
-        (GenericRegions.Atomicity.fold_invariant invariant state1) exit
-        closed_assertion post Hwork certificate2_2_2 Hwork_lifo remaining
-        normalized_work Hwork_worker) as (work_result & Hwork_result).
-      pose (terminal_derivation := RavenHoareRules.RTSeq pre
-        opened_assertion closed_assertion _ _ Hunfold
-        (RavenHoareRules.RTSeq opened_assertion opened_post
-          closed_assertion _ _ Hbody Hfold)).
-      pose (access_derivation := raw_access_target invariant
-        opening_arguments
-        first pre closed_assertion d terminal_derivation).
-      pose (target_derivation := RavenHoareRules.RTSeq pre
-        closed_assertion post _ _ access_derivation
-        work_result.(footprinted_normalization).(
-          normalization_target_derivation)).
-      pose (balanced := unfold_free_balanced_structured_result certificate2_1
-        [(invariant, GenericRegions.Atomicity.analysis_open state)]
-        (restricted_access_neutral_unfold_free first a) Hbody_lifo).
-      match goal with
-      | |- exists _ : footprinted_normalization_result _ _ _ _ _ _ ?sc, _ => pose (source_certificate := sc)
-      end.
-      subst normalized_work.
-      change (exists result : @footprinted_normalization_result
-        Γ F Δ state exit pre post
-        (TSeq (TUnfold invariant opening_arguments)
-          (TSeq first
-            (TSeq
-              (TFold invariant opening_arguments) second)))
-        derivation source_certificate,
-        normalized_statement
-          result.(footprinted_normalization) =
-        TSeq (TInvAccess invariant opening_arguments first)
-          (normalized_statement
-            work_result.(footprinted_normalization))).
-      replace source_certificate with
-        (access_then_source_certificate invariant opening_arguments
-          first second certificate2_1 certificate2_2_2 e0)
-        by apply Runtime.CertificateFacts.analysis_certificate_unique.
-      eapply footprinted_normalization_continued_access_from_worker
-        with (body_analysis := certificate2_1)
-          (work_result := work_result)
-          (Hbody_certificate := balanced.(balanced_structured_certificate))
-          (fuel := remaining);
-        try eassumption.
-      exact (access_neutral_preserves_open certificate2_1 a).
-      exact balanced.(balanced_structured_footprint).
-      exact (fun _ => balanced.(balanced_structured_safe)).
-    + exfalso. apply Hnot_open.
-      pose proof (GenericRegions.Atomicity.open_invariant_success
-        invariant state state0 e0) as (_ & _ & _ & Hopened).
-      rewrite (access_neutral_preserves_open certificate2_1 a), Hopened.
-      apply elem_of_union_l, elem_of_singleton_2. reflexivity.
-  - eapply ghost_val_normalization_complete_from_worker; try eassumption.
+    apply continued_access_normalization_complete_from_worker; assumption.
+  - intros F Δ entry exit pre post derivation certificate stack Hstack Hlifo
+      fuel normalized Hworker.
+    eapply ghost_val_normalization_complete_from_worker; try eassumption.
     intros F0 Δ0 body_exit body_pre body_post body_derivation
       body_certificate Hbody_lifo fuel0 normalized0 Hbody_worker.
     eapply IHHbaseline; eassumption.
-  - eapply ghost_conditional_normalization_complete_from_worker;
+  - intros F Δ entry exit pre post derivation certificate stack Hstack Hlifo
+      fuel normalized Hworker.
+    eapply ghost_conditional_normalization_complete_from_worker;
       try eassumption.
     + intros F0 Δ0 then_exit then_pre then_post then_derivation
         then_certificate Hthen_lifo fuel0 normalized0 Hthen_worker.
@@ -2698,6 +2864,18 @@ Proof.
     + intros F0 Δ0 else_exit else_pre else_post else_derivation
         else_certificate Helse_lifo fuel0 normalized0 Helse_worker.
       eapply IHHbaseline2; eassumption.
+  - apply conditional_access_normalization_complete_from_worker;
+      try assumption.
+    rewrite e0. assumption.
+  - apply conditional_access_normalization_complete_from_worker;
+      try assumption.
+    + apply BaselineUnfoldFree. exact a.
+    + apply BaselineUnfoldFree. exact a0.
+    + rewrite e0. repeat split; assumption.
+    + apply unfold_free_normalization_complete.
+      apply restricted_access_neutral_unfold_free. exact a.
+    + apply unfold_free_normalization_complete.
+      apply restricted_access_neutral_unfold_free. exact a0.
 Qed.
 
 (** Closed analyzer-facing completeness.  Successful restricted analysis
@@ -2714,16 +2892,16 @@ Lemma analyzed_normalization_exists
 Proof.
   pose proof (restricted_fragment_check_sound source
     (analyzed_restricted analyzed)) as Hbaseline.
-  pose proof (proj1 (baseline_normalizable_closed_lifo source Hbaseline
-    entry exit (analyzed_certificate analyzed) Hentry)) as Hlifo.
+  pose proof (proj1 (baseline_normalizable_closed_lifo _ source Hbaseline
+    eq_refl entry exit (analyzed_certificate analyzed) Hentry)) as Hlifo.
   destruct (analyzed_worker_succeeds analyzed)
     as (normalized & Hworker).
   unfold restricted_analyze_and_normalize in Hworker.
   rewrite (analyzed_restricted analyzed) in Hworker.
-  destruct (baseline_normalization_complete_from_worker source
+  destruct (baseline_normalization_complete_from_worker _ source
     Hbaseline F Δ entry exit pre post
     (analyzed_hoare analyzed)
-    (analyzed_certificate analyzed) Hlifo
+    (analyzed_certificate analyzed) [] eq_refl Hlifo
     (S (normalization_statement_size source)) normalized Hworker)
     as (result & Hresult).
   exists result. unfold restricted_analyze_and_normalize.
