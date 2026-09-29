@@ -1206,25 +1206,25 @@ Axiom term_trusted_atomic_runtime_refinement : forall
       {Γ state body outer inner}
       (body_certificate : Structured.structured_certificate Γ
         (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask outer)
-          (GenericRegions.Atomicity.analysis_open outer)
+          (GenericRegions.Atomicity.analysis_entries outer)
+          (GenericRegions.Atomicity.analysis_records outer)
           (GenericRegions.Atomicity.analysis_step_taken outer) true)
         body inner)
       (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient post,
     GenericRegions.Atomicity.take_step GenericRegions.Atomicity.AtomicStep state =
       inr outer ->
-    GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open outer ->
+    GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records outer ->
     translated_runtime_wp runtime ambient
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask outer)
-        (GenericRegions.Atomicity.analysis_open outer)
+        (GenericRegions.Atomicity.analysis_entries outer)
+        (GenericRegions.Atomicity.analysis_records outer)
         (GenericRegions.Atomicity.analysis_step_taken outer) true)
       inner body post ⊢
       translated_runtime_wp runtime ambient state
         (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask inner)
-          (GenericRegions.Atomicity.analysis_open inner)
+          (GenericRegions.Atomicity.analysis_entries inner)
+          (GenericRegions.Atomicity.analysis_records inner)
           (GenericRegions.Atomicity.analysis_step_taken outer ||
             GenericRegions.Atomicity.analysis_step_taken inner)
           (GenericRegions.Atomicity.analysis_in_atomic outer))
@@ -2438,6 +2438,26 @@ Definition term_structured_runtime_arguments_valid
        term_interp_resource_prenex_at_arguments runtime formals binders valuation
          arguments values post).
 
+Lemma term_structured_certificate_preserves_records
+    {Γ entry statement exit}
+    (certificate : Structured.structured_certificate
+      Γ entry statement exit) :
+  GenericRegions.Atomicity.analysis_records exit =
+    GenericRegions.Atomicity.analysis_records entry.
+Proof.
+  induction certificate; simpl.
+  - eapply GenericRegions.Atomicity.take_step_preserves_records; eauto.
+  - reflexivity.
+  - apply GenericRegions.Atomicity.fold_fresh_records. exact n.
+  - etrans; eauto.
+  - exact IHcertificate1.
+  - rewrite e0.
+    eapply GenericRegions.Atomicity.take_step_preserves_records; eauto.
+  - eapply GenericRegions.Atomicity.fold_after_open_records; eauto.
+  - exact IHcertificate.
+  - exact IHcertificate1.
+Qed.
+
 Lemma term_structured_certificate_preserves_open
     {Γ entry statement exit}
     (certificate : Structured.structured_certificate
@@ -2445,31 +2465,8 @@ Lemma term_structured_certificate_preserves_open
   GenericRegions.Atomicity.analysis_open exit =
     GenericRegions.Atomicity.analysis_open entry.
 Proof.
-  induction certificate; simpl.
-  - eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
-  - reflexivity.
-  - apply GenericRegions.Atomicity.fold_fresh_invariant in n as [_ Hopen].
-    exact Hopen.
-  - etrans; eauto.
-  - exact IHcertificate1.
-  - simpl. rewrite e0.
-    eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
-  - apply GenericRegions.Atomicity.open_invariant_success in e as
-      (Hfresh & _ & _ & Hopened).
-    have Hmember : invariant ∈ GenericRegions.Atomicity.analysis_open inner.
-    { rewrite e0 Hopened. apply elem_of_union_l.
-      apply elem_of_singleton_2. reflexivity. }
-    destruct (GenericRegions.Atomicity.fold_open_invariant invariant inner Hmember)
-      as [_ Hfolded].
-    rewrite Hfolded e0 Hopened.
-    apply set_eq. intros candidate.
-    rewrite elem_of_difference elem_of_union elem_of_singleton.
-    split.
-    + intros [[->|Hcandidate] Hneq]; [contradiction|exact Hcandidate].
-    + intros Hcandidate. split; [right; exact Hcandidate|].
-      intros ->. apply Hfresh. exact Hcandidate.
-  - exact IHcertificate.
-  - exact IHcertificate1.
+  apply GenericRegions.Atomicity.analysis_open_records.
+  exact (term_structured_certificate_preserves_records certificate).
 Qed.
 
 Lemma term_invariant_namespace_active_from_footprint
@@ -2520,7 +2517,8 @@ Lemma term_invariant_fresh_fold_node_valid {Γ F Δ} invariant arguments
          (IR.symbolize_expr_list store arguments)))) ⊢
   concrete_operation_wp runtime ambient entry
     (TFold invariant arguments)
-    (GenericRegions.Atomicity.fold_invariant invariant entry)
+    (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) entry)
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals binders valuation
        (Translation.Resource.RState store
@@ -2532,10 +2530,11 @@ Proof.
     invariant (IR.symbolize_expr_list store arguments))
     as (values & Harguments & Hbody_core).
   have Hfold_facts := GenericRegions.Atomicity.fold_fresh_invariant
-    invariant entry Hfresh.
+    invariant (RegionSyntax.argument_key arguments) entry Hfresh.
   destruct Hfold_facts as [_ Hfold_open].
   have Hactive : RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.fold_invariant invariant entry) =
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) entry) =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
   { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
     exact Hfold_open. }
@@ -2558,7 +2557,8 @@ Proof.
     change (namespace ∈ ambient ∖
       RegionExecution.Primitives.Model.invariant_mask
         (GenericRegions.Atomicity.analysis_open
-          (GenericRegions.Atomicity.fold_invariant invariant entry)))
+          (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) entry)))
       in Hnamespace_member.
     change (namespace ∈ ambient ∖
       RegionExecution.Primitives.Model.invariant_mask
@@ -2696,29 +2696,33 @@ Lemma conditional_then_active_mask_join ambient then_exit else_exit :
   RegionExecution.Primitives.Model.active_runtime_mask ambient then_exit =
     RegionExecution.Primitives.Model.active_runtime_mask ambient
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit)).
 Proof. apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. reflexivity. Qed.
 
 Lemma conditional_else_active_mask_join ambient then_exit else_exit :
-  GenericRegions.Atomicity.analysis_open then_exit =
-    GenericRegions.Atomicity.analysis_open else_exit ->
+  GenericRegions.Atomicity.analysis_records then_exit =
+    GenericRegions.Atomicity.analysis_records else_exit ->
   RegionExecution.Primitives.Model.active_runtime_mask ambient else_exit =
     RegionExecution.Primitives.Model.active_runtime_mask ambient
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit)).
 Proof.
-  intros Hopen. apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. simpl.
-  symmetry. exact Hopen.
+  intros Hrecords.
+  apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+  apply GenericRegions.Atomicity.analysis_open_records.
+  symmetry. exact Hrecords.
 Qed.
 
 Lemma translated_runtime_wp_if {Γ F Δ}
@@ -2791,9 +2795,10 @@ Lemma translated_runtime_wp_then_join_transport {Γ}
   translated_runtime_wp runtime ambient state then_exit statement post ⊣⊢
     translated_runtime_wp runtime ambient state
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit))
@@ -2807,14 +2812,15 @@ Qed.
 Lemma translated_runtime_wp_else_join_transport {Γ}
     (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient state then_exit else_exit
     statement post :
-  GenericRegions.Atomicity.analysis_open then_exit =
-    GenericRegions.Atomicity.analysis_open else_exit ->
+  GenericRegions.Atomicity.analysis_records then_exit =
+    GenericRegions.Atomicity.analysis_records else_exit ->
   translated_runtime_wp runtime ambient state else_exit statement post ⊣⊢
     translated_runtime_wp runtime ambient state
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit))
@@ -2830,8 +2836,8 @@ Lemma translated_runtime_wp_if_total_join {Γ F Δ}
     (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) ambient state condition
     (then_branch else_branch : stmt Γ) then_exit else_exit post P
-    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
-      GenericRegions.Atomicity.analysis_open else_exit) :
+    (records_equal : GenericRegions.Atomicity.analysis_records then_exit =
+      GenericRegions.Atomicity.analysis_records else_exit) :
   (interp_expr formals binders valuation
       (IR.symbolize_expr store condition) = Some (VBool true) ->
     @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
@@ -2845,9 +2851,10 @@ Lemma translated_runtime_wp_if_total_join {Γ F Δ}
   @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient state
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit))
@@ -2858,7 +2865,7 @@ Proof.
     now apply Hthen.
   - intros Hcondition.
     rewrite <- (translated_runtime_wp_else_join_transport
-      runtime ambient state then_exit else_exit else_branch post open_equal).
+      runtime ambient state then_exit else_exit else_branch post records_equal).
     now apply Helse.
 Qed.
 
@@ -2871,8 +2878,8 @@ Lemma translated_runtime_wp_ghost_if_total_join {Γ F Δ}
     (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) ambient state condition
     (then_branch else_branch : stmt Γ) then_exit else_exit post P
-    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
-      GenericRegions.Atomicity.analysis_open else_exit) :
+    (records_equal : GenericRegions.Atomicity.analysis_records then_exit =
+      GenericRegions.Atomicity.analysis_records else_exit) :
   proof_onlyb then_branch = true ->
   proof_onlyb else_branch = true ->
   (interp_expr formals binders valuation
@@ -2888,9 +2895,10 @@ Lemma translated_runtime_wp_ghost_if_total_join {Γ F Δ}
   @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient state
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask then_exit ∩
-          GenericRegions.Atomicity.analysis_mask else_exit)
-        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.entries_meet
+          (GenericRegions.Atomicity.analysis_entries then_exit)
+          (GenericRegions.Atomicity.analysis_entries else_exit))
+        (GenericRegions.Atomicity.analysis_records then_exit)
         (GenericRegions.Atomicity.analysis_step_taken then_exit ||
           GenericRegions.Atomicity.analysis_step_taken else_exit)
         (GenericRegions.Atomicity.analysis_in_atomic then_exit))
@@ -2909,7 +2917,7 @@ Proof.
   - rewrite (term_translated_runtime_wp_runtime_stmt_ext runtime ambient state _
       (TGhostIf condition then_branch else_branch) else_branch post).
     + rewrite <- (translated_runtime_wp_else_join_transport runtime ambient state
-        then_exit else_exit else_branch post open_equal).
+        then_exit else_exit else_branch post records_equal).
       apply Helse. exact Hvalue.
     + cbn [RuntimeErasure.runtime_stmt].
       rewrite RuntimeErasure.runtime_stmt_proof_only; [reflexivity|exact Helse_proof].
@@ -2930,7 +2938,8 @@ Lemma term_structured_runtime_fresh_fold_valid {Γ F Δ entry invariant
 Proof.
   intros runtime formals binders valuation ambient Henvelope.
   pose (raw := GenericRegions.Atomicity.CertFold Γ entry
-    (TFold invariant arguments) invariant eq_refl).
+    (TFold invariant arguments) invariant (RegionSyntax.argument_key arguments)
+    eq_refl (GenericRegions.Atomicity.fold_admissible_fresh _ _ _ Hfresh)).
   have Hraw_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint raw) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
@@ -2938,8 +2947,9 @@ Proof.
     simpl in Hin |- *. repeat rewrite elem_of_union in *.
     tauto. }
   have Hexit_member : invariant ∈ GenericRegions.Atomicity.analysis_mask
-      (GenericRegions.Atomicity.fold_invariant invariant entry).
-  { rewrite Certified.fold_analysis_mask. set_solver. }
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) entry).
+  { rewrite Certified.fold_analysis_mask; [set_solver | exact Hfresh]. }
   have Hfootprint : invariant ∈
       GenericRegions.Atomicity.certificate_footprint raw.
   { apply GenericRegions.Atomicity.certificate_exit_subset_footprint.
@@ -3966,12 +3976,13 @@ Qed.
 Lemma term_structured_runtime_inv_access_valid
     {Γ F Δ entry invariant arguments body opened inner}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry =
       inr opened)
     (body_certificate : Structured.structured_certificate
       Γ opened body inner)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
     (input_store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
     (opened_post closed_post : Translation.Resource.resource_prenex Γ F Δ)
@@ -4022,7 +4033,8 @@ Proof.
   { exact (RegionExecution.Primitives.active_runtime_mask_access
       ambient entry invariant opened inner Hopened Hpreserved). }
   have Hexit_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.fold_invariant invariant inner) =
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) inner) =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
   { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
     exact (term_structured_certificate_preserves_open
@@ -4051,7 +4063,8 @@ Proof.
     rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
-    { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. symmetry. exact Hpreserved. }
+    { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. apply GenericRegions.Atomicity.analysis_open_records.
+      symmetry. exact Hpreserved. }
     rewrite Hopened_inner in Hbody_wp. exact Hbody_wp.
   - exact Hclosure.
   - apply Hatomic.
@@ -4060,12 +4073,13 @@ Qed.
 Lemma term_structured_runtime_inv_access_arguments_valid
     {Γ F Δ entry invariant arguments body opened inner ts}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry =
       inr opened)
     (body_certificate : Structured.structured_certificate
       Γ opened body inner)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
     (input_store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
     (opened_post closed_post : Translation.Resource.resource_prenex Γ F Δ)
@@ -4121,7 +4135,8 @@ Proof.
   { exact (RegionExecution.Primitives.active_runtime_mask_access
       ambient entry invariant opened inner Hopened Hpreserved). }
   have Hexit_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.fold_invariant invariant inner) =
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) inner) =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
   { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
     exact (term_structured_certificate_preserves_open
@@ -4152,6 +4167,7 @@ Proof.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
     { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+      apply GenericRegions.Atomicity.analysis_open_records.
       symmetry. exact Hpreserved. }
     rewrite Hopened_inner in Hbody_wp. exact Hbody_wp.
   - exact Hclosure.
@@ -4164,12 +4180,13 @@ Qed.
 Lemma term_structured_runtime_independent_inv_access_arguments_valid
     {Γ F Δ entry invariant program_arguments body opened inner ts}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key program_arguments) entry =
       inr opened)
     (body_certificate : Structured.structured_certificate
       Γ opened body inner)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
     (focus_open focus_close :
       CertifiedNormalization.RavenHoareRules.access_focus
         invariant program_arguments Δ)
@@ -4224,7 +4241,8 @@ Proof.
   { exact (RegionExecution.Primitives.active_runtime_mask_access ambient entry
       invariant opened inner Hopened Hpreserved). }
   have Hexit_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.fold_invariant invariant inner) =
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key program_arguments) inner) =
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
   { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
     exact (term_structured_certificate_preserves_open
@@ -4258,6 +4276,7 @@ Proof.
         ambient opened =
         RegionExecution.Primitives.Model.active_runtime_mask ambient inner.
     { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+      apply GenericRegions.Atomicity.analysis_open_records.
       symmetry. exact Hpreserved. }
     rewrite Hopened_inner Hinner_mask in Hbody_wp. exact Hbody_wp.
   - apply Hatomic.
@@ -4274,17 +4293,17 @@ Lemma term_structured_runtime_atomic_valid
       GenericRegions.Atomicity.AtomicStep state = inr outer)
     (body_certificate : Structured.structured_certificate Γ
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask outer)
-        (GenericRegions.Atomicity.analysis_open outer)
+        (GenericRegions.Atomicity.analysis_entries outer)
+        (GenericRegions.Atomicity.analysis_records outer)
         (GenericRegions.Atomicity.analysis_step_taken outer) true)
       body inner)
-    (open_equal : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open outer)
+    (records_equal : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records outer)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_valid body_certificate pre post ->
   term_structured_runtime_valid
     (Structured.StructuredAtomic Γ state body outer inner step
-      body_certificate open_equal) pre post.
+      body_certificate records_equal) pre post.
 Proof.
   intros Hbody runtime formals binders valuation ambient Henvelope.
   have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
@@ -4300,7 +4319,7 @@ Proof.
     with "Hpre") as "Hwp".
   unfold term_structured_runtime_wp.
   iApply (term_trusted_atomic_runtime_refinement body_certificate
-    runtime ambient _ step open_equal).
+    runtime ambient _ step records_equal).
   iExact "Hwp".
 Qed.
 
@@ -4310,19 +4329,19 @@ Lemma term_structured_runtime_arguments_atomic_valid
       GenericRegions.Atomicity.AtomicStep state = inr outer)
     (body_certificate : Structured.structured_certificate Γ
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask outer)
-        (GenericRegions.Atomicity.analysis_open outer)
+        (GenericRegions.Atomicity.analysis_entries outer)
+        (GenericRegions.Atomicity.analysis_records outer)
         (GenericRegions.Atomicity.analysis_step_taken outer) true)
       body inner)
-    (open_equal : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open outer)
+    (records_equal : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records outer)
     (tracked : gexpr_list Γ ts)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid body_certificate
     tracked pre post ->
   term_structured_runtime_arguments_valid
     (Structured.StructuredAtomic Γ state body outer inner step
-      body_certificate open_equal) tracked pre post.
+      body_certificate records_equal) tracked pre post.
 Proof.
   intros Hbody Hdisjoint values runtime formals binders valuation ambient
     Henvelope.
@@ -4340,7 +4359,7 @@ Proof.
     Hbody_envelope with "Hpre") as "Hwp".
   unfold term_structured_runtime_wp.
   iApply (term_trusted_atomic_runtime_refinement body_certificate
-    runtime ambient _ step open_equal).
+    runtime ambient _ step records_equal).
   iExact "Hwp".
 Qed.
 
@@ -4420,6 +4439,8 @@ Lemma term_structured_runtime_arguments_ghost_val_valid
     (body : stmt (ghost_val t :: Γ))
     (body_certificate : Structured.structured_certificate
       (ghost_val t :: Γ) entry body exit)
+    (admissible : GenericRegions.Atomicity.leave_scope_admissible
+      (length Γ) exit = true)
     (tracked : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
@@ -4437,7 +4458,7 @@ Lemma term_structured_runtime_arguments_ghost_val_valid
     post ->
   term_structured_runtime_arguments_valid
     (Structured.StructuredGhostVal Γ entry name t initializer body exit
-      body_certificate)
+      body_certificate admissible)
     tracked (Translation.Resource.RState store frame)
     (Translation.Resource.ResourceExists t
       (Translation.Resource.drop_head_prenex post)).
@@ -4485,26 +4506,27 @@ Lemma term_structured_runtime_terminal_access_valid
     {Γ F Δ entry invariant arguments atomic_body
      opened atomic_outer atomic_inner}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry =
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry =
       inr opened)
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep opened = inr atomic_outer)
     (atomic_certificate : Structured.structured_certificate Γ
       (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask atomic_outer)
-        (GenericRegions.Atomicity.analysis_open atomic_outer)
+        (GenericRegions.Atomicity.analysis_entries atomic_outer)
+        (GenericRegions.Atomicity.analysis_records atomic_outer)
         (GenericRegions.Atomicity.analysis_step_taken atomic_outer) true)
       atomic_body atomic_inner)
-    (open_equal : GenericRegions.Atomicity.analysis_open atomic_inner =
-      GenericRegions.Atomicity.analysis_open atomic_outer)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open
+    (records_equal : GenericRegions.Atomicity.analysis_records atomic_inner =
+      GenericRegions.Atomicity.analysis_records atomic_outer)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records
         (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask atomic_inner)
-          (GenericRegions.Atomicity.analysis_open atomic_inner)
+          (GenericRegions.Atomicity.analysis_entries atomic_inner)
+          (GenericRegions.Atomicity.analysis_records atomic_inner)
           (GenericRegions.Atomicity.analysis_step_taken atomic_outer ||
             GenericRegions.Atomicity.analysis_step_taken atomic_inner)
           (GenericRegions.Atomicity.analysis_in_atomic atomic_outer)) =
-      GenericRegions.Atomicity.analysis_open opened)
+      GenericRegions.Atomicity.analysis_records opened)
     (input_store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
     (opened_post closed_post : Translation.Resource.resource_prenex Γ F Δ)
@@ -4530,7 +4552,7 @@ Lemma term_structured_runtime_terminal_access_valid
     (Structured.StructuredInvAccess Γ entry invariant arguments
       (TAtomic atomic_body) opened _ Hopen
       (Structured.StructuredAtomic Γ opened atomic_body
-        atomic_outer atomic_inner step atomic_certificate open_equal)
+        atomic_outer atomic_inner step atomic_certificate records_equal)
       Hpreserved)
     (Translation.Resource.RState input_store
       (Translation.Resource.CAnd
@@ -4907,8 +4929,8 @@ Lemma term_structured_runtime_arguments_conditional_valid
       Γ state then_branch then_exit)
     (else_certificate : Structured.structured_certificate
       Γ state else_branch else_exit)
-    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
-      GenericRegions.Atomicity.analysis_open else_exit)
+    (records_equal : GenericRegions.Atomicity.analysis_records then_exit =
+      GenericRegions.Atomicity.analysis_records else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
     (arguments : gexpr_list Γ ts)
@@ -4930,7 +4952,7 @@ Lemma term_structured_runtime_arguments_conditional_valid
   term_structured_runtime_arguments_valid
     (Structured.StructuredConditional Γ state condition
       then_branch else_branch then_exit else_exit then_certificate
-      else_certificate open_equal atomic_equal)
+      else_certificate records_equal atomic_equal)
     arguments (Translation.Resource.RState store body) post.
 Proof.
   intros Hthen Helse Hdisjoint values runtime formals binders valuation ambient
@@ -4974,7 +4996,7 @@ Proof.
       (global_world_context valuation ∗
        (term_interp_core formals binders valuation body ∗
         ⌜interp_expr_list formals binders valuation
-          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal).
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) records_equal).
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
       iApply (Hthen Hthen_disjoint values runtime formals binders valuation ambient
         Hthen_envelope).
@@ -4992,7 +5014,7 @@ Proof.
       (global_world_context valuation ∗
        (term_interp_core formals binders valuation body ∗
         ⌜interp_expr_list formals binders valuation
-          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal).
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) records_equal).
     + intros Htrue. rewrite Hvalue in Htrue. discriminate.
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
       iApply (Helse Helse_disjoint values runtime formals binders valuation ambient
@@ -5011,8 +5033,8 @@ Lemma term_structured_runtime_arguments_ghost_conditional_valid
       Γ state then_branch then_exit)
     (else_certificate : Structured.structured_certificate
       Γ state else_branch else_exit)
-    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
-      GenericRegions.Atomicity.analysis_open else_exit)
+    (records_equal : GenericRegions.Atomicity.analysis_records then_exit =
+      GenericRegions.Atomicity.analysis_records else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
     (arguments : gexpr_list Γ ts)
@@ -5036,7 +5058,7 @@ Lemma term_structured_runtime_arguments_ghost_conditional_valid
   term_structured_runtime_arguments_valid
     (Structured.StructuredGhostConditional Γ state condition
       then_branch else_branch then_exit else_exit then_certificate
-      else_certificate open_equal atomic_equal)
+      else_certificate records_equal atomic_equal)
     arguments (Translation.Resource.RState store body) post.
 Proof.
   intros Hthen Helse Hdisjoint values runtime formals binders valuation ambient
@@ -5080,7 +5102,7 @@ Proof.
       (global_world_context valuation ∗
        (term_interp_core formals binders valuation body ∗
         ⌜interp_expr_list formals binders valuation
-          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) records_equal
       then_proof_only else_proof_only).
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
       iApply (Hthen Hthen_disjoint values runtime formals binders valuation ambient
@@ -5099,7 +5121,7 @@ Proof.
       (global_world_context valuation ∗
        (term_interp_core formals binders valuation body ∗
         ⌜interp_expr_list formals binders valuation
-          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) records_equal
       then_proof_only else_proof_only).
     + intros Htrue. rewrite Hvalue in Htrue. discriminate.
     + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
@@ -5119,10 +5141,11 @@ Qed.
 Lemma term_structured_runtime_inv_access_focus_base_framed_arguments_valid
     {Γ F Δ entry invariant arguments body opened inner ts}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry = inr opened)
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr opened)
     (body_certificate : Structured.structured_certificate Γ opened body inner)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
     (focus_arguments : expr_list F Δ (Assertion.invariant_args invariant))
     (external body_pre body_post external_post :
       Translation.Resource.resource_prenex Γ F Δ)
@@ -5180,10 +5203,11 @@ Qed.
 Lemma term_structured_runtime_inv_access_boundary_arguments_valid
     {Γ F Δ entry invariant arguments body opened inner ts}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant entry = inr opened)
+    (Hopen : GenericRegions.Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr opened)
     (body_certificate : Structured.structured_certificate Γ opened body inner)
-    (Hpreserved : GenericRegions.Atomicity.analysis_open inner =
-      GenericRegions.Atomicity.analysis_open opened)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
     (external_pre body_pre body_post external_post :
       Translation.Resource.resource_prenex Γ F Δ)
     (Hboundary : CertifiedNormalization.RavenHoareRules.access_boundary
@@ -5519,10 +5543,6 @@ Lemma term_structured_runtime_resource_prenex_leaf_valid
     (Structured.StructuredLeaf Γ entry statement exit view step) pre post.
 Proof.
   intros runtime formals binders valuation ambient Henvelope.
-  have Hexit_wf : GenericRegions.Atomicity.state_wf exit.
-  { eapply GenericRegions.Atomicity.certificate_preserves_wf; [exact Hwf |].
-    exact (GenericRegions.Atomicity.CertLeaf Γ entry statement exit
-      view step). }
   have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
   have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
@@ -5532,7 +5552,7 @@ Proof.
     apply Structured.structured_certificate_exit_subset_footprint. exact Hin. }
   have Hactive_exit :=
     RegionExecution.Primitives.Model.runtime_mask_subset_active ambient exit
-      Hexit_wf Hexit_envelope.
+      Hexit_envelope.
   have Hactive : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask exit) ⊆
       RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
@@ -5879,7 +5899,7 @@ Fixpoint term_structured_certificate_trusted_runtime_atomicity
   | Structured.StructuredInvAccess _ _ _ _ _ _ _ _ body_certificate _ =>
       fun runtime =>
         term_structured_certificate_trusted_runtime_atomicity body_certificate runtime
-  | Structured.StructuredGhostVal _ _ name t _ _ _ body_certificate =>
+  | Structured.StructuredGhostVal _ _ name t _ _ _ body_certificate _ =>
       fun runtime =>
         term_structured_certificate_trusted_runtime_atomicity body_certificate
           (RegionExecution.Primitives.Model.ghost_stack_context name t runtime)
@@ -5903,13 +5923,7 @@ Proof.
   - exact Hwf.
   - apply GenericRegions.Atomicity.fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
-  - have Hthen_wf := IHcertificate1 Hwf.
-    unfold GenericRegions.Atomicity.state_wf in *.
-    rewrite elem_of_disjoint in Hthen_wf |- *.
-    intros candidate Hcandidate_open Hcandidate_mask.
-    apply (Hthen_wf candidate Hcandidate_open).
-    rewrite elem_of_intersection in Hcandidate_mask.
-    destruct Hcandidate_mask as [Hcandidate_mask _]. exact Hcandidate_mask.
+  - exact (IHcertificate1 Hwf).
   - have Houter_wf : GenericRegions.Atomicity.state_wf outer.
     { eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto. }
     exact (IHcertificate Houter_wf).
@@ -5918,13 +5932,7 @@ Proof.
     apply GenericRegions.Atomicity.fold_invariant_preserves_wf.
     exact (IHcertificate Hopened_wf).
   - exact (IHcertificate Hwf).
-  - have Hthen_wf := IHcertificate1 Hwf.
-    unfold GenericRegions.Atomicity.state_wf in *.
-    rewrite elem_of_disjoint in Hthen_wf |- *.
-    intros candidate Hcandidate_open Hcandidate_mask.
-    apply (Hthen_wf candidate Hcandidate_open).
-    rewrite elem_of_intersection in Hcandidate_mask.
-    destruct Hcandidate_mask as [Hcandidate_mask _]. exact Hcandidate_mask.
+  - exact (IHcertificate1 Hwf).
 Qed.
 
 Lemma term_structured_certificate_preserves_nonatomic
@@ -5938,23 +5946,16 @@ Proof.
   - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
       _ _ _ e0). exact Hin_atomic.
   - exact Hin_atomic.
-  - unfold GenericRegions.Atomicity.fold_invariant.
-    destruct (bool_decide (invariant ∈
-      GenericRegions.Atomicity.analysis_open entry)); exact Hin_atomic.
+  - rewrite GenericRegions.Atomicity.fold_invariant_preserves_in_atomic.
+    exact Hin_atomic.
   - apply IHcertificate2. apply IHcertificate1. exact Hin_atomic.
   - apply IHcertificate1. exact Hin_atomic.
   - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
       _ _ _ e). exact Hin_atomic.
-  - unfold GenericRegions.Atomicity.open_invariant in e.
-    destruct (bool_decide (invariant ∈
-      GenericRegions.Atomicity.analysis_open entry)); try discriminate.
-    destruct (bool_decide (invariant ∈
-      GenericRegions.Atomicity.analysis_mask entry)); try discriminate.
-    inversion e; subst opened.
-    have Hinner := IHcertificate Hin_atomic.
-    unfold GenericRegions.Atomicity.fold_invariant.
-    destruct (bool_decide (invariant ∈
-      GenericRegions.Atomicity.analysis_open inner)); simpl; exact Hinner.
+  - rewrite GenericRegions.Atomicity.fold_invariant_preserves_in_atomic.
+    apply IHcertificate.
+    rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
+      _ _ _ _ e). exact Hin_atomic.
   - exact (IHcertificate Hin_atomic).
   - apply IHcertificate1. exact Hin_atomic.
 Qed.
@@ -6115,37 +6116,30 @@ Proof.
       simpl in *; first discriminate; lia.
 Qed.
 
-Lemma term_open_invariant_preserves_step_bit invariant entry exit :
-  GenericRegions.Atomicity.open_invariant invariant entry = inr exit ->
+Lemma term_open_invariant_preserves_step_bit invariant key entry exit :
+  GenericRegions.Atomicity.open_invariant invariant key entry = inr exit ->
   term_analysis_step_bit exit = term_analysis_step_bit entry.
 Proof.
-  unfold GenericRegions.Atomicity.open_invariant.
-  destruct (bool_decide
-    (invariant ∈ GenericRegions.Atomicity.analysis_open entry));
-    first discriminate.
-  destruct (bool_decide
-    (invariant ∈ GenericRegions.Atomicity.analysis_mask entry));
-    last discriminate.
-  intros Hinr. inversion Hinr; subst exit. reflexivity.
+  intros Hopen.
+  destruct (GenericRegions.Atomicity.open_invariant_records _ _ _ _ Hopen)
+    as (consumed & _ & ->).
+  reflexivity.
 Qed.
 
-Lemma term_fold_invariant_preserves_step_bit_if_open invariant entry :
+Lemma term_fold_invariant_preserves_step_bit_if_open invariant key entry :
   GenericRegions.Atomicity.analysis_open
-      (GenericRegions.Atomicity.fold_invariant invariant entry) ≠ ∅ ->
+      (GenericRegions.Atomicity.fold_invariant invariant key entry) ≠ ∅ ->
   term_analysis_step_bit
-      (GenericRegions.Atomicity.fold_invariant invariant entry) =
+      (GenericRegions.Atomicity.fold_invariant invariant key entry) =
     term_analysis_step_bit entry.
 Proof.
   unfold GenericRegions.Atomicity.fold_invariant.
-  destruct (bool_decide
-    (invariant ∈ GenericRegions.Atomicity.analysis_open entry)); simpl.
-  - destruct (bool_decide
-      (GenericRegions.Atomicity.analysis_open entry ∖ {[invariant]} = ∅))
-      eqn:Hremaining; simpl.
-    + intros Hopen. apply bool_decide_eq_true in Hremaining.
-      rewrite Hremaining in Hopen. contradiction.
-    + reflexivity.
-  - reflexivity.
+  destruct (GenericRegions.Atomicity.analysis_records entry)
+    as [|record rest]; [reflexivity|].
+  destruct (decide (GenericRegions.Atomicity.record_invariant record =
+    invariant)); [|reflexivity].
+  destruct rest; [|reflexivity].
+  intros Hopen. exfalso. apply Hopen. reflexivity.
 Qed.
 
 Lemma term_structured_certificate_runtime_step_budget
@@ -6172,13 +6166,14 @@ Proof.
       | Γ state first middle second exit first_certificate IHfirst
         second_certificate IHsecond
       | Γ state condition then_branch else_branch then_exit else_exit
-        then_certificate IHthen else_certificate IHelse open_equal atomic_equal
-      | Γ state body outer inner step body_certificate IHbody open_equal
+        then_certificate IHthen else_certificate IHelse records_equal atomic_equal
+      | Γ state body outer inner step body_certificate IHbody records_equal
       | Γ state invariant arguments body opened inner step body_certificate
-        IHbody open_equal
+        IHbody records_equal
       | Γ state name t initializer body exit body_certificate IHbody
+        admissible
       | Γ state condition then_branch else_branch then_exit else_exit
-        then_certificate IHthen else_certificate IHelse open_equal atomic_equal];
+        then_certificate IHthen else_certificate IHelse records_equal atomic_equal];
     simpl in *.
   - destruct (RuntimeErasure.runtime_is_noop
       (@RuntimeErasure.runtime_stmt _ _ Γ
@@ -6216,10 +6211,14 @@ Proof.
        leaves the state unchanged *)
     destruct statement; cbn in view; try discriminate.
     cbn. lia.
-  - unfold RuntimeErasure.runtime_stmt. simpl.
-    unfold term_analysis_step_bit, term_runtime_step_count.
-    unfold GenericRegions.Atomicity.fold_invariant.
-    rewrite bool_decide_false; [simpl; lia|exact Hfresh].
+  - have Hfold_open : GenericRegions.Atomicity.analysis_open
+        (GenericRegions.Atomicity.fold_invariant invariant
+          (RegionSyntax.argument_key arguments) state) ≠ ∅.
+    { rewrite (proj2 (GenericRegions.Atomicity.fold_fresh_invariant
+        _ _ _ Hfresh)). exact Hopen. }
+    rewrite (term_fold_invariant_preserves_step_bit_if_open _ _ _ Hfold_open).
+    unfold RuntimeErasure.runtime_stmt. simpl.
+    unfold term_runtime_step_count. simpl. lia.
   - have Hmiddle_open : GenericRegions.Atomicity.analysis_open middle ≠ ∅.
     { rewrite (term_structured_certificate_preserves_open first_certificate).
       exact Hopen. }
@@ -6304,38 +6303,20 @@ Proof.
     { rewrite Hopened_open. intro Hempty. apply Hopen. set_solver. }
     have Hopened_atomic :
         GenericRegions.Atomicity.analysis_in_atomic opened = false.
-    { unfold GenericRegions.Atomicity.open_invariant in Hopen_transition.
-      destruct (bool_decide (invariant ∈
-        GenericRegions.Atomicity.analysis_open state)); try discriminate.
-      destruct (bool_decide (invariant ∈
-        GenericRegions.Atomicity.analysis_mask state)); try discriminate.
-      inversion Hopen_transition; subst opened. exact Hin_atomic. }
+    { rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
+        _ _ _ _ Hopen_transition). exact Hin_atomic. }
     specialize (IHbody runtime Hopened_nonempty Hopened_atomic).
-    have Hinner_open : GenericRegions.Atomicity.analysis_open inner =
-        {[invariant]} ∪ GenericRegions.Atomicity.analysis_open state.
-    { rewrite open_equal. exact Hopened_open. }
-    have Hmember : invariant ∈ GenericRegions.Atomicity.analysis_open inner.
-    { rewrite Hinner_open. set_solver. }
     have Hexit_open : GenericRegions.Atomicity.analysis_open
-        (GenericRegions.Atomicity.fold_invariant invariant inner) ≠ ∅.
-    { unfold GenericRegions.Atomicity.fold_invariant.
-      rewrite bool_decide_true; last exact Hmember.
-      rewrite Hinner_open. intro Hremaining. simpl in Hremaining. apply Hopen.
-      apply set_eq. intros candidate. rewrite elem_of_empty.
-      split; last contradiction.
-      intros Hcandidate.
-      have Hcandidate_remaining : candidate ∈
-          ({[invariant]} ∪ GenericRegions.Atomicity.analysis_open state) ∖
-            {[invariant]}.
-      { rewrite elem_of_difference elem_of_union elem_of_singleton.
-        split; [right; exact Hcandidate|].
-        intros ->. exact (Hfresh_open Hcandidate). }
-      rewrite Hremaining elem_of_empty in Hcandidate_remaining.
-      contradiction. }
+        (GenericRegions.Atomicity.fold_invariant invariant
+          (RegionSyntax.argument_key arguments) inner) ≠ ∅.
+    { rewrite (GenericRegions.Atomicity.analysis_open_records _ _
+        (GenericRegions.Atomicity.fold_after_open_records _ _ _ _ _ _
+          Hopen_transition records_equal)).
+      exact Hopen. }
     have Hopen_bit := term_open_invariant_preserves_step_bit
-      invariant state opened Hopen_transition.
+      invariant _ state opened Hopen_transition.
     have Hfold_bit := term_fold_invariant_preserves_step_bit_if_open
-      invariant inner Hexit_open.
+      invariant _ inner Hexit_open.
     unfold RuntimeErasure.runtime_stmt. simpl.
     rewrite Hopen_bit in IHbody. rewrite Hfold_bit.
     exact IHbody.
@@ -6375,13 +6356,14 @@ Proof.
       | Γ state first middle second exit first_certificate IHfirst
         second_certificate IHsecond
       | Γ state condition then_branch else_branch then_exit else_exit
-        then_certificate IHthen else_certificate IHelse open_equal atomic_equal
-      | Γ state body outer inner step body_certificate IHbody open_equal
+        then_certificate IHthen else_certificate IHelse records_equal atomic_equal
+      | Γ state body outer inner step body_certificate IHbody records_equal
       | Γ state invariant arguments body opened inner step body_certificate
-        IHbody open_equal
+        IHbody records_equal
       | Γ state name t initializer body exit body_certificate IHbody
+        admissible
       | Γ state condition then_branch else_branch then_exit else_exit
-        then_certificate IHthen else_certificate IHelse open_equal atomic_equal];
+        then_certificate IHthen else_certificate IHelse records_equal atomic_equal];
     simpl in Htrusted |- *.
   - eapply term_open_leaf_runtime_atomic; eauto.
   - (* done erases to the terminal statement, which takes no step *)
@@ -6457,12 +6439,8 @@ Proof.
       rewrite Hempty elem_of_empty in Hmember. contradiction. }
     have Hopened_atomic :
         GenericRegions.Atomicity.analysis_in_atomic opened = false.
-    { unfold GenericRegions.Atomicity.open_invariant in Hopen_transition.
-      destruct (bool_decide (invariant ∈
-        GenericRegions.Atomicity.analysis_open state)); try discriminate.
-      destruct (bool_decide (invariant ∈
-        GenericRegions.Atomicity.analysis_mask state)); try discriminate.
-      inversion Hopen_transition; subst opened. exact Hin_atomic. }
+    { rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
+        _ _ _ _ Hopen_transition). exact Hin_atomic. }
     eapply IHbody; eauto.
   - exact (IHbody (RegionExecution.Primitives.Model.ghost_stack_context
       name t runtime) Hopen Hin_atomic Htrusted).
@@ -6679,7 +6657,7 @@ Proof.
         apply (Structured.structured_certificate_exit_subset_footprint
           (Structured.StructuredFreshFold Γ entry invariant
             arguments n)).
-        rewrite Certified.fold_analysis_mask.
+        rewrite Certified.fold_analysis_mask; [|exact n].
         apply elem_of_union_r. apply elem_of_singleton_2. reflexivity. }
       exact (term_structured_runtime_arguments_fresh_fold_valid
          n Hregistered_invariant tracked store).
@@ -6741,7 +6719,7 @@ Proof.
            { rewrite <- Hempty. exact Hin_opened. }
            rewrite elem_of_empty in Habsurd. contradiction.
         -- rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-             invariant entry opened e). exact Hentry_nonatomic.
+             _ _ entry opened e). exact Hentry_nonatomic.
         -- apply Hbody_trusted.
     + exact Hbody_trusted.
   - (* independent invariant access *)
@@ -6784,7 +6762,7 @@ Proof.
            { rewrite <- Hempty. exact Hin_opened. }
            rewrite elem_of_empty in Habsurd. contradiction.
         -- rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-             invariant entry opened e). exact Hentry_nonatomic.
+             _ _ entry opened e). exact Hentry_nonatomic.
         -- apply Hbody_trusted.
     + exact Hbody_trusted.
   - (* trusted atomic block *)
@@ -6793,8 +6771,8 @@ Proof.
     { eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto. }
     have Hbody_wf : GenericRegions.Atomicity.state_wf
         (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_mask outer)
-          (GenericRegions.Atomicity.analysis_open outer)
+          (GenericRegions.Atomicity.analysis_entries outer)
+          (GenericRegions.Atomicity.analysis_records outer)
           (GenericRegions.Atomicity.analysis_step_taken outer) true).
     { exact Houter_wf. }
     destruct (IHderivation _ inner certificate Hbody_wf Hcost
@@ -6809,7 +6787,7 @@ Proof.
     + intros runtime. exact I.
   - (* ghost value *)
     simpl in Hsafe.
-    destruct (IHderivation entry exit certificate Hwf Hcost Hprocedure_cost
+    destruct (IHderivation entry _ certificate Hwf Hcost Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
       Hsafe) as [Hbody_valid Hbody_trusted].
@@ -6872,7 +6850,7 @@ Proof.
     + intros runtime. simpl. split;
         [apply Hthen_trusted | apply Helse_trusted].
   - (* tracked expression *)
-    destruct (IHderivation entry exit certificate Hwf Hcost Hprocedure_cost
+    destruct (IHderivation entry _ certificate Hwf Hcost Hprocedure_cost
       Hregistered Hsafe) as [Hvalid Htrusted].
     split; [|exact Htrusted].
     intros ts tracked Hdisjoint values runtime formals binders valuation

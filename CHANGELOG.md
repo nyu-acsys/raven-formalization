@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The atomicity analysis tracks invariant instances. Mask entries name a
+  declaration or one instance, keyed by arguments that are locals or
+  literals, and the open accesses form a stack of records, each naming the
+  entry it consumed; the separate LIFO witness is retired. A fold must close
+  the innermost access, with the same instance, or allocate an invariant
+  that is not open. Leaving a local's scope forgets the entries it made
+  available that name the local, and an access may not stay open past the
+  scope of its arguments. At most one instance of a declaration is open at
+  once.
 - Conditionals whose branches finish with different available masks are
   accepted; the joined mask is their intersection. Module analyses now state
   registry coverage for each procedure's required mask and statically

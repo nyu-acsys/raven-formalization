@@ -49,28 +49,37 @@ Definition allocate_else : stmt Γ := TIf b TDone allocate.
 Definition allocate_both : stmt Γ := TIf b allocate allocate.
 
 Definition closed (available : gset inv_id) : Atomicity.analysis_state :=
-  Atomicity.AnalysisState available ∅ false false.
+  Atomicity.AnalysisState (Atomicity.declaration_entries available) [] false
+    false.
+
+(** Allocating [counter(x)] makes the instance named by the level of [x]
+    available. *)
+Definition x_instance : Atomicity.mask_entry :=
+  (counter_invariant, Some [Atomicity.AtomLevel 1]).
+
+Definition allocated (entries : gset Atomicity.mask_entry) :
+    Atomicity.analysis_state :=
+  Atomicity.AnalysisState ({[x_instance]} ∪ entries) [] false false.
 
 (** Allocation in one branch is accepted; its credit is absent after the
     join. *)
 Lemma allocate_then_accepted :
-  Atomicity.analyze_lifo (closed ∅) allocate_then = Some (closed ∅).
+  Atomicity.analyze (closed ∅) allocate_then = inr (closed ∅).
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma allocate_else_accepted :
-  Atomicity.analyze_lifo (closed ∅) allocate_else = Some (closed ∅).
+  Atomicity.analyze (closed ∅) allocate_else = inr (closed ∅).
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma allocate_both_accepted :
-  Atomicity.analyze_lifo (closed ∅) allocate_both =
-    Some (closed {[counter_invariant]}).
+  Atomicity.analyze (closed ∅) allocate_both = inr (allocated ∅).
 Proof. vm_compute. reflexivity. Qed.
 
-(** Branches that differ only in an allocation already available join to
-    the entry mask. *)
+(** Branches that differ only in an allocation already covered by a
+    declaration-wide entry keep both entries. *)
 Lemma allocate_available_accepted :
-  Atomicity.analyze_lifo (closed {[counter_invariant]}) allocate_then =
-    Some (closed {[counter_invariant]}).
+  Atomicity.analyze (closed {[counter_invariant]}) allocate_then =
+    inr (allocated {[(counter_invariant, None)]}).
 Proof. vm_compute. reflexivity. Qed.
 
 (** Opening after a one-branch allocation is rejected by the joined mask. *)
@@ -80,8 +89,8 @@ Lemma access_after_allocate_then_rejected :
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma access_after_allocate_both_accepted :
-  Atomicity.analyze_lifo (closed ∅) (TSeq allocate_both access) =
-    Some (closed {[counter_invariant]}).
+  Atomicity.analyze (closed ∅) (TSeq allocate_both access) =
+    inr (allocated ∅).
 Proof. vm_compute. reflexivity. Qed.
 
 (** A call requiring the invariant sees the joined mask as well. *)
@@ -91,8 +100,8 @@ Lemma call_after_allocate_then_rejected :
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma call_after_allocate_both_accepted :
-  Atomicity.analyze_lifo (closed ∅) (TSeq allocate_both call_read) =
-    Some (closed {[counter_invariant]}).
+  Atomicity.analyze (closed ∅) (TSeq allocate_both call_read) =
+    inr (allocated ∅).
 Proof. vm_compute. reflexivity. Qed.
 
 (** The one-branch program is in the fragment handled by normalization, and
@@ -107,11 +116,11 @@ Proof. vm_compute. reflexivity. Qed.
 
 Lemma allocate_then_footprint :
   Atomicity.certificate_footprint
-    (projT1 (Atomicity.analyze_lifo_builds_certificate (closed ∅)
-      allocate_then (closed ∅) allocate_then_accepted)) ⊆
+    (Atomicity.analyze_builds_certificate (closed ∅)
+      allocate_then (closed ∅) allocate_then_accepted) ⊆
     {[counter_invariant]}.
 Proof.
-  etrans; [apply Atomicity.certificate_footprint_allocations|].
+  etrans; [apply Atomicity.certificate_footprint_allocations; constructor|].
   rewrite allocate_then_allocations. cbn. set_solver.
 Qed.
 

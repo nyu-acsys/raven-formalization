@@ -30,8 +30,8 @@ Definition access_in_atomic : stmt Γ :=
   TAtomic (TSeq open_counter close_counter).
 
 Lemma access_in_atomic_accepted :
-  Atomicity.analyze_lifo (closed initial_counter_mask) access_in_atomic =
-    Some (closed initial_counter_mask).
+  Atomicity.analyze (closed initial_counter_mask) access_in_atomic =
+    inr (closed initial_counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma access_in_atomic_normalized :
@@ -55,7 +55,8 @@ Definition leaked_access : stmt Γ :=
   TSeq (TAtomic (TSeq open_counter (TAtomic TDone))) close_counter.
 
 Lemma leaked_access_rejected :
-  Atomicity.analyze_lifo (closed initial_counter_mask) leaked_access = None.
+  Atomicity.analyze (closed initial_counter_mask) leaked_access =
+    inl Atomicity.AtomicBlockLeaksAccess.
 Proof. vm_compute. reflexivity. Qed.
 
 (** A physical step after the fold stays inside the block, so the access

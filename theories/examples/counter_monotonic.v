@@ -690,7 +690,8 @@ Module CounterAtomicity := RuleValidity.GenericRegions.Atomicity.
 
 Definition counter_closed_state (available : RuleValidity.Hoare.mask) :
     CounterAtomicity.analysis_state :=
-  CounterAtomicity.AnalysisState available ∅ false false.
+  CounterAtomicity.AnalysisState
+    (CounterAtomicity.declaration_entries available) [] false false.
 
 Definition read_exit_state : CounterAtomicity.analysis_state :=
   counter_closed_state
@@ -1864,64 +1865,60 @@ Proof. vm_compute. reflexivity. Qed.
     [analyzed_triple] wants three things: an analysis certificate
     (under the framework's [contract_cost_model]), the [RavenHoareRules]
     derivation, and the executable restricted-fragment check.  Nothing else -- no alignment,
-    no LIFO witness, no normalization.  The certificate comes from
-    [analyze_lifo_builds_certificate], so it never has to be inspected. *)
+    no normalization.  The certificate comes from
+    [analyze_builds_certificate], so it never has to be inspected. *)
 
 Module CN := RuleValidity.CertifiedNormalization.
 
-Lemma read_analysis_lifo :
-  CounterAtomicity.analyze_lifo
+Lemma read_analysis :
+  CounterAtomicity.analyze
       (counter_closed_state counter_mask) read_typed_body =
-    Some read_exit_state.
+    inr read_exit_state.
 Proof. reflexivity. Qed.
 
-Lemma incr_analysis_lifo :
-  CounterAtomicity.analyze_lifo
+Lemma incr_analysis :
+  CounterAtomicity.analyze
       (counter_closed_state counter_mask) incr_typed_body =
-    Some (counter_closed_state counter_mask).
+    inr (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
 
-Lemma make_analysis_lifo :
-  CounterAtomicity.analyze_lifo
+(** [make] exits with the instance it allocated, named by the level of its
+    local. *)
+Definition make_exit_state : CounterAtomicity.analysis_state :=
+  CounterAtomicity.AnalysisState
+    {[(counter_invariant, Some [CounterAtomicity.AtomLevel 1])]} [] false false.
+
+Lemma make_analysis :
+  CounterAtomicity.analyze
       (counter_closed_state ∅) make_typed_body =
-    Some (counter_closed_state counter_mask).
+    inr make_exit_state.
 Proof. reflexivity. Qed.
 
-Lemma client_analysis_lifo :
-  CounterAtomicity.analyze_lifo
+Lemma client_analysis :
+  CounterAtomicity.analyze
       (counter_closed_state ∅) client_typed_body =
-    Some (counter_closed_state counter_mask).
+    inr (counter_closed_state counter_mask).
 Proof. reflexivity. Qed.
-
-Definition client_lifo_run :=
-  CounterAtomicity.analyze_lifo_builds_certificate
-    (counter_closed_state ∅) client_typed_body
-    (counter_closed_state counter_mask) client_analysis_lifo.
 
 Definition client_analyzed_certificate :=
-  projT1 client_lifo_run.
-
-Definition read_lifo_run :=
-  CounterAtomicity.analyze_lifo_builds_certificate
-    (counter_closed_state counter_mask) read_typed_body
-    read_exit_state read_analysis_lifo.
-
-Definition incr_lifo_run :=
-  CounterAtomicity.analyze_lifo_builds_certificate
-    (counter_closed_state counter_mask) incr_typed_body
-    (counter_closed_state counter_mask) incr_analysis_lifo.
-
-Definition make_lifo_run :=
-  CounterAtomicity.analyze_lifo_builds_certificate
-    (counter_closed_state ∅) make_typed_body
-    (counter_closed_state counter_mask) make_analysis_lifo.
+  CounterAtomicity.analyze_builds_certificate
+    (counter_closed_state ∅) client_typed_body
+    (counter_closed_state counter_mask) client_analysis.
 
 Definition read_analyzed_certificate :=
-  projT1 read_lifo_run.
+  CounterAtomicity.analyze_builds_certificate
+    (counter_closed_state counter_mask) read_typed_body
+    read_exit_state read_analysis.
+
 Definition incr_analyzed_certificate :=
-  projT1 incr_lifo_run.
+  CounterAtomicity.analyze_builds_certificate
+    (counter_closed_state counter_mask) incr_typed_body
+    (counter_closed_state counter_mask) incr_analysis.
+
 Definition make_analyzed_certificate :=
-  projT1 make_lifo_run.
+  CounterAtomicity.analyze_builds_certificate
+    (counter_closed_state ∅) make_typed_body
+    make_exit_state make_analysis.
 
 Definition read_analyzed_body :
   ProcedureValidity.analyzed_body_valid read_typed_procedure.
@@ -1937,7 +1934,7 @@ Proof.
                  CN.analyzed_restricted :=
                    read_restricted_fragment_accepted |}. }
   - reflexivity.
-  - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
+  - constructor.
   - reflexivity.
   - reflexivity.
   - reflexivity.
@@ -1961,7 +1958,7 @@ Proof.
                  CN.analyzed_restricted :=
                    incr_restricted_fragment_accepted |}. }
   - reflexivity.
-  - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
+  - constructor.
   - reflexivity.
   - reflexivity.
   - reflexivity.
@@ -1976,14 +1973,14 @@ Proof.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
     ([runtime_val TRef; runtime_var TRef]) make_procedure make_typed_procedure ∅
     (counter_closed_state ∅)
-    (counter_closed_state counter_mask)
+    make_exit_state
     [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _).
   8: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
                  CN.analyzed_hoare := make_resource_body_derivation;
                  CN.analyzed_restricted :=
                    make_restricted_fragment_accepted |}. }
   - reflexivity.
-  - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
+  - constructor.
   - reflexivity.
   - reflexivity.
   - reflexivity.
@@ -2006,7 +2003,7 @@ Proof.
                  CN.analyzed_restricted :=
                    client_restricted_fragment_accepted |}. }
   - exact client_exit_return.
-  - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
+  - constructor.
   - reflexivity.
   - reflexivity.
   - reflexivity.

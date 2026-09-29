@@ -122,8 +122,8 @@ Definition conditional_in_linear : stmt Γ :=
     (TSeq open_nested (TSeq (TIf b close_nested close_nested) close_counter)).
 
 Lemma conditional_in_linear_accepted :
-  Atomicity.analyze_lifo (closed nested_mask) conditional_in_linear =
-    Some (closed nested_mask).
+  Atomicity.analyze (closed nested_mask) conditional_in_linear =
+    inr (closed nested_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 Lemma conditional_in_linear_normalized :

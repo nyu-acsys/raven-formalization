@@ -8,7 +8,7 @@ From raven Require Import analysis.structured_certificates
 
 Import ListNotations.
 
-(** Focused analyzer regressions for representative LIFO conditional shapes.
+(** Focused analyzer regressions for representative conditional shapes.
     These deliberately check only that analysis succeeds and returns the
     precise joined state; normalization and Hoare proofs are exercised
     separately. *)
@@ -50,7 +50,8 @@ Definition counter_access : stmt Γ :=
 
 Definition initial_counter_mask : gset Core.inv_id := {[counter_invariant]}.
 Definition closed (available : gset Core.inv_id) : Atomicity.analysis_state :=
-  Atomicity.AnalysisState available ∅ false false.
+  Atomicity.AnalysisState (Atomicity.declaration_entries available) [] false
+    false.
 
 (** 1. The conditional is wholly inside the access, which has one shared
     trailing fold. *)
@@ -59,8 +60,8 @@ Definition shared_trailing_fold : stmt Γ :=
     (TSeq (TIf b TDone TDone) close_counter).
 
 Lemma shared_trailing_fold_accepted :
-  Atomicity.analyze_lifo (closed initial_counter_mask) shared_trailing_fold =
-    Some (closed initial_counter_mask).
+  Atomicity.analyze (closed initial_counter_mask) shared_trailing_fold =
+    inr (closed initial_counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** 2. Each branch closes the access independently. *)
@@ -69,8 +70,8 @@ Definition branch_local_folds : stmt Γ :=
     (TIf b (TSeq TDone close_counter) (TSeq TDone close_counter)).
 
 Lemma branch_local_folds_accepted :
-  Atomicity.analyze_lifo (closed initial_counter_mask) branch_local_folds =
-    Some (closed initial_counter_mask).
+  Atomicity.analyze (closed initial_counter_mask) branch_local_folds =
+    inr (closed initial_counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** 3. A trusted physical step occurs while the invariant is open, before
@@ -81,8 +82,8 @@ Definition physical_step_before_branch_folds : stmt Γ :=
       (TIf b (TSeq TDone close_counter) (TSeq TDone close_counter))).
 
 Lemma physical_step_before_branch_folds_accepted :
-  Atomicity.analyze_lifo (closed initial_counter_mask)
-      physical_step_before_branch_folds = Some (closed initial_counter_mask).
+  Atomicity.analyze (closed initial_counter_mask)
+      physical_step_before_branch_folds = inr (closed initial_counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** A fresh, undeclared identifier lets these analyzer-only programs
@@ -106,8 +107,8 @@ Definition nested_in_one_branch : stmt Γ :=
       close_counter).
 
 Lemma nested_in_one_branch_accepted :
-  Atomicity.analyze_lifo (closed nested_mask) nested_in_one_branch =
-    Some (closed nested_mask).
+  Atomicity.analyze (closed nested_mask) nested_in_one_branch =
+    inr (closed nested_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** Nested accesses may also occur in both branches. *)
@@ -118,8 +119,8 @@ Definition nested_in_both_branches : stmt Γ :=
       (TSeq open_nested (TSeq close_nested close_counter))).
 
 Lemma nested_in_both_branches_accepted :
-  Atomicity.analyze_lifo (closed nested_mask) nested_in_both_branches =
-    Some (closed nested_mask).
+  Atomicity.analyze (closed nested_mask) nested_in_both_branches =
+    inr (closed nested_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** 5. The branches take different physical continuations after their local
@@ -131,9 +132,9 @@ Definition different_physical_continuations : stmt Γ :=
       (TSeq close_counter (TCall read_procedure read_arguments CTDiscard))).
 
 Lemma different_physical_continuations_accepted :
-  Atomicity.analyze_lifo (closed counter_mask)
+  Atomicity.analyze (closed counter_mask)
       different_physical_continuations =
-    Some (closed initial_counter_mask).
+    inr (closed initial_counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 (** 6. After closing the outer access, either branch may perform any finite
@@ -152,8 +153,8 @@ Definition arbitrary_balanced_pairs : stmt Γ :=
     (TIf b (close_then_pairs 3) (close_then_pairs 2)).
 
 Lemma arbitrary_balanced_pairs_accepted :
-  Atomicity.analyze_lifo (closed counter_mask) arbitrary_balanced_pairs =
-    Some (closed counter_mask).
+  Atomicity.analyze (closed counter_mask) arbitrary_balanced_pairs =
+    inr (closed counter_mask).
 Proof. vm_compute. reflexivity. Qed.
 
 End ConditionalAccesses.

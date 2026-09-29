@@ -13,10 +13,38 @@ Module RegionSyntax.
 Section WithSignature.
 Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
   Definition statement := IR.stmt.
+  (** The atom naming an argument: a local by its de Bruijn level, or a
+      literal. *)
+  Definition argument_atom {keep Γ t} (argument : pexpr keep Γ t) :
+      option AnalysisView.key_atom :=
+    match argument with
+    | PEVar variable =>
+        Some (AnalysisView.AtomLevel (length Γ - S (lvar_index variable)))
+    | PEVal value =>
+        match value with
+        | VBool value => Some (AnalysisView.AtomBool value)
+        | VInt value => Some (AnalysisView.AtomInt value)
+        | VUnit => Some AnalysisView.AtomUnit
+        | _ => None
+        end
+    | _ => None
+    end.
+  Fixpoint argument_key {keep Γ ts} (arguments : pexpr_list keep Γ ts) :
+      AnalysisView.access_key :=
+    match arguments with
+    | PENil => Some []
+    | PECons argument rest =>
+        match argument_atom argument, argument_key rest with
+        | Some atom, Some atoms => Some (atom :: atoms)
+        | _, _ => None
+        end
+    end.
   Definition region_view {Γ} (statement : statement Γ) :=
     match statement with
-    | TUnfold invariant _ => AnalysisView.ViewUnfold invariant
-    | TFold invariant _ => AnalysisView.ViewFold invariant
+    | TUnfold invariant arguments =>
+        AnalysisView.ViewUnfold invariant (argument_key arguments)
+    | TFold invariant arguments =>
+        AnalysisView.ViewFold invariant (argument_key arguments)
     | TSeq first second => AnalysisView.ViewSequence first second
     | TIf _ then_branch else_branch | TGhostIf _ then_branch else_branch =>
         AnalysisView.ViewConditional then_branch else_branch
@@ -98,7 +126,8 @@ Inductive structured_certificate :
 | StructuredFreshFold Γ entry invariant arguments :
     invariant ∉ AnalysisView.analysis_open entry ->
     structured_certificate Γ entry (TFold invariant arguments)
-      (AnalysisView.fold_invariant invariant entry)
+      (AnalysisView.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) entry)
 | StructuredSequence Γ entry first middle second exit :
     structured_certificate Γ entry first middle ->
     structured_certificate Γ middle second exit ->
@@ -107,16 +136,16 @@ Inductive structured_certificate :
     then_exit else_exit :
     structured_certificate Γ entry then_branch then_exit ->
     structured_certificate Γ entry else_branch else_exit ->
-    AnalysisView.analysis_open then_exit =
-      AnalysisView.analysis_open else_exit ->
+    AnalysisView.analysis_records then_exit =
+      AnalysisView.analysis_records else_exit ->
     AnalysisView.analysis_in_atomic then_exit =
       AnalysisView.analysis_in_atomic else_exit ->
     structured_certificate Γ entry
       (TIf condition then_branch else_branch)
       (AnalysisView.AnalysisState
-        (AnalysisView.analysis_mask then_exit ∩
-          AnalysisView.analysis_mask else_exit)
-        (AnalysisView.analysis_open then_exit)
+        (AnalysisView.entries_meet (AnalysisView.analysis_entries then_exit)
+          (AnalysisView.analysis_entries else_exit))
+        (AnalysisView.analysis_records then_exit)
         (AnalysisView.analysis_step_taken then_exit ||
           AnalysisView.analysis_step_taken else_exit)
         (AnalysisView.analysis_in_atomic then_exit))
@@ -125,43 +154,47 @@ Inductive structured_certificate :
       inr outer ->
     structured_certificate Γ
       (AnalysisView.AnalysisState
-        (AnalysisView.analysis_mask outer)
-        (AnalysisView.analysis_open outer)
+        (AnalysisView.analysis_entries outer)
+        (AnalysisView.analysis_records outer)
         (AnalysisView.analysis_step_taken outer) true)
       body inner ->
-    AnalysisView.analysis_open inner =
-      AnalysisView.analysis_open outer ->
+    AnalysisView.analysis_records inner =
+      AnalysisView.analysis_records outer ->
     structured_certificate Γ entry (TAtomic body)
       (AnalysisView.AnalysisState
-        (AnalysisView.analysis_mask inner)
-        (AnalysisView.analysis_open inner)
+        (AnalysisView.analysis_entries inner)
+        (AnalysisView.analysis_records inner)
         (AnalysisView.analysis_step_taken outer ||
           AnalysisView.analysis_step_taken inner)
         (AnalysisView.analysis_in_atomic outer))
 | StructuredInvAccess Γ entry invariant arguments body opened inner :
-    AnalysisView.open_invariant invariant entry = inr opened ->
+    AnalysisView.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr opened ->
     structured_certificate Γ opened body inner ->
-    AnalysisView.analysis_open inner =
-      AnalysisView.analysis_open opened ->
+    AnalysisView.analysis_records inner =
+      AnalysisView.analysis_records opened ->
     structured_certificate Γ entry (TInvAccess invariant arguments body)
-      (AnalysisView.fold_invariant invariant inner)
-| StructuredGhostVal Γ entry name t initializer body exit :
-    structured_certificate (ghost_val t :: Γ) entry body exit ->
-    structured_certificate Γ entry (TGhostVal name t initializer body) exit
+      (AnalysisView.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) inner)
+| StructuredGhostVal Γ entry name t initializer body inner :
+    structured_certificate (ghost_val t :: Γ) entry body inner ->
+    AnalysisView.leave_scope_admissible (length Γ) inner = true ->
+    structured_certificate Γ entry (TGhostVal name t initializer body)
+      (AnalysisView.leave_scope (length Γ) entry inner)
 | StructuredGhostConditional Γ entry condition then_branch else_branch
     then_exit else_exit :
     structured_certificate Γ entry then_branch then_exit ->
     structured_certificate Γ entry else_branch else_exit ->
-    AnalysisView.analysis_open then_exit =
-      AnalysisView.analysis_open else_exit ->
+    AnalysisView.analysis_records then_exit =
+      AnalysisView.analysis_records else_exit ->
     AnalysisView.analysis_in_atomic then_exit =
       AnalysisView.analysis_in_atomic else_exit ->
     structured_certificate Γ entry
       (TGhostIf condition then_branch else_branch)
       (AnalysisView.AnalysisState
-        (AnalysisView.analysis_mask then_exit ∩
-          AnalysisView.analysis_mask else_exit)
-        (AnalysisView.analysis_open then_exit)
+        (AnalysisView.entries_meet (AnalysisView.analysis_entries then_exit)
+          (AnalysisView.analysis_entries else_exit))
+        (AnalysisView.analysis_records then_exit)
         (AnalysisView.analysis_step_taken then_exit ||
           AnalysisView.analysis_step_taken else_exit)
         (AnalysisView.analysis_in_atomic then_exit)).
@@ -190,7 +223,7 @@ Fixpoint structured_certificate_footprint
       structured_certificate_footprint body_certificate
   | StructuredInvAccess _ _ _ _ _ _ _ _ body_certificate _ =>
       structured_certificate_footprint body_certificate
-  | StructuredGhostVal _ _ _ _ _ _ _ body_certificate =>
+  | StructuredGhostVal _ _ _ _ _ _ _ body_certificate _ =>
       structured_certificate_footprint body_certificate
   | StructuredGhostConditional _ _ _ _ _ _ _
       then_certificate else_certificate _ _ =>

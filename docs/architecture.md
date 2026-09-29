@@ -144,8 +144,11 @@ derives one coherent resource-contract environment.
 [`analysis/atomicity.v`](../theories/analysis/atomicity.v) contains an
 executable, certificate-producing analysis. Its state records:
 
-- the currently available invariant mask;
-- the invariants currently open;
+- the available mask entries: an entry names either every instance of an
+  invariant declaration or one instance, keyed by its arguments when each
+  argument is a local (by its de Bruijn level) or a literal;
+- the open accesses, innermost first, each with its instance and the entry
+  it consumed;
 - whether a physical atomic step has been taken while an invariant is open;
   and
 - whether traversal is inside a trusted atomic block.
@@ -157,8 +160,15 @@ The essential policy is:
 - a non-atomic physical operation is forbidden while an invariant is open;
 - closing the last open invariant resets step accounting;
 - both conditional branches start from the same state;
-- branch masks are joined by intersection, so an invariant allocated in only
-  one branch is unavailable after the conditional;
+- an unfold consumes the exact entry of its instance, or else the
+  declaration-wide entry; a fold closes the innermost open access, which
+  must be the same instance, and restores the consumed entry, or allocates
+  an instance of an invariant that is not open;
+- leaving the scope of a local forgets the entries it made available that
+  name the local, and no open access may name it;
+- branch entries are joined by keeping each entry of either branch that is
+  covered in both, so an invariant allocated in only one branch is
+  unavailable after the conditional;
 - branch step flags are joined by disjunction; and
 - procedures must return with no invariant left open.
 
@@ -167,9 +177,8 @@ atomic blocks count as one physical atomic step to the surrounding context;
 step counting inside the block is suspended, while invariant-opening state is
 still tracked.
 
-The current accepted fragment additionally requires a LIFO witness for
-invariant accesses. The executable combined analysis reconstructs this
-witness generically, so clients do not prove it per procedure.
+The Iris interpretation reads only the declaration-level projections of this
+state: the available and the open declarations.
 
 ## 7. Why normalization is necessary
 
@@ -228,7 +237,7 @@ The transformation is proof-producing. It retains:
 - coverage of every invariant used by the transformed program; and
 - evidence that structured accesses occur only in supported positions.
 
-The base checks and LIFO facts are in
+The base checks and the balance of accepted regions are in
 [`analysis/normalization_base.v`](../theories/analysis/normalization_base.v).
 The aligned transformation and its completeness theorem are in
 [`analysis/normalization.v`](../theories/analysis/normalization.v).
@@ -276,7 +285,7 @@ interpret arbitrary unmatched fold/unfold syntax directly.
 lifts rule validity to procedure bodies. For each procedure it combines:
 
 1. the declared resource Hoare derivation;
-2. successful atomicity/LIFO analysis;
+2. successful atomicity analysis;
 3. normalization completeness;
 4. equality between source and normalized runtime erasure; and
 5. the canonical runtime procedure registration.
@@ -371,8 +380,9 @@ The current release deliberately formalizes a conservative subset of Raven's
 analysis:
 
 - invariant accesses must be LIFO;
-- masks identify invariant declarations, not argument-indexed instances;
-- only one instance of a declaration can effectively be open at once;
+- instance keys are exact only for arguments that are locals or literals,
+  and the Iris interpretation uses one namespace per declaration;
+- only one instance of a declaration can be open at once;
 - the normalizer does not yet cover every branch-local fold/unfold placement
   accepted by Raven: after the common prefix has consumed an access's
   physical-step budget, the branch prefixes of the resulting factored access

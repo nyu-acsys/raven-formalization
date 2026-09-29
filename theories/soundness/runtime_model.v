@@ -66,9 +66,7 @@ Definition ghost_chunk_valid (field : field_id)
 End WithSignature.
 
 (** Canonical pairing used by certified-region soundness.  Every component
-    below is stated over the runtime IR.  The explicit LIFO boundary stacks let
-    the semantic induction split sequences without losing an accessor that
-    was opened by the first component and is closed by the second. *)
+    below is stated over the runtime IR. *)
 Module CertifiedRegions.
 Module Atomicity := GenericRegions.Atomicity.
 
@@ -175,23 +173,25 @@ Lemma unfold_analysis_mask {Γ : decl_context} {entry : Atomicity.analysis_state
     {invariant : inv_id}
     {arguments : gexpr_list Γ (Assertion.invariant_args invariant)}
     {exit : Atomicity.analysis_state}
-    (view : RegionSyntax.view (TUnfold invariant arguments) =
-      AnalysisView.ViewUnfold invariant)
-    (step : Atomicity.open_invariant invariant entry = inr exit) :
+    (step : Atomicity.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr exit) :
   Atomicity.analysis_mask exit =
     Atomicity.analysis_mask entry ∖ {[invariant]}.
 Proof.
-  intros. apply Atomicity.open_invariant_success in step as
+  apply Atomicity.open_invariant_success in step as
     (_ & _ & Hmask & _). exact Hmask.
 Qed.
 
-Lemma fold_analysis_mask (invariant : inv_id) (entry : Atomicity.analysis_state) :
-  Atomicity.analysis_mask (Atomicity.fold_invariant invariant entry) =
+(** A fresh fold makes its invariant available. *)
+Lemma fold_analysis_mask (invariant : inv_id) key
+    (entry : Atomicity.analysis_state) :
+  invariant ∉ Atomicity.analysis_open entry ->
+  Atomicity.analysis_mask (Atomicity.fold_invariant invariant key entry) =
     Atomicity.analysis_mask entry ∪ {[invariant]}.
 Proof.
-  unfold Atomicity.fold_invariant.
-  destruct (bool_decide (invariant ∈ Atomicity.analysis_open entry));
-    simpl; set_solver.
+  intros Hfresh.
+  rewrite (proj1 (Atomicity.fold_fresh_invariant invariant key entry Hfresh)).
+  set_solver.
 Qed.
 
 Lemma step_analysis_mask (entry exit : Atomicity.analysis_state) :
@@ -1000,17 +1000,13 @@ Proof.
   unfold runtime_mask. rewrite invariant_mask_union. set_solver.
 Qed.
 
-Lemma active_runtime_mask_open ambient invariant outer state :
-  GenericRegions.Atomicity.analysis_open state = {[invariant]} ∪ outer ->
+Lemma active_runtime_mask_open ambient invariant state other :
+  GenericRegions.Atomicity.analysis_open state =
+    {[invariant]} ∪ GenericRegions.Atomicity.analysis_open other ->
   active_runtime_mask ambient state =
-    active_runtime_mask ambient
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_mask state) outer
-        (GenericRegions.Atomicity.analysis_step_taken state)
-        (GenericRegions.Atomicity.analysis_in_atomic state)) ∖
-      ↑(invariant_namespace invariant).
+    active_runtime_mask ambient other ∖ ↑(invariant_namespace invariant).
 Proof.
-  intros Hopen. unfold active_runtime_mask, enabled_runtime_mask. simpl. rewrite Hopen.
+  intros Hopen. unfold active_runtime_mask, enabled_runtime_mask. rewrite Hopen.
   rewrite invariant_mask_union_singleton. set_solver.
 Qed.
 
@@ -1081,16 +1077,16 @@ Qed.
 
 Lemma runtime_mask_subset_active ambient (state :
     GenericRegions.Atomicity.analysis_state) :
-  GenericRegions.Atomicity.state_wf state ->
   runtime_mask (GenericRegions.Atomicity.analysis_mask state) ⊆ ambient ->
   runtime_mask (GenericRegions.Atomicity.analysis_mask state) ⊆
     active_runtime_mask ambient state.
 Proof.
-  intros Hwf Henvelope.
+  intros Henvelope.
   have Hinvariants : invariant_mask
       (GenericRegions.Atomicity.analysis_mask state) ##
       invariant_mask (GenericRegions.Atomicity.analysis_open state).
-  { apply invariant_masks_disjoint. symmetry. exact Hwf. }
+  { apply invariant_masks_disjoint.
+    unfold GenericRegions.Atomicity.analysis_mask. set_solver. }
   have Hghost : (↑ghost_heap_namespace : coPset) ##
       invariant_mask (GenericRegions.Atomicity.analysis_open state).
   { apply ghost_namespace_disjoint_invariant_mask. }
@@ -1916,14 +1912,15 @@ Proof. apply Model.invariant_mask_union_singleton. Qed.
 Lemma active_runtime_mask_access ambient entry invariant opened inner :
   GenericRegions.Atomicity.analysis_open opened =
     {[invariant]} ∪ GenericRegions.Atomicity.analysis_open entry ->
-  GenericRegions.Atomicity.analysis_open inner =
-    GenericRegions.Atomicity.analysis_open opened ->
+  GenericRegions.Atomicity.analysis_records inner =
+    GenericRegions.Atomicity.analysis_records opened ->
   Model.active_runtime_mask ambient inner =
     Model.active_runtime_mask ambient entry ∖
       ↑(invariant_namespace invariant).
 Proof.
   intros Hopened Hinner.
-  rewrite (Model.active_runtime_mask_same_open ambient inner opened Hinner).
+  rewrite (Model.active_runtime_mask_same_open ambient inner opened
+    (GenericRegions.Atomicity.analysis_open_records _ _ Hinner)).
   apply Model.active_runtime_mask_open. exact Hopened.
 Qed.
 
@@ -2064,7 +2061,7 @@ Definition operation_wp {Γ}
     (exit : GenericRegions.Atomicity.analysis_state) (post : iProp) : iProp :=
   match RegionSyntax.view statement with
   | AnalysisView.ViewLeaf => ambient_leaf_wp runtime ambient entry statement post
-  | AnalysisView.ViewUnfold _ | AnalysisView.ViewFold _ =>
+  | AnalysisView.ViewUnfold _ _ | AnalysisView.ViewFold _ _ =>
       (|={Model.active_runtime_mask ambient entry,
           Model.active_runtime_mask ambient exit}=> post)%I
   | AnalysisView.ViewAtomic body =>

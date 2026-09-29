@@ -1,15 +1,103 @@
-From Coq Require Import Bool Lia Program.Equality ProofIrrelevance.
-From stdpp Require Import gmap.
+From Coq Require Import Lia Program.Equality ProofIrrelevance.
+From Coq Require Bool.
+From stdpp Require Import gmap countable.
 
 From raven Require Import verification.expressions.
 
 (** A small boundary between an intrinsically typed statement
     family and the atomicity analyzer.  The analyzer never needs the payload
-    of leaves, conditions, or invariant arguments; it needs only this control
-    view while retaining the original statement opaquely. *)
+    of leaves or conditions, and names invariant applications only by their
+    keys; it needs only this control view while retaining the original
+    statement opaquely. *)
 Module AnalysisView.
 
 Import Core.
+
+Section Instances.
+
+(** ** Invariant instances
+
+    An invariant argument is named by an atom when it is a local, by its
+    de Bruijn level (stable across nested scopes), or a literal.  An
+    application with an argument of another form has no key and is covered
+    only by a declaration-wide mask entry. *)
+Inductive key_atom :=
+| AtomLevel (level : nat)
+| AtomBool (value : bool)
+| AtomInt (value : Z)
+| AtomUnit.
+
+#[global] Instance key_atom_eq_decision : EqDecision key_atom.
+Proof. solve_decision. Defined.
+
+#[global] Program Instance key_atom_countable : Countable key_atom :=
+  inj_countable'
+    (fun atom => match atom with
+      | AtomLevel level => inl level
+      | AtomBool value => inr (inl value)
+      | AtomInt value => inr (inr (inl value))
+      | AtomUnit => inr (inr (inr ()))
+      end)
+    (fun code => match code with
+      | inl level => AtomLevel level
+      | inr (inl value) => AtomBool value
+      | inr (inr (inl value)) => AtomInt value
+      | inr (inr (inr _)) => AtomUnit
+      end) _.
+Next Obligation. intros []; reflexivity. Qed.
+
+(** The key of an invariant application, if all its arguments are atoms. *)
+Definition access_key : Type := option (list key_atom).
+
+(** An available invariant: [(I, None)] covers every instance of [I],
+    [(I, Some key)] exactly the instance [key]. *)
+Definition mask_entry : Type := (inv_id * access_key)%type.
+
+(** An open invariant: its declaration and key, and the mask entry consumed
+    by opening it. *)
+Definition open_record : Type := (inv_id * access_key * mask_entry)%type.
+
+Definition record_invariant (record : open_record) : inv_id := record.1.1.
+Definition record_key (record : open_record) : access_key := record.1.2.
+Definition record_consumed (record : open_record) : mask_entry := record.2.
+
+Definition key_mentions (level : nat) (key : access_key) : bool :=
+  match key with
+  | Some atoms => bool_decide (AtomLevel level ∈ atoms)
+  | None => false
+  end.
+
+Definition entry_mentions (level : nat) (entry : mask_entry) : bool :=
+  key_mentions level entry.2.
+
+Definition record_mentions (level : nat) (record : open_record) : bool :=
+  key_mentions level (record_key record) ||
+  entry_mentions level (record_consumed record).
+
+(** The declarations of a set of entries. *)
+Definition entry_declarations (entries : gset mask_entry) : gset inv_id :=
+  set_map fst entries.
+
+(** Declaration-wide entries for a set of declarations. *)
+Definition declaration_entries (declarations : gset inv_id) :
+    gset mask_entry :=
+  set_map (fun invariant => (invariant, None)) declarations.
+
+Definition entry_covered (entry : mask_entry) (entries : gset mask_entry) :
+    Prop :=
+  entry ∈ entries \/ (entry.1, None) ∈ entries.
+
+#[global] Instance entry_covered_decision entry entries :
+  Decision (entry_covered entry entries).
+Proof. unfold entry_covered. apply _. Defined.
+
+(** The entries available on both sides of a join, each at the more precise
+    of the two coverings. *)
+Definition entries_meet (left right : gset mask_entry) : gset mask_entry :=
+  filter (fun entry => entry_covered entry left /\ entry_covered entry right)
+    (left ∪ right).
+
+End Instances.
 
 
 Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) : Type :=
@@ -17,8 +105,8 @@ Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) 
 (* The empty continuation.  Unlike a leaf it is never charged a cost: it is
    the identity on the analysis state by construction. *)
 | ViewDone
-| ViewUnfold (invariant : inv_id)
-| ViewFold (invariant : inv_id)
+| ViewUnfold (invariant : inv_id) (key : access_key)
+| ViewFold (invariant : inv_id) (key : access_key)
 | ViewSequence (first second : statement Γ)
 | ViewConditional (then_branch else_branch : statement Γ)
 | ViewStructuredAccess (invariant : inv_id) (body : statement Γ)
@@ -28,8 +116,8 @@ Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) 
 
 Arguments ViewLeaf {_ _}.
 Arguments ViewDone {_ _}.
-Arguments ViewUnfold {_ _} _.
-Arguments ViewFold {_ _} _.
+Arguments ViewUnfold {_ _} _ _.
+Arguments ViewFold {_ _} _ _.
 Arguments ViewSequence {_ _} _ _.
 Arguments ViewConditional {_ _} _ _.
 Arguments ViewStructuredAccess {_ _} _ _.
@@ -62,6 +150,7 @@ Class AnalysisSyntax := AnalysisSyntaxData {
 }.
 
 
+
 Section WithSyntax.
 Context {Syntax : AnalysisSyntax}.
 
@@ -75,24 +164,50 @@ Inductive step_cost :=
 Inductive analysis_error :=
 | MissingInvariant (invariant : inv_id)
 | ReentrantInvariant (invariant : inv_id)
+| NonLifoFold (invariant : inv_id)
 | SecondAtomicStep
 | NonAtomicWhileOpen
 | MissingProcedureMask
 | ProcedureGrantAlreadyOpen
 | AtomicBlockLeaksAccess
+| ScopeLeaksAccess
 | StructuredAccessRequiresCertificate
 | IncompatibleBranches
 | FuelExhausted.
 
+(** The analysis state: the available mask entries, the stack of open
+    invariants (innermost first), whether the open accesses have taken
+    their physical step, and whether the analysis is inside a trusted
+    atomic block. *)
 Record analysis_state := AnalysisState {
-  analysis_mask : gset inv_id;
-  analysis_open : gset inv_id;
+  analysis_entries : gset mask_entry;
+  analysis_records : list open_record;
   analysis_step_taken : bool;
   analysis_in_atomic : bool;
 }.
 
+(** The open declarations. *)
+Definition analysis_open (state : analysis_state) : gset inv_id :=
+  list_to_set (map record_invariant (analysis_records state)).
+
+(** The available declarations. *)
+Definition analysis_mask (state : analysis_state) : gset inv_id :=
+  entry_declarations (analysis_entries state) ∖ analysis_open state.
+
+(** At most one instance of a declaration is open. *)
 Definition state_wf state : Prop :=
-  analysis_open state ## analysis_mask state.
+  NoDup (map record_invariant (analysis_records state)).
+
+(** Replaces the derived declaration sets in the goal by variables, for
+    [set_solver]. *)
+Ltac abstract_declarations :=
+  repeat match goal with
+  | |- context [entry_declarations ?entries] =>
+      generalize (entry_declarations entries); intro
+  | |- context [list_to_set (map record_invariant ?records)] =>
+      generalize (list_to_set (map record_invariant records) : gset inv_id);
+      intro
+  end.
 
 Definition take_plain_step cost state : analysis_error + analysis_state :=
   if analysis_in_atomic state || bool_decide (analysis_open state = ∅) then
@@ -101,15 +216,16 @@ Definition take_plain_step cost state : analysis_error + analysis_state :=
   | NoStep => inr state
   | AtomicStep =>
       if analysis_step_taken state then inl SecondAtomicStep
-      else inr (AnalysisState (analysis_mask state) (analysis_open state)
+      else inr (AnalysisState (analysis_entries state) (analysis_records state)
         true false)
   | NonAtomicStep => inl NonAtomicWhileOpen
   | ProcedureCallStep _ _ | ProcedureSpawnStep _ => inl NonAtomicWhileOpen
   end.
 
 Definition grant_state (granted : gset inv_id) state : analysis_state :=
-  AnalysisState (analysis_mask state ∪ granted) (analysis_open state)
-    (analysis_step_taken state) (analysis_in_atomic state).
+  AnalysisState (analysis_entries state ∪ declaration_entries granted)
+    (analysis_records state) (analysis_step_taken state)
+    (analysis_in_atomic state).
 
 Definition take_step cost state : analysis_error + analysis_state :=
   match cost with
@@ -136,28 +252,100 @@ Definition take_step cost state : analysis_error + analysis_state :=
 
 #[global] Arguments take_step : simpl never.
 
-Definition open_invariant invariant state : analysis_error + analysis_state :=
+(** The entry an opening consumes: the exact instance if available,
+    otherwise the declaration-wide entry. *)
+Definition select_entry (invariant : inv_id) (key : access_key)
+    (entries : gset mask_entry) : option mask_entry :=
+  if bool_decide (key <> None /\ (invariant, key) ∈ entries)
+  then Some (invariant, key)
+  else if bool_decide ((invariant, None) ∈ entries)
+  then Some (invariant, None)
+  else None.
+
+Definition open_invariant (invariant : inv_id) (key : access_key) state :
+    analysis_error + analysis_state :=
   if bool_decide (invariant ∈ analysis_open state) then
     inl (ReentrantInvariant invariant)
-  else if bool_decide (invariant ∈ analysis_mask state) then
-    inr (AnalysisState (analysis_mask state ∖ {[invariant]})
-      ({[invariant]} ∪ analysis_open state) (analysis_step_taken state)
-      (analysis_in_atomic state))
-  else inl (MissingInvariant invariant).
+  else match select_entry invariant key (analysis_entries state) with
+  | Some entry =>
+      inr (AnalysisState (analysis_entries state ∖ {[entry]})
+        ((invariant, key, entry) :: analysis_records state)
+        (analysis_step_taken state) (analysis_in_atomic state))
+  | None => inl (MissingInvariant invariant)
+  end.
 
-Definition fold_invariant invariant state : analysis_state :=
-  if bool_decide (invariant ∈ analysis_open state) then
-    let remaining := analysis_open state ∖ {[invariant]} in
-    AnalysisState ({[invariant]} ∪ analysis_mask state) remaining
-      (if bool_decide (remaining = ∅) then false
-       else analysis_step_taken state) (analysis_in_atomic state)
-  else AnalysisState ({[invariant]} ∪ analysis_mask state)
-    (analysis_open state) (analysis_step_taken state) (analysis_in_atomic state).
+(** A fold closes the innermost open invariant, restoring the entry it
+    consumed, or allocates a fresh instance. *)
+Definition fold_invariant (invariant : inv_id) (key : access_key) state :
+    analysis_state :=
+  match analysis_records state with
+  | record :: rest =>
+      if decide (record_invariant record = invariant) then
+        AnalysisState ({[record_consumed record]} ∪ analysis_entries state) rest
+          (match rest with [] => false | _ => analysis_step_taken state end)
+          (analysis_in_atomic state)
+      else AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
+        (analysis_records state) (analysis_step_taken state)
+        (analysis_in_atomic state)
+  | [] =>
+      AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
+        (analysis_records state) (analysis_step_taken state)
+        (analysis_in_atomic state)
+  end.
 
-Lemma take_plain_step_preserves_sets cost state exit :
+(** A fold names the innermost open instance, or an invariant that is not
+    open. *)
+Definition fold_admissible (invariant : inv_id) (key : access_key) state :
+    bool :=
+  match analysis_records state with
+  | record :: _ =>
+      if decide (record_invariant record = invariant)
+      then bool_decide (record_key record = key)
+      else bool_decide (invariant ∉ analysis_open state)
+  | [] => true
+  end.
+
+(** Leaving the scope of the local at [level], entered in [outer], forgets
+    the entries naming it that were not available on entry; no open
+    invariant may name it. *)
+Definition leave_scope (level : nat) (outer state : analysis_state) :
+    analysis_state :=
+  AnalysisState
+    (filter (fun entry => entry_mentions level entry = false \/
+        entry ∈ analysis_entries outer)
+      (analysis_entries state))
+    (analysis_records state) (analysis_step_taken state)
+    (analysis_in_atomic state).
+
+Definition leave_scope_admissible (level : nat) state : bool :=
+  forallb (fun record => negb (record_mentions level record))
+    (analysis_records state).
+
+Lemma analysis_open_records (left right : analysis_state) :
+  analysis_records left = analysis_records right ->
+  analysis_open left = analysis_open right.
+Proof. unfold analysis_open. intros ->. reflexivity. Qed.
+
+Lemma analysis_open_cons record rest (state : analysis_state) :
+  analysis_records state = record :: rest ->
+  analysis_open state =
+    {[record_invariant record]} ∪ list_to_set (map record_invariant rest).
+Proof. unfold analysis_open. intros ->. reflexivity. Qed.
+
+Lemma analysis_open_empty (state : analysis_state) :
+  analysis_open state = ∅ <-> analysis_records state = [].
+Proof.
+  unfold analysis_open. destruct (analysis_records state) as [|record rest];
+    cbn; split; intros H; try reflexivity; try discriminate.
+  exfalso. assert (record_invariant record ∈ (∅ : gset inv_id)) as Hin.
+  { rewrite <- H. set_solver. }
+  set_solver.
+Qed.
+
+Lemma take_plain_step_preserves_state cost state exit :
   take_plain_step cost state = inr exit ->
-  analysis_mask exit = analysis_mask state /\
-  analysis_open exit = analysis_open state.
+  analysis_entries exit = analysis_entries state /\
+  analysis_records exit = analysis_records state.
 Proof.
   unfold take_plain_step.
   destruct (analysis_in_atomic state ||
@@ -167,22 +355,41 @@ Proof.
   intros Hinr. inversion Hinr. done.
 Qed.
 
-Lemma take_step_preserves_open cost state exit :
-  take_step cost state = inr exit ->
+Lemma take_plain_step_preserves_sets cost state exit :
+  take_plain_step cost state = inr exit ->
+  analysis_mask exit = analysis_mask state /\
   analysis_open exit = analysis_open state.
 Proof.
+  intros Hstep. apply take_plain_step_preserves_state in Hstep as
+    [Hentries Hrecords].
+  unfold analysis_mask, analysis_open. rewrite Hentries, Hrecords. done.
+Qed.
+
+Lemma take_step_preserves_records cost state exit :
+  take_step cost state = inr exit ->
+  analysis_records exit = analysis_records state.
+Proof.
   unfold take_step.
-  destruct cost; try (apply take_plain_step_preserves_sets; assumption).
+  destruct cost; try (intros Hstep;
+    exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep))).
   - destruct (bool_decide (_ ⊆ _)); last discriminate.
     destruct (bool_decide (analysis_open state = ∅)); last discriminate.
     destruct (take_plain_step NonAtomicStep state) as [error|stepped]
       eqn:Hstep; first discriminate.
     destruct (bool_decide (_ ## _)); last discriminate.
     intros [= <-]. simpl.
-    exact (proj2 (take_plain_step_preserves_sets _ _ _ Hstep)).
+    exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep)).
   - destruct (bool_decide (_ ⊆ _)); last discriminate.
     destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    apply take_plain_step_preserves_sets.
+    intros Hstep. exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep)).
+Qed.
+
+Lemma take_step_preserves_open cost state exit :
+  take_step cost state = inr exit ->
+  analysis_open exit = analysis_open state.
+Proof.
+  intros Hstep. apply analysis_open_records.
+  exact (take_step_preserves_records _ _ _ Hstep).
 Qed.
 
 Lemma take_plain_step_preserves_in_atomic cost state exit :
@@ -193,7 +400,7 @@ Proof.
   destruct (analysis_in_atomic state ||
     bool_decide (analysis_open state = ∅)) eqn:Hallowed;
     first by intros [= <-].
-  apply orb_false_iff in Hallowed as [Hin_atomic _].
+  apply Bool.orb_false_iff in Hallowed as [Hin_atomic _].
   destruct cost; try by intros [= <-]; try discriminate.
   destruct (analysis_step_taken state); first discriminate.
   intros [= <-]. simpl. symmetry. exact Hin_atomic.
@@ -220,29 +427,29 @@ Qed.
 Lemma take_step_preserves_wf cost state exit :
   state_wf state -> take_step cost state = inr exit -> state_wf exit.
 Proof.
-  intros Hwf Hstep. unfold take_step in Hstep.
-  destruct cost; try (apply take_plain_step_preserves_sets in Hstep as
-    [Hmask Hopen]; unfold state_wf in *; now rewrite Hmask, Hopen).
-  - destruct (bool_decide (_ ⊆ _)) eqn:Hrequired; last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
-      eqn:Hplain; first discriminate.
-    destruct (bool_decide (_ ## _)) eqn:Hgrant; last discriminate.
-    inversion Hstep; subst exit.
-    apply bool_decide_eq_true in Hgrant.
-    apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
-    assert (state_wf stepped) as Hwf_stepped.
-    { unfold state_wf in Hwf |- *. now rewrite Hmask, Hopen. }
-    unfold state_wf, grant_state in *. simpl in *.
-    rewrite elem_of_disjoint in Hwf_stepped, Hgrant |- *.
-    intros invariant Hinvariant Havailable.
-    rewrite elem_of_union in Havailable. destruct Havailable as [Havailable|Hgranted].
-    + exact (Hwf_stepped invariant Hinvariant Havailable).
-    + exact (Hgrant invariant Hgranted Hinvariant).
-  - destruct (bool_decide (_ ⊆ _)); last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
-    unfold state_wf in Hwf |- *. now rewrite Hmask, Hopen.
+  intros Hwf Hstep. unfold state_wf.
+  rewrite (take_step_preserves_records _ _ _ Hstep). exact Hwf.
+Qed.
+
+Lemma entry_declarations_union left right :
+  entry_declarations (left ∪ right) =
+    entry_declarations left ∪ entry_declarations right.
+Proof. unfold entry_declarations. apply set_map_union_L. Qed.
+
+Lemma entry_declarations_singleton (entry : mask_entry) :
+  entry_declarations {[entry]} = {[entry.1]}.
+Proof. unfold entry_declarations. apply set_map_singleton_L. Qed.
+
+Lemma entry_declarations_declaration_entries declarations :
+  entry_declarations (declaration_entries declarations) = declarations.
+Proof.
+  unfold entry_declarations, declaration_entries. apply set_eq.
+  intros invariant. split.
+  - intros Hin. apply elem_of_map in Hin as (entry & -> & Hentry).
+    apply elem_of_map in Hentry as (invariant' & -> & Hin'). exact Hin'.
+  - intros Hin. apply elem_of_map. exists (invariant, None).
+    split; [reflexivity|]. apply elem_of_map. exists invariant.
+    split; [reflexivity|exact Hin].
 Qed.
 
 Lemma procedure_call_step_success required granted state exit :
@@ -256,15 +463,22 @@ Proof.
   destruct (bool_decide (required ⊆ analysis_mask state)) eqn:Hrequired;
     last discriminate.
   apply bool_decide_eq_true in Hrequired.
-  destruct (bool_decide (analysis_open state = ∅)); last discriminate.
+  destruct (bool_decide (analysis_open state = ∅)) eqn:Hclosed;
+    last discriminate.
+  apply bool_decide_eq_true in Hclosed.
   destruct (take_plain_step NonAtomicStep state) as [error|stepped]
     eqn:Hplain; first discriminate.
   destruct (bool_decide (granted ## analysis_open stepped)) eqn:Hgrant;
     last discriminate.
   apply bool_decide_eq_true in Hgrant. intros [= <-].
-  apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
-  rewrite Hopen in Hgrant. simpl. repeat split; try assumption.
-  - now rewrite Hmask.
+  apply take_plain_step_preserves_state in Hplain as [Hentries Hrecords].
+  assert (Hopen : analysis_open stepped = analysis_open state)
+    by (apply analysis_open_records; exact Hrecords).
+  rewrite Hopen in Hgrant. repeat split; try assumption.
+  unfold analysis_mask, grant_state, analysis_open in *. cbn.
+  rewrite Hentries, Hrecords, entry_declarations_union,
+    entry_declarations_declaration_entries, Hclosed.
+  set_solver.
 Qed.
 
 Lemma procedure_call_step_success_closed required granted state exit :
@@ -311,24 +525,23 @@ Lemma atomic_step_preserves_sets state exit :
   analysis_open exit = analysis_open state.
 Proof. apply take_plain_step_preserves_sets. Qed.
 
+Lemma atomic_step_preserves_state state exit :
+  take_step AtomicStep state = inr exit ->
+  analysis_entries exit = analysis_entries state /\
+  analysis_records exit = analysis_records state.
+Proof. apply take_plain_step_preserves_state. Qed.
+
 Lemma take_step_resources_monotone cost state exit :
   take_step cost state = inr exit ->
   analysis_mask state ∪ analysis_open state ⊆
     analysis_mask exit ∪ analysis_open exit.
 Proof.
   intros Hstep. destruct cost.
-  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
-    now rewrite Hmask, Hopen.
-  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
-    now rewrite Hmask, Hopen.
-  - apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen].
+  1-3: apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen];
     now rewrite Hmask, Hopen.
   - apply procedure_call_step_success in Hstep as
       (_ & _ & Hmask & Hopen).
-    intros invariant Hmember. rewrite elem_of_union in Hmember |- *.
-    destruct Hmember as [Havailable|Hopened].
-    + left. rewrite Hmask, elem_of_union. now left.
-    + right. now rewrite Hopen.
+    rewrite Hmask, Hopen. set_solver.
   - apply procedure_spawn_step_success in Hstep as (_ & Hmask & Hopen).
     now rewrite Hmask, Hopen.
 Qed.
@@ -359,55 +572,252 @@ Proof.
   rewrite bool_decide_false; [discriminate | exact Hopen].
 Qed.
 
-Lemma fold_invariant_preserves_wf invariant state :
-  state_wf state -> state_wf (fold_invariant invariant state).
+(** ** Opening and closing *)
+
+Lemma select_entry_sound invariant key entries entry :
+  select_entry invariant key entries = Some entry ->
+  entry ∈ entries /\ entry.1 = invariant.
 Proof.
-  intros Hwf. unfold fold_invariant, state_wf in *.
-  destruct (bool_decide (invariant ∈ analysis_open state)) eqn:Hmember;
-    cbn;
-    rewrite elem_of_disjoint in Hwf |- *;
-    intros other Hother_open Hother_mask;
-    rewrite elem_of_union in Hother_mask;
-    rewrite elem_of_singleton in Hother_mask.
-  - rewrite elem_of_difference in Hother_open.
-    rewrite elem_of_singleton in Hother_open.
-    destruct Hother_mask as [->|Hother_mask].
-    + destruct Hother_open as [_ Hneq]. exact (Hneq eq_refl).
-    + destruct Hother_open as [Hother_open _].
-      exact (Hwf other Hother_open Hother_mask).
-  - apply bool_decide_eq_false in Hmember.
-    destruct Hother_mask as [->|Hother_mask].
-    + exact (Hmember Hother_open).
-    + exact (Hwf other Hother_open Hother_mask).
+  unfold select_entry.
+  destruct (bool_decide (key <> None /\ (invariant, key) ∈ entries)) eqn:Hexact.
+  - apply bool_decide_eq_true in Hexact as [_ Hin].
+    intros [= <-]. auto.
+  - destruct (bool_decide ((invariant, None) ∈ entries)) eqn:Hall;
+      [|discriminate].
+    apply bool_decide_eq_true in Hall. intros [= <-]. auto.
 Qed.
 
-Lemma fold_open_invariant invariant state :
+Lemma entry_declarations_remove entries (entry : mask_entry) :
+  entry ∈ entries ->
+  entry_declarations entries ∖ {[entry.1]} ⊆
+    entry_declarations (entries ∖ {[entry]}) /\
+  entry_declarations (entries ∖ {[entry]}) ⊆ entry_declarations entries.
+Proof.
+  intros Hin. unfold entry_declarations. split; intros invariant Hmember.
+  - apply elem_of_difference in Hmember as [Hmember Hne].
+    apply elem_of_map in Hmember as (other & -> & Hother).
+    apply elem_of_map. exists other. split; [reflexivity|].
+    apply elem_of_difference. split; [exact Hother|].
+    intros Heq. apply elem_of_singleton in Heq. subst other.
+    apply Hne, elem_of_singleton. reflexivity.
+  - apply elem_of_map in Hmember as (other & -> & Hother).
+    apply elem_of_difference in Hother as [Hother _].
+    apply elem_of_map. exists other. auto.
+Qed.
+
+Lemma open_invariant_records invariant key state exit :
+  open_invariant invariant key state = inr exit ->
+  exists entry,
+    select_entry invariant key (analysis_entries state) = Some entry /\
+    exit = AnalysisState (analysis_entries state ∖ {[entry]})
+      ((invariant, key, entry) :: analysis_records state)
+      (analysis_step_taken state) (analysis_in_atomic state).
+Proof.
+  unfold open_invariant.
+  destruct (bool_decide (invariant ∈ analysis_open state)); first discriminate.
+  destruct (select_entry invariant key (analysis_entries state)) as [entry|];
+    [|discriminate].
+  intros [= <-]. eauto.
+Qed.
+
+Lemma open_invariant_success invariant key state exit :
+  open_invariant invariant key state = inr exit ->
+  invariant ∉ analysis_open state /\
+  invariant ∈ analysis_mask state /\
+  analysis_mask exit = analysis_mask state ∖ {[invariant]} /\
+  analysis_open exit = {[invariant]} ∪ analysis_open state.
+Proof.
+  intros Hopen. pose proof Hopen as Hrecords.
+  unfold open_invariant in Hopen.
+  destruct (bool_decide (invariant ∈ analysis_open state)) eqn:Hclosed;
+    first discriminate.
+  apply bool_decide_eq_false in Hclosed.
+  destruct (open_invariant_records _ _ _ _ Hrecords) as (entry & Hselect & ->).
+  destruct (select_entry_sound _ _ _ _ Hselect) as [Hin Hdecl].
+  destruct (entry_declarations_remove _ _ Hin) as [Hsub1 Hsub2].
+  unfold analysis_mask, analysis_open in *. cbn [analysis_entries
+    analysis_records map list_to_set record_invariant fst] in *.
+  rewrite Hdecl in Hsub1.
+  split; [exact Hclosed|]. split.
+  { apply elem_of_difference. split; [|exact Hclosed].
+    unfold entry_declarations. apply elem_of_map. exists entry. auto. }
+  split; [|reflexivity].
+  apply set_eq. intros other. split; intros Hother; set_solver.
+Qed.
+
+Lemma open_invariant_preserves_in_atomic invariant key state exit :
+  open_invariant invariant key state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  intros Hopen. destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
+  reflexivity.
+Qed.
+
+Lemma open_invariant_preserves_wf invariant key state exit :
+  state_wf state -> open_invariant invariant key state = inr exit ->
+  state_wf exit.
+Proof.
+  intros Hwf Hopen.
+  pose proof (proj1 (open_invariant_success _ _ _ _ Hopen)) as Hclosed.
+  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
+  unfold state_wf in *. cbn. constructor; [|exact Hwf].
+  unfold analysis_open in Hclosed. intros Hin. apply Hclosed.
+  apply elem_of_list_to_set. exact Hin.
+Qed.
+
+Lemma fold_invariant_preserves_in_atomic invariant key state :
+  analysis_in_atomic (fold_invariant invariant key state) =
+    analysis_in_atomic state.
+Proof.
+  unfold fold_invariant.
+  destruct (analysis_records state) as [|record rest]; [reflexivity|].
+  destruct (decide (record_invariant record = invariant)); reflexivity.
+Qed.
+
+Lemma fold_invariant_preserves_wf invariant key state :
+  state_wf state -> state_wf (fold_invariant invariant key state).
+Proof.
+  unfold state_wf, fold_invariant.
+  destruct (analysis_records state) as [|record rest]; [done|].
+  destruct (decide (record_invariant record = invariant)); cbn; [|done].
+  intros Hnodup. inversion Hnodup. assumption.
+Qed.
+
+(** Closing the innermost open invariant. *)
+Lemma fold_invariant_closes invariant key state record rest :
+  analysis_records state = record :: rest ->
+  record_invariant record = invariant ->
+  fold_invariant invariant key state =
+    AnalysisState ({[record_consumed record]} ∪ analysis_entries state) rest
+      (match rest with [] => false | _ => analysis_step_taken state end)
+      (analysis_in_atomic state).
+Proof.
+  intros Hrecords Hinvariant. unfold fold_invariant. rewrite Hrecords.
+  rewrite decide_True by exact Hinvariant. reflexivity.
+Qed.
+
+(** Every open record consumed an entry of its own declaration. *)
+Definition records_consume_own (records : list open_record) : Prop :=
+  Forall (fun record => (record_consumed record).1 = record_invariant record)
+    records.
+
+Lemma fold_open_invariant invariant key state :
+  state_wf state -> records_consume_own (analysis_records state) ->
+  fold_admissible invariant key state = true ->
   invariant ∈ analysis_open state ->
-  analysis_mask (fold_invariant invariant state) =
+  analysis_mask (fold_invariant invariant key state) =
     {[invariant]} ∪ analysis_mask state /\
-  analysis_open (fold_invariant invariant state) =
+  analysis_open (fold_invariant invariant key state) =
     analysis_open state ∖ {[invariant]}.
 Proof.
-  intros Hopen. unfold fold_invariant.
-  rewrite bool_decide_true; first done. exact Hopen.
+  intros Hwf Hown Hadmissible Hopen.
+  unfold fold_admissible in Hadmissible.
+  destruct (analysis_records state) as [|record rest] eqn:Hrecords.
+  { unfold analysis_open in Hopen. rewrite Hrecords in Hopen. set_solver. }
+  destruct (decide (record_invariant record = invariant)) as [Heq|Hne].
+  2: { apply bool_decide_eq_true in Hadmissible. contradiction. }
+  rewrite (fold_invariant_closes _ _ _ _ _ Hrecords Heq).
+  unfold state_wf in Hwf. rewrite ?Hrecords in Hwf. cbn in Hwf.
+  inversion Hwf as [|? ? Hfresh _]. subst.
+  unfold records_consume_own in Hown. rewrite ?Hrecords in Hown.
+  inversion Hown as [|? ? Hconsumed _]. subst.
+  assert (Hrest : record_invariant record ∉
+      (list_to_set (map record_invariant rest) : gset inv_id))
+    by (rewrite elem_of_list_to_set; exact Hfresh).
+  unfold analysis_mask, analysis_open. cbn [analysis_entries analysis_records].
+  rewrite Hrecords. cbn [map list_to_set].
+  rewrite entry_declarations_union, entry_declarations_singleton, Hconsumed.
+  revert Hrest.
+  generalize (list_to_set (map record_invariant rest) : gset inv_id) as R.
+  generalize (entry_declarations (analysis_entries state)) as D.
+  generalize (record_invariant record) as i.
+  clear. intros i D R Hrest.
+  split; apply set_eq; intros x;
+    repeat rewrite ?elem_of_difference, ?elem_of_union, ?elem_of_singleton;
+    destruct (decide (x = i)); subst; tauto.
 Qed.
 
-Lemma fold_fresh_invariant invariant state :
+Lemma fold_fresh_invariant invariant key state :
   invariant ∉ analysis_open state ->
-  analysis_mask (fold_invariant invariant state) =
+  analysis_mask (fold_invariant invariant key state) =
     {[invariant]} ∪ analysis_mask state /\
-  analysis_open (fold_invariant invariant state) = analysis_open state.
+  analysis_open (fold_invariant invariant key state) = analysis_open state.
+Proof.
+  intros Hclosed.
+  assert (Hfresh : fold_invariant invariant key state =
+    AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
+      (analysis_records state) (analysis_step_taken state)
+      (analysis_in_atomic state)).
+  { unfold fold_invariant.
+    destruct (analysis_records state) as [|record rest] eqn:Hrecords;
+      [reflexivity|].
+    destruct (decide (record_invariant record = invariant)) as [Heq|];
+      [|reflexivity].
+    exfalso. apply Hclosed. unfold analysis_open. rewrite Hrecords.
+    cbn. set_solver. }
+  rewrite Hfresh. unfold analysis_mask, analysis_open.
+  cbn [analysis_entries analysis_records].
+  rewrite entry_declarations_union, entry_declarations_singleton.
+  unfold analysis_open in Hclosed. split; [|reflexivity].
+  apply set_eq; intros other; set_solver.
+Qed.
+
+Lemma fold_admissible_fresh invariant key state :
+  invariant ∉ analysis_open state -> fold_admissible invariant key state = true.
+Proof.
+  intros Hclosed. unfold fold_admissible.
+  destruct (analysis_records state) as [|record rest] eqn:Hrecords;
+    [reflexivity|].
+  destruct (decide (record_invariant record = invariant)) as [Heq|].
+  - exfalso. apply Hclosed. unfold analysis_open. rewrite Hrecords.
+    cbn. set_solver.
+  - apply bool_decide_eq_true. exact Hclosed.
+Qed.
+
+Lemma fold_fresh_records invariant key state :
+  invariant ∉ analysis_open state ->
+  analysis_records (fold_invariant invariant key state) = analysis_records state.
 Proof.
   intros Hclosed. unfold fold_invariant.
-  rewrite bool_decide_false; first done. exact Hclosed.
+  destruct (analysis_records state) as [|record rest] eqn:Hrecords;
+    [reflexivity|].
+  destruct (decide (record_invariant record = invariant)) as [Heq|];
+    [|reflexivity].
+  exfalso. apply Hclosed. unfold analysis_open. rewrite Hrecords.
+  cbn. set_solver.
 Qed.
 
-Lemma open_invariant_not_available invariant state :
-  state_wf state -> invariant ∈ analysis_open state ->
-  invariant ∉ analysis_mask state.
+(** A fold after an access's unfold, with the records restored in between,
+    closes the access. *)
+Lemma fold_after_open_records invariant key key' outer opened inner :
+  open_invariant invariant key outer = inr opened ->
+  analysis_records inner = analysis_records opened ->
+  analysis_records (fold_invariant invariant key' inner) =
+    analysis_records outer.
 Proof.
-  unfold state_wf. rewrite elem_of_disjoint. intros Hwf Hopen Hmask.
-  exact (Hwf invariant Hopen Hmask).
+  intros Hopen Hinner.
+  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
+  cbn [analysis_records] in Hinner.
+  rewrite (fold_invariant_closes _ _ _ _ _ Hinner eq_refl). reflexivity.
+Qed.
+
+Lemma leave_scope_preserves_records level outer state :
+  analysis_records (leave_scope level outer state) = analysis_records state.
+Proof. reflexivity. Qed.
+
+Lemma leave_scope_preserves_open level outer state :
+  analysis_open (leave_scope level outer state) = analysis_open state.
+Proof. reflexivity. Qed.
+
+Lemma leave_scope_mask level outer state :
+  analysis_mask (leave_scope level outer state) ⊆ analysis_mask state.
+Proof.
+  unfold analysis_mask, leave_scope, entry_declarations. cbn.
+  intros invariant Hin. apply elem_of_difference in Hin as [Hin Hclosed].
+  apply elem_of_difference. split; [|exact Hclosed].
+  apply elem_of_map in Hin as (entry & -> & Hentry).
+  apply elem_of_filter in Hentry as [_ Hentry].
+  apply elem_of_map. eauto.
 Qed.
 
 (** The cost of each leaf, as the analyzer consults it. *)
@@ -425,8 +835,11 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
       match syntax_view Γ statement with
       | ViewLeaf => take_step (leaf_cost Γ statement) state
       | ViewDone => inr state
-      | ViewUnfold invariant => open_invariant invariant state
-      | ViewFold invariant => inr (fold_invariant invariant state)
+      | ViewUnfold invariant key => open_invariant invariant key state
+      | ViewFold invariant key =>
+          if fold_admissible invariant key state
+          then inr (fold_invariant invariant key state)
+          else inl (NonLifoFold invariant)
       | ViewSequence first second =>
           match analyze_fuel fuel' state first with
           | inl error => inl error
@@ -437,11 +850,12 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
               analyze_fuel fuel' state else_branch with
           | inr then_state, inr else_state =>
               if bool_decide
-                  (analysis_open then_state = analysis_open else_state /\
+                  (analysis_records then_state = analysis_records else_state /\
                    analysis_in_atomic then_state = analysis_in_atomic else_state)
               then inr (AnalysisState
-                (analysis_mask then_state ∩ analysis_mask else_state)
-                (analysis_open then_state)
+                (entries_meet (analysis_entries then_state)
+                  (analysis_entries else_state))
+                (analysis_records then_state)
                 (analysis_step_taken then_state || analysis_step_taken else_state)
                 (analysis_in_atomic then_state))
               else inl IncompatibleBranches
@@ -452,70 +866,32 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
           match take_step AtomicStep state with
           | inl error => inl error
           | inr outer =>
-              let inner_entry := AnalysisState (analysis_mask outer)
-                (analysis_open outer) (analysis_step_taken outer) true in
+              let inner_entry := AnalysisState (analysis_entries outer)
+                (analysis_records outer) (analysis_step_taken outer) true in
               match analyze_fuel fuel' inner_entry body with
               | inl error => inl error
               | inr inner =>
-                  if bool_decide (analysis_open inner = analysis_open outer)
-                  then inr (AnalysisState (analysis_mask inner)
-                    (analysis_open inner)
+                  if bool_decide (analysis_records inner = analysis_records outer)
+                  then inr (AnalysisState (analysis_entries inner)
+                    (analysis_records inner)
                     (analysis_step_taken outer || analysis_step_taken inner)
                     (analysis_in_atomic outer))
                   else inl AtomicBlockLeaksAccess
               end
           end
-      | ViewScope _ body => analyze_fuel fuel' state body
+      | ViewScope _ body =>
+          match analyze_fuel fuel' state body with
+          | inl error => inl error
+          | inr inner =>
+              if leave_scope_admissible (length Γ) inner
+              then inr (leave_scope (length Γ) state inner)
+              else inl ScopeLeaksAccess
+          end
       end
   end.
 
 Definition analyze {Γ} state (statement : syntax_statement Γ) :=
   analyze_fuel (syntax_size Γ statement) state statement.
-
-Lemma open_invariant_success invariant state exit :
-  open_invariant invariant state = inr exit ->
-  invariant ∉ analysis_open state /\
-  invariant ∈ analysis_mask state /\
-  analysis_mask exit = analysis_mask state ∖ {[invariant]} /\
-  analysis_open exit = {[invariant]} ∪ analysis_open state.
-Proof.
-  unfold open_invariant.
-  destruct (bool_decide (invariant ∈ analysis_open state)) eqn:Hopen;
-    first discriminate.
-  destruct (bool_decide (invariant ∈ analysis_mask state)) eqn:Hmask;
-    last discriminate.
-  intros Hinr. inversion Hinr; subst exit. repeat split; try reflexivity.
-  - apply bool_decide_eq_false in Hopen. exact Hopen.
-  - apply bool_decide_eq_true in Hmask. exact Hmask.
-Qed.
-
-Lemma open_invariant_preserves_in_atomic invariant state exit :
-  open_invariant invariant state = inr exit ->
-  analysis_in_atomic exit = analysis_in_atomic state.
-Proof.
-  unfold open_invariant.
-  destruct (bool_decide (invariant ∈ analysis_open state)); try discriminate.
-  destruct (bool_decide (invariant ∈ analysis_mask state)); try discriminate.
-  intros Hinr. inversion Hinr. reflexivity.
-Qed.
-
-Lemma open_invariant_preserves_wf invariant state exit :
-  state_wf state -> open_invariant invariant state = inr exit -> state_wf exit.
-Proof.
-  intros Hwf Hopen.
-  apply open_invariant_success in Hopen as
-    (Hnotopen & Havailable & Hmask & Hopened).
-  unfold state_wf in *. rewrite Hmask. rewrite Hopened.
-  rewrite elem_of_disjoint in Hwf |- *. intros other Hother_open Hother_mask.
-  rewrite elem_of_union in Hother_open.
-  rewrite elem_of_singleton in Hother_open.
-  rewrite elem_of_difference in Hother_mask.
-  rewrite elem_of_singleton in Hother_mask.
-  destruct Hother_open as [->|Hother_open].
-  - destruct Hother_mask as [_ Hneq]. exact (Hneq eq_refl).
-  - destruct Hother_mask as [Hother_mask _].
-    exact (Hwf other Hother_open Hother_mask).
-Qed.
 
 Inductive analysis_certificate :
     forall Γ, analysis_state -> syntax_statement Γ ->
@@ -527,14 +903,15 @@ Inductive analysis_certificate :
 | CertDone Γ state statement :
     syntax_view Γ statement = ViewDone ->
     analysis_certificate Γ state statement state
-| CertUnfold Γ state statement invariant exit :
-    syntax_view Γ statement = ViewUnfold invariant ->
-    open_invariant invariant state = inr exit ->
+| CertUnfold Γ state statement invariant key exit :
+    syntax_view Γ statement = ViewUnfold invariant key ->
+    open_invariant invariant key state = inr exit ->
     analysis_certificate Γ state statement exit
-| CertFold Γ state statement invariant :
-    syntax_view Γ statement = ViewFold invariant ->
+| CertFold Γ state statement invariant key :
+    syntax_view Γ statement = ViewFold invariant key ->
+    fold_admissible invariant key state = true ->
     analysis_certificate Γ state statement
-      (fold_invariant invariant state)
+      (fold_invariant invariant key state)
 | CertSequence Γ state statement first middle second exit :
     syntax_view Γ statement = ViewSequence first second ->
     analysis_certificate Γ state first middle ->
@@ -545,29 +922,31 @@ Inductive analysis_certificate :
     syntax_view Γ statement = ViewConditional then_branch else_branch ->
     analysis_certificate Γ state then_branch then_exit ->
     analysis_certificate Γ state else_branch else_exit ->
-    analysis_open then_exit = analysis_open else_exit ->
+    analysis_records then_exit = analysis_records else_exit ->
     analysis_in_atomic then_exit = analysis_in_atomic else_exit ->
     analysis_certificate Γ state statement
       (AnalysisState
-        (analysis_mask then_exit ∩ analysis_mask else_exit)
-        (analysis_open then_exit)
+        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
+        (analysis_records then_exit)
         (analysis_step_taken then_exit || analysis_step_taken else_exit)
         (analysis_in_atomic then_exit))
 | CertAtomic Γ state statement body outer inner :
     syntax_view Γ statement = ViewAtomic body ->
     take_step AtomicStep state = inr outer ->
     analysis_certificate Γ
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
         (analysis_step_taken outer) true) body inner ->
-    analysis_open inner = analysis_open outer ->
+    analysis_records inner = analysis_records outer ->
     analysis_certificate Γ state statement
-      (AnalysisState (analysis_mask inner) (analysis_open inner)
+      (AnalysisState (analysis_entries inner) (analysis_records inner)
         (analysis_step_taken outer || analysis_step_taken inner)
         (analysis_in_atomic outer))
-| CertScope Γ state statement d body exit :
+| CertScope Γ state statement d body inner :
     syntax_view Γ statement = ViewScope d body ->
-    analysis_certificate (d :: Γ) state body exit ->
-    analysis_certificate Γ state statement exit.
+    analysis_certificate (d :: Γ) state body inner ->
+    leave_scope_admissible (length Γ) inner = true ->
+    analysis_certificate Γ state statement
+      (leave_scope (length Γ) state inner).
 
 Lemma analysis_certificate_preserves_in_atomic
     {Γ entry statement exit}
@@ -578,353 +957,11 @@ Proof.
   - eapply take_step_preserves_in_atomic. exact e0.
   - reflexivity.
   - eapply open_invariant_preserves_in_atomic. exact e0.
-  - unfold fold_invariant.
-    destruct (bool_decide (invariant ∈ analysis_open state)); reflexivity.
+  - apply fold_invariant_preserves_in_atomic.
   - etrans; eassumption.
   - exact IHcertificate1.
   - eapply take_step_preserves_in_atomic. exact e0.
   - exact IHcertificate.
-Qed.
-
-Definition access_marker : Type := (inv_id * gset inv_id)%type.
-
-(** Temporary semantic restriction used by the Iris accessor proof.  The
-    executable flat analysis deliberately records open declarations as a set,
-    matching Raven's unordered source analysis.  This additional certificate
-    witnesses that one particular successful run is nevertheless properly
-    nested, without baking that restriction into the source language or the
-    analyzer result. *)
-Fixpoint lifo_certificate {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    (stack_in stack_out : list access_marker) : Prop :=
-  match certificate with
-  | CertLeaf _ _ _ _ _ _ => stack_out = stack_in
-  | CertDone _ _ _ _ => stack_out = stack_in
-  | CertUnfold _ _ _ invariant _ _ _ =>
-      stack_out = (invariant, analysis_open entry) :: stack_in
-  | CertFold _ state _ invariant _ =>
-      (exists outer_open,
-       stack_in = (invariant, outer_open) :: stack_out /\
-       invariant ∈ analysis_open state /\
-       invariant ∉ outer_open /\
-       analysis_open state = {[invariant]} ∪ outer_open) \/
-      (stack_out = stack_in /\ invariant ∉ analysis_open state)
-  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
-      exists stack_middle,
-        lifo_certificate first_certificate stack_in stack_middle /\
-        lifo_certificate second_certificate stack_middle stack_out
-  | CertConditional _ _ _ _ _ _ _ _
-      then_certificate else_certificate _ _ =>
-      lifo_certificate then_certificate stack_in stack_out /\
-      lifo_certificate else_certificate stack_in stack_out
-  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
-      lifo_certificate body_certificate stack_in stack_in /\
-      stack_out = stack_in
-  | CertScope _ _ _ _ _ _ _ body_certificate =>
-      lifo_certificate body_certificate stack_in stack_out
-  end.
-
-(** Executable replay of the auxiliary access stack.  This is certification
-    of an already-produced analysis certificate, not another statement
-    analysis: every branch follows the certificate's constructors and merely
-    checks the equalities and membership facts occurring in
-    [lifo_certificate]. *)
-Fixpoint replay_lifo_certificate {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    (stack_in : list access_marker) : option (list access_marker) :=
-  match certificate with
-  | CertLeaf _ _ _ _ _ _ => Some stack_in
-  | CertDone _ _ _ _ => Some stack_in
-  | CertUnfold _ _ _ invariant _ _ _ =>
-      Some ((invariant, analysis_open entry) :: stack_in)
-  | CertFold _ state _ invariant _ =>
-      match stack_in with
-      | (candidate, outer_open) :: stack_out =>
-          if decide (candidate = invariant /\
-              invariant ∈ analysis_open state /\
-              invariant ∉ outer_open /\
-              analysis_open state = {[invariant]} ∪ outer_open)
-          then Some stack_out
-          else if decide (invariant ∉ analysis_open state)
-            then Some stack_in else None
-      | [] =>
-          if decide (invariant ∉ analysis_open state)
-          then Some [] else None
-      end
-  | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
-      match replay_lifo_certificate first_certificate stack_in with
-      | Some stack_middle => replay_lifo_certificate second_certificate stack_middle
-      | None => None
-      end
-  | CertConditional _ _ _ _ _ _ _ _
-      then_certificate else_certificate _ _ =>
-      match replay_lifo_certificate then_certificate stack_in,
-          replay_lifo_certificate else_certificate stack_in with
-      | Some then_stack, Some else_stack =>
-          if decide (then_stack = else_stack) then Some then_stack else None
-      | _, _ => None
-      end
-  | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
-      match replay_lifo_certificate body_certificate stack_in with
-      | Some body_stack =>
-          if decide (body_stack = stack_in) then Some stack_in else None
-      | None => None
-      end
-  | CertScope _ _ _ _ _ _ _ body_certificate =>
-      replay_lifo_certificate body_certificate stack_in
-  end.
-
-Lemma replay_lifo_certificate_sound {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    stack_in stack_out :
-  replay_lifo_certificate certificate stack_in = Some stack_out ->
-  lifo_certificate certificate stack_in stack_out.
-Proof.
-  revert stack_in stack_out.
-  induction certificate; intros stack_in stack_out Hreplay; simpl in *.
-  - inversion Hreplay. reflexivity.
-  - inversion Hreplay. reflexivity.
-  - inversion Hreplay. reflexivity.
-  - destruct stack_in as [|[candidate outer_open] rest].
-    + destruct (decide (invariant ∉ analysis_open state)); inversion Hreplay;
-        subst. right. split; [reflexivity|assumption].
-    + destruct (decide (candidate = invariant /\
-          invariant ∈ analysis_open state /\ invariant ∉ outer_open /\
-          analysis_open state = {[invariant]} ∪ outer_open)) as [Hclose|Hclose].
-      * inversion Hreplay; subst. left. destruct Hclose as
-          [-> [Hmember [Hfresh Hopen]]].
-        exists outer_open. repeat split; assumption.
-      * destruct (decide (invariant ∉ analysis_open state)); inversion Hreplay;
-          subst. right. split; [reflexivity|assumption].
-  - destruct (replay_lifo_certificate certificate1 stack_in) as
-      [stack_middle|] eqn:Hfirst; try discriminate.
-    exists stack_middle. split.
-    + apply IHcertificate1. exact Hfirst.
-    + apply IHcertificate2. exact Hreplay.
-  - destruct (replay_lifo_certificate certificate1 stack_in) as
-      [then_stack|] eqn:Hthen; try discriminate.
-    destruct (replay_lifo_certificate certificate2 stack_in) as
-      [else_stack|] eqn:Helse; try discriminate.
-    destruct (decide (then_stack = else_stack)) as [->|Hdifferent];
-      inversion Hreplay; subst.
-    split; [apply IHcertificate1|apply IHcertificate2]; assumption.
-  - destruct (replay_lifo_certificate certificate stack_in) as
-      [body_stack|] eqn:Hbody; try discriminate.
-    destruct (decide (body_stack = stack_in)) as [->|Hdifferent];
-      inversion Hreplay; subst.
-    split; [apply IHcertificate; assumption|reflexivity].
-  - apply IHcertificate. exact Hreplay.
-Qed.
-
-(** A fused, certificate-free executable pass.  Unlike
-    [replay_lifo_certificate], this pass follows the syntax directly while
-    carrying both the analyzer state and the access stack.  Consequently its
-    computation never unfolds the proof term returned by
-    [analyze_builds_certificate]. *)
-Fixpoint analyze_lifo_fuel {Γ} (fuel : nat)
-    (state : analysis_state) (stack : list access_marker)
-    (statement : syntax_statement Γ) :
-    option (analysis_state * list access_marker) :=
-  match fuel with
-  | 0 => None
-  | S fuel' =>
-      match syntax_view Γ statement with
-      | ViewLeaf =>
-          match take_step (leaf_cost Γ statement) state with
-          | inl _ => None
-          | inr exit => Some (exit, stack)
-          end
-      | ViewDone => Some (state, stack)
-      | ViewUnfold invariant =>
-          match open_invariant invariant state with
-          | inl _ => None
-          | inr exit => Some (exit, (invariant, analysis_open state) :: stack)
-          end
-      | ViewFold invariant =>
-          let exit := fold_invariant invariant state in
-          match stack with
-          | (candidate, outer_open) :: stack_out =>
-              if decide (candidate = invariant /\
-                  invariant ∈ analysis_open state /\
-                  invariant ∉ outer_open /\
-                  analysis_open state = {[invariant]} ∪ outer_open)
-              then Some (exit, stack_out)
-              else if decide (invariant ∉ analysis_open state)
-                then Some (exit, stack) else None
-          | [] =>
-              if decide (invariant ∉ analysis_open state)
-              then Some (exit, []) else None
-          end
-      | ViewSequence first second =>
-          match analyze_lifo_fuel fuel' state stack first with
-          | Some (middle, stack_middle) =>
-              analyze_lifo_fuel fuel' middle stack_middle second
-          | None => None
-          end
-      | ViewConditional then_branch else_branch =>
-          match analyze_lifo_fuel fuel' state stack then_branch,
-              analyze_lifo_fuel fuel' state stack else_branch with
-          | Some (then_exit, then_stack), Some (else_exit, else_stack) =>
-              if decide
-                  (analysis_open then_exit = analysis_open else_exit /\
-                   analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-                   then_stack = else_stack)
-              then Some (AnalysisState
-                (analysis_mask then_exit ∩ analysis_mask else_exit)
-                (analysis_open then_exit)
-                (analysis_step_taken then_exit || analysis_step_taken else_exit)
-                (analysis_in_atomic then_exit), then_stack)
-              else None
-          | _, _ => None
-          end
-      | ViewStructuredAccess _ _ => None
-      | ViewAtomic body =>
-          match take_step AtomicStep state with
-          | inl _ => None
-          | inr outer =>
-              let inner_entry := AnalysisState (analysis_mask outer)
-                (analysis_open outer) (analysis_step_taken outer) true in
-              match analyze_lifo_fuel fuel' inner_entry stack body with
-              | Some (inner, body_stack) =>
-                  if decide (analysis_open inner = analysis_open outer /\
-                    body_stack = stack)
-                  then Some (AnalysisState (analysis_mask inner)
-                    (analysis_open inner)
-                    (analysis_step_taken outer || analysis_step_taken inner)
-                    (analysis_in_atomic outer), stack)
-                  else None
-              | None => None
-              end
-          end
-      | ViewScope _ body => analyze_lifo_fuel fuel' state stack body
-      end
-  end.
-
-Definition analyze_lifo {Γ}
-    (state : analysis_state) (statement : syntax_statement Γ) :
-    option analysis_state :=
-  match analyze_lifo_fuel (syntax_size Γ statement) state []
-      statement with
-  | Some (exit, []) => Some exit
-  | _ => None
-  end.
-
-Lemma analyze_lifo_fuel_projects {Γ} fuel
-    (state : analysis_state) (stack : list access_marker)
-    (statement : syntax_statement Γ) exit stack_out :
-  analyze_lifo_fuel fuel state stack statement =
-    Some (exit, stack_out) ->
-  analyze_fuel fuel state statement = inr exit.
-Proof.
-  revert Γ state stack statement exit stack_out.
-  induction fuel as [|fuel IH];
-    intros Γ state stack statement exit stack_out Hrun; simpl in Hrun;
-    first discriminate.
-  destruct (syntax_view Γ statement) eqn:Hview; simpl in Hrun.
-  - destruct (take_step (leaf_cost Γ statement) state) as [error|actual]
-      eqn:Hstep; try discriminate.
-    inversion Hrun; subst. simpl. rewrite Hview. exact Hstep.
-  - inversion Hrun; subst. simpl. rewrite Hview. reflexivity.
-  - destruct (open_invariant invariant state) as [error|actual]
-      eqn:Hstep; try discriminate.
-    inversion Hrun; subst. simpl. rewrite Hview. exact Hstep.
-  - destruct stack as [|[candidate outer_open] stack_out']; simpl in Hrun.
-    + destruct (decide (invariant ∉ analysis_open state)); try discriminate.
-      inversion Hrun; subst. simpl. rewrite Hview. reflexivity.
-    + destruct (decide (candidate = invariant /\
-          invariant ∈ analysis_open state /\ invariant ∉ outer_open /\
-          analysis_open state = {[invariant]} ∪ outer_open));
-        try destruct (decide (invariant ∉ analysis_open state));
-        try discriminate;
-        inversion Hrun; subst; simpl; rewrite Hview; reflexivity.
-  - destruct (analyze_lifo_fuel fuel state stack first) as
-      [[middle stack_middle]|] eqn:Hfirst; try discriminate.
-    specialize (IH _ state stack first middle stack_middle Hfirst) as Hfirst'.
-    specialize (IH _ middle stack_middle second exit stack_out Hrun) as Hsecond'.
-    simpl. rewrite Hview, Hfirst'. exact Hsecond'.
-  - destruct (analyze_lifo_fuel fuel state stack then_branch) as
-      [[then_exit then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_lifo_fuel fuel state stack else_branch) as
-      [[else_exit else_stack]|] eqn:Helse; try discriminate.
-    destruct (decide
-      (analysis_open then_exit = analysis_open else_exit /\
-       analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-       then_stack = else_stack)) as [Hjoin|Hjoin]; try discriminate.
-    inversion Hrun; subst exit stack_out.
-    specialize (IH _ state stack then_branch then_exit then_stack Hthen)
-      as Hthen'.
-    specialize (IH _ state stack else_branch else_exit else_stack Helse)
-      as Helse'.
-    destruct Hjoin as [Hopen [Hatomic _]].
-    simpl. rewrite Hview, Hthen', Helse'.
-    rewrite bool_decide_true; [reflexivity|]. exact (conj Hopen Hatomic).
-  - discriminate.
-  - destruct (take_step AtomicStep state) as [error|outer]
-      eqn:Hstep; try discriminate.
-    destruct (analyze_lifo_fuel fuel
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
-        (analysis_step_taken outer) true) stack body) as
-      [[inner body_stack]|] eqn:Hbody; try discriminate.
-    destruct (decide (analysis_open inner = analysis_open outer /\
-      body_stack = stack)) as [Hclose|Hclose]; try discriminate.
-    inversion Hrun; subst exit stack_out.
-    specialize (IH _ _ stack body inner body_stack Hbody) as Hbody'.
-    destruct Hclose as [Hopen _].
-    simpl. rewrite Hview, Hstep, Hbody'.
-    rewrite bool_decide_true; [reflexivity|exact Hopen].
-  - specialize (IH _ state stack body exit stack_out Hrun) as Hbody'.
-    simpl. rewrite Hview. exact Hbody'.
-Qed.
-
-Lemma analyze_lifo_projects {Γ}
-    (state : analysis_state) (statement : syntax_statement Γ) exit :
-  analyze_lifo state statement = Some exit ->
-  analyze state statement = inr exit.
-Proof.
-  unfold analyze_lifo.
-  destruct (analyze_lifo_fuel (syntax_size Γ statement) state []
-    statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
-  destruct stack_out as [|marker stack_out]; try discriminate.
-  intros Hsuccess. inversion Hsuccess; subst actual.
-  exact (analyze_lifo_fuel_projects _ state [] statement exit [] Hrun).
-Qed.
-
-(** [lifo_certificate] is deterministic: for one fixed certificate and input
-    stack, the execution it describes has exactly one output stack, not
-    several -- [unfold] pushes one prescribed marker, [leaf]/[atomic]
-    preserve the stack, [sequence] composes deterministic transitions, and
-    [fold]'s two alternatives are separated by whether the invariant belongs
-    to the fixed entry open set (mutually exclusive, so at most one can
-    hold).  Reconciles independently obtained LIFO witnesses for the same
-    certificate/input (e.g. two [aligned_operational_suffix] normalizations
-    of the same branch) without re-deriving the underlying access-stack
-    discipline from scratch. *)
-Lemma lifo_certificate_functional {Γ entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    stack_in stack_out1 stack_out2 :
-  lifo_certificate certificate stack_in stack_out1 ->
-  lifo_certificate certificate stack_in stack_out2 ->
-  stack_out1 = stack_out2.
-Proof.
-  revert stack_in stack_out1 stack_out2.
-  induction certificate; simpl; intros stack_in stack_out1 stack_out2 H1 H2.
-  - congruence.
-  - congruence.
-  - congruence.
-  - destruct H1 as [(o1 & Hin1 & Hmem1 & Hnm1 & Ho1) | (Heq1 & Hnm1)];
-      destruct H2 as [(o2 & Hin2 & Hmem2 & Hnm2 & Ho2) | (Heq2 & Hnm2)].
-    + pose proof (eq_trans (eq_sym Hin1) Hin2) as Heq.
-      injection Heq as _ Heq_out. exact Heq_out.
-    + exfalso. exact (Hnm2 Hmem1).
-    + exfalso. exact (Hnm1 Hmem2).
-    + congruence.
-  - destruct H1 as (mid1 & Hfirst1 & Hsecond1).
-    destruct H2 as (mid2 & Hfirst2 & Hsecond2).
-    assert (mid1 = mid2) as Hmid by eauto.
-    subst mid2. eauto.
-  - destruct H1 as [Hthen1 _]. destruct H2 as [Hthen2 _]. eauto.
-  - destruct H1 as [_ Heq1]. destruct H2 as [_ Heq2]. congruence.
-  - eauto.
 Qed.
 
 (** Logical Raven masks that may be available anywhere in a certified
@@ -946,7 +983,7 @@ Fixpoint certificate_footprint {Γ entry statement exit}
       certificate_footprint else_certificate
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       certificate_footprint body_certificate
-  | CertScope _ _ _ _ _ _ _ body_certificate =>
+  | CertScope _ _ _ _ _ _ _ body_certificate _ =>
       certificate_footprint body_certificate
   | _ => ∅
   end.
@@ -978,8 +1015,8 @@ Fixpoint certificate_height {Γ entry statement exit}
   match certificate with
   | CertLeaf _ _ _ _ _ _ => 1
   | CertDone _ _ _ _ => 1
-  | CertUnfold _ _ _ _ _ _ _ => 1
-  | CertFold _ _ _ _ _ => 1
+  | CertUnfold _ _ _ _ _ _ _ _ => 1
+  | CertFold _ _ _ _ _ _ _ => 1
   | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       S (Nat.max (certificate_height first_certificate)
         (certificate_height second_certificate))
@@ -988,7 +1025,7 @@ Fixpoint certificate_height {Γ entry statement exit}
         (certificate_height else_certificate))
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       S (certificate_height body_certificate)
-  | CertScope _ _ _ _ _ _ _ body_certificate =>
+  | CertScope _ _ _ _ _ _ _ body_certificate _ =>
       S (certificate_height body_certificate)
   end.
 
@@ -1007,8 +1044,7 @@ Proof.
   - exact Hrun.
   - destruct (analyze_fuel fuel state first) as [error|middle]
       eqn:Hfirst; try discriminate.
-    eapply IH in Hfirst.
-    eapply IH in Hrun.
+    apply IH in Hfirst. apply IH in Hrun.
     change (analyze_fuel (S fuel) state first = inr middle) in Hfirst.
     change (analyze_fuel (S fuel) middle second = inr exit) in Hrun.
     change (match analyze_fuel (S fuel) state first with
@@ -1020,11 +1056,7 @@ Proof.
       eqn:Hthen; try discriminate.
     destruct (analyze_fuel fuel state else_branch) as [error|else_exit]
       eqn:Helse; try discriminate.
-    destruct (bool_decide
-      (analysis_open then_exit = analysis_open else_exit /\
-       analysis_in_atomic then_exit = analysis_in_atomic else_exit)) eqn:Hjoin;
-      try discriminate.
-    eapply IH in Hthen. eapply IH in Helse.
+    apply IH in Hthen. apply IH in Helse.
     change (analyze_fuel (S fuel) state then_branch = inr then_exit)
       in Hthen.
     change (analyze_fuel (S fuel) state else_branch = inr else_exit)
@@ -1033,44 +1065,54 @@ Proof.
       analyze_fuel (S fuel) state else_branch with
       | inr then_state, inr else_state =>
           if bool_decide
-            (analysis_open then_state = analysis_open else_state /\
+            (analysis_records then_state = analysis_records else_state /\
              analysis_in_atomic then_state = analysis_in_atomic else_state)
           then inr (AnalysisState
-            (analysis_mask then_state ∩ analysis_mask else_state)
-            (analysis_open then_state)
+            (entries_meet (analysis_entries then_state)
+              (analysis_entries else_state))
+            (analysis_records then_state)
             (analysis_step_taken then_state || analysis_step_taken else_state)
             (analysis_in_atomic then_state))
           else inl IncompatibleBranches
       | inl error, _ | _, inl error => inl error
       end = inr exit).
-    rewrite Hthen, Helse, Hjoin. exact Hrun.
+    rewrite Hthen, Helse. exact Hrun.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
     destruct (analyze_fuel fuel
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
         (analysis_step_taken outer) true) body) as [error|inner]
       eqn:Hbody; try discriminate.
-    destruct (bool_decide (analysis_open inner = analysis_open outer)) eqn:Hclose;
-      try discriminate.
-    eapply IH in Hbody.
+    apply IH in Hbody.
     change (analyze_fuel (S fuel)
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
         (analysis_step_taken outer) true) body = inr inner) in Hbody.
     change (match analyze_fuel (S fuel)
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
         (analysis_step_taken outer) true) body with
       | inl error => inl error
       | inr inner =>
-          if bool_decide (analysis_open inner = analysis_open outer)
-          then inr (AnalysisState (analysis_mask inner)
-            (analysis_open inner)
+          if bool_decide (analysis_records inner = analysis_records outer)
+          then inr (AnalysisState (analysis_entries inner)
+            (analysis_records inner)
             (analysis_step_taken outer || analysis_step_taken inner)
             (analysis_in_atomic outer))
           else inl AtomicBlockLeaksAccess
       end = inr exit).
-    rewrite Hbody, Hclose. exact Hrun.
-  - apply IH. exact Hrun.
+    rewrite Hbody. exact Hrun.
+  - destruct (analyze_fuel fuel state body) as [error|inner] eqn:Hbody;
+      try discriminate.
+    apply IH in Hbody.
+    change (analyze_fuel (S fuel) state body = inr inner) in Hbody.
+    change (match analyze_fuel (S fuel) state body with
+      | inl error => inl error
+      | inr inner =>
+          if leave_scope_admissible (length Γ) inner
+          then inr (leave_scope (length Γ) state inner)
+          else inl ScopeLeaksAccess
+      end = inr exit).
+    rewrite Hbody. exact Hrun.
 Qed.
 
 Lemma analyze_fuel_monotone {Γ fuel target} state
@@ -1092,7 +1134,7 @@ Proof.
   - rewrite e. exact e0.
   - rewrite e. reflexivity.
   - rewrite e. exact e0.
-  - rewrite e. reflexivity.
+  - rewrite e, e0. reflexivity.
   - rewrite e.
     rewrite (analyze_fuel_monotone _ _ _
       (Nat.le_max_l _ _) IHcertificate1).
@@ -1107,7 +1149,7 @@ Proof.
   - rewrite e, e0.
     rewrite IHcertificate.
     rewrite bool_decide_true; [reflexivity|exact e1].
-  - rewrite e. exact IHcertificate.
+  - rewrite e, IHcertificate, e0. reflexivity.
 Qed.
 
 Lemma certificate_height_le_size {Γ entry statement exit}
@@ -1146,7 +1188,7 @@ Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
   | S fuel' =>
       match syntax_view Γ statement with
       | ViewLeaf => step_cost_grants (leaf_cost Γ statement)
-      | ViewFold invariant => {[invariant]}
+      | ViewFold invariant _ => {[invariant]}
       | ViewSequence first second =>
           statement_allocations_fuel fuel' first ∪
             statement_allocations_fuel fuel' second
@@ -1156,7 +1198,7 @@ Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
       | ViewStructuredAccess _ body | ViewAtomic body =>
           statement_allocations_fuel fuel' body
       | ViewScope _ body => statement_allocations_fuel fuel' body
-      | ViewDone | ViewUnfold _ => ∅
+      | ViewDone | ViewUnfold _ _ => ∅
       end
   end.
 
@@ -1178,45 +1220,148 @@ Proof.
     rewrite Hmask, Hopen. set_solver.
 Qed.
 
+(** Every declaration named by a state is available or open. *)
+Lemma fold_invariant_resources_bound invariant key state :
+  records_consume_own (analysis_records state) ->
+  analysis_mask (fold_invariant invariant key state) ∪
+    analysis_open (fold_invariant invariant key state) ⊆
+  analysis_mask state ∪ analysis_open state ∪ {[invariant]}.
+Proof.
+  intros Hown. unfold fold_invariant.
+  destruct (analysis_records state) as [|record rest] eqn:Hrecords.
+  - unfold analysis_mask, analysis_open. cbn [analysis_entries analysis_records].
+    rewrite Hrecords, entry_declarations_union, entry_declarations_singleton.
+    cbn [fst]. abstract_declarations. apply elem_of_subseteq. intros x Hx.
+    destruct (decide (x = invariant)); set_solver.
+  - unfold records_consume_own in Hown. rewrite ?Hrecords in Hown.
+    inversion Hown as [|? ? Hconsumed _]. subst.
+    destruct (decide (record_invariant record = invariant));
+      unfold analysis_mask, analysis_open; cbn [analysis_entries
+        analysis_records]; rewrite Hrecords, entry_declarations_union,
+        entry_declarations_singleton; cbn [map list_to_set];
+      [rewrite Hconsumed|]; cbn [fst];
+      generalize (list_to_set (map record_invariant rest) : gset inv_id) as R;
+      generalize (entry_declarations (analysis_entries state)) as D;
+      generalize (record_invariant record) as i;
+      clear; intros i D R; apply elem_of_subseteq; intros x Hx;
+      destruct (decide (x ∈ R)); destruct (decide (x = i));
+      destruct (decide (x = invariant)); set_solver.
+Qed.
+
+Lemma open_invariant_consume_own invariant key state exit :
+  records_consume_own (analysis_records state) ->
+  open_invariant invariant key state = inr exit ->
+  records_consume_own (analysis_records exit).
+Proof.
+  intros Hown Hopen.
+  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & Hselect & ->).
+  destruct (select_entry_sound _ _ _ _ Hselect) as [_ Hdecl].
+  constructor; [exact Hdecl | exact Hown].
+Qed.
+
+Lemma fold_invariant_consume_own invariant key state :
+  records_consume_own (analysis_records state) ->
+  records_consume_own
+    (analysis_records (fold_invariant invariant key state)).
+Proof.
+  unfold records_consume_own, fold_invariant.
+  destruct (analysis_records state) as [|record rest]; [done|].
+  destruct (decide (record_invariant record = invariant)); cbn; [|done].
+  intros Hown. inversion Hown. assumption.
+Qed.
+
+(** States reached by a certificate keep every open record's consumed entry
+    in its own declaration. *)
+Theorem certificate_consume_own {Γ entry statement exit}
+    (certificate : analysis_certificate Γ entry statement exit) :
+  records_consume_own (analysis_records entry) ->
+  records_consume_own (analysis_records exit).
+Proof.
+  induction certificate; intros Hown; cbn.
+  - rewrite (take_step_preserves_records _ _ _ e0). exact Hown.
+  - exact Hown.
+  - eapply open_invariant_consume_own; eassumption.
+  - apply fold_invariant_consume_own. exact Hown.
+  - apply IHcertificate2, IHcertificate1, Hown.
+  - apply IHcertificate1, Hown.
+  - rewrite e1. rewrite (take_step_preserves_records _ _ _ e0). exact Hown.
+  - apply IHcertificate, Hown.
+Qed.
+
 Lemma certificate_footprint_allocations_fuel {Γ entry statement exit}
     (certificate : analysis_certificate Γ entry statement exit) fuel :
+  records_consume_own (analysis_records entry) ->
   certificate_height certificate <= fuel ->
   certificate_footprint certificate ⊆
     analysis_mask entry ∪ analysis_open entry ∪
       statement_allocations_fuel fuel statement.
 Proof.
   revert fuel.
-  induction certificate; intros [|fuel] Hheight; simpl in Hheight;
+  induction certificate; intros [|fuel] Hown Hheight; simpl in Hheight;
     try lia; cbn [statement_allocations_fuel certificate_footprint];
     rewrite e.
   - pose proof (take_step_resources_bound _ _ _ e0). set_solver.
   - set_solver.
   - apply open_invariant_success in e0 as (_ & Havailable & Hmask & Hopen).
     rewrite Hmask, Hopen. set_solver.
-  - unfold fold_invariant.
-    destruct (bool_decide (invariant ∈ analysis_open state)); simpl;
-      set_solver.
-  - pose proof (IHcertificate1 fuel ltac:(lia)) as Hfirst.
-    pose proof (IHcertificate2 fuel ltac:(lia)) as Hsecond.
+  - pose proof (fold_invariant_resources_bound invariant key state Hown).
+    set_solver.
+  - pose proof (IHcertificate1 fuel Hown ltac:(lia)) as Hfirst.
+    pose proof (IHcertificate2 fuel
+      (certificate_consume_own certificate1 Hown) ltac:(lia)) as Hsecond.
     pose proof (certificate_exit_subset_footprint certificate1).
     pose proof (certificate_exit_open_subset_footprint certificate1).
     pose proof (certificate_exit_subset_footprint certificate2).
     pose proof (certificate_exit_open_subset_footprint certificate2).
     set_solver.
-  - pose proof (IHcertificate1 fuel ltac:(lia)) as Hthen.
-    pose proof (IHcertificate2 fuel ltac:(lia)) as Helse.
-    pose proof (certificate_exit_subset_footprint certificate1).
-    pose proof (certificate_exit_open_subset_footprint certificate1).
-    simpl. set_solver.
-  - pose proof (IHcertificate fuel ltac:(lia)) as Hbody.
+  - pose proof (IHcertificate1 fuel Hown ltac:(lia)) as Hthen.
+    pose proof (IHcertificate2 fuel Hown ltac:(lia)) as Helse.
+    pose proof (certificate_exit_subset_footprint certificate1) as Hexit_mask.
+    pose proof (certificate_exit_open_subset_footprint certificate1)
+      as Hexit_open.
+    assert (Hjoin_open : analysis_open (AnalysisState
+        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
+        (analysis_records then_exit)
+        (analysis_step_taken then_exit || analysis_step_taken else_exit)
+        (analysis_in_atomic then_exit)) = analysis_open then_exit)
+      by reflexivity.
+    assert (Hjoin_mask : analysis_mask (AnalysisState
+        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
+        (analysis_records then_exit)
+        (analysis_step_taken then_exit || analysis_step_taken else_exit)
+        (analysis_in_atomic then_exit)) ⊆ analysis_mask then_exit).
+    { unfold analysis_mask, analysis_open, entries_meet, entry_declarations.
+      cbn [analysis_entries analysis_records]. intros invariant Hin.
+      apply elem_of_difference in Hin as [Hin Hclosed].
+      apply elem_of_difference. split; [|exact Hclosed].
+      apply elem_of_map in Hin as (entry' & -> & Hentry).
+      apply elem_of_filter in Hentry as [[Hleft _] _].
+      apply elem_of_map. destruct Hleft as [Hleft|Hleft].
+      - exists entry'. auto.
+      - exists (entry'.1, None). auto. }
+    rewrite Hjoin_open. apply elem_of_subseteq. intros x Hx.
+    rewrite !elem_of_union in Hx.
+    destruct Hx as [[[[Hx|Hx]|Hx]|Hx]|[Hx|Hx]].
+    + clear - Hx. set_solver.
+    + clear - Hx. set_solver.
+    + apply Hjoin_mask, Hexit_mask, Hthen in Hx. clear - Hx. set_solver.
+    + apply Hexit_open, Hthen in Hx. clear - Hx. set_solver.
+    + apply Hthen in Hx. clear - Hx. set_solver.
+    + apply Helse in Hx. clear - Hx. set_solver.
+  - assert (Hbody_own : records_consume_own (analysis_records
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
+        (analysis_step_taken outer) true))).
+    { cbn. rewrite (take_step_preserves_records _ _ _ e0). exact Hown. }
+    pose proof (IHcertificate fuel Hbody_own ltac:(lia)) as Hbody.
     apply atomic_step_preserves_sets in e0 as [Hmask Hopen].
     pose proof (certificate_exit_subset_footprint certificate).
     pose proof (certificate_exit_open_subset_footprint certificate).
-    simpl in *. set_solver.
-  - pose proof (IHcertificate fuel ltac:(lia)) as Hbody.
+    unfold analysis_mask, analysis_open in *. simpl in *. set_solver.
+  - pose proof (IHcertificate fuel Hown ltac:(lia)) as Hbody.
     pose proof (certificate_exit_subset_footprint certificate).
     pose proof (certificate_exit_open_subset_footprint certificate).
-    set_solver.
+    pose proof (leave_scope_mask (length Γ) state inner).
+    rewrite leave_scope_preserves_open. set_solver.
 Qed.
 
 (** Every invariant in a certificate footprint is available or open on entry,
@@ -1224,11 +1369,12 @@ Qed.
     conditional joins restrict the exit mask. *)
 Lemma certificate_footprint_allocations {Γ entry statement exit}
     (certificate : analysis_certificate Γ entry statement exit) :
+  records_consume_own (analysis_records entry) ->
   certificate_footprint certificate ⊆
     analysis_mask entry ∪ analysis_open entry ∪
       statement_allocations statement.
 Proof.
-  apply certificate_footprint_allocations_fuel.
+  intros Hown. apply certificate_footprint_allocations_fuel; [exact Hown|].
   apply certificate_height_le_size.
 Qed.
 
@@ -1270,121 +1416,6 @@ Proof.
   congruence.
 Qed.
 
-Lemma analyze_lifo_fuel_replays {Γ fuel entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    stack_in stack_out :
-  analyze_lifo_fuel fuel entry stack_in statement =
-    Some (exit, stack_out) ->
-  replay_lifo_certificate certificate stack_in = Some stack_out.
-Proof.
-  revert fuel stack_in stack_out.
-  induction certificate.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e, e0 in Hrun.
-    inversion Hrun; reflexivity.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun.
-    inversion Hrun; reflexivity.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e, e0 in Hrun.
-    inversion Hrun; reflexivity.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun.
-    destruct stack_in as [|[candidate outer_open] rest]; simpl in *.
-    + destruct (decide (invariant ∉ analysis_open state)); try discriminate.
-      inversion Hrun. reflexivity.
-    + destruct (decide (candidate = invariant /\
-          invariant ∈ analysis_open state /\ invariant ∉ outer_open /\
-          analysis_open state = {[invariant]} ∪ outer_open)) as [Hclose|Hclose].
-      * inversion Hrun. reflexivity.
-      * destruct (decide (invariant ∉ analysis_open state)); try discriminate.
-        inversion Hrun. reflexivity.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun.
-    destruct (analyze_lifo_fuel fuel state stack_in first) as
-      [[actual_middle stack_middle]|] eqn:Hfirst; try discriminate.
-    assert (Hmiddle : actual_middle = middle).
-    { pose proof (analyze_lifo_fuel_projects _ state stack_in
-        first actual_middle stack_middle Hfirst) as Hactual.
-      exact (analyze_fuel_certificate_exit Hactual certificate1). }
-    subst actual_middle.
-    specialize (IHcertificate1 _ _ _ Hfirst) as Hfirst_replay.
-    specialize (IHcertificate2 _ _ _ Hrun) as Hsecond_replay.
-    rewrite Hfirst_replay. exact Hsecond_replay.
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun.
-    destruct (analyze_lifo_fuel fuel state stack_in then_branch) as
-      [[actual_then then_stack]|] eqn:Hthen; try discriminate.
-    destruct (analyze_lifo_fuel fuel state stack_in else_branch) as
-      [[actual_else else_stack]|] eqn:Helse; try discriminate.
-    assert (Hthen_exit : actual_then = then_exit).
-    { pose proof (analyze_lifo_fuel_projects _ state stack_in
-        then_branch actual_then then_stack Hthen) as Hactual.
-      exact (analyze_fuel_certificate_exit Hactual certificate1). }
-    assert (Helse_exit : actual_else = else_exit).
-    { pose proof (analyze_lifo_fuel_projects _ state stack_in
-        else_branch actual_else else_stack Helse) as Hactual.
-      exact (analyze_fuel_certificate_exit Hactual certificate2). }
-    subst actual_then. subst actual_else.
-    destruct (decide
-      (analysis_open then_exit = analysis_open else_exit /\
-       analysis_in_atomic then_exit = analysis_in_atomic else_exit /\
-       then_stack = else_stack)) as [Hjoin|Hjoin]; try discriminate.
-    inversion Hrun; subst stack_out.
-    destruct Hjoin as [_ [_ Hstacks]].
-    subst else_stack.
-    specialize (IHcertificate1 _ _ _ Hthen) as Hthen_replay.
-    specialize (IHcertificate2 _ _ _ Helse) as Helse_replay.
-    rewrite Hthen_replay, Helse_replay.
-    rewrite decide_True; [reflexivity|reflexivity].
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun.
-    destruct (take_step AtomicStep state) as [error|actual_outer]
-      eqn:Hstep; try discriminate.
-    assert (Houter : actual_outer = outer).
-    { rewrite e0 in Hstep. congruence. }
-    subst actual_outer.
-    destruct (analyze_lifo_fuel fuel
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
-        (analysis_step_taken outer) true) stack_in body) as
-      [[actual_inner body_stack]|] eqn:Hbody; try discriminate.
-    assert (Hinner : actual_inner = inner).
-    { pose proof (analyze_lifo_fuel_projects _
-        (AnalysisState (analysis_mask outer) (analysis_open outer)
-          (analysis_step_taken outer) true) stack_in body actual_inner
-        body_stack Hbody) as Hactual.
-      exact (analyze_fuel_certificate_exit Hactual certificate). }
-    subst actual_inner.
-    destruct (decide (analysis_open inner = analysis_open outer /\
-      body_stack = stack_in)) as [Hclose|Hclose]; try discriminate.
-    inversion Hrun; subst stack_out.
-    destruct Hclose as [_ Hstack]. subst body_stack.
-    specialize (IHcertificate _ _ _ Hbody) as Hbody_replay.
-    rewrite Hbody_replay. rewrite decide_True; [reflexivity|reflexivity].
-  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
-      [discriminate|].
-    rewrite e in Hrun. exact (IHcertificate _ _ _ Hrun).
-Qed.
-
-Lemma analyze_lifo_fuel_sound {Γ fuel entry statement exit}
-    (certificate : analysis_certificate Γ entry statement exit)
-    stack_in stack_out :
-  analyze_lifo_fuel fuel entry stack_in statement =
-    Some (exit, stack_out) ->
-  lifo_certificate certificate stack_in stack_out.
-Proof.
-  intros Hrun.
-  apply replay_lifo_certificate_sound.
-  eapply analyze_lifo_fuel_replays; exact Hrun.
-Qed.
-
 (** For fixed public indices, successful analyzer certificates carry no additional
     computational choice.  This lets later certified transformations use a
     canonical certificate construction without introducing a parallel plan
@@ -1401,8 +1432,10 @@ Proof.
   - f_equal; apply proof_irrelevance.
   - f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
+    assert (key0 = key) by congruence. subst key0.
     f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
+    assert (key0 = key) by congruence. subst key0.
     apply JMeq_eq in x. subst certificate0.
     f_equal; apply proof_irrelevance.
   - assert (first0 = first) by congruence. subst first0.
@@ -1429,9 +1462,12 @@ Proof.
     apply JMeq_eq in x. subst certificate0.
     rewrite (IHcertificate1 certificate2).
     f_equal; apply proof_irrelevance.
-  - pose proof (eq_trans (eq_sym e) e0) as Hview.
+  - pose proof (eq_trans (eq_sym e) e1) as Hview.
     injection Hview as <- Hbody.
     apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst body0.
+    pose proof (analysis_certificate_exit_unique certificate1
+      certificate2) as Hinner. subst inner0.
+    apply JMeq_eq in x. subst certificate0.
     rewrite (IHcertificate1 certificate2).
     f_equal; apply proof_irrelevance.
 Qed.
@@ -1448,15 +1484,9 @@ Proof.
   - eapply open_invariant_preserves_wf; eauto.
   - apply fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
-  - cbn. specialize (IHcertificate1 Hwf).
-    unfold state_wf in IHcertificate1 |- *.
-    rewrite elem_of_disjoint in IHcertificate1 |- *.
-    intros invariant Hinvariant Hmask.
-    apply (IHcertificate1 invariant Hinvariant).
-    apply elem_of_intersection in Hmask as [Hmask _]. exact Hmask.
-  - cbn. apply IHcertificate.
-    pose proof (take_step_preserves_wf _ _ _ Hwf e0) as Houter.
-    exact Houter.
+  - exact (IHcertificate1 Hwf).
+  - unfold state_wf in *. cbn. rewrite e1.
+    rewrite (take_step_preserves_records _ _ _ e0). exact Hwf.
   - exact (IHcertificate Hwf).
 Qed.
 
@@ -1472,7 +1502,9 @@ Proof.
   - eapply CertLeaf; [exact Hview|exact Hanalyze].
   - inversion Hanalyze; subst exit. eapply CertDone. exact Hview.
   - eapply CertUnfold; [exact Hview|exact Hanalyze].
-  - inversion Hanalyze; subst exit. eapply CertFold. exact Hview.
+  - destruct (fold_admissible invariant key state) eqn:Hadmissible;
+      [|discriminate].
+    inversion Hanalyze; subst exit. eapply CertFold; eassumption.
   - destruct (analyze_fuel fuel state first) as [error|middle] eqn:Hfirst;
       try discriminate.
     eapply CertSequence; [exact Hview|eapply IH|eapply IH]; eauto.
@@ -1481,25 +1513,30 @@ Proof.
     destruct (analyze_fuel fuel state else_branch) as [error|else_exit] eqn:Helse;
       try discriminate.
     destruct (bool_decide
-      (analysis_open then_exit = analysis_open else_exit /\
+      (analysis_records then_exit = analysis_records else_exit /\
        analysis_in_atomic then_exit = analysis_in_atomic else_exit)) eqn:Hjoin;
       last discriminate.
-    apply bool_decide_eq_true in Hjoin as [Hopen Hin_atomic].
+    apply bool_decide_eq_true in Hjoin as [Hrecords Hin_atomic].
     inversion Hanalyze; subst exit.
     eapply CertConditional; eauto.
   - discriminate.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
     destruct (analyze_fuel fuel
-      (AnalysisState (analysis_mask outer) (analysis_open outer)
+      (AnalysisState (analysis_entries outer) (analysis_records outer)
         (analysis_step_taken outer) true) body) as [error|inner] eqn:Hbody;
       try discriminate.
-    destruct (bool_decide (analysis_open inner = analysis_open outer)) eqn:Hscope;
-      last discriminate.
+    destruct (bool_decide (analysis_records inner = analysis_records outer))
+      eqn:Hscope; last discriminate.
     apply bool_decide_eq_true in Hscope.
     inversion Hanalyze; subst exit.
     eapply CertAtomic; eauto.
-  - eapply CertScope; [exact Hview | eapply IH; exact Hanalyze].
+  - destruct (analyze_fuel fuel state body) as [error|inner] eqn:Hbody;
+      try discriminate.
+    destruct (leave_scope_admissible (length Γ) inner) eqn:Hadmissible;
+      [|discriminate].
+    inversion Hanalyze; subst exit.
+    eapply CertScope; [exact Hview | eapply IH; exact Hbody | exact Hadmissible].
 Defined.
 
 Corollary analyze_builds_certificate {Γ} state
@@ -1507,29 +1544,6 @@ Corollary analyze_builds_certificate {Γ} state
   analyze state statement = inr exit ->
   analysis_certificate Γ state statement exit.
 Proof. apply analyze_fuel_builds_certificate. Defined.
-
-(** The proof-facing bridge for the fused executable pass.  Certificate
-    construction is deliberately confined to this theorem: the executable
-    checker above never unfolds [analyze_builds_certificate]. *)
-Lemma analyze_lifo_builds_certificate {Γ}
-    entry (statement : syntax_statement Γ) exit :
-  analyze_lifo entry statement = Some exit ->
-  { certificate : analysis_certificate Γ entry statement exit &
-    lifo_certificate certificate [] [] }.
-Proof.
-  unfold analyze_lifo.
-  destruct (analyze_lifo_fuel (syntax_size Γ statement) entry []
-    statement) as [[actual stack_out]|] eqn:Hrun; try discriminate.
-  destruct stack_out as [|marker stack_out]; try discriminate.
-  intros Hsuccess. inversion Hsuccess; subst actual.
-  assert (Hclosed : analyze_lifo entry statement = Some exit).
-  { unfold analyze_lifo. rewrite Hrun. reflexivity. }
-  pose (certificate := analyze_builds_certificate entry statement exit
-    (analyze_lifo_projects entry statement exit Hclosed)).
-  exists certificate.
-  eapply analyze_lifo_fuel_sound.
-  exact Hrun.
-Qed.
 
 End WithSyntax.
 End AnalysisView.

@@ -1485,48 +1485,14 @@ Proof.
   induction statement; simpl; intuition.
 Qed.
 
-(** Access-neutral statements cannot change the auxiliary LIFO stack.  This
-    is particularly useful for trusted atomic bodies: their analyzer
-    certificates may remain opaque while their lack of invariant operations
-    determines the stack behavior completely. *)
-Lemma access_neutral_lifo {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) stack :
+(** Access-neutral statements keep the open records. *)
+Lemma access_neutral_records {Γ entry statement exit}
+    (certificate : Atom.analysis_certificate Γ entry statement exit) :
   access_neutral statement ->
-  GenericRegions.Atomicity.lifo_certificate certificate stack stack.
-Proof.
-  revert stack.
-  induction certificate; intros stack Hneutral; simpl in *.
-  - reflexivity.
-  - reflexivity.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hneutral. contradiction.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hneutral. contradiction.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    destruct Hneutral as [Hfirst Hsecond].
-    exists stack. split; [apply IHcertificate1 | apply IHcertificate2];
-      assumption.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst;
-      destruct Hneutral as [Hthen Helse];
-      (split; [apply IHcertificate1 | apply IHcertificate2]); assumption.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    split; [apply IHcertificate | reflexivity]. exact Hneutral.
-  - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
-    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
-    cbn in Hneutral. apply IHcertificate. exact Hneutral.
-Qed.
-
-Lemma access_neutral_preserves_open {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) :
-  access_neutral statement ->
-  GenericRegions.Atomicity.analysis_open exit =
-    GenericRegions.Atomicity.analysis_open entry.
+  Atom.analysis_records exit = Atom.analysis_records entry.
 Proof.
   induction certificate; intros Hneutral.
-  - eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+  - eapply Atom.take_step_preserves_records; eauto.
   - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hneutral. contradiction.
@@ -1539,59 +1505,81 @@ Proof.
     all: cbn in Hneutral; destruct Hneutral as [Hthen _].
     all: exact (IHcertificate1 Hthen).
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    eapply eq_trans; [exact e1|].
-    eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+    cbn [Atom.analysis_records]. rewrite e1.
+    eapply Atom.take_step_preserves_records; eauto.
   - destruct statement; cbn in e; try discriminate.
     injection e as Hd Hscope_body. subst d.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hneutral. exact (IHcertificate Hneutral).
 Qed.
 
-(** An unfold-free analyzed region entered with no open invariant is LIFO
-    balanced.  Raw folds are deliberately allowed here: at a closed entry
-    they are invariant allocation, hence leave both the analyzer open set
-    and the auxiliary access stack unchanged. *)
-Lemma unfold_free_closed_lifo {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) :
-  unfold_free statement ->
-  GenericRegions.Atomicity.analysis_open entry = ∅ ->
-  GenericRegions.Atomicity.lifo_certificate certificate [] [] /\
-    GenericRegions.Atomicity.analysis_open exit = ∅.
+Lemma access_neutral_preserves_open {Γ entry statement exit}
+    (certificate : Atom.analysis_certificate Γ entry statement exit) :
+  access_neutral statement ->
+  Atom.analysis_open exit = Atom.analysis_open entry.
 Proof.
-  induction certificate; intros Hfree Hclosed; simpl in *.
-  - split; [reflexivity|].
-    rewrite <- Hclosed.
-    eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
-  - split; [reflexivity | exact Hclosed].
+  intros Hneutral. apply Atom.analysis_open_records.
+  exact (access_neutral_records certificate Hneutral).
+Qed.
+
+(** Without an unfold, the open records can only be popped. *)
+Lemma unfold_free_records_suffix {Γ entry statement exit}
+    (certificate : Atom.analysis_certificate Γ entry statement exit) :
+  unfold_free statement ->
+  Atom.analysis_records exit `suffix_of` Atom.analysis_records entry.
+Proof.
+  induction certificate; intros Hfree.
+  - erewrite Atom.take_step_preserves_records by eauto. reflexivity.
+  - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
-  - split.
-    + right. split; [reflexivity|]. rewrite Hclosed. apply not_elem_of_empty.
-    + destruct (GenericRegions.Atomicity.fold_fresh_invariant invariant state)
-        as [_ Hopen].
-      * rewrite Hclosed. apply not_elem_of_empty.
-      * now rewrite Hopen, Hclosed.
+  - unfold Atom.fold_invariant.
+    destruct (Atom.analysis_records state) as [|record rest];
+      [reflexivity|].
+    destruct (decide (Atom.record_invariant record = invariant)); cbn;
+      [apply suffix_cons_r|]; reflexivity.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    destruct Hfree as [Hfirst Hsecond].
-    destruct (IHcertificate1 Hfirst Hclosed) as [Hlifo1 Hmiddle].
-    destruct (IHcertificate2 Hsecond Hmiddle) as [Hlifo2 Hexit].
-    split; [eexists; split; eassumption|exact Hexit].
+    cbn in Hfree. destruct Hfree as [Hfirst Hsecond].
+    transitivity (Atom.analysis_records middle); auto.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    all: destruct Hfree as [Hthen Helse].
-    all: destruct (IHcertificate1 Hthen Hclosed) as [Hlifo1 Hthen_closed].
-    all: destruct (IHcertificate2 Helse Hclosed) as [Hlifo2 Helse_closed].
-    all: split; [split; assumption|exact Hthen_closed].
+    all: cbn in Hfree; destruct Hfree as [Hthen _].
+    all: exact (IHcertificate1 Hthen).
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    pose proof (GenericRegions.Atomicity.take_step_preserves_open _ _ _ e0)
-      as Houter.
-    rewrite Hclosed in Houter.
-    destruct (IHcertificate Hfree Houter) as [Hlifo Hinner].
-    split; [split; [exact Hlifo|reflexivity]|exact Hinner].
+    cbn [Atom.analysis_records]. rewrite e1.
+    erewrite Atom.take_step_preserves_records by eauto. reflexivity.
   - destruct statement; cbn in e; try discriminate.
     injection e as Hd Hscope_body. subst d.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
-    cbn in Hfree. exact (IHcertificate Hfree Hclosed).
+    cbn in Hfree. exact (IHcertificate Hfree).
+Qed.
+
+(** An unfold-free region entered with no open invariant exits with none.
+    Its folds are allocations. *)
+Lemma unfold_free_closed {Γ entry statement exit}
+    (certificate : Atom.analysis_certificate Γ entry statement exit) :
+  unfold_free statement ->
+  Atom.analysis_records entry = [] -> Atom.analysis_records exit = [].
+Proof.
+  intros Hfree Hentry.
+  pose proof (unfold_free_records_suffix certificate Hfree) as Hsuffix.
+  rewrite Hentry in Hsuffix. exact (suffix_nil_inv _ Hsuffix).
+Qed.
+
+(** A fold that keeps the open records allocates. *)
+Lemma fold_keeping_records_fresh invariant key state :
+  Atom.fold_admissible invariant key state = true ->
+  Atom.analysis_records (Atom.fold_invariant invariant key state) =
+    Atom.analysis_records state ->
+  invariant ∉ Atom.analysis_open state.
+Proof.
+  unfold Atom.fold_admissible, Atom.fold_invariant.
+  destruct (Atom.analysis_records state) as [|record rest] eqn:Hrecords.
+  - intros _ _. unfold Atom.analysis_open. rewrite Hrecords. set_solver.
+  - destruct (decide (Atom.record_invariant record = invariant)).
+    + cbn. intros _ Hrest. exfalso.
+      apply (f_equal (@length _)) in Hrest. cbn in Hrest. lia.
+    + intros Hadmissible _. apply bool_decide_eq_true in Hadmissible.
+      exact Hadmissible.
 Qed.
 
 Lemma structured_certificate_unfold_free {Γ entry statement exit}
@@ -1620,7 +1608,7 @@ Fixpoint structured_accesses_outside_atomic
   | StructuredInvAccess _ access_entry _ _ _ _ _ _ body _ =>
       GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
       structured_accesses_outside_atomic body
-  | StructuredGhostVal _ _ _ _ _ _ _ body =>
+  | StructuredGhostVal _ _ _ _ _ _ _ body _ =>
       structured_accesses_outside_atomic body
   | StructuredGhostConditional _ _ _ _ _ _ _ then_branch else_branch _ _ =>
       structured_accesses_outside_atomic then_branch /\
@@ -1628,97 +1616,6 @@ Fixpoint structured_accesses_outside_atomic
   | _ => True
   end.
 
-(** Without an unfold, the LIFO machine can only preserve or pop its input
-    stack.  These two small facts let the focused normalizer recognize an
-    ordinary, stack-preserving prefix without reconstructing an access trace. *)
-Lemma unfold_free_lifo_length_le {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) stack_in stack_out :
-  unfold_free statement ->
-  GenericRegions.Atomicity.lifo_certificate certificate stack_in stack_out ->
-  length stack_out <= length stack_in.
-Proof.
-  revert stack_in stack_out.
-  induction certificate; intros stack_in stack_out Hfree Hlifo; simpl in *.
-  - subst stack_out. lia.
-  - subst stack_out. lia.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hfree. contradiction.
-  - destruct Hlifo as [(outer & -> & _)|[-> _]]; simpl; lia.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    cbn in Hfree. destruct Hfree as [Hfirst_free Hsecond_free].
-    destruct Hlifo as (stack_middle & Hfirst & Hsecond).
-    specialize (IHcertificate1 _ _ Hfirst_free Hfirst).
-    specialize (IHcertificate2 _ _ Hsecond_free Hsecond). lia.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    all: cbn in Hfree. all: destruct Hfree as [Hthen_free Helse_free].
-    all: destruct Hlifo as [Hthen _]. all: eauto.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    cbn in Hfree. destruct Hlifo as [Hbody ->]. eauto.
-  - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
-    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
-    cbn in Hfree. eauto.
-Qed.
-
-Lemma unfold_free_lifo_same_length {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) stack_in stack_out :
-  unfold_free statement ->
-  GenericRegions.Atomicity.lifo_certificate certificate stack_in stack_out ->
-  length stack_out = length stack_in ->
-  stack_out = stack_in.
-Proof.
-  revert stack_in stack_out.
-  induction certificate; intros stack_in stack_out Hfree Hlifo Hlength;
-    simpl in *.
-  - exact Hlifo.
-  - exact Hlifo.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hfree. contradiction.
-  - destruct Hlifo as [(outer & -> & _)|[-> _]]; [simpl in Hlength; lia|reflexivity].
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    cbn in Hfree. destruct Hfree as [Hfirst_free Hsecond_free].
-    destruct Hlifo as (stack_middle & Hfirst & Hsecond).
-    pose proof (unfold_free_lifo_length_le certificate1 _ _
-      Hfirst_free Hfirst) as Hfirst_le.
-    pose proof (unfold_free_lifo_length_le certificate2 _ _
-      Hsecond_free Hsecond) as Hsecond_le.
-    assert (length stack_middle = length stack_in) by lia.
-    pose proof (IHcertificate1 _ _ Hfirst_free Hfirst ltac:(assumption))
-      as Hmiddle. subst stack_middle.
-    apply IHcertificate2; assumption.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst; clear e.
-    all: cbn in Hfree. all: destruct Hfree as [Hthen_free _].
-    all: destruct Hlifo as [Hthen _]. all: eauto.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst; clear e.
-    destruct Hlifo as [Hbody ->]. reflexivity.
-  - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
-    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
-    cbn in Hfree. eauto.
-Qed.
-
-Definition choose_lifo_sequence_middle
-    {Γ entry statement first middle second exit view
-      first_certificate second_certificate stack_in stack_out}
-    (Hlifo : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertSequence Γ entry statement first
-        middle second exit view first_certificate second_certificate)
-      stack_in stack_out) :
-  { stack_middle : list GenericRegions.Atomicity.access_marker |
-    GenericRegions.Atomicity.lifo_certificate first_certificate stack_in
-      stack_middle /\
-    GenericRegions.Atomicity.lifo_certificate second_certificate stack_middle
-      stack_out }.
-Proof.
-  apply constructive_indefinite_description. exact Hlifo.
-Defined.
-
-(** Every accepted baseline region is balanced when entered with no pending
-    access marker.  This is the compositional boundary needed to normalize
-    two adjacent accepted regions independently: the parent sequence's
-    existential LIFO midpoint is forced back to [[]]. *)
 (** ** Certificates of canonical conditional accesses *)
 
 Lemma guard_if_view {Γ} (guard : access_guard Γ) (then_branch else_branch : stmt Γ) :
@@ -1730,8 +1627,11 @@ Definition closing_branch_certificate {Γ} invariant
     (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (branch_prefix continuation : stmt Γ) {joined closed exit}
     (prefix_certificate : Atom.analysis_certificate Γ joined branch_prefix closed)
+    (Hadmissible : Atom.fold_admissible invariant
+      (RegionSyntax.argument_key arguments) closed = true)
     (continuation_certificate : Atom.analysis_certificate Γ
-      (Atom.fold_invariant invariant closed) continuation exit) :
+      (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+        closed) continuation exit) :
     Atom.analysis_certificate Γ joined
       (canonical_branch invariant arguments branch_prefix continuation) exit :=
   Atom.CertSequence Γ joined
@@ -1740,8 +1640,10 @@ Definition closing_branch_certificate {Γ} invariant
     eq_refl prefix_certificate
     (Atom.CertSequence Γ closed (TSeq (TFold invariant arguments) continuation)
       (TFold invariant arguments)
-      (Atom.fold_invariant invariant closed) continuation exit eq_refl
-      (Atom.CertFold Γ closed (TFold invariant arguments) invariant eq_refl)
+      (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+        closed) continuation exit eq_refl
+      (Atom.CertFold Γ closed (TFold invariant arguments) invariant
+        (RegionSyntax.argument_key arguments) eq_refl Hadmissible)
       continuation_certificate).
 
 Definition conditional_access_certificate {Γ} invariant
@@ -1749,25 +1651,34 @@ Definition conditional_access_certificate {Γ} invariant
     (prefix : stmt Γ) (guard : access_guard Γ)
     (then_prefix then_continuation else_prefix else_continuation : stmt Γ)
     {entry opened joined then_closed then_exit else_closed else_exit}
-    (Hopen : Atom.open_invariant invariant entry = inr opened)
+    (Hopen : Atom.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr opened)
     (prefix_certificate : Atom.analysis_certificate Γ opened prefix joined)
     (then_prefix_certificate :
       Atom.analysis_certificate Γ joined then_prefix then_closed)
+    (Hthen_admissible : Atom.fold_admissible invariant
+      (RegionSyntax.argument_key arguments) then_closed = true)
     (then_certificate : Atom.analysis_certificate Γ
-      (Atom.fold_invariant invariant then_closed) then_continuation then_exit)
+      (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+        then_closed) then_continuation then_exit)
     (else_prefix_certificate :
       Atom.analysis_certificate Γ joined else_prefix else_closed)
+    (Helse_admissible : Atom.fold_admissible invariant
+      (RegionSyntax.argument_key arguments) else_closed = true)
     (else_certificate : Atom.analysis_certificate Γ
-      (Atom.fold_invariant invariant else_closed) else_continuation else_exit)
-    (Hopen_equal : Atom.analysis_open then_exit = Atom.analysis_open else_exit)
+      (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+        else_closed) else_continuation else_exit)
+    (Hrecords_equal :
+      Atom.analysis_records then_exit = Atom.analysis_records else_exit)
     (Hatomic_equal :
       Atom.analysis_in_atomic then_exit = Atom.analysis_in_atomic else_exit) :
     Atom.analysis_certificate Γ entry
       (conditional_access invariant arguments prefix guard then_prefix
         then_continuation else_prefix else_continuation)
       (Atom.AnalysisState
-        (Atom.analysis_mask then_exit ∩ Atom.analysis_mask else_exit)
-        (Atom.analysis_open then_exit)
+        (Atom.entries_meet (Atom.analysis_entries then_exit)
+          (Atom.analysis_entries else_exit))
+        (Atom.analysis_records then_exit)
         (Atom.analysis_step_taken then_exit || Atom.analysis_step_taken else_exit)
         (Atom.analysis_in_atomic then_exit)) :=
   let then_branch :=
@@ -1779,18 +1690,20 @@ Definition conditional_access_certificate {Γ} invariant
     (conditional_access invariant arguments prefix guard then_prefix
       then_continuation else_prefix else_continuation)
     (TUnfold invariant arguments) opened (TSeq prefix conditional) _ eq_refl
-    (Atom.CertUnfold Γ entry (TUnfold invariant arguments) invariant opened
-      eq_refl Hopen)
+    (Atom.CertUnfold Γ entry (TUnfold invariant arguments) invariant
+      (RegionSyntax.argument_key arguments) opened eq_refl Hopen)
     (Atom.CertSequence Γ opened (TSeq prefix conditional) prefix joined
       conditional _ eq_refl prefix_certificate
       (Atom.CertConditional Γ joined conditional then_branch else_branch
         then_exit else_exit
         (guard_if_view guard _ _)
         (closing_branch_certificate invariant arguments then_prefix
-          then_continuation then_prefix_certificate then_certificate)
+          then_continuation then_prefix_certificate Hthen_admissible
+          then_certificate)
         (closing_branch_certificate invariant arguments else_prefix
-          else_continuation else_prefix_certificate else_certificate)
-        Hopen_equal Hatomic_equal)).
+          else_continuation else_prefix_certificate Helse_admissible
+          else_certificate)
+        Hrecords_equal Hatomic_equal)).
 
 Record conditional_access_parts {Γ} invariant
     (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
@@ -1803,25 +1716,31 @@ Record conditional_access_parts {Γ} invariant
   cap_then_exit : Atom.analysis_state;
   cap_else_closed : Atom.analysis_state;
   cap_else_exit : Atom.analysis_state;
-  cap_open : Atom.open_invariant invariant entry = inr cap_opened;
+  cap_open : Atom.open_invariant invariant
+    (RegionSyntax.argument_key arguments) entry = inr cap_opened;
   cap_prefix : Atom.analysis_certificate Γ cap_opened prefix cap_joined;
   cap_then_prefix :
     Atom.analysis_certificate Γ cap_joined then_prefix cap_then_closed;
+  cap_then_admissible : Atom.fold_admissible invariant
+    (RegionSyntax.argument_key arguments) cap_then_closed = true;
   cap_then : Atom.analysis_certificate Γ
-    (Atom.fold_invariant invariant cap_then_closed) then_continuation
-    cap_then_exit;
+    (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+      cap_then_closed) then_continuation cap_then_exit;
   cap_else_prefix :
     Atom.analysis_certificate Γ cap_joined else_prefix cap_else_closed;
+  cap_else_admissible : Atom.fold_admissible invariant
+    (RegionSyntax.argument_key arguments) cap_else_closed = true;
   cap_else : Atom.analysis_certificate Γ
-    (Atom.fold_invariant invariant cap_else_closed) else_continuation
-    cap_else_exit;
-  cap_open_equal : Atom.analysis_open cap_then_exit =
-    Atom.analysis_open cap_else_exit;
+    (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
+      cap_else_closed) else_continuation cap_else_exit;
+  cap_records_equal : Atom.analysis_records cap_then_exit =
+    Atom.analysis_records cap_else_exit;
   cap_atomic_equal : Atom.analysis_in_atomic cap_then_exit =
     Atom.analysis_in_atomic cap_else_exit;
   cap_exit : exit = Atom.AnalysisState
-    (Atom.analysis_mask cap_then_exit ∩ Atom.analysis_mask cap_else_exit)
-    (Atom.analysis_open cap_then_exit)
+    (Atom.entries_meet (Atom.analysis_entries cap_then_exit)
+      (Atom.analysis_entries cap_else_exit))
+    (Atom.analysis_records cap_then_exit)
     (Atom.analysis_step_taken cap_then_exit ||
       Atom.analysis_step_taken cap_else_exit)
     (Atom.analysis_in_atomic cap_then_exit);
@@ -1863,81 +1782,38 @@ Proof.
   all: econstructor; try eassumption; reflexivity.
 Qed.
 
-Lemma closing_branch_lifo {Γ} invariant
-    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (branch_prefix continuation : stmt Γ) {joined closed exit}
-    (prefix_certificate : Atom.analysis_certificate Γ joined branch_prefix closed)
-    (continuation_certificate : Atom.analysis_certificate Γ
-      (Atom.fold_invariant invariant closed) continuation exit)
-    marker_open stack stack_out :
-  (forall stack', Atom.lifo_certificate prefix_certificate stack' stack') ->
-  Atom.analysis_open closed = Atom.analysis_open joined ->
-  invariant ∈ Atom.analysis_open joined ->
-  Atom.lifo_certificate (closing_branch_certificate invariant arguments
-    branch_prefix continuation prefix_certificate continuation_certificate)
-    ((invariant, marker_open) :: stack) stack_out ->
-  Atom.lifo_certificate continuation_certificate stack stack_out.
-Proof.
-  intros Hprefix_lifo Hprefix_open Hopen Hlifo.
-  cbn [closing_branch_certificate Atom.lifo_certificate] in Hlifo.
-  destruct Hlifo as (prefix_stack & Hprefix & fold_stack & Hfold & Hcontinuation).
-  assert (prefix_stack = (invariant, marker_open) :: stack) as ->.
-  { eapply Atom.lifo_certificate_functional; [exact Hprefix|].
-    apply Hprefix_lifo. }
-  destruct Hfold as [(outer_open & Hstack & _)|[_ Hclosed]].
-  - inversion Hstack; subst. exact Hcontinuation.
-  - exfalso. apply Hclosed. rewrite Hprefix_open. exact Hopen.
-Qed.
-
-Lemma closing_branch_lifo_intro {Γ} invariant
-    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (branch_prefix continuation : stmt Γ) {joined closed exit}
-    (prefix_certificate : Atom.analysis_certificate Γ joined branch_prefix closed)
-    (continuation_certificate : Atom.analysis_certificate Γ
-      (Atom.fold_invariant invariant closed) continuation exit)
-    marker_open stack stack_out :
-  (forall stack', Atom.lifo_certificate prefix_certificate stack' stack') ->
-  Atom.analysis_open closed = Atom.analysis_open joined ->
-  invariant ∉ marker_open ->
-  Atom.analysis_open joined = {[invariant]} ∪ marker_open ->
-  Atom.lifo_certificate continuation_certificate stack stack_out ->
-  Atom.lifo_certificate (closing_branch_certificate invariant arguments
-    branch_prefix continuation prefix_certificate continuation_certificate)
-    ((invariant, marker_open) :: stack) stack_out.
-Proof.
-  intros Hprefix_lifo Hclosed_open Hfresh Hjoined Hcontinuation.
-  cbn [closing_branch_certificate Atom.lifo_certificate].
-  exists ((invariant, marker_open) :: stack). split; [apply Hprefix_lifo|].
-  exists stack. split; [|exact Hcontinuation].
-  left. exists marker_open. rewrite Hclosed_open, Hjoined.
-  repeat split; [set_solver | exact Hfresh].
-Qed.
-
-Lemma fold_after_open_closes invariant (outer inner : Atom.analysis_state) :
-  invariant ∉ Atom.analysis_open outer ->
-  Atom.analysis_open inner = {[invariant]} ∪ Atom.analysis_open outer ->
-  Atom.analysis_open (Atom.fold_invariant invariant inner) =
-    Atom.analysis_open outer.
-Proof.
-  intros Hfresh Hinner.
-  rewrite (proj2 (Atom.fold_open_invariant invariant inner
-    ltac:(rewrite Hinner; set_solver))), Hinner.
-  set_solver.
-Qed.
-
-(** A piece of a conditional access that keeps any stack and the open set. *)
+(** A piece of an access that keeps the open records. *)
 Definition balanced_piece {Γ} (statement : stmt Γ) : Prop :=
   forall entry exit
     (certificate : Atom.analysis_certificate Γ entry statement exit),
-  (forall stack, Atom.lifo_certificate certificate stack stack) /\
-  Atom.analysis_open exit = Atom.analysis_open entry.
+  Atom.analysis_records exit = Atom.analysis_records entry.
 
 Lemma access_neutral_balanced {Γ} (statement : stmt Γ) :
   access_neutral statement -> balanced_piece statement.
 Proof.
-  intros Hneutral entry exit certificate. split.
-  - intros. apply access_neutral_lifo. exact Hneutral.
-  - exact (access_neutral_preserves_open certificate Hneutral).
+  intros Hneutral entry exit certificate.
+  exact (access_neutral_records certificate Hneutral).
+Qed.
+
+(** The records at a branch's continuation are those at the access's
+    entry. *)
+Lemma conditional_access_continuation_records {Γ} invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (prefix branch_prefix : stmt Γ) {entry opened joined closed}
+    (Hopen : Atom.open_invariant invariant
+      (RegionSyntax.argument_key arguments) entry = inr opened)
+    (prefix_certificate : Atom.analysis_certificate Γ opened prefix joined)
+    (branch_certificate :
+      Atom.analysis_certificate Γ joined branch_prefix closed) :
+  balanced_piece prefix -> balanced_piece branch_prefix ->
+  Atom.analysis_records (Atom.fold_invariant invariant
+    (RegionSyntax.argument_key arguments) closed) =
+    Atom.analysis_records entry.
+Proof.
+  intros Hprefix Hbranch.
+  apply (Atom.fold_after_open_records _ _ _ _ _ _ Hopen).
+  rewrite (Hbranch _ _ branch_certificate).
+  exact (Hprefix _ _ prefix_certificate).
 Qed.
 
 Lemma conditional_access_balanced {Γ} invariant
@@ -1945,65 +1821,42 @@ Lemma conditional_access_balanced {Γ} invariant
     (prefix : stmt Γ) (guard : access_guard Γ)
     (then_prefix then_continuation else_prefix else_continuation : stmt Γ) :
   balanced_piece prefix -> balanced_piece then_prefix ->
-  balanced_piece else_prefix -> balanced_piece then_continuation ->
-  balanced_piece else_continuation ->
+  balanced_piece then_continuation ->
   balanced_piece (conditional_access invariant arguments prefix guard
     then_prefix then_continuation else_prefix else_continuation).
 Proof.
-  intros Hq Htp Hep Htc Hec entry exit certificate.
+  intros Hq Htp Htc entry exit certificate.
   destruct (conditional_access_certificate_parts _ _ _ _ _ _ _ _ _ _
     certificate) as [opened joined then_closed then_exit else_closed else_exit
-      Hopen cq ctp ctc cep cec Hopen_equal Hatomic_equal Hexit].
-  subst exit.
-  rewrite (Atom.analysis_certificate_unique certificate
-    (conditional_access_certificate _ _ _ _ _ _ _ _ Hopen cq ctp ctc cep cec
-      Hopen_equal Hatomic_equal)).
-  pose proof (Atom.open_invariant_success _ _ _ Hopen)
-    as (Hfresh & _ & _ & Hopened).
-  destruct (Hq _ _ cq) as [Hq_lifo Hq_open].
-  destruct (Htp _ _ ctp) as [Htp_lifo Htp_open].
-  destruct (Hep _ _ cep) as [Hep_lifo Hep_open].
-  destruct (Htc _ _ ctc) as [Htc_lifo Htc_open].
-  destruct (Hec _ _ cec) as [Hec_lifo Hec_open].
-  assert (Hjoined : Atom.analysis_open joined =
-    {[invariant]} ∪ Atom.analysis_open entry) by congruence.
-  split.
-  - intros stack. cbn [conditional_access_certificate Atom.lifo_certificate].
-    eexists. split; [reflexivity|].
-    eexists. split; [apply Hq_lifo|].
-    split; eapply closing_branch_lifo_intro; eauto.
-  - cbn [Atom.analysis_open]. rewrite Htc_open.
-    apply fold_after_open_closes; [exact Hfresh | congruence].
+      Hopen cq ctp _ ctc cep _ cec _ _ Hexit].
+  subst exit. cbn [Atom.analysis_records].
+  rewrite (Htc _ _ ctc).
+  exact (conditional_access_continuation_records _ _ _ _ Hopen cq ctp Hq Htp).
 Qed.
 
-(** A nested statement keeps any access stack and the open set. *)
+Ltac open_transition :=
+  match goal with
+  | Htransition : Atom.open_invariant _ _ _ = inr _ |- _ => exact Htransition
+  end.
+
+(** A nested statement keeps the open records. *)
 Lemma baseline_nested_balanced {Γ} nested (statement : stmt Γ)
     (Hbaseline : baseline_normalizable nested statement) :
-  nested = true ->
-  forall entry exit
-    (certificate : Atom.analysis_certificate Γ entry statement exit),
-  (forall stack, Atom.lifo_certificate certificate stack stack) /\
-  Atom.analysis_open exit = Atom.analysis_open entry.
+  nested = true -> balanced_piece statement.
 Proof.
   induction Hbaseline; intros Hnested entry exit certificate; subst nested.
   - exact (access_neutral_balanced _ y _ _ certificate).
   - dependent destruction certificate; try discriminate.
     try view_inversion.
-    destruct (IHHbaseline eq_refl _ _ certificate2) as [Hlifo Hopen].
-    split.
-    + intros stack. exists stack. split; [apply access_neutral_lifo; exact a|].
-      apply Hlifo.
-    + rewrite Hopen. exact (access_neutral_preserves_open certificate1 a).
+    rewrite (IHHbaseline eq_refl _ _ certificate2).
+    exact (access_neutral_records certificate1 a).
   - dependent destruction certificate; try discriminate.
     try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1) as [Hlifo1 Hopen1].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2) as [Hlifo2 Hopen2].
-    split; [intros stack; exists stack; split; auto | congruence].
+    rewrite (IHHbaseline2 eq_refl _ _ certificate2).
+    exact (IHHbaseline1 eq_refl _ _ certificate1).
   - dependent destruction certificate; try discriminate.
     try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1) as [Hlifo1 Hopen1].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2) as [Hlifo2 Hopen2].
-    split; [intros stack; split; auto | exact Hopen1].
+    exact (IHHbaseline1 eq_refl _ _ certificate1).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
     try view_inversion.
@@ -2013,16 +1866,8 @@ Proof.
     try view_inversion.
     dependent destruction certificate2_2; try discriminate.
     try view_inversion.
-    pose proof (Atom.open_invariant_success _ _ _ e0)
-      as (Hfresh & _ & _ & Hopened).
-    destruct (IHHbaseline eq_refl _ _ certificate2_1) as [Hlifo Hopen].
-    rewrite Hopened in Hopen.
-    split.
-    + intros stack. cbn [Atom.lifo_certificate].
-      eexists. split; [reflexivity|]. eexists. split; [apply Hlifo|].
-      left. eexists. split; [reflexivity|]. rewrite Hopen.
-      split; [set_solver|]. split; [exact Hfresh | reflexivity].
-    + apply fold_after_open_closes; assumption.
+    eapply Atom.fold_after_open_records; [open_transition|].
+    exact (IHHbaseline eq_refl _ _ certificate2_1).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
     try view_inversion.
@@ -2034,457 +1879,111 @@ Proof.
     try view_inversion.
     dependent destruction certificate2_2_1; try discriminate.
     try view_inversion.
-    pose proof (Atom.open_invariant_success _ _ _ e0)
-      as (Hfresh & _ & _ & Hopened).
-    destruct (IHHbaseline1 eq_refl _ _ certificate2_1) as [Hlifo Hopen].
-    rewrite Hopened in Hopen.
-    destruct (IHHbaseline2 eq_refl _ _ certificate2_2_2) as [Hwork_lifo Hwork_open].
-    split.
-    + intros stack. cbn [Atom.lifo_certificate].
-      eexists. split; [reflexivity|]. eexists. split; [apply Hlifo|].
-      eexists. split; [|apply Hwork_lifo].
-      left. eexists. split; [reflexivity|]. rewrite Hopen.
-      split; [set_solver|]. split; [exact Hfresh | reflexivity].
-    + rewrite Hwork_open. apply fold_after_open_closes; assumption.
+    rewrite (IHHbaseline2 eq_refl _ _ certificate2_2_2).
+    eapply Atom.fold_after_open_records; [open_transition|].
+    exact (IHHbaseline1 eq_refl _ _ certificate2_1).
   - dependent destruction certificate; try discriminate.
-    match goal with
-    | Hview : @AnalysisView.syntax_view _ _ (TGhostVal _ _ _ _) = _ |- _ =>
-        cbn in Hview; injection Hview as Hd Hscope_body
-    end.
-    subst. apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst.
+    try view_inversion.
     exact (IHHbaseline eq_refl _ _ certificate).
   - dependent destruction certificate; try discriminate.
     try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1) as [Hlifo1 Hopen1].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2) as [Hlifo2 Hopen2].
-    split; [intros stack; split; auto | exact Hopen1].
-  - apply conditional_access_balanced;
+    exact (IHHbaseline1 eq_refl _ _ certificate1).
+  - revert entry exit certificate. apply conditional_access_balanced;
       [exact (IHHbaseline1 eq_refl) | exact (IHHbaseline2 eq_refl)
-      | exact (IHHbaseline3 eq_refl) | exact (IHHbaseline4 eq_refl)
-      | exact (IHHbaseline5 eq_refl)].
-  - apply conditional_access_balanced;
+      | exact (IHHbaseline4 eq_refl)].
+  - revert entry exit certificate. apply conditional_access_balanced;
       [exact (IHHbaseline1 eq_refl) | apply access_neutral_balanced; assumption
-      | apply access_neutral_balanced; assumption
-      | exact (IHHbaseline2 eq_refl) | exact (IHHbaseline3 eq_refl)].
+      | exact (IHHbaseline2 eq_refl)].
 Qed.
 
-Lemma conditional_access_empty_output {Γ} invariant
+Lemma conditional_access_closed {Γ} invariant
     (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (prefix : stmt Γ) (guard : access_guard Γ)
     (then_prefix then_continuation else_prefix else_continuation : stmt Γ) :
   balanced_piece prefix -> balanced_piece then_prefix ->
-  (forall entry exit
-    (certificate : Atom.analysis_certificate Γ entry then_continuation exit)
-    stack_out,
-    Atom.lifo_certificate certificate [] stack_out -> stack_out = []) ->
-  forall entry exit
-    (certificate : Atom.analysis_certificate Γ entry
-      (conditional_access invariant arguments prefix guard then_prefix
-        then_continuation else_prefix else_continuation) exit) stack_out,
-  Atom.lifo_certificate certificate [] stack_out -> stack_out = [].
-Proof.
-  intros Hq Htp Htc entry exit certificate stack_out Hlifo.
-  destruct (conditional_access_certificate_parts _ _ _ _ _ _ _ _ _ _
-    certificate) as [opened joined then_closed then_exit else_closed else_exit
-      Hopen cq ctp ctc cep cec Hopen_equal Hatomic_equal Hexit].
-  subst exit.
-  rewrite (Atom.analysis_certificate_unique certificate
-    (conditional_access_certificate _ _ _ _ _ _ _ _ Hopen cq ctp ctc cep cec
-      Hopen_equal Hatomic_equal)) in Hlifo.
-  pose proof (Atom.open_invariant_success _ _ _ Hopen)
-    as (_ & _ & _ & Hopened).
-  destruct (Hq _ _ cq) as [Hq_lifo Hq_open].
-  destruct (Htp _ _ ctp) as [Htp_lifo Htp_open].
-  cbn [conditional_access_certificate Atom.lifo_certificate] in Hlifo.
-  destruct Hlifo as (m1 & -> & m2 & Hq_run & Hthen & _).
-  assert (m2 = [(invariant, Atom.analysis_open entry)]) as ->
-    by (eapply Atom.lifo_certificate_functional; [exact Hq_run | apply Hq_lifo]).
-  eapply Htc. eapply closing_branch_lifo; [exact Htp_lifo | exact Htp_open | |
-    exact Hthen].
-  rewrite Hq_open, Hopened. set_solver.
-Qed.
-
-Lemma conditional_access_closed_lifo {Γ} invariant
-    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
-    (prefix : stmt Γ) (guard : access_guard Γ)
-    (then_prefix then_continuation else_prefix else_continuation : stmt Γ) :
-  balanced_piece prefix -> balanced_piece then_prefix ->
-  balanced_piece else_prefix ->
   (forall entry exit
     (certificate : Atom.analysis_certificate Γ entry then_continuation exit),
-    Atom.analysis_open entry = ∅ ->
-    Atom.lifo_certificate certificate [] [] /\ Atom.analysis_open exit = ∅) ->
-  (forall entry exit
-    (certificate : Atom.analysis_certificate Γ entry else_continuation exit),
-    Atom.analysis_open entry = ∅ ->
-    Atom.lifo_certificate certificate [] [] /\ Atom.analysis_open exit = ∅) ->
+    Atom.analysis_records entry = [] -> Atom.analysis_records exit = []) ->
   forall entry exit
     (certificate : Atom.analysis_certificate Γ entry
       (conditional_access invariant arguments prefix guard then_prefix
         then_continuation else_prefix else_continuation) exit),
-  Atom.analysis_open entry = ∅ ->
-  Atom.lifo_certificate certificate [] [] /\ Atom.analysis_open exit = ∅.
+  Atom.analysis_records entry = [] -> Atom.analysis_records exit = [].
 Proof.
-  intros Hq Htp Hep Htc Hec entry exit certificate Hentry.
+  intros Hq Htp Htc entry exit certificate Hentry.
   destruct (conditional_access_certificate_parts _ _ _ _ _ _ _ _ _ _
     certificate) as [opened joined then_closed then_exit else_closed else_exit
-      Hopen cq ctp ctc cep cec Hopen_equal Hatomic_equal Hexit].
-  subst exit.
-  rewrite (Atom.analysis_certificate_unique certificate
-    (conditional_access_certificate _ _ _ _ _ _ _ _ Hopen cq ctp ctc cep cec
-      Hopen_equal Hatomic_equal)).
-  pose proof (Atom.open_invariant_success _ _ _ Hopen)
-    as (Hfresh & _ & _ & Hopened).
-  destruct (Hq _ _ cq) as [Hq_lifo Hq_open].
-  destruct (Htp _ _ ctp) as [Htp_lifo Htp_open].
-  destruct (Hep _ _ cep) as [Hep_lifo Hep_open].
-  assert (Hjoined : Atom.analysis_open joined =
-    {[invariant]} ∪ Atom.analysis_open entry) by congruence.
-  destruct (Htc _ _ ctc) as [Htc_lifo Htc_exit].
-  { rewrite (fold_after_open_closes invariant entry); [exact Hentry | exact Hfresh
-    | congruence]. }
-  destruct (Hec _ _ cec) as [Hec_lifo _].
-  { rewrite (fold_after_open_closes invariant entry); [exact Hentry | exact Hfresh
-    | congruence]. }
-  split; [|exact Htc_exit].
-  cbn [conditional_access_certificate Atom.lifo_certificate].
-  eexists. split; [reflexivity|].
-  eexists. split; [apply Hq_lifo|].
-  split; eapply closing_branch_lifo_intro; eauto.
+      Hopen cq ctp _ ctc cep _ cec _ _ Hexit].
+  subst exit. cbn [Atom.analysis_records].
+  apply (Htc _ _ ctc).
+  rewrite (conditional_access_continuation_records _ _ _ _ Hopen cq ctp Hq Htp).
+  exact Hentry.
 Qed.
 
-Lemma baseline_normalizable_empty_output {Γ} nested (statement : stmt Γ)
+(** Accepted source regions entered with no open invariant exit with
+    none. *)
+Lemma baseline_normalizable_closed {Γ} nested (statement : stmt Γ)
     (Hbaseline : baseline_normalizable nested statement) :
   nested = false ->
   forall entry exit
-    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry statement exit) stack_out,
-    GenericRegions.Atomicity.lifo_certificate certificate [] stack_out ->
-    stack_out = [].
-Proof.
-  induction Hbaseline; intros Hnested entry exit certificate stack_out Hlifo;
-    subst nested.
-  - pose proof (unfold_free_lifo_length_le certificate [] stack_out y Hlifo)
-      as Hlength.
-    destruct stack_out; [reflexivity|simpl in Hlength; lia].
-  - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct Hlifo as (middle_stack & Hfirst & Hsecond).
-    assert (Hmiddle : middle_stack = []).
-    { eapply Atom.lifo_certificate_functional; [exact Hfirst|].
-      apply access_neutral_lifo. exact a. }
-    subst middle_stack.
-    exact (IHHbaseline eq_refl _ _ _ _ Hsecond).
-  - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct Hlifo as (middle_stack & Hfirst & Hsecond).
-    pose proof (IHHbaseline1 eq_refl _ _ _ _ Hfirst). subst middle_stack.
-    exact (IHHbaseline2 eq_refl _ _ _ _ Hsecond).
-  - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct Hlifo as [Hthen _]. exact (IHHbaseline1 eq_refl _ _ _ _ Hthen).
-  - subst closing_arguments.
-    dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    destruct (baseline_nested_balanced _ _ Hbaseline eq_refl _ _ certificate2_1)
-      as [Hbody_lifo Hbody_open].
-    destruct Hlifo as (opened_stack & Hopen & Htail).
-    destruct Htail as (body_stack & Hbody & Hfold).
-    assert (body_stack = opened_stack) as ->
-      by (eapply Atom.lifo_certificate_functional; [exact Hbody | apply Hbody_lifo]).
-    unfold Atom.lifo_certificate in Hfold.
-    destruct Hfold as [(outer_open & Hstack & _)|[Hsame Hclosed]].
-    + cbn in Hopen. congruence.
-    + exfalso. apply Hclosed. rewrite Hbody_open.
-      match goal with
-      | Htransition : Atom.open_invariant _ _ = inr _ |- _ =>
-          pose proof (Atom.open_invariant_success _ _ _ Htransition)
-            as (_ & _ & _ & ->)
-      end.
-      set_solver.
-  - subst closing_arguments.
-    dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    match goal with
-    | Hfold_certificate : Atom.analysis_certificate _ _ (TFold _ _) _ |- _ =>
-        dependent destruction Hfold_certificate
-    end; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    destruct (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _ certificate2_1)
-      as [Hbody_lifo Hbody_open].
-    destruct Hlifo as (opened_stack & Hopen & Htail).
-    destruct Htail as (body_stack & Hbody & Hfold_work).
-    assert (body_stack = opened_stack) as ->
-      by (eapply Atom.lifo_certificate_functional; [exact Hbody | apply Hbody_lifo]).
-    destruct Hfold_work as (closed_stack & Hfold & Hwork).
-    unfold Atom.lifo_certificate in Hfold.
-    destruct Hfold as [(outer_open & Hstack & _)|[Hsame Hclosed]].
-    + cbn in Hopen. subst opened_stack.
-      inversion Hstack; subst outer_open closed_stack.
-      exact (IHHbaseline2 eq_refl _ _ _ _ Hwork).
-    + exfalso. apply Hclosed. rewrite Hbody_open.
-      match goal with
-      | Htransition : Atom.open_invariant _ _ = inr _ |- _ =>
-          pose proof (Atom.open_invariant_success _ _ _ Htransition)
-            as (_ & _ & _ & ->)
-      end.
-      set_solver.
-  - dependent destruction certificate; try discriminate.
-    match goal with
-    | Hview : @AnalysisView.syntax_view _ _ (TGhostVal _ _ _ _) = _ |- _ =>
-        cbn in Hview; injection Hview as Hd Hscope_body
-    end.
-    subst. apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst.
-    exact (IHHbaseline eq_refl _ _ _ _ Hlifo).
-  - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct Hlifo as [Hthen _]. exact (IHHbaseline1 eq_refl _ _ _ _ Hthen).
-  - eapply conditional_access_empty_output; [| | | exact Hlifo].
-    + exact (baseline_nested_balanced _ _ Hbaseline1 eq_refl).
-    + exact (baseline_nested_balanced _ _ Hbaseline2 eq_refl).
-    + exact (IHHbaseline4 eq_refl).
-  - eapply conditional_access_empty_output; [| | | exact Hlifo].
-    + exact (baseline_nested_balanced _ _ Hbaseline1 eq_refl).
-    + apply access_neutral_balanced. assumption.
-    + exact (IHHbaseline2 eq_refl).
-Qed.
-
-(** Accepted source regions are balanced at a closed procedure boundary.
-    Unlike the purely syntactic statement, this uses the analyzer entry
-    state so that an unmatched raw fold is correctly treated as allocation. *)
-Lemma baseline_normalizable_closed_lifo {Γ} nested (statement : stmt Γ)
-    (Hbaseline : baseline_normalizable nested statement) :
-  nested = false ->
-  forall entry exit
-    (certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry statement exit),
-    GenericRegions.Atomicity.analysis_open entry = ∅ ->
-    GenericRegions.Atomicity.lifo_certificate certificate [] [] /\
-      GenericRegions.Atomicity.analysis_open exit = ∅.
+    (certificate : Atom.analysis_certificate Γ entry statement exit),
+  Atom.analysis_records entry = [] -> Atom.analysis_records exit = [].
 Proof.
   induction Hbaseline; intros Hnested entry exit certificate Hentry;
     subst nested.
-  - now apply unfold_free_closed_lifo.
+  - exact (unfold_free_closed certificate y Hentry).
   - dependent destruction certificate; try discriminate. try view_inversion.
-    assert (Hmiddle : Atom.analysis_open middle = ∅).
-    { rewrite (access_neutral_preserves_open certificate1 a). exact Hentry. }
-    destruct (IHHbaseline eq_refl _ _ certificate2 Hmiddle) as [Hsecond Hexit].
-    split; [|exact Hexit]. eexists. split; [|exact Hsecond].
-    apply access_neutral_lifo. exact a.
+    apply (IHHbaseline eq_refl _ _ certificate2).
+    rewrite (access_neutral_records certificate1 a). exact Hentry.
   - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1 Hentry) as [Hfirst Hmiddle].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2 Hmiddle) as [Hsecond Hexit].
-    split; [eexists; split; eassumption|exact Hexit].
+    exact (IHHbaseline2 eq_refl _ _ certificate2
+      (IHHbaseline1 eq_refl _ _ certificate1 Hentry)).
   - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1 Hentry) as [Hthen Hthen_exit].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2 Hentry) as [Helse Helse_exit].
-    split; [split; assumption|exact Hthen_exit].
+    exact (IHHbaseline1 eq_refl _ _ certificate1 Hentry).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    pose proof (Atom.open_invariant_success _ _ _ e0)
-      as (Hfresh & _ & _ & Hopened).
-    destruct (baseline_nested_balanced _ _ Hbaseline eq_refl _ _ certificate2_1)
-      as [Hbody_lifo Hbody_open].
-    rewrite Hopened in Hbody_open.
-    split.
-    + cbn [Atom.lifo_certificate]. eexists. split; [reflexivity|].
-      eexists. split; [apply Hbody_lifo|].
-      left. eexists. split; [reflexivity|]. rewrite Hbody_open.
-      split; [set_solver|]. split; [exact Hfresh | reflexivity].
-    + rewrite (fold_after_open_closes invariant state); assumption.
+    try view_inversion.
+    rewrite (Atom.fold_after_open_records _ _ _ _ _ _ ltac:(open_transition)
+      (baseline_nested_balanced _ _ Hbaseline eq_refl _ _ certificate2_1)).
+    exact Hentry.
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate1; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TUnfold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
+    try view_inversion.
     dependent destruction certificate2_2; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TSeq _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    match goal with
-    | Hfold_certificate : Atom.analysis_certificate _ _ (TFold _ _) _ |- _ =>
-        dependent destruction Hfold_certificate
-    end; try discriminate.
-    match goal with Hview : @AnalysisView.syntax_view _ _ (TFold _ _) = _ |- _ =>
-      cbn in Hview; inversion Hview; subst end.
-    pose proof (Atom.open_invariant_success _ _ _ e0)
-      as (Hfresh & _ & _ & Hopened).
-    destruct (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _ certificate2_1)
-      as [Hbody_lifo Hbody_open].
-    rewrite Hopened in Hbody_open.
-    assert (Hclosed_middle : Atom.analysis_open
-      (Atom.fold_invariant invariant state1) = ∅)
-      by (rewrite (fold_after_open_closes invariant state); assumption).
-    destruct (IHHbaseline2 eq_refl _ _ certificate2_2_2 Hclosed_middle)
-      as [Hwork Hexit].
-    split; [|exact Hexit].
-    cbn [Atom.lifo_certificate]. eexists. split; [reflexivity|].
-    eexists. split; [apply Hbody_lifo|].
-    eexists. split; [|exact Hwork].
-    left. eexists. split; [reflexivity|]. rewrite Hbody_open.
-    split; [set_solver|]. split; [exact Hfresh | reflexivity].
+    try view_inversion.
+    dependent destruction certificate2_2_1; try discriminate.
+    try view_inversion.
+    apply (IHHbaseline2 eq_refl _ _ certificate2_2_2).
+    rewrite (Atom.fold_after_open_records _ _ _ _ _ _ ltac:(open_transition)
+      (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _ certificate2_1)).
+    exact Hentry.
   - dependent destruction certificate; try discriminate.
-    match goal with
-    | Hview : @AnalysisView.syntax_view _ _ (TGhostVal _ _ _ _) = _ |- _ =>
-        cbn in Hview; injection Hview as Hd Hscope_body
-    end.
-    subst. apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst.
-    simpl. exact (IHHbaseline eq_refl _ _ _ Hentry).
+    try view_inversion.
+    exact (IHHbaseline eq_refl _ _ certificate Hentry).
   - dependent destruction certificate; try discriminate. try view_inversion.
-    destruct (IHHbaseline1 eq_refl _ _ certificate1 Hentry) as [Hthen Hthen_exit].
-    destruct (IHHbaseline2 eq_refl _ _ certificate2 Hentry) as [Helse Helse_exit].
-    split; [split; assumption|exact Hthen_exit].
-  - eapply conditional_access_closed_lifo; [| | | | | exact Hentry].
+    exact (IHHbaseline1 eq_refl _ _ certificate1 Hentry).
+  - revert entry exit certificate Hentry. apply conditional_access_closed.
     + exact (baseline_nested_balanced _ _ Hbaseline1 eq_refl).
     + exact (baseline_nested_balanced _ _ Hbaseline2 eq_refl).
-    + exact (baseline_nested_balanced _ _ Hbaseline3 eq_refl).
     + exact (IHHbaseline4 eq_refl).
-    + exact (IHHbaseline5 eq_refl).
-  - eapply conditional_access_closed_lifo; [| | | | | exact Hentry].
+  - revert entry exit certificate Hentry. apply conditional_access_closed.
     + exact (baseline_nested_balanced _ _ Hbaseline1 eq_refl).
     + apply access_neutral_balanced. assumption.
-    + apply access_neutral_balanced. assumption.
     + exact (IHHbaseline2 eq_refl).
-    + exact (IHHbaseline3 eq_refl).
 Qed.
 
-(** In the focused one-marker traversal, an unfold-free sequence has only
-    two possible handoff points: either its first child preserves the focused
-    marker, or that child consumes it.  This is the structural dichotomy used
-    by the recursive normalizer; in particular, callers never inspect the
-    implementation of [lifo_certificate] or redo its length arithmetic. *)
-Lemma unfold_free_lifo_sequence_middle_boundary
-    {Γ entry first middle second exit marker tail stack_middle}
-    (first_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      entry first middle)
-    (second_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      middle second exit)
-    (Hfirst_free : unfold_free first)
-    (Hsecond_free : unfold_free second)
-    (Hfirst : GenericRegions.Atomicity.lifo_certificate first_certificate
-      (marker :: tail) stack_middle)
-    (Hsecond : GenericRegions.Atomicity.lifo_certificate second_certificate
-      stack_middle tail) :
-  stack_middle = marker :: tail \/ stack_middle = tail.
-Proof.
-  pose proof (unfold_free_lifo_length_le first_certificate _ _
-    Hfirst_free Hfirst) as Hfirst_length.
-  pose proof (unfold_free_lifo_length_le second_certificate _ _
-    Hsecond_free Hsecond) as Hsecond_length.
-  destruct (Nat.eq_dec (length stack_middle) (S (length tail))) as
-    [Hpreserved | Hnot_preserved].
-  - left. apply unfold_free_lifo_same_length with first_certificate;
-      assumption.
-  - right.
-    simpl in Hfirst_length.
-    assert (Hclosed : length tail = length stack_middle) by lia.
-    symmetry. apply unfold_free_lifo_same_length with second_certificate;
-      assumption.
-Qed.
-
-(** A fold that shortens the focused stack is necessarily the matching fold,
-    not the fresh-invariant-allocation alternative of the analyzer rule. *)
-Lemma lifo_fold_consumes_focused_marker
-    {Γ state invariant arguments}
-    {focused : inv_id} {outer_open : gset inv_id}
-    {tail : list GenericRegions.Atomicity.access_marker}
-    (Hlifo : GenericRegions.Atomicity.lifo_certificate
-      (GenericRegions.Atomicity.CertFold Γ state
-        (TFold invariant arguments) invariant eq_refl)
-      ((focused, outer_open) :: tail) tail) :
-  invariant = focused.
-Proof.
-  simpl in Hlifo.
-  destruct Hlifo as
-    [(observed_outer & Hstack & _)|[Hstack _]].
-  - congruence.
-  - apply (f_equal (@length _)) in Hstack. simpl in Hstack. lia.
-Qed.
-
-Lemma unfold_free_balanced_structured {Γ entry statement exit}
-    (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) stack :
-  unfold_free statement ->
-  GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
-  structured_certificate Γ entry statement exit.
-Proof.
-  revert stack.
-  induction certificate; intros stack Hfree Hlifo; simpl in *.
-  - econstructor; eauto.
-  - eapply StructuredDone. exact e.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hfree. contradiction.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    destruct (decide
-      (invariant ∈ GenericRegions.Atomicity.analysis_open state)) as
-      [Hmember|Hfresh].
-    + exfalso. destruct Hlifo as
-        [(outer & Hcons & _)|[_ Hnot_member]].
-      * apply (f_equal (@length _)) in Hcons. simpl in Hcons. lia.
-      * exact (Hnot_member Hmember).
-    + apply StructuredFreshFold. exact Hfresh.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    cbn in Hfree. destruct Hfree as [Hfirst_free Hsecond_free].
-    destruct (constructive_indefinite_description _ Hlifo) as
-      (stack_middle & Hfirst & Hsecond).
-    pose proof (unfold_free_lifo_length_le certificate1 _ _
-      Hfirst_free Hfirst) as Hfirst_le.
-    pose proof (unfold_free_lifo_length_le certificate2 _ _
-      Hsecond_free Hsecond) as Hsecond_le.
-    assert (Hmiddle_length : length stack_middle = length stack) by lia.
-    pose proof (unfold_free_lifo_same_length certificate1 _ _
-      Hfirst_free Hfirst Hmiddle_length) as Hmiddle.
-    subst stack_middle. eapply StructuredSequence.
-    + apply (IHcertificate1 stack); assumption.
-    + apply (IHcertificate2 stack); assumption.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    all: cbn in Hfree. all: destruct Hfree as [Hthen_free Helse_free].
-    all: first [eapply StructuredConditional | eapply StructuredGhostConditional];
-      eauto using (proj1 Hlifo), (proj2 Hlifo).
-  - destruct statement; cbn in e; try discriminate; inversion e; subst; clear e.
-    cbn in Hfree. eapply StructuredAtomic; eauto using (proj1 Hlifo).
-  - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
-    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
-    cbn in Hfree. apply StructuredGhostVal.
-    apply (IHcertificate stack); assumption.
-Qed.
-
-(** Footprint-preserving form used by the public dispatcher.  The older
-    projection above remains useful to low-level callers that need only a
-    structured certificate. *)
+(** A structured certificate for an unfold-free region that keeps the open
+    records, with its footprint within the analyzer's. *)
 Record balanced_structured_result {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
       Γ entry statement exit) : Type := {
@@ -2504,13 +2003,12 @@ Record balanced_structured_result {Γ entry statement exit}
 Lemma unfold_free_balanced_structured_result
     {Γ entry statement exit}
     (certificate : GenericRegions.Atomicity.analysis_certificate
-      Γ entry statement exit) stack :
+      Γ entry statement exit) :
   unfold_free statement ->
-  GenericRegions.Atomicity.lifo_certificate certificate stack stack ->
+  Atom.analysis_records exit = Atom.analysis_records entry ->
   balanced_structured_result certificate.
 Proof.
-  revert stack.
-  induction certificate; intros stack Hfree Hlifo; simpl in *.
+  induction certificate; intros Hfree Hbalanced.
   - refine {| balanced_structured_certificate := StructuredLeaf Γ state
         statement exit e e0 |}.
     intros invariant Hmember. exact Hmember.
@@ -2522,31 +2020,24 @@ Proof.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
-    destruct (decide
-      (invariant ∈ GenericRegions.Atomicity.analysis_open state)) as
-      [Hmember|Hfresh].
-    + exfalso. destruct Hlifo as
-        [(outer & Hcons & _)|[_ Hnot_member]].
-      * apply (f_equal (@length _)) in Hcons. simpl in Hcons. lia.
-      * exact (Hnot_member Hmember).
-    + refine {| balanced_structured_certificate :=
-          StructuredFreshFold Γ state invariant arguments Hfresh |}.
-      intros candidate Hcandidate. exact Hcandidate.
-      exact I.
+    pose proof (fold_keeping_records_fresh _ _ _ e0 Hbalanced) as Hfresh.
+    refine {| balanced_structured_certificate :=
+        StructuredFreshFold Γ state invariant arguments Hfresh |}.
+    intros candidate Hcandidate. exact Hcandidate.
+    exact I.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     cbn in Hfree. destruct Hfree as [Hfirst_free Hsecond_free].
-    destruct (constructive_indefinite_description _ Hlifo) as
-      (stack_middle & Hfirst & Hsecond).
-    pose proof (unfold_free_lifo_length_le certificate1 _ _
-      Hfirst_free Hfirst) as Hfirst_le.
-    pose proof (unfold_free_lifo_length_le certificate2 _ _
-      Hsecond_free Hsecond) as Hsecond_le.
-    assert (Hmiddle_length : length stack_middle = length stack) by lia.
-    pose proof (unfold_free_lifo_same_length certificate1 _ _
-      Hfirst_free Hfirst Hmiddle_length) as Hmiddle.
-    subst stack_middle.
-    pose (first_result := IHcertificate1 stack Hfirst_free Hfirst).
-    pose (second_result := IHcertificate2 stack Hsecond_free Hsecond).
+    pose proof (unfold_free_records_suffix certificate1 Hfirst_free)
+      as Hfirst_suffix.
+    pose proof (unfold_free_records_suffix certificate2 Hsecond_free)
+      as Hsecond_suffix.
+    assert (Hmiddle : Atom.analysis_records middle =
+      Atom.analysis_records state).
+    { apply suffix_length_eq; [exact Hfirst_suffix|].
+      rewrite <- Hbalanced. apply suffix_length. exact Hsecond_suffix. }
+    pose (first_result := IHcertificate1 Hfirst_free Hmiddle).
+    pose (second_result := IHcertificate2 Hsecond_free
+      (eq_trans Hbalanced (eq_sym Hmiddle))).
     refine {| balanced_structured_certificate :=
         StructuredSequence Γ state first middle second exit
           first_result.(balanced_structured_certificate)
@@ -2563,8 +2054,10 @@ Proof.
       exact second_result.(balanced_structured_safe)].
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     all: cbn in Hfree. all: destruct Hfree as [Hthen_free Helse_free].
-    all: pose (then_result := IHcertificate1 stack Hthen_free (proj1 Hlifo)).
-    all: pose (else_result := IHcertificate2 stack Helse_free (proj2 Hlifo)).
+    all: cbn [Atom.analysis_records] in Hbalanced.
+    all: pose (then_result := IHcertificate1 Hthen_free Hbalanced).
+    all: pose (else_result := IHcertificate2 Helse_free
+      (eq_trans (eq_sym e0) Hbalanced)).
     + refine {| balanced_structured_certificate :=
         StructuredConditional Γ state condition then_branch else_branch
           then_exit else_exit then_result.(balanced_structured_certificate)
@@ -2595,7 +2088,7 @@ Proof.
           exact else_result.(balanced_structured_safe)].
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     cbn in Hfree.
-    pose (body_result := IHcertificate stack Hfree (proj1 Hlifo)).
+    pose (body_result := IHcertificate Hfree e1).
     refine {| balanced_structured_certificate :=
         StructuredAtomic Γ state body outer inner e0
           body_result.(balanced_structured_certificate) e1 |}.
@@ -2616,10 +2109,10 @@ Proof.
     injection e as Hd Hscope_body. subst d.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hfree.
-    pose (body_result := IHcertificate stack Hfree Hlifo).
+    pose (body_result := IHcertificate Hfree Hbalanced).
     refine {| balanced_structured_certificate :=
-        StructuredGhostVal Γ state name t initializer _ exit
-          body_result.(balanced_structured_certificate) |}.
+        StructuredGhostVal Γ state name t initializer _ inner
+          body_result.(balanced_structured_certificate) e0 |}.
     intros invariant Hmember.
     simpl in Hmember |- *.
     repeat rewrite elem_of_union in Hmember |- *.
