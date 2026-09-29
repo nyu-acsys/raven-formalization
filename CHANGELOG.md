@@ -22,20 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read every local. Write statements carry an initialization flag, and only
   an initializing write may target a runtime `val`. Procedure-level locals
   must be runtime locals (`procedure_wf`).
+- The trusted atomic-block transition depends only on the erasure of the
+  block, so proof-only rewrites of a block cannot change it.
 
 ### Added
 
 - Scoped ghost values: `ghost val x := e; s` (optionally annotated with a
   type) elaborates to `TGhostVal`, with a Hoare rule, analysis and
   normalization support, and an Iris soundness proof in which ghost locals
-  have no runtime frame slot. The counter example's `read` snapshots its
-  invariant argument this way.
+  have no runtime frame slot.
+- Invariant-argument snapshots: procedure elaboration binds the arguments of
+  every `unfold I(args)` to ghost `val`s, unfolds and folds the instance at
+  the snapshot, and asserts after the matching fold that its written
+  arguments equal the snapshot. An access whose argument variables are
+  reassigned inside it is thereby accepted by the normalizer. The rewrite
+  erases exactly to the source program (`snapshot_accesses_erasure`). A
+  conditional whose branches close an open access also saves its control
+  result in a ghost `val` at its evaluation point.
+  Derived rules `RTGhostValVar` and `RTAssertTrue` discharge the generated
+  binders and checks, as in the counter example's `read` and `incr`.
 - Immutable runtime locals: a procedure body may declare
   `val x : T := e;` or `val x : T := new(...);`, elaborated to a runtime
   `val` local and its initializing write. The counter example's `make`
   declares its allocated counter this way.
-- Analyzer regression tests for asymmetric allocation in conditionals
-  (`dune build @tests`).
+- Analyzer regression tests for asymmetric allocation in conditionals and
+  for snapshotted invariant arguments (`dune build @tests`).
 
 ## [1.0.0] - 2026-09-28
 

@@ -24,5 +24,6 @@
 ; [dune build @tests]: analyzer regression tests.
 (rule
  (alias tests)
- (deps tests/conditional_masks.vo tests/conditional_accesses.vo)
+ (deps tests/conditional_masks.vo tests/conditional_accesses.vo
+   tests/argument_snapshots.vo)
  (action (progn)))

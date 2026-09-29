@@ -1,4 +1,4 @@
-From Coq Require Import List String ZArith Program.Equality Lia
+From Coq Require Import List String ZArith Program.Equality Lia FunctionalExtensionality
   Logic.ProofIrrelevance ClassicalEpsilon.
 From stdpp Require Import countable gmap namespaces sets strings pretty.
 
@@ -92,9 +92,9 @@ Proof. apply ndot_preserve_disjoint_l, ndot_ne_disjoint. done. Qed.
     global [term_trusted_atomic_runtime_refinement] assumption at the
     certified Iris boundary; examples neither define this relation nor prove
     a separate progress condition for it. *)
-Axiom trusted_atomic_transition : forall {RAs : RAConfig}
-    {Logic : Assertion.LogicSignature} {Γ},
-  stmt Γ -> RuntimeLang.trusted_atomic_transition.
+Axiom trusted_atomic_transition : forall {RAs : RAConfig},
+  (RuntimeLang.stack_id -> RuntimeLang.runtime_stmt) ->
+  RuntimeLang.trusted_atomic_transition.
 
 
 Section WithSignature.
@@ -1384,45 +1384,34 @@ Fixpoint runtime_stmt {Γ} (names : named_context Γ)
       runtime_seq (runtime_stmt names stack first)
         (runtime_stmt names stack second)
   | TAtomic body =>
-      RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack
+      RuntimeLang.RTTrustedAtomic
+        (trusted_atomic_transition (fun stack' => runtime_stmt names stack' body))
+        stack
   | TGhostVal name t _ body =>
       runtime_stmt (NCCons name (ghost_val t) names) stack body
   end.
 
 End WithSignature.
-(** The trusted substrate observes an atomic block only through its runtime
-    behavior.  Consequently, proof-only rewrites with identical erasure
-    select the same opaque hardware transition.  Like the refinement law,
-    this is a framework property, never a module-specific obligation. *)
-Axiom trusted_atomic_transition_runtime_erasure : forall {RAs : RAConfig}
-    {Logic : Assertion.LogicSignature} {Γ}
-    (body body' : stmt Γ),
-  (forall (names : named_context Γ) (stack : RuntimeLang.stack_id),
-    runtime_stmt names stack body = runtime_stmt names stack body') ->
-  trusted_atomic_transition body = trusted_atomic_transition body'.
-
 Section WithSignature.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}.
 Lemma runtime_stmt_atomic {Γ} (names : named_context Γ) stack
     (body : stmt Γ) :
   runtime_stmt names stack (TAtomic body) =
-    RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack.
+    RuntimeLang.RTTrustedAtomic
+      (trusted_atomic_transition (fun stack' => runtime_stmt names stack' body))
+      stack.
 Proof. reflexivity. Qed.
 
-(** A proof-only rewrite of an atomic body cannot change its runtime
-    statement. No hypothesis about the transition is
-    needed -- it simply cannot see the difference. *)
-Lemma runtime_stmt_atomic_congruence {Γ} (names : named_context Γ) stack
-    (body body' : stmt Γ) :
-  (forall (names : named_context Γ) (stack : RuntimeLang.stack_id),
-    runtime_stmt names stack body = runtime_stmt names stack body') ->
+(** The trusted substrate observes an atomic block only through its erasure,
+    so a proof-only rewrite of the body cannot change its transition. *)
+Lemma runtime_stmt_atomic_congruence {Γ Γ'} (names : named_context Γ)
+    (names' : named_context Γ') stack (body : stmt Γ) (body' : stmt Γ') :
+  (forall stack, runtime_stmt names stack body = runtime_stmt names' stack body') ->
   runtime_stmt names stack (TAtomic body) =
-    runtime_stmt names stack (TAtomic body').
+    runtime_stmt names' stack (TAtomic body').
 Proof.
-  intros Herasure.
-  rewrite !runtime_stmt_atomic.
-  rewrite (trusted_atomic_transition_runtime_erasure body body' Herasure).
-  reflexivity.
+  intros Herasure. rewrite !runtime_stmt_atomic.
+  f_equal. f_equal. apply functional_extensionality_dep. exact Herasure.
 Qed.
 
 End WithSignature.

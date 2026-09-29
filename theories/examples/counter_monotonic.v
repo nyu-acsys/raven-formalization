@@ -4,7 +4,7 @@ From stdpp Require Import namespaces sets.
 From iris.base_logic.lib Require iprop invariants fancy_updates.
 From iris.proofmode Require proofmode.
 
-From raven Require Import runtime.erasure analysis.structured_certificates examples.mono_nat_ra surface.syntax surface.elaboration verification.expressions verification.assertions verification.ir verification.procedures analysis.normalization_base analysis.normalization soundness.runtime_model soundness.rule_validity soundness.procedure_validity soundness.adequacy.
+From raven Require Import runtime.erasure analysis.structured_certificates examples.mono_nat_ra surface.syntax surface.elaboration verification.expressions verification.assertions verification.ir verification.procedures analysis.normalization_base analysis.normalization soundness.runtime_model soundness.rule_validity soundness.procedure_validity soundness.adequacy verification.snapshots.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -21,7 +21,6 @@ Definition x := name "x".
 Definition v1 := name "v1".
 Definition v2 := name "v2".
 Definition new_v1 := name "new_v1".
-Definition gx := name "gx".
 Definition res := name "res".
 Definition call_res := name "call_res".
 Definition ret := name "ret".
@@ -58,10 +57,9 @@ Definition counter_declarations : source_module :=
         requires counterInv(x)
       {
         var v1 : Int;
-        ghost val gx := x;
-        unfold counterInv(gx);
+        unfold counterInv(x);
         v1 := x . c;
-        fold counterInv(gx);
+        fold counterInv(x);
         ret := v1
       }
 
@@ -326,8 +324,8 @@ Proof.
   reflexivity.
 Qed.
 
-(** The body of [read] runs under the snapshot [gx], whose slot holds the
-    formal once the snapshot equality is used. *)
+(** The body of [read] runs under the snapshot of its invariant argument,
+    whose slot holds the formal once the snapshot equality is used. *)
 Definition read_body_decls : decl_context :=
   ghost_val TRef :: runtime_decls [TRef; TInt; TInt].
 
@@ -384,12 +382,21 @@ Definition read_body_exit_store :
   RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
     read_field_store (LThere (LThere (LThere (LHere eq_refl)))).
 
-(** The snapshot is the outermost binder of [read]'s exit telescope. *)
 Definition read_exit_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt]) [TRef]
-      [TInt; TInt; TInt; TRef] :=
-  StoreCons (RefFormal MHere)
-    (StoreCons (RefBound (MThere MHere)) (StoreCons (RefBound MHere) StoreNil)).
+    symbolic_store (runtime_decls [TRef; TInt; TInt]) [TRef] [TInt; TInt; TInt] :=
+  store_tail read_body_exit_store.
+Lemma interp_equality_same {F Δ t} (formals : formal_env F)
+    (binders : binder_env Δ) valuation (expression : expr F Δ t) :
+  interp_expr formals binders valuation (EBinOp (BEq t) expression expression) =
+    Some (VBool true).
+Proof.
+  cbn [interp_expr].
+  destruct (interp_expr_total formals binders valuation expression)
+    as [value ->].
+  cbn [interp_binop]. rewrite (proj2 (tval_eqb_eq t value value) eq_refl).
+  reflexivity.
+Qed.
+
 Lemma interp_typed_equality_true_early {F Δ t}
     (formals : formal_env F) (binders : binder_env Δ) valuation
     (left right : expr F Δ t) :
@@ -456,6 +463,8 @@ Module Rules.
   Notation RTGhostUpdate := (HoareRules.RTGhostUpdate (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTIf := (HoareRules.RTIf (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTPostOpenCoreExists := (HoareRules.RTPostOpenCoreExists (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTAssertTrue := (HoareRules.RTAssertTrue (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTGhostValVar := (HoareRules.RTGhostValVar (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTGhostVal := (HoareRules.RTGhostVal (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTStackRewrite := (HoareRules.RTStackRewrite (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTBoundWeaken := (HoareRules.RTBoundWeaken (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
@@ -652,6 +661,11 @@ Proof.
     split; [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro].
 Qed.
 
+(** The generated check that the fold names the opened instance. *)
+Definition read_snapshot_check : stmt read_body_decls :=
+  TAssert (PEBinOp (BEq TRef) (PEVar (LHere eq_refl))
+    (PEVar (LThere (LHere eq_refl)))).
+
 Lemma read_rest :
   HoareRules.RavenHoareTriple
     (Resource.RState read_open_store read_open_core)
@@ -660,8 +674,9 @@ Lemma read_rest :
         (PEVar (LThere (LHere eq_refl))))
       (TSeq
         (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
-        (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
-          (PEVar (LThere (LThere (LHere eq_refl)))))))
+        (TSeq read_snapshot_check
+          (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+            (PEVar (LThere (LThere (LHere eq_refl))))))))
     (Resource.ResourceExists TInt
       (Resource.ResourceExists TInt
         (Resource.RState read_body_exit_store Resource.CTrue))).
@@ -669,9 +684,10 @@ Proof.
   eapply Rules.RTSeq.
   - exact read_field_read.
   - apply Rules.RTPrenexPreserve.
-    eapply Rules.RTSeq.
-    + exact read_fold.
-    + exact read_assign.
+    eapply Rules.RTSeq; [exact read_fold |].
+    eapply Rules.RTSeq; [| exact read_assign].
+    apply Rules.RTAssertTrue. intros formals binders valuation.
+    apply interp_equality_same.
 Qed.
 
 Lemma read_snapshot_derivation :
@@ -684,8 +700,9 @@ Lemma read_snapshot_derivation :
           (PEVar (LThere (LHere eq_refl))))
         (TSeq
           (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
-          (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
-            (PEVar (LThere (LThere (LHere eq_refl))))))))
+          (TSeq read_snapshot_check
+            (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+              (PEVar (LThere (LThere (LHere eq_refl)))))))))
     (Resource.ResourceExists TInt
       (Resource.ResourceExists TInt
         (Resource.ResourceExists TInt
@@ -711,26 +728,8 @@ Proof.
     Resource.subst_bound_core].
   eapply Rules.RTPrenexConsequence;
     [| apply Rules.resource_prenex_entails_refl |].
-  - eapply Rules.RTGhostVal.
-    (* The snapshot equality puts the formal into the slot of [gx]. *)
-    eapply Rules.RTStackRewrite;
-      [| apply RH.StoreEqualCons;
-         [apply Rules.CEntailsStep, Rules.CESAndElimR
-         | apply RH.store_equal_under_refl]].
-    eapply Rules.RTConsequence;
-      [| apply Rules.CEntailsStep, Rules.CESAndElimL
-       | apply Rules.resource_prenex_entails_refl].
-    exact (Rules.RTBoundWeaken TRef _ _ _ read_snapshot_derivation).
-  - match goal with
-    | |- RH.resource_prenex_entails ?left ?right =>
-        replace left with right
-    end;
-    [|unfold read_body_exit_store, read_field_store, read_open_store,
-        read_snapshot_store, read_exit_store; cbn;
-      repeat (unfold HoareRules.Resource.Assertions.lift_bound_renaming ||
-        rewrite view_member_here || rewrite view_member_there);
-      reflexivity].
-    apply Rules.resource_prenex_entails_refl.
+  - apply Rules.RTGhostValVar. exact read_snapshot_derivation.
+  - apply Rules.resource_prenex_entails_refl.
 Qed.
 
 Module CounterAtomicity := RuleValidity.GenericRegions.Atomicity.
@@ -888,38 +887,51 @@ Proof.
   apply Rules.RTPrenexPreserve.
   exact make_fold_assign.
 Qed.
-Definition incr_open1_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt] :=
-  weaken_store incr_entry_store.
+(** The body of [incr] runs under the snapshots of its two accesses'
+    arguments; each snapshot slot holds the formal. *)
+Definition incr_body1_decls : decl_context :=
+  ghost_val TRef :: runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit].
+Definition incr_body2_decls : decl_context := ghost_val TRef :: incr_body1_decls.
+
+Definition incr_snapshot1_store : symbolic_store incr_body1_decls [TRef] [] :=
+  StoreCons (RefFormal MHere) incr_entry_store.
+
+Lemma incr_snapshot1_arguments {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr_list incr_snapshot1_store
+      (PECons (PEVar (LHere Hkeep)) PENil) =
+    ExprCons (ERef (RefFormal MHere)) ExprNil.
+Proof. reflexivity. Qed.
+
+Definition incr_open1_store : symbolic_store incr_body1_decls [TRef] [TInt] :=
+  weaken_store incr_snapshot1_store.
 
 Definition incr_read1_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_open1_store (LThere (LHere eq_refl)).
+    symbolic_store incr_body1_decls [TRef] [TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    incr_open1_store (LThere (LThere (LHere eq_refl))).
 
 Definition incr_new_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_read1_store
-    (LThere (LThere (LHere eq_refl))).
+    symbolic_store incr_body1_decls [TRef] [TInt; TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    incr_read1_store (LThere (LThere (LThere (LHere eq_refl)))).
+
+Definition incr_snapshot2_store :
+    symbolic_store incr_body2_decls [TRef] [TInt; TInt; TInt] :=
+  StoreCons (RefFormal MHere) incr_new_store.
 
 Definition incr_open2_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt; TInt; TInt; TInt] :=
-  weaken_store incr_new_store.
+    symbolic_store incr_body2_decls [TRef] [TInt; TInt; TInt; TInt] :=
+  weaken_store incr_snapshot2_store.
 
 Definition incr_cas_read_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt; TInt; TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_open2_store
-    (LThere (LThere (LThere (LHere eq_refl)))).
+    symbolic_store incr_body2_decls [TRef] [TInt; TInt; TInt; TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    incr_open2_store (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))).
 
 Definition incr_res_store :
-    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_cas_read_store
-    (LThere (LThere (LThere (LThere (LHere eq_refl))))).
+    symbolic_store incr_body2_decls [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    incr_cas_read_store (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl))))))).
 
 Lemma incr_open1_location {keep} (Hkeep : keep _ = true) :
   RuleValidity.Translation.IR.symbolize_expr incr_open1_store (PEVar (LHere Hkeep)) =
@@ -931,8 +943,34 @@ Lemma incr_read1_location {keep} (Hkeep : keep _ = true) :
     ERef (RefFormal MHere).
 Proof. reflexivity. Qed.
 
-Lemma incr_new_location {keep} (Hkeep : keep _ = true) :
-  RuleValidity.Translation.IR.symbolize_expr incr_new_store (PEVar (LHere Hkeep)) =
+Lemma incr_snapshot2_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_snapshot2_store
+      (PEVar (LHere Hkeep)) =
+    ERef (RefFormal MHere).
+Proof. reflexivity. Qed.
+
+(** [x] itself, one slot below the snapshot of each access. *)
+Lemma incr_open1_x_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_open1_store
+      (PEVar (LThere (LHere Hkeep))) =
+    ERef (RefFormal MHere).
+Proof. reflexivity. Qed.
+
+Lemma incr_open2_x_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_open2_store
+      (PEVar (LThere (LThere (LHere Hkeep)))) =
+    ERef (RefFormal MHere).
+Proof. reflexivity. Qed.
+
+Lemma incr_cas_read_x_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_cas_read_store
+      (PEVar (LThere (LThere (LHere Hkeep)))) =
+    ERef (RefFormal MHere).
+Proof. reflexivity. Qed.
+
+Lemma incr_res_x_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_res_store
+      (PEVar (LThere (LThere (LHere Hkeep)))) =
     ERef (RefFormal MHere).
 Proof. reflexivity. Qed.
 
@@ -952,7 +990,7 @@ Lemma incr_res_location {keep} (Hkeep : keep _ = true) :
 Proof. reflexivity. Qed.
 Lemma incr_unfold1_open :
   HoareRules.RavenHoareTriple
-    (Resource.RState incr_entry_store
+    (Resource.RState incr_snapshot1_store
       (counter_token_core (ERef (RefFormal MHere))))
     (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.ResourceExists TInt
@@ -963,14 +1001,14 @@ Proof.
   unfold counter_token_core.
   try change (Assertion.procedure_args incr_procedure) with ([TRef] : context).
   rewrite <- counter_invariant_at_formal.
-  rewrite <- (incr_entry_arguments (keep := keep_all) eq_refl).
+  rewrite <- (incr_snapshot1_arguments (keep := keep_all) eq_refl).
   apply Rules.RTUnfoldInvariant.
 Qed.
 
 Lemma incr_field1_read :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open1_store read_open_core)
-    (TFieldRead false counter_field (LThere (LHere eq_refl)) (PEVar (LHere eq_refl)))
+    (TFieldRead false counter_field (LThere (LThere (LHere eq_refl))) (PEVar (LThere (LHere eq_refl))))
     (Resource.ResourceExists TInt
       (Resource.RState incr_read1_store read_field_core)).
 Proof.
@@ -983,10 +1021,10 @@ Proof.
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
   - eapply Rules.RTFrame.
     change (Assertion.field_type counter_field) with TInt.
-    rewrite <- (incr_open1_location (keep := keep_runtime) eq_refl).
+    rewrite <- (incr_open1_x_location (keep := keep_runtime) eq_refl).
     eapply Rules.RTFieldRead.
   - apply Rules.CEntailsStep. apply Rules.CESAndComm.
-  - rewrite incr_open1_location. apply Rules.resource_prenex_entails_refl.
+  - rewrite incr_open1_x_location. apply Rules.resource_prenex_entails_refl.
 Qed.
 
 Lemma incr_fold1 :
@@ -1012,6 +1050,16 @@ Proof.
     unfold counter_token_core. apply Rules.resource_prenex_entails_refl.
 Qed.
 
+(** The generated checks that each fold names the opened instance. *)
+Lemma incr_check1 :
+  HoareRules.RavenHoareTriple
+    (Resource.RState incr_read1_store
+      (counter_token_core (ERef (RefFormal MHere))))
+    (TAssert (PEBinOp (BEq TRef) (PEVar (LHere eq_refl)) (PEVar (LThere (LHere eq_refl)))))
+    (Resource.RState incr_read1_store
+      (counter_token_core (ERef (RefFormal MHere)))).
+Proof. apply Rules.RTAssertTrue. intros. apply interp_equality_same. Qed.
+
 (** *** Step 2: [new_v1 := v1 + 1], carrying the closed invariant token *)
 
 (** The opened invariant body, at any ambient binder context.  [read]'s
@@ -1028,14 +1076,14 @@ Definition incr_new_equality_core :
     expr [TRef] [TInt; TInt; TInt] TBool :=
   EBinOp (BEq TInt) (ERef (RefBound MHere))
     (weaken_expr (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_read1_store
-      (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z))))).
+      (PEBinOp BAdd (PEVar (LThere (LThere (LHere eq_refl)))) (PEVal (VInt 1%Z))))).
 
 Lemma incr_assign_new :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_read1_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign false (LThere (LThere (LHere eq_refl)))
-      (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z))))
+    (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+      (PEBinOp BAdd (PEVar (LThere (LThere (LHere eq_refl)))) (PEVal (VInt 1%Z))))
     (Resource.ResourceExists TInt
       (Resource.RState incr_new_store
         (Resource.CAnd (Resource.CExpr incr_new_equality_core)
@@ -1059,7 +1107,7 @@ Qed.
 
 Lemma incr_unfold2 :
   HoareRules.RavenHoareTriple
-    (Resource.RState incr_new_store
+    (Resource.RState incr_snapshot2_store
       (Resource.CAnd (Resource.CExpr incr_new_equality_core)
         (counter_token_core (ERef (RefFormal MHere)))))
     (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
@@ -1071,7 +1119,7 @@ Proof.
   unfold incr_open2_store.
   eapply Rules.RTConsequence;
     [eapply Rules.RTFrame; eapply Rules.RTUnfoldInvariant | | ].
-  - cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_new_location.
+  - cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_snapshot2_location.
     unfold counter_token_core.
     apply Rules.CEntailsStep. apply Rules.CESAndComm.
   - eapply Rules.RPETrans; [| apply Rules.RPEOpenCoreExists].
@@ -1079,7 +1127,7 @@ Proof.
     apply Rules.RPEBody. split; [reflexivity |].
     cbn [RuleValidity.Hoare.ResourceHoare.Resource.resource_body
       RuleValidity.Hoare.ResourceHoare.Resource.resource_stack].
-    cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_new_location.
+    cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_snapshot2_location.
     try change (Assertion.procedure_args incr_procedure) with ([TRef] : context).
     rewrite (counter_invariant_instantiated (ERef (RefFormal MHere))).
     unfold counter_open_core.
@@ -1093,11 +1141,12 @@ Definition incr_cas_old_core :
 Definition incr_cas_new_core :
     expr [TRef] [TInt; TInt; TInt; TInt; TInt] TInt :=
   RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
-    (PEVar (LThere (LThere (LHere eq_refl)))).
+    (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))).
 
 Definition incr_cas_expected_core :
     expr [TRef] [TInt; TInt; TInt; TInt; TInt] TInt :=
-  RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store (PEVar (LThere (LHere eq_refl))).
+  RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
+    (PEVar (LThere (LThere (LThere (LHere eq_refl))))).
 
 (** The block's own read lands [v2] in binder zero. *)
 Definition incr_cas_failure_core :
@@ -1128,8 +1177,7 @@ Definition incr_cas_read_core :
 
 (** The joined post of the block, discriminated by the result bit. *)
 Definition incr_cas_join_prenex :
-    Resource.resource_prenex (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
-      [TRef] [TInt; TInt; TInt; TInt] :=
+    Resource.resource_prenex incr_body2_decls [TRef] [TInt; TInt; TInt; TInt] :=
   Resource.ResourceExists TInt
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1140,8 +1188,8 @@ Definition incr_cas_join_prenex :
 Lemma incr_cas_read :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    (TFieldRead false counter_field (LThere (LThere (LThere (LHere eq_refl))))
-      (PEVar (LHere eq_refl)))
+    (TFieldRead false counter_field (LThere (LThere (LThere (LThere (LThere (LHere eq_refl))))))
+      (PEVar (LThere (LThere (LHere eq_refl)))))
     (Resource.ResourceExists TInt
       (Resource.RState incr_cas_read_store incr_cas_read_core)).
 Proof.
@@ -1155,10 +1203,10 @@ Proof.
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
   - eapply Rules.RTFrame.
     change (Assertion.field_type counter_field) with TInt.
-    rewrite <- (incr_open2_location (keep := keep_runtime) eq_refl).
+    rewrite <- (incr_open2_x_location (keep := keep_runtime) eq_refl).
     eapply Rules.RTFieldRead.
   - apply Rules.CEntailsStep. apply Rules.CESAndComm.
-  - rewrite incr_open2_location. apply Rules.resource_prenex_entails_refl.
+  - rewrite incr_open2_x_location. apply Rules.resource_prenex_entails_refl.
 Qed.
 
 Lemma incr_cas_success_branch :
@@ -1166,12 +1214,12 @@ Lemma incr_cas_success_branch :
     (Resource.RState incr_cas_read_store
       (Resource.CAnd incr_cas_read_core
         (Resource.CExpr (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
-          (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LHere eq_refl)))))
-            (PEVar (LThere (LHere eq_refl))))))))
+          (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
+            (PEVar (LThere (LThere (LThere (LHere eq_refl))))))))))
     (TSeq
-      (TFieldWrite counter_field (PEVar (LHere eq_refl))
-        (PEVar (LThere (LThere (LHere eq_refl)))))
-      (TAssign false (LThere (LThere (LThere (LThere (LHere eq_refl)))))
+      (TFieldWrite counter_field (PEVar (LThere (LThere (LHere eq_refl))))
+        (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
+      (TAssign false (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
         (PEVal (VBool true))))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1236,10 +1284,11 @@ Proof.
           (EUnOp (URAOfInt h_ra) incr_cas_expected_core)))).
   - eapply Rules.RTConsequence;
       [eapply Rules.RTFrame; eapply Rules.RTFieldWrite | | ].
-    + rewrite <- (incr_cas_read_location (keep := keep_runtime) eq_refl). apply Rules.CEntailsRefl.
+    + rewrite <- (incr_cas_read_x_location (keep := keep_runtime) eq_refl).
+      apply Rules.CEntailsRefl.
     + unfold incr_cas_new_core.
       cbn [RuleValidity.Hoare.ResourceHoare.Resource.prenex_and].
-      rewrite <- (incr_cas_read_location (keep := keep_runtime) eq_refl).
+      rewrite <- (incr_cas_read_x_location (keep := keep_runtime) eq_refl).
       apply Rules.resource_prenex_entails_refl.
   - unfold incr_res_store.
     eapply Rules.RTConsequence;
@@ -1273,9 +1322,9 @@ Lemma incr_cas_failure_branch :
       (Resource.CAnd incr_cas_read_core
         (Resource.CExpr (EUnOp UNot
           (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
-            (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LHere eq_refl)))))
-              (PEVar (LThere (LHere eq_refl)))))))))
-    (TAssign false (LThere (LThere (LThere (LThere (LHere eq_refl)))))
+            (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
+              (PEVar (LThere (LThere (LThere (LHere eq_refl)))))))))))
+    (TAssign false (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
       (PEVal (VBool false)))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1315,13 +1364,18 @@ Proof.
     injection Hvalue as Hvalue. rewrite Hvalue. reflexivity.
 Qed.
 
+(** The trusted block as it appears under the two snapshots. *)
+Definition cas_snapshot_body : stmt incr_body2_decls :=
+  Eval vm_compute in
+    snapshots.Snapshots.stmt_rename (fun _ _ variable => LThere (LThere variable))
+      cas_typed_body.
+
 Lemma incr_cas_body :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    cas_typed_body incr_cas_join_prenex.
+    cas_snapshot_body incr_cas_join_prenex.
 Proof.
-  unfold cas_typed_body, incr_cas_join_prenex.
-  cbn [elaborate_stmt].
+  unfold cas_snapshot_body, incr_cas_join_prenex.
   eapply Rules.RTSeq; [apply incr_cas_read |].
   apply Rules.RTPrenexPreserve.
   eapply Rules.RTIf;
@@ -1332,7 +1386,7 @@ Qed.
 Lemma incr_atomic_cas :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    (TAtomic cas_typed_body) incr_cas_join_prenex.
+    (TAtomic cas_snapshot_body) incr_cas_join_prenex.
 Proof.
   apply Rules.RTAtomicBlock. exact incr_cas_body.
 Qed.
@@ -1345,13 +1399,15 @@ Qed.
 Definition incr_fpu_old_core :
     expr [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] (TRA h_ra) :=
   EUnOp (URAOfInt h_ra)
-    (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store (PEVar (LThere (LHere eq_refl)))).
+    (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store
+      (PEVar (LThere (LThere (LThere (LHere eq_refl)))))).
 
 Definition incr_fpu_new_core :
     expr [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] (TRA h_ra) :=
   EUnOp (URAOfInt h_ra)
     (EBinOp BAdd
-      (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store (PEVar (LThere (LHere eq_refl))))
+      (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store
+        (PEVar (LThere (LThere (LThere (LHere eq_refl))))))
       (EVal (VInt 1%Z))).
 
 Lemma incr_fpu_allowed :
@@ -1413,10 +1469,10 @@ Lemma incr_fpu_branch :
     (Resource.RState incr_res_store
       (Resource.CAnd incr_cas_result_core
         (Resource.CExpr (ERef (RefBound MHere)))))
-    (TGhostUpdate ghost_field (PEVar (LHere eq_refl))
-      (PEUnOp (URAOfInt h_ra) (PEVar (LThere (LHere eq_refl))))
+    (TGhostUpdate ghost_field (PEVar (LThere (LThere (LHere eq_refl))))
+      (PEUnOp (URAOfInt h_ra) (PEVar (LThere (LThere (LThere (LHere eq_refl))))))
       (PEUnOp (URAOfInt h_ra)
-        (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z)))))
+        (PEBinOp BAdd (PEVar (LThere (LThere (LThere (LHere eq_refl))))) (PEVal (VInt 1%Z)))))
     (Resource.RState incr_res_store incr_post_cas_core).
 Proof.
   eapply Rules.RTConsequence;
@@ -1478,7 +1534,7 @@ Proof.
   apply Rules.CEntailsAndMono; [| apply Rules.CEntailsRefl].
   unfold incr_threaded_equality_core, incr_new_equality_core.
   cbn [Resource.weaken_core].
-  rewrite <- (incr_res_location (keep := keep_runtime) eq_refl).
+  rewrite <- (incr_res_x_location (keep := keep_runtime) eq_refl).
   apply Rules.CEntailsStep. apply Rules.CESGhostOwnChunkEqAssume.
   intros formals binders valuation Heq.
   pose proof (interp_typed_equality_true_early formals binders valuation _ _ Heq)
@@ -1542,6 +1598,15 @@ Proof.
     unfold counter_token_core. apply Rules.resource_prenex_entails_refl.
 Qed.
 
+Lemma incr_check2 :
+  HoareRules.RavenHoareTriple
+    (Resource.RState incr_res_store
+      (counter_token_core (ERef (RefFormal MHere))))
+    (TAssert (PEBinOp (BEq TRef) (PEVar (LHere eq_refl)) (PEVar (LThere (LThere (LHere eq_refl))))))
+    (Resource.RState incr_res_store
+      (counter_token_core (ERef (RefFormal MHere)))).
+Proof. apply Rules.RTAssertTrue. intros. apply interp_equality_same. Qed.
+
 Lemma counter_resource_instantiated_pre {F Delta : context}
     (location : expr F Delta TRef) :
   HoareRules.instantiated_pre incr_procedure
@@ -1575,7 +1640,7 @@ Lemma incr_retry_call :
     (Resource.RState incr_res_store
       (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
         (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
-    (TCall incr_procedure (PECons (PEVar (LHere eq_refl)) PENil)
+    (TCall incr_procedure (PECons (PEVar (LThere (LThere (LHere eq_refl)))) PENil)
       (@CTDiscard _ TUnit))
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
@@ -1591,7 +1656,7 @@ Proof.
        rewrite rename_bound_store_weaken_store.
        apply Rules.RPEBody. split;
          [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro]. }
-  2: { cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_res_location.
+  2: { cbn [RuleValidity.IR.symbolize_expr_list]. rewrite incr_res_x_location.
        rewrite counter_resource_instantiated_pre.
        unfold counter_token_core.
        apply Rules.CEntailsStep. apply Rules.CESAndElimL. }
@@ -1613,7 +1678,7 @@ Proof.
     [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro].
 Qed.
 
-Definition incr_exit_store := incr_res_store.
+Definition incr_exit_store := store_tail (store_tail incr_res_store).
 
 (** [incr] returns nothing: its hidden return slot keeps whatever it holds
     at exit. *)
@@ -1634,8 +1699,8 @@ Lemma incr_retry_conditional :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TIf (PEUnOp UNot (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
-      (TCall incr_procedure (PECons (PEVar (LHere eq_refl)) PENil)
+    (TIf (PEUnOp UNot (PEVar (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))))
+      (TCall incr_procedure (PECons (PEVar (LThere (LThere (LHere eq_refl)))) PENil)
         (@CTDiscard _ TUnit))
       TDone)
     (Resource.RState incr_res_store Resource.CTrue).
@@ -1660,26 +1725,33 @@ Proof.
   cbn [IR.Resource.subst_bound_core].
   rewrite incr_typed_body_normalized_eq.
   unfold incr_typed_body_normalized.
-  eapply Rules.RTSeq; [apply incr_unfold1_open |].
-  apply Rules.RTPrenexPreserve.
-  eapply Rules.RTSeq; [apply incr_field1_read |].
-  apply Rules.RTPrenexPreserve.
-  eapply Rules.RTSeq; [apply incr_fold1 |].
-  eapply Rules.RTSeq; [apply incr_assign_new |].
-  apply Rules.RTPrenexPreserve.
-  eapply Rules.RTSeq; [apply incr_unfold2 |].
-  apply Rules.RTPrenexPreserve.
-  eapply Rules.RTSeq.
-  - eapply Rules.RTSeq.
-    + eapply Rules.RTFrame. apply incr_atomic_cas.
-    + apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
-      eapply (Rules.RTIf incr_res_store incr_cas_result_core
-        (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))) _ _ _).
-      * exact incr_fpu_branch.
-      * exact incr_done_branch.
-  - apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
-    eapply Rules.RTSeq; [apply incr_fold2 |].
-    apply incr_retry_conditional.
+  eapply Rules.RTPrenexConsequence;
+    [| apply Rules.resource_prenex_entails_refl |].
+  { apply Rules.RTGhostValVar.
+    eapply Rules.RTSeq; [apply incr_unfold1_open |].
+    apply Rules.RTPrenexPreserve.
+    eapply Rules.RTSeq; [apply incr_field1_read |].
+    apply Rules.RTPrenexPreserve.
+    eapply Rules.RTSeq; [apply incr_fold1 |].
+    eapply Rules.RTSeq; [apply incr_check1 |].
+    eapply Rules.RTSeq; [apply incr_assign_new |].
+    apply Rules.RTPrenexPreserve.
+    apply Rules.RTGhostValVar.
+    eapply Rules.RTSeq; [apply incr_unfold2 |].
+    apply Rules.RTPrenexPreserve.
+    eapply Rules.RTSeq.
+    - eapply Rules.RTSeq.
+      + eapply Rules.RTFrame. apply incr_atomic_cas.
+      + apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
+        eapply (Rules.RTIf incr_res_store incr_cas_result_core
+          (PEVar (LThere (LThere (LThere (LThere (LThere (LThere (LHere eq_refl)))))))) _ _ _).
+        * exact incr_fpu_branch.
+        * exact incr_done_branch.
+    - apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
+      eapply Rules.RTSeq; [apply incr_fold2 |].
+      eapply Rules.RTSeq; [apply incr_check2 |].
+      apply incr_retry_conditional. }
+  apply Rules.resource_prenex_entails_refl.
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -1926,7 +1998,7 @@ Proof.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
     (runtime_decls [TRef; TInt; TInt]) read_procedure read_typed_procedure counter_mask
     (counter_closed_state counter_mask) read_exit_state
-    [TInt; TInt; TInt; TRef] read_exit_store (RefBound MHere)
+    [TInt; TInt; TInt] read_exit_store (RefBound MHere)
     _ _ _ _ _ _ _ _).
   8: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
                  CN.analyzed_hoare := read_resource_body_derivation;

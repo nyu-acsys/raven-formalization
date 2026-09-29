@@ -1826,6 +1826,56 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
       (TSpawn procedure typed_arguments)
       (RState store CTrue).
 
+(** An assertion whose symbolic condition always holds leaves the state
+    unchanged. *)
+Lemma RTAssertTrue {Γ F Δ} (store : symbolic_store Γ F Δ)
+    (body : core_assertion F Δ) condition :
+  (forall formals binders valuation,
+    interp_expr formals binders valuation (symbolize_expr store condition) =
+      Some (VBool true)) ->
+  RavenHoareTriple (RState store body) (TAssert condition) (RState store body).
+Proof.
+  intros Hcondition.
+  eapply RTConsequence; [apply RTAssert | |].
+  - eapply CEntailsTrans; [apply CEntailsStep, CESAndTrueIntro|].
+    apply CEntailsAndMono; [apply CEntailsRefl|].
+    apply CEntailsStep, CESExprTrue. exact Hcondition.
+  - apply RPEBody. split; [reflexivity|].
+    apply CEntailsStep, CESAndElimL.
+Qed.
+
+(** A snapshot of a variable: the body may run with the snapshot's slot
+    holding the variable's own symbolic value, so the binder adds nothing to
+    the telescope. *)
+Lemma RTGhostValVar {Γ F Δ} name t (variable : pvar Γ t)
+    (body : stmt (ghost_val t :: Γ)) (store : symbolic_store Γ F Δ)
+    (frame : core_assertion F Δ) (post : resource_prenex (ghost_val t :: Γ) F Δ) :
+  RavenHoareTriple
+    (RState (StoreCons (d := ghost_val t) (lookup_store store t variable) store)
+      frame) body post ->
+  RavenHoareTriple (RState store frame) (TGhostVal name t (PEVar variable) body)
+    (drop_head_prenex post).
+Proof.
+  intros Hbody.
+  eapply RTPrenexConsequence; [| apply resource_prenex_entails_refl |].
+  - apply RTGhostVal.
+    eapply RTStackRewrite with (store := StoreCons (d := ghost_val t)
+      (weaken_ref (lookup_store store t variable)) (weaken_store store)).
+    + eapply RTConsequence;
+        [| apply CEntailsStep, CESAndElimL | apply resource_prenex_entails_refl].
+      pose proof (RTBoundWeaken t _ _ _ Hbody) as Hweakened.
+      unfold weaken_resource_prenex, RState in Hweakened.
+      cbn [rename_resource_prenex] in Hweakened.
+      unfold rename_bound_resource in Hweakened.
+      cbn [resource_stack resource_body] in Hweakened.
+      rewrite rename_bound_store_weaken, <- weaken_core_rename in Hweakened.
+      exact Hweakened.
+    + apply StoreEqualCons; [apply CEntailsStep, CESAndElimR|].
+      apply store_equal_under_refl.
+  - unfold weaken_resource_prenex. rewrite drop_head_prenex_rename.
+    apply RPEVacuous.
+Qed.
+
 (** Telescope transport is deliberately stated over the completed access,
     not over [access_boundary].  These are the three outcomes used
     by the joint body/fold cut: preservation retains the witness, elimination

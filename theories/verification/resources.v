@@ -464,6 +464,17 @@ Fixpoint drop_head_prenex {d Γ F Δ} (prenex : resource_prenex (d :: Γ) F Δ) 
   | ResourceExists t rest => ResourceExists t (drop_head_prenex rest)
   end.
 
+Lemma drop_head_prenex_rename {d Γ F Δ}
+    (prenex : resource_prenex (d :: Γ) F Δ) :
+  forall Δ' (renaming : bound_renaming Δ Δ'),
+  drop_head_prenex (rename_resource_prenex prenex Δ' renaming) =
+    rename_resource_prenex (drop_head_prenex prenex) Δ' renaming.
+Proof.
+  induction prenex as [Δ [stack body] | Δ t rest IH]; intros Δ' renaming.
+  - dependent destruction stack. reflexivity.
+  - cbn [rename_resource_prenex drop_head_prenex]. f_equal. apply IH.
+Qed.
+
 Fixpoint prenex_and {Γ F Δ} (prenex : resource_prenex Γ F Δ)
     (frame : core_assertion F Δ) {struct prenex} : resource_prenex Γ F Δ :=
   match prenex in resource_prenex _ _ Δ0

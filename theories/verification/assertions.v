@@ -489,6 +489,14 @@ Fixpoint rename_bound_store {Γ F Δ Δ'}
         (rename_bound_store renaming tail)
   end.
 
+Lemma rename_bound_store_weaken {Γ F Δ u}
+    (store : symbolic_store Γ F Δ) :
+  rename_bound_store (@weaken_bound_renaming Δ u) store =
+    weaken_store (u := u) store.
+Proof.
+  induction store; cbn [rename_bound_store weaken_store]; f_equal; auto.
+Qed.
+
 Definition bound_renaming_injective {Δ Δ'}
     (renaming : bound_renaming Δ Δ') : Prop :=
   forall t (left right : bvar Δ t),
