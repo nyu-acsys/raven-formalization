@@ -148,9 +148,33 @@ Fixpoint runtime_variables {Γ} (names : named_context Γ) :
   | NCCons source_name _ tail => source_name :: runtime_variables tail
   end.
 
-Definition runtime_variable {Γ t} (names : named_context Γ)
-    (variable : pvar Γ t) : RuntimeLang.var :=
-  default "" (runtime_variables names !! member_index variable).
+Definition runtime_variable {Γ keep t} (names : named_context Γ)
+    (variable : lvar keep Γ t) : RuntimeLang.var :=
+  default "" (runtime_variables names !! lvar_index variable).
+
+(** The names that occupy a runtime frame: ghost locals have no slot. *)
+Fixpoint runtime_frame_names {Γ} (names : named_context Γ) :
+    list RuntimeLang.var :=
+  match names with
+  | NCNil => []
+  | NCCons source_name d tail =>
+      if keep_runtime d then source_name :: runtime_frame_names tail
+      else runtime_frame_names tail
+  end.
+
+Lemma runtime_frame_names_all {Γ} (names : named_context Γ) :
+  forallb keep_runtime Γ = true ->
+  runtime_frame_names names = runtime_variables names.
+Proof.
+  induction names as [|Γ name d names IH]; simpl; first reflexivity.
+  rewrite andb_true_iff. intros [-> Htail]. f_equal. exact (IH Htail).
+Qed.
+
+Lemma runtime_variable_forget {Γ keep t} (names : named_context Γ)
+    (variable : lvar keep Γ t) :
+  runtime_variable names (lvar_forget variable) =
+    runtime_variable names variable.
+Proof. unfold runtime_variable. rewrite lvar_forget_index. reflexivity. Qed.
 
 (** Runtime procedure frames reserve a fixed return name, but the slot is
     still the procedure's distinguished typed variable.  Rename that one
@@ -171,7 +195,7 @@ Fixpoint rename_named_context_at {Γ} (names : named_context Γ)
 Definition runtime_procedure_names {Γ F}
     (procedure : typed_procedure Γ F) : named_context Γ :=
   rename_named_context_at (procedure_variables _ _ procedure) "#ret_val"
-    (member_index (procedure_return_variable _ _ procedure)).
+    (lvar_index (procedure_return_variable _ _ procedure)).
 
 Lemma runtime_variables_rename_named_context_at_member {Γ}
     (names : named_context Γ) replacement index name :
@@ -212,15 +236,15 @@ Proof.
   apply IHnames. lia.
 Qed.
 
-Lemma runtime_variable_rename_named_context_at_other {Γ t}
-    (names : named_context Γ) replacement index (variable : pvar Γ t) :
-  not (member_index variable = index) ->
+Lemma runtime_variable_rename_named_context_at_other {Γ keep t}
+    (names : named_context Γ) replacement index (variable : lvar keep Γ t) :
+  not (lvar_index variable = index) ->
   runtime_variable (rename_named_context_at names replacement index) variable =
     runtime_variable names variable.
 Proof.
   revert names index. induction variable; intros names index Hother;
     dependent destruction names; destruct index;
-    cbn [member_index rename_named_context_at runtime_variable] in *;
+    cbn [lvar_index rename_named_context_at runtime_variable] in *;
     try contradiction; try reflexivity.
   apply IHvariable. lia.
 Qed.
@@ -263,6 +287,25 @@ Proof.
   - exact (procedure_reserved_return_fresh _ Hwf).
 Qed.
 
+Lemma runtime_procedure_frame_names {Γ F}
+    (procedure : typed_procedure Γ F) :
+  procedure_wf procedure ->
+  runtime_frame_names (runtime_procedure_names procedure) =
+    runtime_variables (runtime_procedure_names procedure).
+Proof.
+  intros Hwf. apply runtime_frame_names_all.
+  exact (procedure_locals_runtime _ Hwf).
+Qed.
+
+Lemma runtime_procedure_frame_names_nodup {Γ F}
+    (procedure : typed_procedure Γ F) :
+  procedure_wf procedure ->
+  NoDup (runtime_frame_names (runtime_procedure_names procedure)).
+Proof.
+  intros Hwf. rewrite runtime_procedure_frame_names; [|exact Hwf].
+  apply runtime_procedure_names_nodup. exact Hwf.
+Qed.
+
 (** The runtime procedure record uses untyped declaration lists.  These
     projections are nevertheless generated from the intrinsic frame layout,
     so an argument declaration always names a body slot of the same type. *)
@@ -296,19 +339,19 @@ Fixpoint runtime_local_declarations_from {Γ} (names : named_context Γ)
     list (RuntimeLang.var * RuntimeLang.typ) :=
   match names with
   | NCNil => []
-  | NCCons name t tail =>
+  | NCCons name d tail =>
       let tail_declarations := runtime_local_declarations_from tail
         formal_indices return_index (S index) in
       if existsb (Nat.eqb index) formal_indices then tail_declarations
       else
         let runtime_name :=
           if Nat.eqb index return_index then "#ret_val" else name in
-        (runtime_name, runtime_type t) :: tail_declarations
+        (runtime_name, runtime_type (decl_type d)) :: tail_declarations
   end.
 
 Definition procedure_return_index {Γ F} (procedure : typed_procedure Γ F) :
     nat :=
-  member_index (procedure_return_variable _ _ procedure).
+  lvar_index (procedure_return_variable _ _ procedure).
 
 Definition runtime_procedure_arguments {Γ F}
     (procedure : typed_procedure Γ F) :
@@ -324,20 +367,21 @@ Definition runtime_procedure_locals {Γ F}
     (pvar_list_indices (procedure_formal_variables _ _ procedure))
     (procedure_return_index procedure) 0.
 
-Definition runtime_local_name {Γ t} (names : named_context Γ)
-    (return_index index : nat) (variable : pvar Γ t) : RuntimeLang.var :=
-  if Nat.eqb (index + member_index variable) return_index then "#ret_val"
+Definition runtime_local_name {Γ keep t} (names : named_context Γ)
+    (return_index index : nat) (variable : lvar keep Γ t) : RuntimeLang.var :=
+  if Nat.eqb (index + lvar_index variable) return_index then "#ret_val"
   else runtime_variable names variable.
 
-Lemma runtime_local_declarations_from_variable {Γ}
+Lemma runtime_local_declarations_from_variable {Γ keep}
     (names : named_context Γ) (formal_indices : list nat)
-    (return_index index : nat) t (variable : pvar Γ t) :
-  ~ In (index + member_index variable) formal_indices ->
+    (return_index index : nat) t (variable : lvar keep Γ t) :
+  ~ In (index + lvar_index variable) formal_indices ->
   In (runtime_local_name names return_index index variable, runtime_type t)
     (runtime_local_declarations_from names formal_indices return_index index).
 Proof.
-  revert index names. induction variable; intros index names Hnot;
-    dependent destruction names; cbn [runtime_local_name member_index] in *.
+  revert index names. induction variable as [d D Hkeep | d D t variable IH];
+    intros index names Hnot; dependent destruction names;
+    cbn [runtime_local_name lvar_index] in *.
   - replace (index + 0) with index in Hnot by lia.
     destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
     + exfalso. apply Hnot. apply existsb_exists in Hformal.
@@ -346,71 +390,65 @@ Proof.
       exact Hin.
     + cbn [runtime_local_declarations_from]. rewrite Hformal.
       unfold runtime_local_name.
-      cbn [member_index runtime_variable].
+      cbn [lvar_index runtime_variable].
       replace (index + 0) with index by lia.
-      assert (Hhead : runtime_variable (NCCons name t names) MHere = name)
-        by reflexivity.
+      assert (Hhead : runtime_variable (NCCons name d names)
+          (LHere (keep := keep) Hkeep) = name) by reflexivity.
       rewrite Hhead.
       destruct (Nat.eqb index return_index); apply in_eq.
   - destruct (existsb (Nat.eqb index) formal_indices) eqn:Hformal.
     + cbn [runtime_local_declarations_from]. rewrite Hformal.
-      assert (Hname : runtime_local_name (NCCons name u names) return_index
-          index (MThere variable) =
+      assert (Hname : runtime_local_name (NCCons name d names) return_index
+          index (LThere variable) =
           runtime_local_name names return_index (S index) variable).
-      { unfold runtime_local_name. cbn [member_index runtime_variable].
-        replace (index + S (member_index variable)) with
-          (S index + member_index variable) by lia. reflexivity. }
+      { unfold runtime_local_name. cbn [lvar_index runtime_variable].
+        replace (index + S (lvar_index variable)) with
+          (S index + lvar_index variable) by lia. reflexivity. }
       rewrite Hname.
-      apply IHvariable.
-      replace (index + S (member_index variable)) with
-        (S index + member_index variable) in Hnot by lia. exact Hnot.
+      apply IH.
+      replace (index + S (lvar_index variable)) with
+        (S index + lvar_index variable) in Hnot by lia. exact Hnot.
     + cbn [runtime_local_declarations_from]. rewrite Hformal.
-      assert (Hname : runtime_local_name (NCCons name u names) return_index
-          index (MThere variable) =
+      assert (Hname : runtime_local_name (NCCons name d names) return_index
+          index (LThere variable) =
           runtime_local_name names return_index (S index) variable).
-      { unfold runtime_local_name. cbn [member_index runtime_variable].
-        replace (index + S (member_index variable)) with
-          (S index + member_index variable) by lia. reflexivity. }
+      { unfold runtime_local_name. cbn [lvar_index runtime_variable].
+        replace (index + S (lvar_index variable)) with
+          (S index + lvar_index variable) by lia. reflexivity. }
       rewrite Hname.
-      apply in_cons. apply IHvariable.
-      replace (index + S (member_index variable)) with
-        (S index + member_index variable) in Hnot by lia. exact Hnot.
+      apply in_cons. apply IH.
+      replace (index + S (lvar_index variable)) with
+        (S index + lvar_index variable) in Hnot by lia. exact Hnot.
 Qed.
 
-Lemma runtime_local_name_at_result {Γ t u} (names : named_context Γ)
-    (result : pvar Γ u) (variable : pvar Γ t) :
-  runtime_local_name names (member_index result) 0 variable =
+Lemma runtime_local_name_at_result {Γ keep keep' t u}
+    (names : named_context Γ)
+    (result : lvar keep' Γ u) (variable : lvar keep Γ t) :
+  runtime_local_name names (lvar_index result) 0 variable =
   runtime_variable
-    (rename_named_context_at names "#ret_val" (member_index result)) variable.
+    (rename_named_context_at names "#ret_val" (lvar_index result)) variable.
 Proof.
   revert t variable u result.
-  induction names as [| Γ name head_type names IH];
+  induction names as [| D name d names IH];
     intros value_type variable result_type result;
     dependent destruction variable; dependent destruction result;
-    cbn [runtime_local_name rename_named_context_at runtime_variable].
-  - unfold runtime_local_name, runtime_variable,
-      Equality.simplification_heq.
-    rewrite !member_index_here.
-    reflexivity.
-  - unfold runtime_local_name.
-    rewrite member_index_here. rewrite member_index_there. reflexivity.
-  - unfold runtime_local_name.
-    rewrite member_index_there. rewrite member_index_here. reflexivity.
-  - unfold runtime_local_name.
-    rewrite !member_index_there. apply IH.
-  all: try reflexivity.
+    unfold runtime_local_name; cbn [lvar_index rename_named_context_at];
+    try reflexivity.
+  specialize (IH _ variable _ result). unfold runtime_local_name in IH.
+  cbn [runtime_variable lvar_index Nat.eqb Nat.add] in *.
+  exact IH.
 Qed.
 
-Lemma runtime_local_name_procedure {Γ F} (procedure : typed_procedure Γ F)
-    t (variable : pvar Γ t) :
+Lemma runtime_local_name_procedure {Γ F keep}
+    (procedure : typed_procedure Γ F) t (variable : lvar keep Γ t) :
   runtime_local_name (procedure_variables _ _ procedure)
       (procedure_return_index procedure) 0 variable =
   runtime_variable (runtime_procedure_names procedure) variable.
 Proof. apply runtime_local_name_at_result. Qed.
 
-Lemma runtime_procedure_local_declaration {Γ F}
-    (procedure : typed_procedure Γ F) t (variable : pvar Γ t) :
-  ~ In (member_index variable)
+Lemma runtime_procedure_local_declaration {Γ F keep}
+    (procedure : typed_procedure Γ F) t (variable : lvar keep Γ t) :
+  ~ In (lvar_index variable)
       (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
   In (runtime_variable (runtime_procedure_names procedure) variable,
       runtime_type t) (runtime_procedure_locals procedure).
@@ -426,48 +464,53 @@ Definition entry_symbol_realizes {Γ} (identity : proc_id)
     (frame : RuntimeLang.stack_frame) {t} (symbolic : symbol t)
     (value : tval t) : Prop :=
   forall variable : pvar Γ t,
-    symbolic = ProcedureEntrySymbol identity (member_index variable) ->
-    ~ In (member_index variable) formal_indices ->
+    symbolic = ProcedureEntrySymbol identity (lvar_index variable) ->
+    ~ In (lvar_index variable) formal_indices ->
     frame.(RuntimeLang.locals) !! runtime_variable names variable =
       Some (tval_to_val value).
 
 (** The variable of a given type at a given slot, if there is one. *)
-Fixpoint member_at (Γ : context) (t : typ) (slot : nat) : option (member Γ t) :=
-  match Γ return option (member Γ t) with
+Fixpoint pvar_at (D : decl_context) (t : typ) (slot : nat) :
+    option (pvar D t) :=
+  match D return option (pvar D t) with
   | [] => None
-  | u :: Γ' =>
+  | d :: D' =>
       match slot with
       | O =>
-          match typ_eq_dec u t with
-          | left equal => Some (eq_rect u (fun v => member (u :: Γ') v) MHere t equal)
+          match typ_eq_dec (decl_type d) t with
+          | left equal =>
+              Some (eq_rect (decl_type d) (fun v => pvar (d :: D') v)
+                (LHere eq_refl) t equal)
           | right _ => None
           end
       | S slot' =>
-          match member_at Γ' t slot' with
-          | Some variable => Some (MThere variable)
+          match pvar_at D' t slot' with
+          | Some variable => Some (LThere variable)
           | None => None
           end
       end
   end.
 
-Lemma member_at_sound Γ t slot (variable : member Γ t) :
-  member_at Γ t slot = Some variable -> member_index variable = slot.
+Lemma pvar_at_sound D t slot (variable : pvar D t) :
+  pvar_at D t slot = Some variable -> lvar_index variable = slot.
 Proof.
-  revert slot variable. induction Γ as [| u Γ IH]; intros slot variable;
+  revert slot variable. induction D as [| d D IH]; intros slot variable;
     simpl; [discriminate |].
   destruct slot as [| slot].
-  - destruct (typ_eq_dec u t) as [<- |]; [| discriminate].
+  - destruct (typ_eq_dec (decl_type d) t) as [<- |]; [| discriminate].
     intros [= <-]. reflexivity.
-  - destruct (member_at Γ t slot) as [variable' |] eqn:Hat; [| discriminate].
+  - destruct (pvar_at D t slot) as [variable' |] eqn:Hat; [| discriminate].
     intros [= <-]. simpl. f_equal. exact (IH _ _ Hat).
 Qed.
 
-Lemma member_at_complete Γ t (variable : member Γ t) :
-  member_at Γ t (member_index variable) = Some variable.
+Lemma pvar_at_complete D t (variable : pvar D t) :
+  pvar_at D t (lvar_index variable) = Some variable.
 Proof.
-  induction variable as [Γ t | Γ t u variable IH]; simpl.
-  - destruct (typ_eq_dec t t) as [equal |]; [| contradiction].
-    rewrite (Eqdep_dec.UIP_dec typ_eq_dec equal eq_refl). reflexivity.
+  induction variable as [d D Hkeep | d D t variable IH]; simpl.
+  - destruct (typ_eq_dec (decl_type d) (decl_type d)) as [equal |];
+      [| contradiction].
+    rewrite (Eqdep_dec.UIP_dec typ_eq_dec equal eq_refl). simpl.
+    f_equal. f_equal. apply (Eqdep_dec.UIP_dec Bool.bool_dec).
   - rewrite IH. reflexivity.
 Qed.
 
@@ -514,18 +557,18 @@ Lemma frame_entry_symbol_valuation_exist {Γ} (caller_valuation : symbol_valuati
     (identity : proc_id) (names : named_context Γ)
     (formal_indices : list nat) (frame : RuntimeLang.stack_frame) :
   (forall t (variable : pvar Γ t),
-    ~ In (member_index variable) formal_indices ->
+    ~ In (lvar_index variable) formal_indices ->
     exists value : tval t,
       frame.(RuntimeLang.locals) !! runtime_variable names variable =
         Some (tval_to_val value)) ->
   exists callee_valuation : symbol_valuation,
     constant_symbols_agree caller_valuation callee_valuation /\
     forall t (variable : pvar Γ t),
-      ~ In (member_index variable) formal_indices ->
+      ~ In (lvar_index variable) formal_indices ->
       frame.(RuntimeLang.locals) !! runtime_variable names variable =
         Some (tval_to_val
           (callee_valuation t
-            (ProcedureEntrySymbol identity (member_index variable)))).
+            (ProcedureEntrySymbol identity (lvar_index variable)))).
 Proof.
   intros Htyped.
   assert (Hrealizable : forall t (symbolic : symbol t),
@@ -537,11 +580,11 @@ Proof.
     destruct (decide (procedure = identity)) as [-> | Hother_procedure].
     2: { exists (default_tval t). intros variable Hsymbolic _.
          injection Hsymbolic as Hprocedure _. contradiction. }
-    destruct (member_at Γ t slot) as [variable |] eqn:Hat.
+    destruct (pvar_at Γ t slot) as [variable |] eqn:Hat.
     2: { exists (default_tval t). intros variable Hsymbolic _.
          injection Hsymbolic as ->.
-         rewrite member_at_complete in Hat. discriminate Hat. }
-    pose proof (member_at_sound _ _ _ _ Hat) as Hslot.
+         rewrite pvar_at_complete in Hat. discriminate Hat. }
+    pose proof (pvar_at_sound _ _ _ _ Hat) as Hslot.
     destruct (in_dec Nat.eq_dec slot formal_indices) as [Hformal | Hnot].
     { exists (default_tval t). intros other Hsymbolic Hother_not.
       injection Hsymbolic as ->. contradiction. }
@@ -550,7 +593,7 @@ Proof.
     exists value. intros other Hother Hother_not.
     injection Hother as Hindices.
     have -> : other = variable.
-    { apply member_index_injective. symmetry. exact Hindices. }
+    { apply lvar_index_injective. symmetry. exact Hindices. }
     exact Hvalue.
   }
   exists (frame_entry_symbol_valuation caller_valuation identity names formal_indices frame
@@ -559,7 +602,7 @@ Proof.
   - intros t variable Hnot.
     apply (frame_entry_symbol_valuation_realize caller_valuation identity names formal_indices
       frame Hrealizable t
-      (ProcedureEntrySymbol identity (member_index variable)) variable
+      (ProcedureEntrySymbol identity (lvar_index variable)) variable
       eq_refl Hnot).
 Qed.
 
@@ -574,12 +617,12 @@ Lemma procedure_frame_entry_symbol_valuation_exist {Γ F}
   exists callee_valuation : symbol_valuation,
     constant_symbols_agree caller_valuation callee_valuation /\
     forall t (variable : pvar Γ t),
-      ~ In (member_index variable)
+      ~ In (lvar_index variable)
         (pvar_list_indices (procedure_formal_variables _ _ procedure)) ->
       frame.(RuntimeLang.locals) !!
           runtime_variable (runtime_procedure_names procedure) variable =
         Some (tval_to_val
-          (callee_valuation t (ProcedureEntrySymbol F (member_index variable)))).
+          (callee_valuation t (ProcedureEntrySymbol F (lvar_index variable)))).
 Proof.
   intros Hlocals. apply frame_entry_symbol_valuation_exist.
   intros t variable Hnot.
@@ -619,10 +662,6 @@ Lemma runtime_variables_length {Γ} (names : named_context Γ) :
   length (runtime_variables names) = length Γ.
 Proof. induction names; simpl; congruence. Qed.
 
-Lemma member_index_lt {Γ t} (variable : pvar Γ t) :
-  member_index variable < length Γ.
-Proof. induction variable; simpl; lia. Qed.
-
 Lemma runtime_procedure_return_name {Γ F}
     (procedure : typed_procedure Γ F) :
   runtime_variable (runtime_procedure_names procedure)
@@ -631,21 +670,50 @@ Proof.
   unfold runtime_variable, runtime_procedure_names.
   rewrite runtime_variables_rename_named_context_at_lookup.
   - reflexivity.
-  - rewrite runtime_variables_length. apply member_index_lt.
+  - rewrite runtime_variables_length. apply lvar_index_lt.
 Qed.
 
-Lemma runtime_variable_member {Γ} (names : named_context Γ) t
-    (variable : pvar Γ t) :
+Lemma runtime_variable_member {Γ keep} (names : named_context Γ) t
+    (variable : lvar keep Γ t) :
   runtime_variable names variable ∈ runtime_variables names.
 Proof.
   unfold runtime_variable.
-  have Hlookup : is_Some (runtime_variables names !! member_index variable).
+  have Hlookup : is_Some (runtime_variables names !! lvar_index variable).
   { apply lookup_lt_is_Some_2. rewrite runtime_variables_length.
-    apply member_index_lt. }
-  destruct (runtime_variables names !! member_index variable) as [name|]
+    apply lvar_index_lt. }
+  destruct (runtime_variables names !! lvar_index variable) as [name|]
     eqn:Hname.
-  - simpl. apply elem_of_list_lookup. exists (member_index variable). exact Hname.
+  - simpl. apply elem_of_list_lookup. exists (lvar_index variable). exact Hname.
   - destruct Hlookup as [name Hsome]. congruence.
+Qed.
+
+Lemma runtime_variable_frame_member {Γ keep} (names : named_context Γ) t
+    (variable : lvar keep Γ t) :
+  lvar_runtime variable = true ->
+  runtime_variable names variable ∈ runtime_frame_names names.
+Proof.
+  revert names. induction variable as [d D Hkeep | d D t variable IH];
+    intros names Hruntime; dependent destruction names; simpl in *.
+  - rewrite Hruntime. apply elem_of_list_here.
+  - specialize (IH names Hruntime).
+    change (runtime_variable (NCCons name d names) (LThere variable)) with
+      (runtime_variable names variable).
+    destruct (keep_runtime d); [apply elem_of_list_further|]; exact IH.
+Qed.
+
+Lemma runtime_frame_name_has_variable {Γ} (names : named_context Γ) name :
+  In name (runtime_frame_names names) ->
+  exists t (variable : lvar keep_runtime Γ t),
+    runtime_variable names variable = name.
+Proof.
+  induction names as [|Γ head d names IH]; simpl; first tauto.
+  destruct (keep_runtime d) eqn:Hd.
+  - intros [<- | Hin].
+    + exists (decl_type d), (LHere Hd). reflexivity.
+    + destruct (IH Hin) as (u & variable & Hvariable).
+      exists u, (LThere variable). exact Hvariable.
+  - intros Hin. destruct (IH Hin) as (u & variable & Hvariable).
+    exists u, (LThere variable). exact Hvariable.
 Qed.
 
 Lemma runtime_variable_member_inv {Γ} (names : named_context Γ) name :
@@ -654,33 +722,33 @@ Lemma runtime_variable_member_inv {Γ} (names : named_context Γ) name :
 Proof.
   induction names; simpl; first tauto.
   intros [<- | Hin].
-  - exists t, MHere. reflexivity.
+  - exists (decl_type d), (LHere eq_refl). reflexivity.
   - destruct (IHnames Hin) as (u & variable & Hvariable).
-    exists u, (MThere variable). exact Hvariable.
+    exists u, (LThere variable). exact Hvariable.
 Qed.
 
 Lemma runtime_variables_are_names {Γ} (names : named_context Γ) :
   runtime_variables names = named_context_names names.
 Proof. induction names; simpl; [reflexivity | f_equal; assumption]. Qed.
 
-Lemma runtime_variable_lookup {Γ t} (names : named_context Γ)
-    (variable : pvar Γ t) :
-  runtime_variables names !! member_index variable =
+Lemma runtime_variable_lookup {Γ keep t} (names : named_context Γ)
+    (variable : lvar keep Γ t) :
+  runtime_variables names !! lvar_index variable =
     Some (runtime_variable names variable).
 Proof.
   unfold runtime_variable.
-  destruct (runtime_variables names !! member_index variable) as [name|]
+  destruct (runtime_variables names !! lvar_index variable) as [name|]
     eqn:Hlookup; [reflexivity |].
   exfalso. apply lookup_ge_None_1 in Hlookup.
   rewrite runtime_variables_length in Hlookup.
-  pose proof (member_index_lt variable). lia.
+  pose proof (lvar_index_lt variable). lia.
 Qed.
 
-Lemma runtime_variable_injective {Γ t u} (names : named_context Γ)
-    (left : pvar Γ t) (right : pvar Γ u) :
+Lemma runtime_variable_injective {Γ keep keep' t u} (names : named_context Γ)
+    (left : lvar keep Γ t) (right : lvar keep' Γ u) :
   List.NoDup (named_context_names names) ->
   runtime_variable names left = runtime_variable names right ->
-  member_index left = member_index right.
+  lvar_index left = lvar_index right.
 Proof.
   intros Hnames Heq.
   rewrite <- runtime_variables_are_names in Hnames.
@@ -698,7 +766,7 @@ Proof.
   induction variables as [| F t variable variables IH]; simpl.
   - intros Hin. inversion Hin.
   - intros [Heq | Hin].
-    + subst name. exists (member_index variable). split; [left; reflexivity |].
+    + subst name. exists (lvar_index variable). split; [left; reflexivity |].
       apply runtime_variable_lookup.
     + destruct (IH Hin) as (index & Hindex & Hlookup).
       exists index. split; [right; exact Hindex | exact Hlookup].
@@ -715,7 +783,7 @@ Proof.
   inversion Hindices as [| index indices Hfresh Htail]. constructor.
   - intros Hin. destruct (runtime_formal_name_index names variables _ Hin)
       as (other & Hother & Hlookup).
-    apply Hfresh. enough (member_index variable = other) by congruence.
+    apply Hfresh. enough (lvar_index variable = other) by congruence.
     rewrite <- runtime_variables_are_names in Hnames.
     eapply NoDup_lookup;
       [apply NoDup_ListNoDup; exact Hnames | apply runtime_variable_lookup |].
@@ -912,7 +980,7 @@ Lemma runtime_procedure_return_local {Γ F} (procedure : typed_procedure Γ F) :
 Proof.
   intros Hwf Hfresh. apply runtime_local_declarations_from_contains_return.
   - lia.
-  - rewrite runtime_variables_length. apply member_index_lt.
+  - rewrite runtime_variables_length. apply lvar_index_lt.
   - exact (procedure_return_slot_local _ Hwf).
 Qed.
 
@@ -985,7 +1053,7 @@ Proof.
     destruct (runtime_variable_member_inv
       (runtime_procedure_names procedure) name Hname)
       as (t & variable & <-).
-    destruct (in_dec Nat.eq_dec (member_index variable)
+    destruct (in_dec Nat.eq_dec (lvar_index variable)
       (pvar_list_indices (procedure_formal_variables _ _ procedure)))
       as [Hformal | Hlocal].
     + left. apply elem_of_list_In.
@@ -1089,8 +1157,8 @@ Proof.
     simpl; intros Heq; inversion Heq; subst; reflexivity.
 Qed.
 
-Fixpoint runtime_expr {Γ t} (names : named_context Γ)
-    (expression : pexpr Γ t) : RuntimeLang.expr :=
+Fixpoint runtime_expr {Γ keep t} (names : named_context Γ)
+    (expression : pexpr keep Γ t) : RuntimeLang.expr :=
   match expression with
   | PEVar variable => RuntimeLang.Var (runtime_variable names variable)
   | PEVal value => RuntimeLang.Val (tval_to_val value)
@@ -1101,15 +1169,16 @@ Fixpoint runtime_expr {Γ t} (names : named_context Γ)
         (runtime_expr names operand1) (runtime_expr names operand2)
   end.
 
-(** A runtime stack frame represents a symbolic typed store when each typed
-    program variable is bound to the interpretation of its symbolic value.
+(** A runtime stack frame represents a symbolic typed store when each
+    local is bound to the interpretation of its symbolic value.
     Keeping this relation extensional avoids dependent transports in the
     operational simulation proofs. *)
 Definition stack_corresponds {Γ F Δ}
     (names : named_context Γ) (formals : formal_env F)
     (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame) : Prop :=
-  forall t (variable : pvar Γ t),
+  forall keep t (variable : lvar keep Γ t),
+    lvar_runtime variable = true ->
     frame.(RuntimeLang.locals) !! runtime_variable names variable =
       Some (tval_to_val
         (interp_ref formals binders valuation (lookup_store store t variable))).
@@ -1117,7 +1186,7 @@ Definition stack_corresponds {Γ F Δ}
 Lemma runtime_expr_sound {Γ F Δ t} (names : named_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame)
-    (expression : pexpr Γ t) (value : tval t) :
+    (expression : pexpr keep_runtime Γ t) (value : tval t) :
   stack_corresponds names formals binders valuation store frame ->
   interp_program_expr formals binders valuation store expression = Some value ->
   RuntimeLang.expr_step (runtime_expr names expression) frame
@@ -1125,7 +1194,7 @@ Lemma runtime_expr_sound {Γ F Δ t} (names : named_context Γ)
 Proof.
   intros Hstack. unfold interp_program_expr. induction expression; simpl.
   - intros Heq. inversion Heq. subst. apply RuntimeLang.VarStep.
-    apply Hstack.
+    apply Hstack. apply (lvar_runtime_keep (keep := keep_runtime)).
   - intros Heq. inversion Heq. subst. apply RuntimeLang.ExprRefl.
   - destruct (interp_expr formals binders valuation
         (IR.symbolize_expr store expression))
@@ -1145,16 +1214,16 @@ Proof.
     + eapply runtime_binop_sound. exact Heq.
 Qed.
 
-Fixpoint runtime_expr_list {Γ ts} (names : named_context Γ)
-    (expressions : pexpr_list Γ ts) : list RuntimeLang.expr :=
+Fixpoint runtime_expr_list {Γ keep ts} (names : named_context Γ)
+    (expressions : pexpr_list keep Γ ts) : list RuntimeLang.expr :=
   match expressions with
   | PENil => []
   | PECons expression expressions' =>
       runtime_expr names expression :: runtime_expr_list names expressions'
   end.
 
-Lemma runtime_expr_list_length {Γ ts} (names : named_context Γ)
-    (expressions : pexpr_list Γ ts) :
+Lemma runtime_expr_list_length {Γ keep ts} (names : named_context Γ)
+    (expressions : pexpr_list keep Γ ts) :
   length (runtime_expr_list names expressions) = length ts.
 Proof. induction expressions; simpl; congruence. Qed.
 
@@ -1276,23 +1345,23 @@ Fixpoint runtime_stmt {Γ} (names : named_context Γ)
   match statement with
   | TDone => runtime_noop
   | TAssert _ => runtime_noop
-  | TAssign target value =>
+  | TAssign _ target value =>
       RuntimeLang.RTAssign (runtime_variable names target)
         (runtime_expr names value) stack
-  | TFieldRead field target base =>
+  | TFieldRead _ field target base =>
       RuntimeLang.RTFldRd (runtime_variable names target)
         (runtime_expr names base) (field_name field) stack
   | TFieldWrite field base value =>
       RuntimeLang.RTFldWr (runtime_expr names base)
         (field_name field) (runtime_expr names value) stack
-  | TAlloc target fields =>
+  | TAlloc _ target fields =>
       RuntimeLang.RTAlloc (runtime_variable names target)
         (runtime_field_initializers names
           (physical_field_initializers fields)) stack
   | TGhostUpdate _ _ _ _ => runtime_noop
   | TCall procedure arguments target =>
       match target with
-      | CTStore target' =>
+      | CTStore _ target' =>
           RuntimeLang.RTCall (runtime_variable names target')
             (procedure_name procedure)
             (runtime_expr_list names arguments) stack
@@ -1316,6 +1385,8 @@ Fixpoint runtime_stmt {Γ} (names : named_context Γ)
         (runtime_stmt names stack second)
   | TAtomic body =>
       RuntimeLang.RTTrustedAtomic (trusted_atomic_transition body) stack
+  | TGhostVal name t _ body =>
+      runtime_stmt (NCCons name (ghost_val t) names) stack body
   end.
 
 End WithSignature.

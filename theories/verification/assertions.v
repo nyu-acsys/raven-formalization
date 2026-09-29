@@ -113,7 +113,7 @@ Proof.
   - right. intros ->. rewrite expr_list_eqb_refl in Heq. discriminate.
 Defined.
 
-Inductive assertion (Γ F Δ : context) : Type :=
+Inductive assertion (Γ : decl_context) (F Δ : context) : Type :=
 | AStack (store : symbolic_store Γ F Δ)
 | AExpr (condition : expr F Δ TBool)
 | APure (proposition : Prop)

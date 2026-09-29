@@ -56,11 +56,12 @@ Proof.
     destruct (IH left' right right' x) as [-> ->]. split; reflexivity.
 Qed.
 
-Inductive concrete_store : context -> Type :=
+Inductive concrete_store : decl_context -> Type :=
 | ConcreteNil : concrete_store []
-| ConcreteCons t Γ : tval t -> concrete_store Γ -> concrete_store (t :: Γ).
+| ConcreteCons d D : tval (decl_type d) -> concrete_store D ->
+    concrete_store (d :: D).
 
-#[global] Arguments ConcreteCons {_ _} _ _.
+#[global] Arguments ConcreteCons {_ _} & _ _.
 
 Definition binder_cons {Δ t} (head : tval t) (tail : binder_env Δ) :
     binder_env (t :: Δ) :=
@@ -231,15 +232,15 @@ Proof.
   rewrite (IH Htail). reflexivity.
 Qed.
 
-Definition interp_program_expr {Γ F Δ t}
+Definition interp_program_expr {Γ F Δ keep t}
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
+    (store : symbolic_store Γ F Δ) (expression : pexpr keep Γ t) :
     option (tval t) :=
   interp_expr formals binders valuation (IR.symbolize_expr store expression).
 
-Definition interp_program_expr_list {Γ F Δ ts}
+Definition interp_program_expr_list {Γ F Δ keep ts}
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
+    (store : symbolic_store Γ F Δ) (expressions : pexpr_list keep Γ ts) :
     option (tval_list ts) :=
   interp_expr_list formals binders valuation
     (IR.symbolize_expr_list store expressions).
@@ -253,23 +254,23 @@ Lemma interp_lookup_store_ext {Γ F Δ}
     (left right : symbolic_store Γ F Δ) :
   interp_store formals binders valuation left =
     interp_store formals binders valuation right ->
-  forall t (variable : pvar Γ t),
+  forall keep t (variable : lvar keep Γ t),
     interp_ref formals binders valuation (lookup_store left t variable) =
     interp_ref formals binders valuation (lookup_store right t variable).
 Proof.
-  intro Hstore. induction variable.
+  intros Hstore keep t variable. induction variable.
   - dependent destruction left. dependent destruction right.
     cbn in Hstore. injection Hstore as Hhead _.
-    rewrite !lookup_store_here. exact Hhead.
+    exact (Eqdep.EqdepTheory.inj_pair2 _ _ _ _ _ Hhead).
   - dependent destruction left. dependent destruction right.
     cbn in Hstore. injection Hstore as _ Htail.
-    rewrite !lookup_store_there. apply IHvariable.
+    apply IHvariable.
     exact (Eqdep.EqdepTheory.inj_pair2 _ _ _ _ _ Htail).
 Qed.
 
-Lemma interp_program_expr_store_ext {Γ F Δ t}
+Lemma interp_program_expr_store_ext {Γ F Δ keep t}
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (left right : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
+    (left right : symbolic_store Γ F Δ) (expression : pexpr keep Γ t) :
   interp_store formals binders valuation left =
     interp_store formals binders valuation right ->
   interp_program_expr formals binders valuation left expression =
@@ -286,9 +287,9 @@ Proof.
     rewrite IHexpression1. rewrite IHexpression2. reflexivity.
 Qed.
 
-Lemma interp_program_expr_list_store_ext {Γ F Δ ts}
+Lemma interp_program_expr_list_store_ext {Γ F Δ keep ts}
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (left right : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
+    (left right : symbolic_store Γ F Δ) (expressions : pexpr_list keep Γ ts) :
   interp_store formals binders valuation left =
     interp_store formals binders valuation right ->
   interp_program_expr_list formals binders valuation left expressions =
@@ -438,9 +439,14 @@ Lemma interp_rename_bound_store {Γ F Δ Δ'}
       (rename_bound_store renaming store) =
     interp_store formals source_binders valuation store.
 Proof.
+  assert (Hreference : forall t (reference : value_ref F Δ t),
+    interp_ref formals target_binders valuation
+        (rename_bound_ref renaming reference) =
+      interp_ref formals source_binders valuation reference).
+  { intros t reference. destruct reference; simpl; try reflexivity.
+    apply Hrenaming. }
   induction store; simpl; [reflexivity|].
-  rewrite IHstore. destruct v; simpl; try reflexivity.
-  rewrite Hrenaming. reflexivity.
+  rewrite IHstore Hreference. reflexivity.
 Qed.
 
 (** *** Reference substitution in the symbolic store
@@ -631,7 +637,7 @@ Qed.
     adequacy proof. *)
 Record semantic_config_data (PROP : bi) : Type := SemanticConfigData {
   data_bi_affine : BiAffine PROP;
-  data_stack_context : context -> Type;
+  data_stack_context : decl_context -> Type;
   data_empty_stack_context : data_stack_context [];
   data_stack_own : forall Γ,
     data_stack_context Γ -> concrete_store Γ -> bi_car PROP;

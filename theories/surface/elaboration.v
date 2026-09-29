@@ -198,6 +198,7 @@ Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 
 Inductive elaboration_error :=
 | EEUnknownVariable (name : source_name)
+| EEInaccessibleVariable (name : source_name)
 | EEUnknownField (name : source_name)
 | EEUnknownProcedure (name : source_name)
 | EEUnknownInvariant (name : source_name)
@@ -211,10 +212,11 @@ Inductive elaboration_error :=
 | EEIllFormedModule
 | EEUndeclaredProcedure.
 
-Definition packed_pexpr Γ := { t : typ & pexpr Γ t }.
+Definition packed_pexpr keep Γ := { t : typ & pexpr keep Γ t }.
 
-Definition expect_pexpr {Γ} (expected : typ) (expression : packed_pexpr Γ) :
-    elaboration_error + pexpr Γ expected.
+Definition expect_pexpr {keep Γ} (expected : typ)
+    (expression : packed_pexpr keep Γ) :
+    elaboration_error + pexpr keep Γ expected.
 Proof.
   destruct expression as [actual expression].
   destruct (typ_eq_dec expected actual) as [<- | Hneq].
@@ -226,8 +228,9 @@ Defined.
     the elaborator inserts the resource algebra's canonical embedding.  The
     coercion is deliberately used only at field initialization and ghost
     update sites, so ordinary expression typing remains explicit. *)
-Definition expect_field_chunk {Γ} (expected : typ)
-    (expression : packed_pexpr Γ) : elaboration_error + pexpr Γ expected.
+Definition expect_field_chunk {keep Γ} (expected : typ)
+    (expression : packed_pexpr keep Γ) :
+    elaboration_error + pexpr keep Γ expected.
 Proof.
   destruct expression as [actual expression].
   destruct (typ_eq_dec expected actual) as [Heq | Hneq].
@@ -245,9 +248,9 @@ Proof.
       * exact (inl (EETypeMismatch (TRA resource) (TRA actual_resource))).
 Defined.
 
-Definition expect_pvar {Γ} (expected : typ)
-    (variable : { t : typ & pvar Γ t }) :
-    elaboration_error + pvar Γ expected.
+Definition expect_lvar {keep Γ} (expected : typ)
+    (variable : { t : typ & lvar keep Γ t }) :
+    elaboration_error + lvar keep Γ expected.
 Proof.
   destruct variable as [actual variable].
   destruct (typ_eq_dec expected actual) as [<- | Hneq].
@@ -255,33 +258,64 @@ Proof.
   - exact (inl (EETypeMismatch expected actual)).
 Defined.
 
-Definition elaborate_int_binop {Γ} (op : binop TInt TInt TInt)
-    (left_expression right_expression : packed_pexpr Γ) :
-    elaboration_error + packed_pexpr Γ :=
+(** The same local, if its declaration satisfies [keep]. *)
+Fixpoint lvar_restrict (keep : decl -> bool) {keep' D t}
+    (variable : lvar keep' D t) : option (lvar keep D t) :=
+  match variable with
+  | @LHere _ d D' _ =>
+      match keep d as selected return
+        keep d = selected -> option (lvar keep (d :: D') (decl_type d))
+      with
+      | true => fun Hkeep => Some (LHere Hkeep)
+      | false => fun _ => None
+      end eq_refl
+  | LThere variable' =>
+      match lvar_restrict keep variable' with
+      | Some restricted => Some (LThere restricted)
+      | None => None
+      end
+  end.
+
+(** A named local usable where [keep] is required. *)
+Definition lookup_variable {Γ} (keep : decl -> bool)
+    (variables : named_context Γ) (name : source_name) :
+    elaboration_error + { t : typ & lvar keep Γ t } :=
+  match lookup_named variables name with
+  | None => inl (EEUnknownVariable name)
+  | Some (existT t variable) =>
+      match lvar_restrict keep variable with
+      | Some restricted => inr (existT t restricted)
+      | None => inl (EEInaccessibleVariable name)
+      end
+  end.
+
+Definition elaborate_int_binop {keep Γ} (op : binop TInt TInt TInt)
+    (left_expression right_expression : packed_pexpr keep Γ) :
+    elaboration_error + packed_pexpr keep Γ :=
   match expect_pexpr TInt left_expression, expect_pexpr TInt right_expression with
   | inr left', inr right' => inr (existT TInt (PEBinOp op left' right'))
   | inl error, _ | _, inl error => inl error
   end.
 
-Definition elaborate_int_comparison {Γ} (op : binop TInt TInt TBool)
-    (left_expression right_expression : packed_pexpr Γ) :
-    elaboration_error + packed_pexpr Γ :=
+Definition elaborate_int_comparison {keep Γ} (op : binop TInt TInt TBool)
+    (left_expression right_expression : packed_pexpr keep Γ) :
+    elaboration_error + packed_pexpr keep Γ :=
   match expect_pexpr TInt left_expression, expect_pexpr TInt right_expression with
   | inr left', inr right' => inr (existT TBool (PEBinOp op left' right'))
   | inl error, _ | _, inl error => inl error
   end.
 
-Definition elaborate_bool_binop {Γ} (op : binop TBool TBool TBool)
-    (left_expression right_expression : packed_pexpr Γ) :
-    elaboration_error + packed_pexpr Γ :=
+Definition elaborate_bool_binop {keep Γ} (op : binop TBool TBool TBool)
+    (left_expression right_expression : packed_pexpr keep Γ) :
+    elaboration_error + packed_pexpr keep Γ :=
   match expect_pexpr TBool left_expression, expect_pexpr TBool right_expression with
   | inr left', inr right' => inr (existT TBool (PEBinOp op left' right'))
   | inl error, _ | _, inl error => inl error
   end.
 
-Definition elaborate_equality {Γ} (negated : bool)
-    (left_expression right_expression : packed_pexpr Γ) :
-    elaboration_error + packed_pexpr Γ.
+Definition elaborate_equality {keep Γ} (negated : bool)
+    (left_expression right_expression : packed_pexpr keep Γ) :
+    elaboration_error + packed_pexpr keep Γ.
 Proof.
   destruct left_expression as [left_type left_expression].
   destruct right_expression as [right_type right_expression].
@@ -291,19 +325,21 @@ Proof.
   - exact (inl (EETypeMismatch left_type right_type)).
 Defined.
 
-Fixpoint elaborate_expr {Γ} (variables : named_context Γ)
-    (expression : source_expr) : elaboration_error + packed_pexpr Γ :=
+(** Expressions over the locals admitted by [keep]. *)
+Fixpoint elaborate_expr {Γ} (keep : decl -> bool)
+    (variables : named_context Γ) (expression : source_expr) :
+    elaboration_error + packed_pexpr keep Γ :=
   match expression with
   | SEVar name =>
-      match lookup_named variables name with
-      | Some (existT t variable) => inr (existT t (PEVar variable))
-      | None => inl (EEUnknownVariable name)
+      match lookup_variable keep variables name with
+      | inr (existT t variable) => inr (existT t (PEVar variable))
+      | inl error => inl error
       end
   | SEVal (SVBool value) => inr (existT TBool (PEVal (VBool value)))
   | SEVal (SVInt value) => inr (existT TInt (PEVal (VInt value)))
   | SEVal SVUnit => inr (existT TUnit (PEVal VUnit))
   | SEUnOp SUNot operand =>
-      match elaborate_expr variables operand with
+      match elaborate_expr keep variables operand with
       | inl error => inl error
       | inr operand' =>
           match expect_pexpr TBool operand' with
@@ -312,7 +348,7 @@ Fixpoint elaborate_expr {Γ} (variables : named_context Γ)
           end
       end
   | SEUnOp SUNeg operand =>
-      match elaborate_expr variables operand with
+      match elaborate_expr keep variables operand with
       | inl error => inl error
       | inr operand' =>
           match expect_pexpr TInt operand' with
@@ -321,8 +357,8 @@ Fixpoint elaborate_expr {Γ} (variables : named_context Γ)
           end
       end
   | SEBinOp op left_expression right_expression =>
-      match elaborate_expr variables left_expression,
-            elaborate_expr variables right_expression with
+      match elaborate_expr keep variables left_expression,
+            elaborate_expr keep variables right_expression with
       | inl error, _ | _, inl error => inl error
       | inr left', inr right' =>
           match op with
@@ -344,14 +380,15 @@ Fixpoint elaborate_expr {Γ} (variables : named_context Γ)
   | SEField _ _ | SECall _ _ => inl EEUnsupportedExpression
   end.
 
-Fixpoint elaborate_expr_list {Γ} (variables : named_context Γ)
-    (types : context) (expressions : list source_expr) :
-    elaboration_error + pexpr_list Γ types :=
+Fixpoint elaborate_expr_list {Γ} (keep : decl -> bool)
+    (variables : named_context Γ) (types : context)
+    (expressions : list source_expr) :
+    elaboration_error + pexpr_list keep Γ types :=
   match types, expressions with
   | [], [] => inr PENil
   | expected :: types', expression :: expressions' =>
-      match elaborate_expr variables expression,
-            elaborate_expr_list variables types' expressions' with
+      match elaborate_expr keep variables expression,
+            elaborate_expr_list keep variables types' expressions' with
       | inr expression', inr expressions'' =>
           match expect_pexpr expected expression' with
           | inr expression'' => inr (PECons expression'' expressions'')
@@ -370,7 +407,7 @@ Fixpoint elaborate_field_inits {Γ} (environment : elaboration_environment)
   | [] => inr []
   | (field_name, value) :: fields' =>
       match lookup_field field_name (elaboration_fields environment),
-            elaborate_expr variables value,
+            elaborate_expr keep_runtime variables value,
             elaborate_field_inits environment variables fields' with
       | Some field, inr value', inr fields'' =>
           match expect_field_chunk
@@ -383,13 +420,16 @@ Fixpoint elaborate_field_inits {Γ} (environment : elaboration_environment)
       end
   end.
 
-Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
+(** Statements.  With [init] set, the statement's write is an initializing
+    write, whose target may be a runtime [val]. *)
+Fixpoint elaborate_stmt_init {Γ} (init : bool)
+    (environment : elaboration_environment)
     (variables : named_context Γ) (statement : source_stmt) :
     elaboration_error + stmt Γ :=
   match statement with
   | SSDone => inr TDone
   | SSAssert condition =>
-      match elaborate_expr variables condition with
+      match elaborate_expr keep_all variables condition with
       | inl error => inl error
       | inr condition' =>
           match expect_pexpr TBool condition' with
@@ -399,39 +439,39 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       end
   | SSAssign target (SEField base field_name)
   | SSFieldRead target base field_name =>
-      match lookup_named variables target,
-            elaborate_expr variables base,
+      match lookup_variable (keep_write init) variables target,
+            elaborate_expr keep_runtime variables base,
             lookup_field field_name (elaboration_fields environment) with
-      | Some (existT target_type target'), inr base', Some field =>
+      | inr target', inr base', Some field =>
           match expect_pexpr TRef base' with
           | inl error => inl error
           | inr base'' =>
-              match expect_pvar (field_type (field_identity field))
-                      (existT target_type target') with
+              match expect_lvar (field_type (field_identity field)) target' with
               | inr target'' =>
-                  inr (TFieldRead (field_identity field)
+                  inr (TFieldRead init (field_identity field)
                     target'' base'')
               | inl error => inl error
               end
           end
-      | None, _, _ => inl (EEUnknownVariable target)
+      | inl error, _, _ => inl error
       | _, inl error, _ => inl error
       | _, _, None => inl (EEUnknownField field_name)
       end
   | SSAssign target value =>
-      match lookup_named variables target, elaborate_expr variables value with
-      | Some (existT target_type target'), inr value' =>
+      match lookup_variable (keep_write init) variables target,
+            elaborate_expr keep_runtime variables value with
+      | inr (existT target_type target'), inr value' =>
           match expect_pexpr target_type value' with
           | inl error => inl error
           | inr value'' =>
-              inr (TAssign target' value'')
+              inr (TAssign init target' value'')
           end
-      | None, _ => inl (EEUnknownVariable target)
+      | inl error, _ => inl error
       | _, inl error => inl error
       end
   | SSFieldWrite base field_name value =>
-      match elaborate_expr variables base,
-            elaborate_expr variables value,
+      match elaborate_expr keep_runtime variables base,
+            elaborate_expr keep_runtime variables value,
             lookup_field field_name (elaboration_fields environment) with
       | inr base', inr value', Some field =>
           match expect_pexpr TRef base',
@@ -444,21 +484,21 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       | _, _, None => inl (EEUnknownField field_name)
       end
   | SSAlloc target fields =>
-      match lookup_named variables target,
+      match lookup_variable (keep_write init) variables target,
             elaborate_field_inits environment variables fields with
-      | Some (existT target_type target'), inr fields' =>
-          match expect_pvar TRef (existT target_type target') with
-          | inr target'' => inr (TAlloc target'' fields')
+      | inr target', inr fields' =>
+          match expect_lvar TRef target' with
+          | inr target'' => inr (TAlloc init target'' fields')
           | inl error => inl error
           end
-      | None, _ => inl (EEUnknownVariable target)
+      | inl error, _ => inl error
       | _, inl error => inl error
       end
   | SSGhostUpdate base field_name old_value new_value =>
       match lookup_field field_name (elaboration_fields environment),
-            elaborate_expr variables base,
-            elaborate_expr variables old_value,
-            elaborate_expr variables new_value with
+            elaborate_expr keep_all variables base,
+            elaborate_expr keep_all variables old_value,
+            elaborate_expr keep_all variables new_value with
       | Some field, inr base', inr old_value', inr new_value' =>
           match expect_pexpr TRef base',
                 expect_field_chunk
@@ -478,7 +518,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
               (elaboration_procedures environment) with
       | None => inl (EEUnknownProcedure procedure_name)
       | Some procedure =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_runtime variables
                   (procedure_args (signature_identity procedure)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -487,22 +527,18 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
                   inr (TCall (signature_identity procedure)
                     arguments' (@CTDiscard Γ (procedure_return (signature_identity procedure))))
               | Some target_name =>
-                  match lookup_named variables target_name with
-                  | None => inl (EEUnknownVariable target_name)
-                  | Some (existT target_type target') =>
+                  match lookup_variable (keep_write init) variables target_name with
+                  | inl error => inl error
+                  | inr (existT target_type target') =>
                       match typ_eq_dec target_type
                           (procedure_return
                             (signature_identity procedure)) with
                       | left equality =>
-                          (* Transport the target slot to the declared
-                             return type.  This is a genuine check on the
-                             surface program, not bookkeeping: the user's
-                             target variable must have the callee's return
-                             type. *)
+                          (* The target must have the callee's return type. *)
                           inr (TCall (signature_identity procedure)
                             arguments'
-                            (CTStore (eq_rect target_type
-                              (fun result => pvar Γ result) target' _
+                            (CTStore init (eq_rect target_type
+                              (fun result => write_target init Γ result) target' _
                               equality)))
                       | right _ => inl (EETypeMismatch target_type
                           (procedure_return
@@ -517,7 +553,7 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
               (elaboration_procedures environment) with
       | None => inl (EEUnknownProcedure procedure_name)
       | Some procedure =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_runtime variables
                   (procedure_args (signature_identity procedure)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -528,14 +564,14 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       match lookup_invariant name (elaboration_invariants environment),
             lookup_predicate name (elaboration_predicates environment) with
       | Some invariant, _ =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
               inr (TUnfold (invariant_identity invariant) arguments')
           end
       | None, Some predicate =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -547,14 +583,14 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       match lookup_invariant name (elaboration_invariants environment),
             lookup_predicate name (elaboration_predicates environment) with
       | Some invariant, _ =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
               inr (TFold (invariant_identity invariant) arguments')
           end
       | None, Some predicate =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -563,26 +599,26 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
       | None, None => inl (EEUnknownInvariant name)
       end
   | SSSeq first second =>
-      match elaborate_stmt environment variables first with
+      match elaborate_stmt_init false environment variables first with
       | inl error => inl error
       | inr first' =>
-          match elaborate_stmt environment variables second with
+          match elaborate_stmt_init false environment variables second with
           | inl error => inl error
           | inr second' =>
               inr (TSeq first' second')
           end
       end
   | SSIf condition then_branch else_branch =>
-      match elaborate_expr variables condition with
+      match elaborate_expr keep_runtime variables condition with
       | inl error => inl error
       | inr condition' =>
           match expect_pexpr TBool condition' with
           | inl error => inl error
           | inr condition'' =>
-              match elaborate_stmt environment variables then_branch with
+              match elaborate_stmt_init false environment variables then_branch with
               | inl error => inl error
               | inr then_branch' =>
-                  match elaborate_stmt environment variables else_branch with
+                  match elaborate_stmt_init false environment variables else_branch with
                   | inl error => inl error
                   | inr else_branch' =>
                       inr (TIf condition'' then_branch' else_branch')
@@ -591,60 +627,131 @@ Fixpoint elaborate_stmt {Γ} (environment : elaboration_environment)
           end
       end
   | SSAtomic body =>
-      match elaborate_stmt environment variables body with
+      match elaborate_stmt_init false environment variables body with
       | inl error => inl error
       | inr body' => inr (TAtomic body')
       end
+  | SSGhostVal name annotation initializer body =>
+      match elaborate_expr keep_all variables initializer with
+      | inl error => inl error
+      | inr (existT t initializer') =>
+          match annotation with
+          | Some annotated =>
+              if typ_eq_dec (elaborate_typ annotated) t then
+                match elaborate_stmt_init false environment
+                    (NCCons name (ghost_val t) variables) body with
+                | inl error => inl error
+                | inr body' => inr (TGhostVal name t initializer' body')
+                end
+              else inl (EETypeMismatch (elaborate_typ annotated) t)
+          | None =>
+              match elaborate_stmt_init false environment
+                  (NCCons name (ghost_val t) variables) body with
+              | inl error => inl error
+              | inr body' => inr (TGhostVal name t initializer' body')
+              end
+          end
+      end
+  | SSInit write => elaborate_stmt_init true environment variables write
   end.
 
-(** Whether elaboration produced a statement. *)
+Definition elaborate_stmt {Γ} (environment : elaboration_environment)
+    (variables : named_context Γ) (statement : source_stmt) :
+    elaboration_error + stmt Γ :=
+  elaborate_stmt_init false environment variables statement.
+
 (** ** Assertions
 
     Expressions inside assertions are elaborated as program expressions over
-    the named context of bound variables followed by formals, and then read
-    back as logical expressions: a variable of the bound prefix becomes a
-    bound reference, one of the formal suffix a formal reference.  Bound
-    names therefore shadow formals. *)
+    the bound variables followed by the formals, and then read back as
+    logical expressions: a variable of the bound prefix becomes a bound
+    reference, one of the formal suffix a formal reference.  Bound names
+    therefore shadow formals. *)
 
-Fixpoint append_named {Δ F} (bound : named_context Δ)
-    (formals : named_context F) : named_context (Δ ++ F)%list :=
+(** The locals standing for the names of a type context. *)
+Fixpoint runtime_decls (types : context) : decl_context :=
+  match types with
+  | [] => []
+  | t :: types' => runtime_var t :: runtime_decls types'
+  end.
+
+Fixpoint named_of_types {Γ} (names : named_types Γ) :
+    named_context (runtime_decls Γ) :=
+  match names with
+  | NTNil => NCNil
+  | NTCons name t tail => NCCons name (runtime_var t) (named_of_types tail)
+  end.
+
+Fixpoint append_named {Δ F} (bound : named_types Δ)
+    (formals : named_types F) : named_context (runtime_decls (Δ ++ F)%list) :=
   match bound with
-  | NCNil => formals
-  | NCCons name t tail => NCCons name t (append_named tail formals)
+  | NTNil => named_of_types formals
+  | NTCons name t tail => NCCons name (runtime_var t) (append_named tail formals)
   end.
 
-Definition member_case {u Γ t} (variable : member (u :: Γ) t) :
-    (u = t) + member Γ t :=
-  match variable in member Γ' t'
-      return match Γ' with [] => unit | u' :: Γ'' => (u' = t') + member Γ'' t' end
+Fixpoint append_types {A B} (left : named_types A) (right : named_types B) :
+    named_types (A ++ B)%list :=
+  match left with
+  | NTNil => right
+  | NTCons name t tail => NTCons name t (append_types tail right)
+  end.
+
+Definition lvar_nil_elim {keep t} (variable : lvar keep [] t) : False :=
+  match variable in lvar _ D0 _ return
+    match D0 with [] => False | _ => True end
   with
-  | MHere => inl eq_refl
-  | MThere variable' => inr variable'
+  | LHere _ => I
+  | LThere _ => I
   end.
 
-Fixpoint split_member (Δ : context) {F t} :
-    member (Δ ++ F)%list t -> member Δ t + member F t :=
+Definition lvar_case {keep d D t} (variable : lvar keep (d :: D) t) :
+    (decl_type d = t) + lvar keep D t :=
+  match variable in lvar _ D0 t0 return
+    match D0 with
+    | [] => unit
+    | d0 :: D1 => (decl_type d0 = t0) + lvar keep D1 t0
+    end
+  with
+  | LHere _ => inl eq_refl
+  | LThere variable' => inr variable'
+  end.
+
+Fixpoint lvar_member (F : context) {keep t} :
+    lvar keep (runtime_decls F) t -> member F t :=
+  match F with
+  | [] => fun variable => match lvar_nil_elim variable with end
+  | u :: F' => fun variable =>
+      match lvar_case variable with
+      | inl equal => eq_rect u (member (u :: F')) MHere t equal
+      | inr variable' => MThere (lvar_member F' variable')
+      end
+  end.
+
+Fixpoint split_lvar (Δ : context) {F keep t} :
+    lvar keep (runtime_decls (Δ ++ F)%list) t -> member Δ t + member F t :=
   match Δ with
-  | [] => fun variable => inr variable
+  | [] => fun variable => inr (lvar_member F variable)
   | u :: Δ' => fun variable =>
-      match member_case variable with
+      match lvar_case variable with
       | inl equal => inl (eq_rect u (member (u :: Δ')) MHere t equal)
       | inr variable' =>
-          match split_member Δ' variable' with
+          match split_lvar Δ' variable' with
           | inl bound => inl (MThere bound)
           | inr formal => inr formal
           end
       end
   end.
 
-Definition logical_ref {Δ F t} (variable : member (Δ ++ F)%list t) :
+Definition logical_ref {Δ F keep t}
+    (variable : lvar keep (runtime_decls (Δ ++ F)%list) t) :
     value_ref F Δ t :=
-  match split_member Δ variable with
+  match split_lvar Δ variable with
   | inl bound => RefBound bound
   | inr formal => RefFormal formal
   end.
 
-Fixpoint logical_expr {Δ F t} (expression : pexpr (Δ ++ F)%list t) : expr F Δ t :=
+Fixpoint logical_expr {Δ F keep t}
+    (expression : pexpr keep (runtime_decls (Δ ++ F)%list) t) : expr F Δ t :=
   match expression with
   | PEVar variable => ERef (logical_ref variable)
   | PEVal value => EVal value
@@ -653,7 +760,8 @@ Fixpoint logical_expr {Δ F t} (expression : pexpr (Δ ++ F)%list t) : expr F Δ
       EBinOp op (logical_expr operand1) (logical_expr operand2)
   end.
 
-Fixpoint logical_expr_list {Δ F ts} (expressions : pexpr_list (Δ ++ F)%list ts) :
+Fixpoint logical_expr_list {Δ F keep ts}
+    (expressions : pexpr_list keep (runtime_decls (Δ ++ F)%list) ts) :
     expr_list F Δ ts :=
   match expressions with
   | PENil => ExprNil
@@ -662,7 +770,7 @@ Fixpoint logical_expr_list {Δ F ts} (expressions : pexpr_list (Δ ++ F)%list ts
   end.
 
 Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
-    (formals : named_context F) (bound : named_context Δ)
+    (formals : named_types F) (bound : named_types Δ)
     (assertion : source_assertion) :
     elaboration_error + Resource.core_assertion F Δ :=
   let variables := append_named bound formals in
@@ -670,7 +778,7 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
   | SATrue => inr (Resource.CPure True)
   | SAFalse => inr (Resource.CPure False)
   | SAPure condition =>
-      match elaborate_expr variables condition with
+      match elaborate_expr keep_all variables condition with
       | inl error => inl error
       | inr condition' =>
           match expect_pexpr TBool condition' with
@@ -680,7 +788,8 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
       end
   | SAOwn (SEField base field_name) chunk None =>
       match lookup_field field_name (elaboration_fields environment),
-            elaborate_expr variables base, elaborate_expr variables chunk with
+            elaborate_expr keep_all variables base,
+            elaborate_expr keep_all variables chunk with
       | None, _, _ => inl (EEUnknownField field_name)
       | _, inl error, _ | _, _, inl error => inl error
       | Some field, inr base', inr chunk' =>
@@ -700,7 +809,7 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
       match lookup_invariant name (elaboration_invariants environment),
             lookup_predicate name (elaboration_predicates environment) with
       | Some invariant, _ =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (invariant_args (invariant_identity invariant)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -708,7 +817,7 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
                 (logical_expr_list arguments'))
           end
       | None, Some predicate =>
-          match elaborate_expr_list variables
+          match elaborate_expr_list keep_all variables
                   (predicate_args (predicate_identity predicate)) arguments with
           | inl error => inl error
           | inr arguments' =>
@@ -719,13 +828,13 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
       end
   | SAExists name binder_type body =>
       match elaborate_assertion environment formals
-              (NCCons name (elaborate_typ binder_type) bound) body with
+              (NTCons name (elaborate_typ binder_type) bound) body with
       | inl error => inl error
       | inr body' => inr (Resource.CExists (elaborate_typ binder_type) body')
       end
   | SAForall name binder_type body =>
       match elaborate_assertion environment formals
-              (NCCons name (elaborate_typ binder_type) bound) body with
+              (NTCons name (elaborate_typ binder_type) bound) body with
       | inl error => inl error
       | inr body' => inr (Resource.CForall (elaborate_typ binder_type) body')
       end
@@ -740,52 +849,72 @@ Fixpoint elaborate_assertion {F Δ} (environment : elaboration_environment)
 (** ** Procedures
 
     A procedure's variables are laid out as its arguments, then its locals,
-    then its return variable.  The arguments are the formals, and their
-    declared types must match the procedure's signature in [Logic]. *)
+    then its return variable, all runtime [var]s.  The arguments are the
+    formals, and their declared types must match the procedure's signature
+    in [Logic]. *)
 Fixpoint elaborate_formals (types : context) (declarations : list source_var_decl) :
-    elaboration_error + named_context types :=
+    elaboration_error + named_types types :=
   match types, declarations with
-  | [], [] => inr NCNil
+  | [], [] => inr NTNil
   | t :: types', declaration :: declarations' =>
       if typ_eq_dec (elaborate_typ (source_var_type declaration)) t then
         match elaborate_formals types' declarations' with
         | inl error => inl error
-        | inr formals => inr (NCCons (source_var_name declaration) t formals)
+        | inr formals => inr (NTCons (source_var_name declaration) t formals)
         end
       else inl (EETypeMismatch t (elaborate_typ (source_var_type declaration)))
   | _, _ => inl EEArgumentCount
   end.
 
 
-Fixpoint elaborate_locals (declarations : list source_var_decl) :
-    named_context (declaration_types declarations) :=
-  match declarations with
+Definition elaborate_mutability (mutability : source_mutability) :
+    Core.mutability :=
+  match mutability with SMVal => MVal | SMVar => MVar end.
+
+(** Procedure locals are runtime locals of their declared mutability. *)
+Definition local_decl (local : source_local) : decl :=
+  Decl PRuntime (elaborate_mutability (source_local_mutability local))
+    (elaborate_typ (source_var_type (source_local_decl local))).
+
+Fixpoint elaborate_locals (locals : list source_local) :
+    named_context (map local_decl locals) :=
+  match locals with
   | [] => NCNil
-  | declaration :: declarations' =>
-      NCCons (source_var_name declaration)
-        (elaborate_typ (source_var_type declaration))
-        (elaborate_locals declarations')
+  | local :: locals' =>
+      NCCons (source_var_name (source_local_decl local)) (local_decl local)
+        (elaborate_locals locals')
   end.
 
-Fixpoint pvar_list_there {Γ F u} (variables : pvar_list Γ F) :
-    pvar_list (u :: Γ) F :=
+Fixpoint append_named_context {A B} (left : named_context A)
+    (right : named_context B) : named_context (A ++ B)%list :=
+  match left with
+  | NCNil => right
+  | NCCons name d tail => NCCons name d (append_named_context tail right)
+  end.
+
+Fixpoint pvar_list_there {D F d} (variables : pvar_list D F) :
+    pvar_list (d :: D) F :=
   match variables with
   | PVNil => PVNil
   | PVCons variable variables' =>
-      PVCons (MThere variable) (pvar_list_there variables')
+      PVCons (LThere variable) (pvar_list_there variables')
   end.
 
-Fixpoint prefix_variables (A R : context) : pvar_list (A ++ R)%list A :=
+Fixpoint prefix_variables (A : context) (R : decl_context) :
+    pvar_list (runtime_decls A ++ R)%list A :=
   match A with
   | [] => PVNil
-  | t :: A' => PVCons MHere (pvar_list_there (prefix_variables A' R))
+  | t :: A' =>
+      PVCons (D := (runtime_decls (t :: A') ++ R)%list)
+        (LHere (keep := keep_all) (d := runtime_var t) eq_refl)
+        (pvar_list_there (prefix_variables A' R))
   end.
 
-Fixpoint member_app_right (A : context) {R t} (variable : member R t) :
-    member (A ++ R)%list t :=
+Fixpoint lvar_app_right (A : decl_context) {keep R t}
+    (variable : lvar keep R t) : lvar keep (A ++ R)%list t :=
   match A with
   | [] => variable
-  | _ :: A' => MThere (member_app_right A' variable)
+  | _ :: A' => LThere (lvar_app_right A' variable)
   end.
 
 (** A procedure without a [returns] clause returns [Unit] through a hidden
@@ -812,11 +941,12 @@ Definition elaborate_procedure (environment : elaboration_environment)
           if typ_eq_dec (elaborate_typ (source_var_type return_declaration))
               return_type then
             let return_binder :=
-              NCCons (source_var_name return_declaration) return_type NCNil in
-            let locals := elaborate_locals (source_proc_locals procedure) in
-            let variables := append_named formals
-              (append_named locals return_binder) in
-            match elaborate_assertion environment formals NCNil
+              NTCons (source_var_name return_declaration) return_type NTNil in
+            let variables := append_named_context (named_of_types formals)
+              (append_named_context
+                (elaborate_locals (source_proc_locals procedure))
+                (named_of_types return_binder)) in
+            match elaborate_assertion environment formals NTNil
                     (source_proc_pre procedure),
                   elaborate_assertion environment formals return_binder
                     (source_proc_post procedure),
@@ -827,7 +957,9 @@ Definition elaborate_procedure (environment : elaboration_environment)
                 inr (pack_typed_procedure
                   (@TypedProcedure _ _ _ identity variables formals
                     (prefix_variables _ _)
-                    (member_app_right _ (member_app_right _ MHere))
+                    (lvar_app_right _ (lvar_app_right _
+                      (LHere (keep := keep_all) (d := runtime_var return_type)
+                        (D := []) eq_refl)))
                     precondition postcondition body))
             end
           else inl (EETypeMismatch return_type
@@ -854,7 +986,7 @@ Definition elaborate_invariant (environment : elaboration_environment)
               (source_inv_args declaration) with
       | inl error => inl error
       | inr formals =>
-          match elaborate_assertion environment formals NCNil
+          match elaborate_assertion environment formals NTNil
                   (source_inv_body declaration) with
           | inl error => inl error
           | inr body => inr (existT identity body)
@@ -875,7 +1007,7 @@ Definition elaborate_predicate (environment : elaboration_environment)
               (source_pred_args declaration) with
       | inl error => inl error
       | inr formals =>
-          match elaborate_assertion environment formals NCNil
+          match elaborate_assertion environment formals NTNil
                   (source_pred_body declaration) with
           | inl error => inl error
           | inr body => inr (existT identity body)
@@ -925,7 +1057,7 @@ Definition elaborate_module (module : source_module) :
 
 (** A procedure of an elaborated module, by identifier. *)
 Definition declared_procedure (M : Hoare.module) (identity : proc_id) :
-    elaboration_error + { Γ : context & typed_procedure Γ identity } :=
+    elaboration_error + { Γ : decl_context & typed_procedure Γ identity } :=
   match Hoare.module_procedure M identity with
   | Some procedure => inr procedure
   | None => inl EEUndeclaredProcedure
@@ -976,8 +1108,8 @@ End TinyLogic.
 #[local] Existing Instances UnitRA.ra_values TinyLogic.logic.
 Import Core IR Elaboration.
 
-Definition variables : IR.named_context [TInt; TRef] :=
-  IR.NCCons "v" TInt (IR.NCCons "c" TRef IR.NCNil).
+Definition variables : IR.named_context [runtime_var TInt; runtime_var TRef] :=
+  IR.NCCons "v" (runtime_var TInt) (IR.NCCons "c" (runtime_var TRef) IR.NCNil).
 
 Definition environment : Elaboration.elaboration_environment :=
   Elaboration.ElaborationEnvironment
@@ -1019,6 +1151,48 @@ Example ghost_update_elaborates :
     elaborate_stmt environment variables
       (SSGhostUpdate (SEVar "c") "value"
         (SEVal (SVInt 0)) (SEVal (SVInt 1))) = inr result.
+Proof. eexists. reflexivity. Qed.
+
+Example ghost_val_elaborates :
+  exists result,
+    elaborate_stmt environment variables
+      (SSGhostVal "g" (Some SRef) (SEVar "c")
+        (SSSeq (SSUnfold "counter" [SEVar "g"])
+          (SSFold "counter" [SEVar "g"]))) = inr result.
+Proof. eexists. reflexivity. Qed.
+
+Example ghost_val_is_immutable :
+  elaborate_stmt environment variables
+      (SSGhostVal "g" None (SEVar "v") (SSAssign "g" (SEVal (SVInt 1)))) =
+    inl (EEInaccessibleVariable "g").
+Proof. reflexivity. Qed.
+
+Example ghost_val_is_not_runtime :
+  elaborate_stmt environment variables
+      (SSGhostVal "g" None (SEVar "v") (SSAssign "v" (SEVar "g"))) =
+    inl (EEInaccessibleVariable "g").
+Proof. reflexivity. Qed.
+
+Definition val_variables :
+    IR.named_context [runtime_val TRef; runtime_var TInt] :=
+  IR.NCCons "r" (runtime_val TRef) (IR.NCCons "v" (runtime_var TInt) IR.NCNil).
+
+Example val_initialization_elaborates :
+  exists result,
+    elaborate_stmt environment val_variables
+      (SSInit (SSAlloc "r" [("value", SEVal (SVInt 0))])) = inr result.
+Proof. eexists. reflexivity. Qed.
+
+Example val_is_immutable :
+  elaborate_stmt environment val_variables
+      (SSAlloc "r" [("value", SEVal (SVInt 0))]) =
+    inl (EEInaccessibleVariable "r").
+Proof. reflexivity. Qed.
+
+Example val_is_readable :
+  exists result,
+    elaborate_stmt environment val_variables
+      (SSFieldRead "v" (SEVar "r") "value") = inr result.
 Proof. eexists. reflexivity. Qed.
 
 End ElaborationExamples.

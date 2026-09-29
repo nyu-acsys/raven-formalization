@@ -13,58 +13,86 @@ Module IR.
 
 Import Core.
 
-(** Source names decorate a typed context but do not occur in the resulting
-    references.  The head is the most recently declared variable. *)
-Inductive named_context : context -> Type :=
+(** Source names decorate a declaration context but do not occur in the
+    resulting references.  The head is the most recently declared local. *)
+Inductive named_context : decl_context -> Type :=
 | NCNil : named_context []
-| NCCons Γ (name : source_name) (t : typ) :
-    named_context Γ -> named_context (t :: Γ).
+| NCCons D (name : source_name) (d : decl) :
+    named_context D -> named_context (d :: D).
 
 Arguments NCCons {_} _ _ _.
 
-Fixpoint lookup_named {Γ} (declarations : named_context Γ)
-    (name : source_name) : option { t : typ & pvar Γ t } :=
+Fixpoint lookup_named {D} (declarations : named_context D)
+    (name : source_name) : option { t : typ & pvar D t } :=
   match declarations with
   | NCNil => None
-  | NCCons declared_name declared_type tail =>
+  | NCCons declared_name declared tail =>
+      if String.eqb name declared_name then
+        Some (existT (decl_type declared) (LHere eq_refl))
+      else
+        match lookup_named tail name with
+        | Some (existT t variable) => Some (existT t (LThere variable))
+        | None => None
+        end
+  end.
+
+(** Source names for a type context (formals and logical binders). *)
+Inductive named_types : context -> Type :=
+| NTNil : named_types []
+| NTCons Γ (name : source_name) (t : typ) :
+    named_types Γ -> named_types (t :: Γ).
+
+Arguments NTCons {_} _ _ _.
+
+Fixpoint lookup_named_type {Γ} (declarations : named_types Γ)
+    (name : source_name) : option { t : typ & member Γ t } :=
+  match declarations with
+  | NTNil => None
+  | NTCons declared_name declared_type tail =>
       if String.eqb name declared_name then
         Some (existT declared_type MHere)
       else
-        match lookup_named tail name with
+        match lookup_named_type tail name with
         | Some (existT t variable) => Some (existT t (MThere variable))
         | None => None
         end
   end.
 
-(** A type-preserving embedding of one context into another.  Procedure
-    entries use this to say which variables of the body frame receive the
-    formal arguments.  Unlike a list of source names, this layout cannot
-    refer to a missing or ill-typed body slot. *)
-Inductive pvar_list (Γ : context) : context -> Type :=
-| PVNil : pvar_list Γ []
-| PVCons F t : pvar Γ t -> pvar_list Γ F -> pvar_list Γ (t :: F).
+Fixpoint named_types_names {Γ} (declarations : named_types Γ) :
+    list source_name :=
+  match declarations with
+  | NTNil => []
+  | NTCons name _ tail => name :: named_types_names tail
+  end.
+
+(** A type-preserving embedding of a formal context into the locals.
+    Procedure entries use this to say which locals receive the formal
+    arguments. *)
+Inductive pvar_list (D : decl_context) : context -> Type :=
+| PVNil : pvar_list D []
+| PVCons F t : pvar D t -> pvar_list D F -> pvar_list D (t :: F).
 
 Arguments PVNil {_}.
 Arguments PVCons {_ _ _} _ _.
 
-Fixpoint pvar_list_indices {Γ F} (variables : pvar_list Γ F) : list nat :=
+Fixpoint pvar_list_indices {D F} (variables : pvar_list D F) : list nat :=
   match variables with
   | PVNil => []
-  | PVCons variable tail => member_index variable :: pvar_list_indices tail
+  | PVCons variable tail => lvar_index variable :: pvar_list_indices tail
   end.
 
-Fixpoint lookup_pvar_list {Γ F t} (variables : pvar_list Γ F)
-    (formal_variable : member F t) : pvar Γ t.
+Fixpoint lookup_pvar_list {D F t} (variables : pvar_list D F)
+    (formal_variable : member F t) : pvar D t.
 Proof.
   destruct variables as [|F head_type variable tail].
   - dependent destruction formal_variable.
   - dependent destruction formal_variable.
     + exact variable.
-    + exact (@lookup_pvar_list Γ F t tail formal_variable).
+    + exact (@lookup_pvar_list D F t tail formal_variable).
 Defined.
 
-Lemma lookup_pvar_list_here {Γ F t} (variable : pvar Γ t)
-    (tail : pvar_list Γ F) :
+Lemma lookup_pvar_list_here {D F t} (variable : pvar D t)
+    (tail : pvar_list D F) :
   lookup_pvar_list (PVCons variable tail) MHere = variable.
 Proof.
   unfold lookup_pvar_list, Equality.simplification_heq.
@@ -72,8 +100,8 @@ Proof.
   reflexivity.
 Qed.
 
-Lemma lookup_pvar_list_there {Γ F head t} (variable : pvar Γ head)
-    (tail : pvar_list Γ F) (formal_variable : formal F t) :
+Lemma lookup_pvar_list_there {D F head t} (variable : pvar D head)
+    (tail : pvar_list D F) (formal_variable : formal F t) :
   lookup_pvar_list (PVCons variable tail) (MThere formal_variable) =
     lookup_pvar_list tail formal_variable.
 Proof.
@@ -82,18 +110,18 @@ Proof.
   reflexivity.
 Qed.
 
-Lemma pvar_list_index_member {Γ F t} (variables : pvar_list Γ F)
-    (variable : pvar Γ t) :
-  In (member_index variable) (pvar_list_indices variables) ->
+Lemma pvar_list_index_member {D F t} (variables : pvar_list D F)
+    (variable : pvar D t) :
+  In (lvar_index variable) (pvar_list_indices variables) ->
   exists formal_variable : formal F t,
     lookup_pvar_list variables formal_variable = variable.
 Proof.
   induction variables as [| F head_type program_variable tail IH]; simpl.
   - contradiction.
   - intros [Hhead | Htail].
-    + assert (Hsigma : @existT typ (fun u => pvar Γ u) head_type program_variable =
-          @existT typ (fun u => pvar Γ u) t variable).
-      { apply member_index_sig_injective. exact Hhead. }
+    + assert (Hsigma : @existT typ (fun u => pvar D u) head_type program_variable =
+          @existT typ (fun u => pvar D u) t variable).
+      { apply lvar_index_sig_injective. exact Hhead. }
       dependent destruction Hsigma.
       exists MHere. exact (lookup_pvar_list_here variable tail).
     + destruct (IH Htail) as (formal_variable & Hlookup).
@@ -103,15 +131,15 @@ Proof.
       * exact Hlookup.
 Qed.
 
-Fixpoint named_context_names {Γ} (declarations : named_context Γ) :
+Fixpoint named_context_names {D} (declarations : named_context D) :
     list source_name :=
   match declarations with
   | NCNil => []
   | NCCons name _ tail => name :: named_context_names tail
   end.
 
-Lemma named_context_names_length {Γ} (declarations : named_context Γ) :
-  List.length (named_context_names declarations) = List.length Γ.
+Lemma named_context_names_length {D} (declarations : named_context D) :
+  List.length (named_context_names declarations) = List.length D.
 Proof. induction declarations; simpl; congruence. Qed.
 
 Module Resource := Resource.
@@ -122,89 +150,130 @@ Import Core Assertions.
 Section WithSignature.
 Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 
-(** Runtime program expressions use program variables.  Logical expressions
-    use [value_ref]; the symbolic Hoare rules will connect the two through a
-    typed [symbolic_store]. *)
-Inductive pexpr (Γ : context) : typ -> Type :=
-| PEVar t (variable : pvar Γ t) : pexpr Γ t
-| PEVal t (value : tval t) : pexpr Γ t
+(** Program expressions read the locals admitted by [keep]: runtime
+    expressions ([keep_runtime]) are evaluated by the program, ghost
+    expressions ([keep_all]) only by proof-only statements.  Logical
+    expressions use [value_ref]; the symbolic Hoare rules connect the two
+    through a typed [symbolic_store]. *)
+Inductive pexpr (keep : decl -> bool) (D : decl_context) : typ -> Type :=
+| PEVar t (variable : lvar keep D t) : pexpr keep D t
+| PEVal t (value : tval t) : pexpr keep D t
 | PEUnOp input output (op : unop input output) :
-    pexpr Γ input -> pexpr Γ output
+    pexpr keep D input -> pexpr keep D output
 | PEBinOp left right output (op : binop left right output) :
-    pexpr Γ left -> pexpr Γ right -> pexpr Γ output.
+    pexpr keep D left -> pexpr keep D right -> pexpr keep D output.
 
-#[global] Arguments PEVar {_ _} _.
-#[global] Arguments PEVal {_ _} _.
-#[global] Arguments PEUnOp {_ _ _} _ _.
-#[global] Arguments PEBinOp {_ _ _ _} _ _ _.
+#[global] Arguments PEVar {_ _ _} & _.
+#[global] Arguments PEVal {_ _ _} & _.
+#[global] Arguments PEUnOp {_ _ _ _} & _ _.
+#[global] Arguments PEBinOp {_ _ _ _ _} & _ _ _.
+
+Notation rexpr := (pexpr keep_runtime).
+Notation gexpr := (pexpr keep_all).
 
 (** Evidence that a conditional guard may be evaluated before opening an
-    invariant.  Program expressions in the current typed fragment mention
-    only runtime stack variables and values, so every such guard is movable.
-
-    This indexed witness is intentionally narrower than a boolean classifier:
-    normalization must receive evidence for the particular guard it moves.
-    Future proof-only ghost guards and executable guards requiring an explicit
-    control result will extend the conditional syntax and their normalization
-    cases; they are not silently classified as movable here. *)
-Inductive guard_mobility {Γ} (condition : pexpr Γ TBool) : Type :=
+    invariant.  Guards are runtime expressions, so every guard is movable. *)
+Inductive guard_mobility {D} (condition : rexpr D TBool) : Type :=
 | GuardMovable : guard_mobility condition.
 
-Definition current_guard_mobility {Γ} (condition : pexpr Γ TBool) :
+Definition current_guard_mobility {D} (condition : rexpr D TBool) :
     guard_mobility condition := GuardMovable condition.
 
-Inductive pexpr_list (Γ : context) : context -> Type :=
-| PENil : pexpr_list Γ []
-| PECons t ts : pexpr Γ t -> pexpr_list Γ ts -> pexpr_list Γ (t :: ts).
+Inductive pexpr_list (keep : decl -> bool) (D : decl_context) :
+    context -> Type :=
+| PENil : pexpr_list keep D []
+| PECons t ts : pexpr keep D t -> pexpr_list keep D ts ->
+    pexpr_list keep D (t :: ts).
 
-#[global] Arguments PENil {_}.
-#[global] Arguments PECons {_ _ _} _ _.
+#[global] Arguments PENil {_ _}.
+#[global] Arguments PECons {_ _ _ _} & _ _.
 
-Fixpoint pexpr_list_append {Γ left_types right_types}
-    (left : pexpr_list Γ left_types) (right : pexpr_list Γ right_types) :
-    pexpr_list Γ (left_types ++ right_types) :=
+Notation rexpr_list := (pexpr_list keep_runtime).
+Notation gexpr_list := (pexpr_list keep_all).
+
+Fixpoint pexpr_list_append {keep D left_types right_types}
+    (left : pexpr_list keep D left_types)
+    (right : pexpr_list keep D right_types) :
+    pexpr_list keep D (left_types ++ right_types) :=
   match left with
   | PENil => right
   | PECons expression tail =>
       PECons expression (pexpr_list_append tail right)
   end.
 
-Inductive field_init (Γ : context) : Type :=
-| FieldInit field : pexpr Γ (field_type field) -> field_init Γ.
+(** Runtime expressions are readable by proof-only constructs. *)
+Fixpoint pexpr_forget {keep D t} (expression : pexpr keep D t) : gexpr D t :=
+  match expression with
+  | PEVar variable => PEVar (lvar_forget variable)
+  | PEVal value => PEVal value
+  | PEUnOp op operand => PEUnOp op (pexpr_forget operand)
+  | PEBinOp op operand1 operand2 =>
+      PEBinOp op (pexpr_forget operand1) (pexpr_forget operand2)
+  end.
 
-#[global] Arguments FieldInit {_} _ _.
+Fixpoint pexpr_list_forget {keep D ts} (expressions : pexpr_list keep D ts) :
+    gexpr_list D ts :=
+  match expressions with
+  | PENil => PENil
+  | PECons expression tail =>
+      PECons (pexpr_forget expression) (pexpr_list_forget tail)
+  end.
 
-Definition field_init_id {Γ} (initialization : field_init Γ) : field_id :=
+(** Reading the same locals under one more declaration. *)
+Fixpoint pexpr_shift {keep d D t} (expression : pexpr keep D t) :
+    pexpr keep (d :: D) t :=
+  match expression with
+  | PEVar variable => PEVar (LThere variable)
+  | PEVal value => PEVal value
+  | PEUnOp op operand => PEUnOp op (pexpr_shift operand)
+  | PEBinOp op operand1 operand2 =>
+      PEBinOp op (pexpr_shift operand1) (pexpr_shift operand2)
+  end.
+
+Fixpoint pexpr_list_shift {keep d D ts} (expressions : pexpr_list keep D ts) :
+    pexpr_list keep (d :: D) ts :=
+  match expressions with
+  | PENil => PENil
+  | PECons expression tail =>
+      PECons (pexpr_shift expression) (pexpr_list_shift tail)
+  end.
+
+Inductive field_init (D : decl_context) : Type :=
+| FieldInit field : rexpr D (field_type field) -> field_init D.
+
+#[global] Arguments FieldInit {_} & _ _.
+
+Definition field_init_id {D} (initialization : field_init D) : field_id :=
   match initialization with FieldInit field _ => field end.
 
-Definition field_init_is_ghost {Γ} (initialization : field_init Γ) : bool :=
+Definition field_init_is_ghost {D} (initialization : field_init D) : bool :=
   match initialization with
   | FieldInit field _ =>
       match field_type field with TRA _ => true | _ => false end
   end.
 
-Inductive ghost_field_init (Γ : context) : Type :=
+Inductive ghost_field_init (D : decl_context) : Type :=
 | GhostFieldInit resource field
     (field_is_resource : field_type field = TRA resource)
-    (value : pexpr Γ (TRA resource)).
+    (value : rexpr D (TRA resource)).
 
 #[global] Arguments GhostFieldInit {_} _ _ _ _.
 
-Definition ghost_field_init_id {Γ} (initialization : ghost_field_init Γ) :
+Definition ghost_field_init_id {D} (initialization : ghost_field_init D) :
     field_id :=
   match initialization with GhostFieldInit _ field _ _ => field end.
 
-Definition physical_field_initializers {Γ} (fields : list (field_init Γ)) :
-    list (field_init Γ) := filter (fun field => negb (field_init_is_ghost field)) fields.
+Definition physical_field_initializers {D} (fields : list (field_init D)) :
+    list (field_init D) := filter (fun field => negb (field_init_is_ghost field)) fields.
 
-Fixpoint ghost_field_initializers {Γ} (fields : list (field_init Γ)) :
-    list (ghost_field_init Γ) :=
+Fixpoint ghost_field_initializers {D} (fields : list (field_init D)) :
+    list (ghost_field_init D) :=
   match fields with
   | [] => []
   | FieldInit field value :: fields' =>
       match field_type field as chunk_type
-        return field_type field = chunk_type -> pexpr Γ chunk_type ->
-          list (ghost_field_init Γ) with
+        return field_type field = chunk_type -> rexpr D chunk_type ->
+          list (ghost_field_init D) with
       | TRA resource => fun Heq chunk =>
           GhostFieldInit resource field Heq chunk ::
             ghost_field_initializers fields'
@@ -212,12 +281,12 @@ Fixpoint ghost_field_initializers {Γ} (fields : list (field_init Γ)) :
       end eq_refl value
   end.
 
-Definition ghost_initializers_require_physical {Γ}
-    (fields : list (field_init Γ)) : Prop :=
+Definition ghost_initializers_require_physical {D}
+    (fields : list (field_init D)) : Prop :=
   ghost_field_initializers fields <> [] -> physical_field_initializers fields <> [].
 
-Lemma physical_field_initializers_ids_nodup {Γ}
-    (fields : list (field_init Γ)) :
+Lemma physical_field_initializers_ids_nodup {D}
+    (fields : list (field_init D)) :
     NoDup (map field_init_id fields) ->
     NoDup (map field_init_id (physical_field_initializers fields)).
 Proof.
@@ -245,135 +314,117 @@ Inductive return_slot : forall return_type t,
 | ReturnSlot return_type :
     return_slot return_type return_type MHere.
 
-Inductive call_target (Γ : context) : typ -> Type :=
-| CTDiscard t : call_target Γ t
-| CTStore t (target : pvar Γ t) : call_target Γ t.
+(** Locals a runtime statement may write. *)
+Notation write_target init := (lvar (keep_write init)).
+
+Inductive call_target (D : decl_context) : typ -> Type :=
+| CTDiscard t : call_target D t
+| CTStore (init : bool) t (target : write_target init D t) : call_target D t.
 
 #[global] Arguments CTDiscard {_ _}.
-#[global] Arguments CTStore {_ _} _.
+#[global] Arguments CTStore {_} _ {_} & _.
 
-Inductive stmt (Γ : context) : Type :=
+Inductive stmt (D : decl_context) : Type :=
 | TDone
-| TAssert (condition : pexpr Γ TBool)
-| TAssign t (target : pvar Γ t) (value : pexpr Γ t)
-| TFieldRead (field : field_id)
-    (target : pvar Γ (field_type field)) (base : pexpr Γ TRef)
-| TFieldWrite (field : field_id) (base : pexpr Γ TRef)
-    (value : pexpr Γ (field_type field))
-| TAlloc (target : pvar Γ TRef)
-    (fields : list (field_init Γ))
-| TGhostUpdate (field : field_id) (base : pexpr Γ TRef)
-    (old_value new_value : pexpr Γ (field_type field))
+| TAssert (condition : gexpr D TBool)
+| TAssign (init : bool) t (target : write_target init D t) (value : rexpr D t)
+| TFieldRead (init : bool) (field : field_id)
+    (target : write_target init D (field_type field)) (base : rexpr D TRef)
+| TFieldWrite (field : field_id) (base : rexpr D TRef)
+    (value : rexpr D (field_type field))
+| TAlloc (init : bool) (target : write_target init D TRef)
+    (fields : list (field_init D))
+| TGhostUpdate (field : field_id) (base : gexpr D TRef)
+    (old_value new_value : gexpr D (field_type field))
 | TCall (procedure : proc_id)
-    (arguments : pexpr_list Γ (procedure_args procedure))
-    (target : call_target Γ (procedure_return procedure))
+    (arguments : rexpr_list D (procedure_args procedure))
+    (target : call_target D (procedure_return procedure))
 | TSpawn (procedure : proc_id)
-    (arguments : pexpr_list Γ (procedure_args procedure))
+    (arguments : rexpr_list D (procedure_args procedure))
 | TUnfold (invariant : inv_id)
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list D (invariant_args invariant))
 | TFold (invariant : inv_id)
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list D (invariant_args invariant))
 | TPredicateUnfold (predicate : pred_id)
-    (arguments : pexpr_list Γ (predicate_args predicate))
+    (arguments : gexpr_list D (predicate_args predicate))
 | TPredicateFold (predicate : pred_id)
-    (arguments : pexpr_list Γ (predicate_args predicate))
+    (arguments : gexpr_list D (predicate_args predicate))
 | TInvAccess (invariant : inv_id)
-    (arguments : pexpr_list Γ (invariant_args invariant))
-    (body : stmt Γ)
-| TIf (condition : pexpr Γ TBool)
-    (then_branch else_branch : stmt Γ)
-| TSeq (first second : stmt Γ)
-| TAtomic (body : stmt Γ).
+    (arguments : gexpr_list D (invariant_args invariant))
+    (body : stmt D)
+| TIf (condition : rexpr D TBool)
+    (then_branch else_branch : stmt D)
+| TSeq (first second : stmt D)
+| TAtomic (body : stmt D)
+(** A ghost value scoped over [body], initialized once and never written. *)
+| TGhostVal (name : source_name) t (initializer : gexpr D t)
+    (body : stmt (ghost_val t :: D)).
 
 #[global] Arguments TDone {_}.
-#[global] Arguments TAssert {_} _.
-#[global] Arguments TAssign {_ _} _ _.
-#[global] Arguments TFieldRead {_} _ _ _.
-#[global] Arguments TFieldWrite {_} _ _ _.
-#[global] Arguments TAlloc {_} _ _.
-#[global] Arguments TGhostUpdate {_} _ _ _ _.
-#[global] Arguments TCall {_} _ _ _.
-#[global] Arguments TSpawn {_} _ _.
-#[global] Arguments TUnfold {_} _ _.
-#[global] Arguments TFold {_} _ _.
-#[global] Arguments TPredicateUnfold {_} _ _.
-#[global] Arguments TPredicateFold {_} _ _.
-#[global] Arguments TInvAccess {_} _ _ _.
-#[global] Arguments TIf {_} _ _ _.
-#[global] Arguments TSeq {_} _ _.
-#[global] Arguments TAtomic {_} _.
+#[global] Arguments TAssert {_} & _.
+#[global] Arguments TAssign {_} _ {_} & _ _.
+#[global] Arguments TFieldRead {_} _ & _ _ _.
+#[global] Arguments TFieldWrite {_} & _ _ _.
+#[global] Arguments TAlloc {_} _ & _ _.
+#[global] Arguments TGhostUpdate {_} & _ _ _ _.
+#[global] Arguments TCall {_} & _ _ _.
+#[global] Arguments TSpawn {_} & _ _.
+#[global] Arguments TUnfold {_} & _ _.
+#[global] Arguments TFold {_} & _ _.
+#[global] Arguments TPredicateUnfold {_} & _ _.
+#[global] Arguments TPredicateFold {_} & _ _.
+#[global] Arguments TInvAccess {_} & _ _ _.
+#[global] Arguments TIf {_} & _ _ _.
+#[global] Arguments TSeq {_} & _ _.
+#[global] Arguments TAtomic {_} & _.
+#[global] Arguments TGhostVal {_} & _ _ _ _.
 
 (** Canonical procedure-entry stores.  Every frame slot starts as a fresh
     procedure-local symbolic symbol; installing the formal-variable embedding
     then replaces exactly the argument slots by their corresponding formal
     references. *)
-Fixpoint procedure_local_entry_store_from {Γ F}
-    (identity : proc_id) (slot : nat) : symbolic_store Γ F [] :=
-  match Γ with
+Fixpoint procedure_local_entry_store_from {D F}
+    (identity : proc_id) (slot : nat) : symbolic_store D F [] :=
+  match D with
   | [] => StoreNil
-  | t :: Γ' =>
-      StoreCons (RefSymbol (ProcedureEntrySymbol identity slot))
-        (@procedure_local_entry_store_from Γ' F identity (S slot))
+  | d :: D' =>
+      StoreCons (d := d) (RefSymbol (ProcedureEntrySymbol identity slot))
+        (@procedure_local_entry_store_from D' F identity (S slot))
   end.
 
-Fixpoint set_store_reference {Γ F Δ t}
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t)
-    (reference : value_ref F Δ t) : symbolic_store Γ F Δ.
-Proof.
-  destruct store as [|head_type tail_context head tail].
-  - dependent destruction variable.
-  - dependent destruction variable.
-    + exact (StoreCons reference tail).
-    + exact (StoreCons head
-        (@set_store_reference tail_context F Δ t tail variable reference)).
-Defined.
+Fixpoint set_store_reference {D F Δ keep t} (variable : lvar keep D t) :
+    symbolic_store D F Δ -> value_ref F Δ t -> symbolic_store D F Δ :=
+  match variable in lvar _ D0 t0 return
+    symbolic_store D0 F Δ -> value_ref F Δ t0 -> symbolic_store D0 F Δ
+  with
+  | LHere _ => fun store reference => StoreCons reference (store_tail store)
+  | LThere variable' => fun store reference =>
+      StoreCons (store_head store)
+        (set_store_reference variable' (store_tail store) reference)
+  end.
 
-Lemma set_store_reference_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (reference : value_ref F Δ head_type) :
-  set_store_reference (StoreCons head tail) MHere reference =
-    StoreCons reference tail.
-Proof.
-  unfold set_store_reference, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl).
-  reflexivity.
-Qed.
-
-Lemma set_store_reference_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) (variable : pvar tail_context t)
-    (reference : value_ref F Δ t) :
-  set_store_reference (StoreCons head tail) (MThere variable) reference =
-    StoreCons head (set_store_reference tail variable reference).
-Proof.
-  unfold set_store_reference, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl).
-  reflexivity.
-Qed.
-
-Fixpoint install_procedure_formals {Γ F Full}
-    (variables : pvar_list Γ F)
+Fixpoint install_procedure_formals {D F Full}
+    (variables : pvar_list D F)
     (embed : forall t, formal F t -> formal Full t)
-    (store : symbolic_store Γ Full []) : symbolic_store Γ Full [] :=
+    (store : symbolic_store D Full []) : symbolic_store D Full [] :=
   match variables in pvar_list _ F0
       return (forall t, formal F0 t -> formal Full t) ->
-        symbolic_store Γ Full [] -> symbolic_store Γ Full [] with
+        symbolic_store D Full [] -> symbolic_store D Full [] with
   | PVNil => fun _ store => store
   | @PVCons _ tail t variable rest => fun embed store =>
       install_procedure_formals rest
         (fun u formal => embed u (MThere formal))
-        (set_store_reference store variable (RefFormal (embed t MHere)))
+        (set_store_reference variable store (RefFormal (embed t MHere)))
   end embed store.
 
-Definition canonical_entry_store_from {Γ F} (identity : proc_id)
-    (formal_variables : pvar_list Γ F) : symbolic_store Γ F [] :=
+Definition canonical_entry_store_from {D F} (identity : proc_id)
+    (formal_variables : pvar_list D F) : symbolic_store D F [] :=
   install_procedure_formals formal_variables (fun _ formal => formal)
     (procedure_local_entry_store_from identity 0).
 
-Definition canonical_procedure_entry_store {Γ identity}
-    (formal_variables : pvar_list Γ (procedure_args identity)) :
-    symbolic_store Γ (procedure_args identity) [] :=
+Definition canonical_procedure_entry_store {D identity}
+    (formal_variables : pvar_list D (procedure_args identity)) :
+    symbolic_store D (procedure_args identity) [] :=
   canonical_entry_store_from identity formal_variables.
 
 (** Indexed by the declared identity rather than by a free formal context:
@@ -382,9 +433,9 @@ Definition canonical_procedure_entry_store {Γ identity}
     and a projection of it respectively, and are kept below as definitions
     so that existing [procedure_identity _ _ procedure] uses continue to
     read. *)
-Record typed_procedure (Γ : context) (identity : proc_id) := TypedProcedure {
+Record typed_procedure (Γ : decl_context) (identity : proc_id) := TypedProcedure {
   procedure_variables : named_context Γ;
-  procedure_formals : named_context (procedure_args identity);
+  procedure_formals : named_types (procedure_args identity);
   procedure_formal_variables : pvar_list Γ (procedure_args identity);
   procedure_return_variable : pvar Γ (procedure_return identity);
   (** Core assertions, not [assertion]: a procedure's contract must not
@@ -401,16 +452,16 @@ Record typed_procedure (Γ : context) (identity : proc_id) := TypedProcedure {
 
 #[global] Arguments TypedProcedure {_ _} _ _ _ _ _ _ _.
 
-Definition procedure_entry_store (Γ : context) (identity : proc_id)
+Definition procedure_entry_store (Γ : decl_context) (identity : proc_id)
     (procedure : typed_procedure Γ identity) :
     symbolic_store Γ (procedure_args identity) [] :=
   canonical_procedure_entry_store
     (procedure_formal_variables _ _ procedure).
 
-Definition procedure_identity (Γ : context) (identity : proc_id)
+Definition procedure_identity (Γ : decl_context) (identity : proc_id)
     (_ : typed_procedure Γ identity) : proc_id := identity.
 
-Definition procedure_return_type (Γ : context) (identity : proc_id)
+Definition procedure_return_type (Γ : decl_context) (identity : proc_id)
     (_ : typed_procedure Γ identity) : typ := procedure_return identity.
 
 (** [procedure_precondition_stack_free] and
@@ -425,12 +476,13 @@ Record procedure_wf {Γ F} (procedure : typed_procedure Γ F) : Prop := {
   procedure_formal_slots_unique :
     NoDup (pvar_list_indices (procedure_formal_variables _ _ procedure));
   procedure_return_slot_local :
-    ~ In (member_index (procedure_return_variable _ _ procedure))
+    ~ In (lvar_index (procedure_return_variable _ _ procedure))
         (pvar_list_indices (procedure_formal_variables _ _ procedure));
   procedure_precondition_entry_free :
     Resource.core_entry_free (procedure_precondition _ _ procedure);
   procedure_postcondition_entry_free :
     Resource.core_entry_free (procedure_postcondition _ _ procedure);
+  procedure_locals_runtime : forallb keep_runtime Γ = true;
 }.
 
 (** A procedure table must be heterogeneous: procedures may have different
@@ -438,11 +490,11 @@ Record procedure_wf {Γ F} (procedure : typed_procedure Γ F) : Prop := {
     package below keeps those indices available when an entry is selected,
     while allowing the table itself to be an ordinary finite list. *)
 Definition packed_typed_procedure :=
-  { Γ : context & { identity : proc_id & typed_procedure Γ identity } }.
+  { Γ : decl_context & { identity : proc_id & typed_procedure Γ identity } }.
 
 Definition pack_typed_procedure {Γ identity}
     (procedure : typed_procedure Γ identity) : packed_typed_procedure :=
-  @existT context (fun variables =>
+  @existT decl_context (fun variables =>
     { identity : proc_id & typed_procedure variables identity }) Γ
     (@existT proc_id (typed_procedure Γ) identity procedure).
 
@@ -483,7 +535,7 @@ Fixpoint lookup_packed_procedure (identity : proc_id)
     longer requires classical choice. *)
 Fixpoint lookup_typed_procedure_at (identity : proc_id)
     (procedures : list packed_typed_procedure) :
-    option { Γ : context & typed_procedure Γ identity } :=
+    option { Γ : decl_context & typed_procedure Γ identity } :=
   match procedures with
   | [] => None
   | existT Γ (existT declared body) :: procedures' =>
@@ -643,8 +695,8 @@ Qed.
     language, so they belong with the store rather than with any one Hoare
     calculus. *)
 
-Fixpoint symbolize_expr {Γ F Δ t} (store : symbolic_store Γ F Δ)
-    (expression : pexpr Γ t) : expr F Δ t :=
+Fixpoint symbolize_expr {D F Δ keep t} (store : symbolic_store D F Δ)
+    (expression : pexpr keep D t) : expr F Δ t :=
   match expression with
   | PEVar variable => ERef (lookup_store store _ variable)
   | PEVal value => EVal value
@@ -653,8 +705,8 @@ Fixpoint symbolize_expr {Γ F Δ t} (store : symbolic_store Γ F Δ)
       EBinOp op (symbolize_expr store operand1) (symbolize_expr store operand2)
   end.
 
-Fixpoint symbolize_expr_list {Γ F Δ ts}
-    (store : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
+Fixpoint symbolize_expr_list {D F Δ keep ts}
+    (store : symbolic_store D F Δ) (expressions : pexpr_list keep D ts) :
     expr_list F Δ ts :=
   match expressions with
   | PENil => ExprNil
@@ -663,98 +715,132 @@ Fixpoint symbolize_expr_list {Γ F Δ ts}
         (symbolize_expr_list store expressions')
   end.
 
-Lemma symbolize_expr_list_append {Γ F Δ left_types right_types}
-    (store : symbolic_store Γ F Δ)
-    (left : pexpr_list Γ left_types) (right : pexpr_list Γ right_types) :
+Lemma symbolize_expr_list_append {D F Δ keep left_types right_types}
+    (store : symbolic_store D F Δ)
+    (left : pexpr_list keep D left_types)
+    (right : pexpr_list keep D right_types) :
   symbolize_expr_list store (pexpr_list_append left right) =
     Assertions.expr_list_append (symbolize_expr_list store left)
       (symbolize_expr_list store right).
 Proof.
-  induction left; simpl; [reflexivity | now rewrite IHleft].
+  induction left; cbn [pexpr_list_append symbolize_expr_list
+    Assertions.expr_list_append]; [reflexivity|].
+  f_equal. exact IHleft.
+Qed.
+
+Lemma lookup_store_forget {D F Δ keep t} (store : symbolic_store D F Δ)
+    (variable : lvar keep D t) :
+  lookup_store store t (lvar_forget variable) = lookup_store store t variable.
+Proof.
+  unfold lookup_store. revert store.
+  induction variable; intros store; simpl; auto.
+Qed.
+
+Lemma symbolize_expr_forget {D F Δ keep t} (store : symbolic_store D F Δ)
+    (expression : pexpr keep D t) :
+  symbolize_expr store (pexpr_forget expression) =
+    symbolize_expr store expression.
+Proof.
+  induction expression; simpl; f_equal; auto using lookup_store_forget.
+Qed.
+
+Lemma symbolize_expr_list_forget {D F Δ keep ts}
+    (store : symbolic_store D F Δ) (expressions : pexpr_list keep D ts) :
+  symbolize_expr_list store (pexpr_list_forget expressions) =
+    symbolize_expr_list store expressions.
+Proof.
+  induction expressions; simpl; f_equal; auto using symbolize_expr_forget.
+Qed.
+
+Lemma symbolize_expr_shift {d D F Δ keep t}
+    (store : symbolic_store (d :: D) F Δ) (expression : pexpr keep D t) :
+  symbolize_expr store (pexpr_shift expression) =
+    symbolize_expr (store_tail store) expression.
+Proof. induction expression; simpl; congruence. Qed.
+
+Lemma symbolize_expr_list_shift {d D F Δ keep ts}
+    (store : symbolic_store (d :: D) F Δ) (expressions : pexpr_list keep D ts) :
+  symbolize_expr_list store (pexpr_list_shift expressions) =
+    symbolize_expr_list (store_tail store) expressions.
+Proof.
+  induction expressions; simpl; f_equal; auto using symbolize_expr_shift.
 Qed.
 
 (** Updating a typed symbolic store is structural: the selected slot receives
     bound variable zero and every other slot is weakened across that binder. *)
-Fixpoint update_store_with_bound {Γ F Δ t}
-    (store : store_data F Δ Γ) (target : pvar Γ t) {struct store} :
-    store_data F (t :: Δ) Γ.
-Proof.
-  destruct store as [| head_type tail_context value tail].
-  - dependent destruction target.
-  - dependent destruction target.
-    + exact (StoreCons (RefBound MHere) (weaken_store tail)).
-    + exact (StoreCons (weaken_ref value)
-        (@update_store_with_bound tail_context F Δ t tail target)).
-Defined.
+Fixpoint update_store_with_bound {D F Δ keep t} (store : store_data F Δ D)
+    (target : lvar keep D t) : store_data F (t :: Δ) D :=
+  match target in lvar _ D0 t0 return
+    store_data F Δ D0 -> store_data F (t0 :: Δ) D0
+  with
+  | LHere _ => fun store =>
+      StoreCons (RefBound MHere) (weaken_store (store_tail store))
+  | LThere target' => fun store =>
+      StoreCons (weaken_ref (store_head store))
+        (update_store_with_bound (store_tail store) target')
+  end store.
 
-Lemma lookup_store_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) :
-  lookup_store (StoreCons head tail) _ MHere = head.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
-Qed.
+Lemma lookup_store_here {F Δ keep d D}
+    (head : value_ref F Δ (decl_type d))
+    (tail : symbolic_store D F Δ) (Hkeep : keep d = true) :
+  lookup_store (StoreCons head tail) _ (LHere Hkeep) = head.
+Proof. reflexivity. Qed.
 
-Lemma lookup_store_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (variable : pvar tail_context t) :
-  lookup_store (StoreCons head tail) _ (MThere variable) =
+Lemma lookup_store_there {F Δ keep d D t}
+    (head : value_ref F Δ (decl_type d))
+    (tail : symbolic_store D F Δ) (variable : lvar keep D t) :
+  lookup_store (StoreCons head tail) _ (LThere variable) =
     lookup_store tail _ variable.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma lookup_set_store_reference_same {Γ F Δ t}
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t)
-    (reference : value_ref F Δ t) :
-  lookup_store (set_store_reference store variable reference) t variable =
+Lemma lookup_set_store_reference_same {D F Δ keep keep' t}
+    (store : symbolic_store D F Δ) (target : lvar keep D t)
+    (variable : lvar keep' D t) (reference : value_ref F Δ t) :
+  lvar_index target = lvar_index variable ->
+  lookup_store (set_store_reference target store reference) t variable =
     reference.
 Proof.
-  induction store; dependent destruction variable.
-  - rewrite set_store_reference_here, lookup_store_here. reflexivity.
-  - rewrite set_store_reference_there, lookup_store_there. apply IHstore.
+  revert store variable. induction target as [d D Hkeep | d D t target IH];
+    intros store variable Hindex; dependent destruction variable;
+    cbn [lvar_index] in Hindex; try discriminate; simpl.
+  - reflexivity.
+  - apply IH. congruence.
 Qed.
 
-Lemma lookup_set_store_reference_other {Γ F Δ t u}
-    (store : symbolic_store Γ F Δ) (target : pvar Γ t)
-    (reference : value_ref F Δ t) (variable : pvar Γ u) :
-  member_index target <> member_index variable ->
-  lookup_store (set_store_reference store target reference) u variable =
+Lemma lookup_set_store_reference_other {D F Δ keep keep' t u}
+    (store : symbolic_store D F Δ) (target : lvar keep D t)
+    (reference : value_ref F Δ t) (variable : lvar keep' D u) :
+  lvar_index target <> lvar_index variable ->
+  lookup_store (set_store_reference target store reference) u variable =
     lookup_store store u variable.
 Proof.
-  revert t target reference u variable. induction store;
-    intros target_type target reference variable_type variable Hne;
-    dependent destruction target; dependent destruction variable.
+  revert store variable. induction target as [d D Hkeep | d D t target IH];
+    intros store variable Hne; dependent destruction variable;
+    cbn [lvar_index] in Hne; simpl.
   - exfalso. apply Hne. reflexivity.
-  - rewrite set_store_reference_here, !lookup_store_there. reflexivity.
-  - rewrite set_store_reference_there, !lookup_store_here. reflexivity.
-  - rewrite set_store_reference_there, !lookup_store_there.
-    apply IHstore. cbn [member_index] in Hne. lia.
+  - reflexivity.
+  - reflexivity.
+  - apply IH. congruence.
 Qed.
 
-Lemma lookup_procedure_local_entry_store_from {Γ F} identity slot t
-    (variable : pvar Γ t) :
-  lookup_store (@procedure_local_entry_store_from Γ F identity slot)
+Lemma lookup_procedure_local_entry_store_from {D F keep} identity slot t
+    (variable : lvar keep D t) :
+  lookup_store (@procedure_local_entry_store_from D F identity slot)
       t variable =
-    RefSymbol (ProcedureEntrySymbol identity (slot + member_index variable)).
+    RefSymbol (ProcedureEntrySymbol identity (slot + lvar_index variable)).
 Proof.
-  revert slot. induction variable; intros slot;
-    cbn [procedure_local_entry_store_from member_index].
-  - rewrite lookup_store_here.
-    replace (slot + 0)%nat with slot by lia. reflexivity.
-  - rewrite lookup_store_there, IHvariable.
-    replace (slot + S (member_index variable))%nat with
-      (S slot + member_index variable)%nat by lia. reflexivity.
+  revert slot. induction variable; intros slot; simpl.
+  - replace (slot + 0)%nat with slot by lia. reflexivity.
+  - unfold lookup_store in IHvariable |- *. simpl. rewrite IHvariable.
+    replace (slot + S (lvar_index variable))%nat with
+      (S slot + lvar_index variable)%nat by lia. reflexivity.
 Qed.
 
-Lemma lookup_install_procedure_formals_absent {Γ F Full}
-    (variables : pvar_list Γ F)
+Lemma lookup_install_procedure_formals_absent {D F Full keep}
+    (variables : pvar_list D F)
     (embed : forall t, formal F t -> formal Full t)
-    (store : symbolic_store Γ Full []) t (variable : pvar Γ t) :
-  ~ In (member_index variable) (pvar_list_indices variables) ->
+    (store : symbolic_store D Full []) t (variable : lvar keep D t) :
+  ~ In (lvar_index variable) (pvar_list_indices variables) ->
   lookup_store (install_procedure_formals variables embed store) t variable =
     lookup_store store t variable.
 Proof.
@@ -766,10 +852,10 @@ Proof.
   - intros Hin. apply Hnot. now right.
 Qed.
 
-Lemma lookup_install_procedure_formals_present {Γ F Full}
-    (variables : pvar_list Γ F)
+Lemma lookup_install_procedure_formals_present {D F Full}
+    (variables : pvar_list D F)
     (embed : forall t, formal F t -> formal Full t)
-    (store : symbolic_store Γ Full []) :
+    (store : symbolic_store D Full []) :
   NoDup (pvar_list_indices variables) ->
   forall t (formal_variable : formal F t),
     lookup_store (install_procedure_formals variables embed store) t
@@ -783,15 +869,15 @@ Proof.
   - inversion Hnodup as [|? ? Hfresh Htail].
     rewrite lookup_pvar_list_here.
     rewrite lookup_install_procedure_formals_absent.
-    + apply lookup_set_store_reference_same.
+    + apply lookup_set_store_reference_same. reflexivity.
     + exact Hfresh.
   - inversion Hnodup as [|? ? Hfresh Htail].
     rewrite lookup_pvar_list_there.
     apply IHvariables. exact Htail.
 Qed.
 
-Lemma lookup_canonical_entry_store_present {Γ F} identity
-    (variables : pvar_list Γ F) :
+Lemma lookup_canonical_entry_store_present {D F} identity
+    (variables : pvar_list D F) :
   NoDup (pvar_list_indices variables) ->
   forall t (formal_variable : formal F t),
     lookup_store (canonical_entry_store_from identity variables) t
@@ -802,11 +888,11 @@ Proof.
   apply lookup_install_procedure_formals_present. exact Hnodup.
 Qed.
 
-Lemma lookup_canonical_entry_store_absent {Γ F} identity
-    (variables : pvar_list Γ F) t (variable : pvar Γ t) :
-  ~ In (member_index variable) (pvar_list_indices variables) ->
+Lemma lookup_canonical_entry_store_absent {D F keep} identity
+    (variables : pvar_list D F) t (variable : lvar keep D t) :
+  ~ In (lvar_index variable) (pvar_list_indices variables) ->
   lookup_store (canonical_entry_store_from identity variables) t variable =
-    RefSymbol (ProcedureEntrySymbol identity (member_index variable)).
+    RefSymbol (ProcedureEntrySymbol identity (lvar_index variable)).
 Proof.
   intros Hnot. unfold canonical_entry_store_from.
   rewrite lookup_install_procedure_formals_absent by exact Hnot.
@@ -814,53 +900,53 @@ Proof.
 Qed.
 
 Lemma lookup_canonical_procedure_entry_store_singleton
-    {Γ t identity} (variable : pvar Γ t) :
+    {D t identity} (variable : pvar D t) :
   lookup_store
       (canonical_entry_store_from identity (PVCons variable PVNil)) t variable =
     RefFormal MHere.
 Proof.
   unfold canonical_entry_store_from.
   change (lookup_store
-    (set_store_reference
-      (procedure_local_entry_store_from identity 0) variable
+    (set_store_reference variable
+      (procedure_local_entry_store_from identity 0)
       (RefFormal (@MHere [] t))) t variable =
         RefFormal (@MHere [] t)).
-  apply lookup_set_store_reference_same.
+  apply lookup_set_store_reference_same. reflexivity.
 Qed.
 
-Lemma lookup_weaken_store {Γ F Δ u t}
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t) :
+Lemma lookup_weaken_store {D F Δ u keep t}
+    (store : symbolic_store D F Δ) (variable : lvar keep D t) :
   lookup_store (weaken_store (u := u) store) t variable =
     weaken_ref (lookup_store store t variable).
 Proof.
-  induction store; dependent destruction variable; cbn [weaken_store].
-  - rewrite !lookup_store_here. reflexivity.
-  - rewrite !lookup_store_there. apply IHstore.
+  unfold lookup_store. revert store.
+  induction variable; intros store; dependent destruction store;
+    simpl; auto.
 Qed.
 
-Lemma lookup_rename_bound_store {Γ F Δ Δ' t}
-    (renaming : bound_renaming Δ Δ') (store : symbolic_store Γ F Δ)
-    (variable : pvar Γ t) :
+Lemma lookup_rename_bound_store {D F Δ Δ' keep t}
+    (renaming : bound_renaming Δ Δ') (store : symbolic_store D F Δ)
+    (variable : lvar keep D t) :
   lookup_store (rename_bound_store renaming store) t variable =
     rename_bound_ref renaming (lookup_store store t variable).
 Proof.
-  induction store; dependent destruction variable; cbn [rename_bound_store].
-  - rewrite !lookup_store_here. reflexivity.
-  - rewrite !lookup_store_there. exact (IHstore _).
+  unfold lookup_store. revert store.
+  induction variable; intros store; dependent destruction store;
+    simpl; auto.
 Qed.
 
-Lemma symbolize_expr_rename_bound_store {Γ F Δ Δ' t}
-    (renaming : bound_renaming Δ Δ') (store : symbolic_store Γ F Δ)
-    (expression : pexpr Γ t) :
+Lemma symbolize_expr_rename_bound_store {D F Δ Δ' keep t}
+    (renaming : bound_renaming Δ Δ') (store : symbolic_store D F Δ)
+    (expression : pexpr keep D t) :
   symbolize_expr (rename_bound_store renaming store) expression =
     rename_bound_expr renaming (symbolize_expr store expression).
 Proof.
   induction expression; cbn; f_equal; auto using lookup_rename_bound_store.
 Qed.
 
-Lemma symbolize_expr_list_rename_bound_store {Γ F Δ Δ' ts}
-    (renaming : bound_renaming Δ Δ') (store : symbolic_store Γ F Δ)
-    (expressions : pexpr_list Γ ts) :
+Lemma symbolize_expr_list_rename_bound_store {D F Δ Δ' keep ts}
+    (renaming : bound_renaming Δ Δ') (store : symbolic_store D F Δ)
+    (expressions : pexpr_list keep D ts) :
   symbolize_expr_list (rename_bound_store renaming store) expressions =
     rename_bound_expr_list renaming (symbolize_expr_list store expressions).
 Proof.
@@ -868,22 +954,21 @@ Proof.
     auto using symbolize_expr_rename_bound_store.
 Qed.
 
-Lemma lookup_subst_bound_store {Γ F Δ Δ' t}
+Lemma lookup_subst_bound_store {D F Δ Δ' keep t}
     (substitution : Resource.bound_ref_subst F Δ Δ')
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t) :
+    (store : symbolic_store D F Δ) (variable : lvar keep D t) :
   lookup_store (Resource.subst_bound_store substitution store) t variable =
     Resource.subst_bound_value_ref substitution
       (lookup_store store t variable).
 Proof.
-  induction store; dependent destruction variable;
-    cbn [Resource.subst_bound_store].
-  - rewrite !lookup_store_here. reflexivity.
-  - rewrite !lookup_store_there. exact (IHstore _).
+  unfold lookup_store. revert store.
+  induction variable; intros store; dependent destruction store;
+    simpl; auto.
 Qed.
 
-Lemma symbolize_expr_subst_bound_store {Γ F Δ Δ' t}
+Lemma symbolize_expr_subst_bound_store {D F Δ Δ' keep t}
     (substitution : Resource.bound_ref_subst F Δ Δ')
-    (store : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
+    (store : symbolic_store D F Δ) (expression : pexpr keep D t) :
   symbolize_expr (Resource.subst_bound_store substitution store) expression =
     subst_bound_expr (Resource.bound_subst_of_refs substitution)
       (symbolize_expr store expression).
@@ -896,10 +981,10 @@ Proof.
   - rewrite IHexpression1. rewrite IHexpression2. reflexivity.
 Qed.
 
-Lemma symbolize_expr_list_subst_bound_store {Γ F Δ Δ' ts}
+Lemma symbolize_expr_list_subst_bound_store {D F Δ Δ' keep ts}
     (substitution : Resource.bound_ref_subst F Δ Δ')
-    (store : symbolic_store Γ F Δ)
-    (expressions : pexpr_list Γ ts) :
+    (store : symbolic_store D F Δ)
+    (expressions : pexpr_list keep D ts) :
   symbolize_expr_list (Resource.subst_bound_store substitution store)
       expressions =
     subst_bound_expr_list (Resource.bound_subst_of_refs substitution)
@@ -909,8 +994,8 @@ Proof.
   rewrite symbolize_expr_subst_bound_store. rewrite IHexpressions. reflexivity.
 Qed.
 
-Lemma rename_bound_store_lift_weaken {Γ F Δ Δ' t}
-    (renaming : bound_renaming Δ Δ') (store : symbolic_store Γ F Δ) :
+Lemma rename_bound_store_lift_weaken {D F Δ Δ' t}
+    (renaming : bound_renaming Δ Δ') (store : symbolic_store D F Δ) :
   rename_bound_store (lift_bound_renaming (u := t) renaming)
     (weaken_store (u := t) store) =
   weaken_store (u := t) (rename_bound_store renaming store).
@@ -923,71 +1008,64 @@ Proof.
   unfold lift_bound_renaming. rewrite view_member_there. reflexivity.
 Qed.
 
-Lemma update_store_with_bound_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) :
-  update_store_with_bound (StoreCons head tail) MHere =
+Lemma update_store_with_bound_here {F Δ keep d D}
+    (head : value_ref F Δ (decl_type d))
+    (tail : symbolic_store D F Δ) (Hkeep : keep d = true) :
+  update_store_with_bound (StoreCons head tail) (LHere Hkeep) =
     StoreCons (RefBound MHere) (weaken_store tail).
-Proof.
-  unfold update_store_with_bound, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma update_store_with_bound_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (target : pvar tail_context t) :
-  update_store_with_bound (StoreCons head tail) (MThere target) =
+Lemma update_store_with_bound_there {F Δ keep d D t}
+    (head : value_ref F Δ (decl_type d))
+    (tail : symbolic_store D F Δ) (target : lvar keep D t) :
+  update_store_with_bound (StoreCons head tail) (LThere target) =
     StoreCons (weaken_ref head) (update_store_with_bound tail target).
-Proof.
-  unfold update_store_with_bound, Equality.simplification_heq.
-  rewrite (proof_irrelevance _ (JMeq_eq JMeq_refl) eq_refl). reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
 (** Updating one program slot weakens every other symbolic reference and
     leaves its denotation unchanged under the extended binder environment. *)
-Lemma lookup_update_store_with_bound_other {Γ F Δ target_type value_type}
-    (store : symbolic_store Γ F Δ) (target : pvar Γ target_type)
-    (variable : pvar Γ value_type) :
-  member_index variable <> member_index target ->
+Lemma lookup_update_store_with_bound_other {D F Δ keep keep' target_type
+    value_type}
+    (store : symbolic_store D F Δ) (target : lvar keep D target_type)
+    (variable : lvar keep' D value_type) :
+  lvar_index variable <> lvar_index target ->
   lookup_store (update_store_with_bound store target) value_type variable =
     weaken_ref (lookup_store store value_type variable).
 Proof.
-  revert target variable.
-  induction store; intros target variable Hneq;
-    dependent destruction target; dependent destruction variable.
+  revert store variable.
+  induction target as [d D Hkeep | d D t target IH];
+    intros store variable Hneq; dependent destruction store;
+    dependent destruction variable; cbn [lvar_index] in Hneq.
   - exfalso. apply Hneq. reflexivity.
-  - rewrite update_store_with_bound_here.
-    rewrite (lookup_store_there (RefBound MHere) (weaken_store store)
-      variable).
-    rewrite (lookup_store_there v store variable).
-    exact (@lookup_weaken_store Γ F Δ t t0 store variable).
-  - rewrite update_store_with_bound_there.
-    rewrite lookup_store_here. rewrite lookup_store_here. reflexivity.
-  - rewrite update_store_with_bound_there.
-    rewrite !lookup_store_there. apply IHstore.
-    cbn [member_index] in Hneq. lia.
+  - exact (lookup_weaken_store store variable).
+  - reflexivity.
+  - apply IH. congruence.
 Qed.
 
-Lemma rename_bound_store_update_store_with_bound {Γ F Δ Δ' t}
-    (renaming : bound_renaming Δ Δ') (store : symbolic_store Γ F Δ)
-    (target : pvar Γ t) :
+Lemma rename_bound_store_update_store_with_bound {D F Δ Δ' keep t}
+    (renaming : bound_renaming Δ Δ') (store : symbolic_store D F Δ)
+    (target : lvar keep D t) :
   rename_bound_store (lift_bound_renaming (u := t) renaming)
     (update_store_with_bound store target) =
   update_store_with_bound (rename_bound_store renaming store) target.
 Proof.
-  induction store; dependent destruction target; cbn [rename_bound_store].
-  - rewrite !update_store_with_bound_here. cbn [rename_bound_store].
-    f_equal.
+  revert store. induction target as [d D Hkeep | d D t target IH];
+    intros store; dependent destruction store; simpl.
+  - f_equal.
     + cbn [rename_bound_ref]. unfold lift_bound_renaming.
       rewrite view_member_here. reflexivity.
     + apply rename_bound_store_lift_weaken.
-  - rewrite !update_store_with_bound_there. cbn [rename_bound_store].
-    f_equal; auto.
+  - f_equal; auto.
     dependent destruction v; cbn [rename_bound_ref weaken_ref];
       try reflexivity.
     unfold lift_bound_renaming. rewrite view_member_there. reflexivity.
 Qed.
 
 End WithSignature.
+
+Notation rexpr := (pexpr keep_runtime).
+Notation gexpr := (pexpr keep_all).
+Notation rexpr_list := (pexpr_list keep_runtime).
+Notation gexpr_list := (pexpr_list keep_all).
+Notation write_target init := (lvar (keep_write init)).
 End IR.

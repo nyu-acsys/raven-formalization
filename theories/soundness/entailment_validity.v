@@ -320,7 +320,7 @@ Qed.
     once, from the interpretation of reference substitution, by
     [rpe_intro_holds] just below.  The definition is kept because the
     slice lemmas quantify over it, but nothing has to supply it. *)
-Definition rpe_intro_valid (Γ F : context) : Prop :=
+Definition rpe_intro_valid (Γ : decl_context) (F : context) : Prop :=
   forall Δ t (witness : Core.value_ref F Δ t)
     (state : Resource.resource_assertion Γ F (t :: Δ))
     (runtime : Translation.data_stack_context Model Γ)
@@ -339,7 +339,7 @@ Definition rpe_intro_valid (Γ F : context) : Prop :=
     [interp_subst_bound_core] does the same.  Nothing about the concrete
     stack-ownership predicate is needed, so this belongs here rather than
     at the runtime layer. *)
-Theorem rpe_intro_holds (Γ F : context) : rpe_intro_valid Γ F.
+Theorem rpe_intro_holds (Γ : decl_context) (F : context) : rpe_intro_valid Γ F.
 Proof.
   intros Δ t witness state runtime formals binders valuation.
   destruct state as [store body].

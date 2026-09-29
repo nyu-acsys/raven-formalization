@@ -636,7 +636,7 @@ Proof.
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure)
         (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure)
@@ -648,7 +648,7 @@ Proof.
           (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
-    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
+    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure)
       (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments) = length (Assertion.procedure_args procedure).
     { apply RuntimeErasure.runtime_expr_list_length. }
     unfold RegionExecution.Primitives.operation_wp,
@@ -661,7 +661,7 @@ Proof.
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (interp_store formals binders valuation store)))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
       (term_interp_core formals binders valuation
@@ -694,9 +694,9 @@ Proof.
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
       destruct Hlayout as [Hcallee_wf Hregistered].
-      have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
+      have Hnames : NoDup (@RuntimeErasure.runtime_frame_names callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
-      { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
+      { apply RuntimeErasure.runtime_procedure_frame_names_nodup; assumption. }
       destruct Hframe as [Hframe_arguments [Hframe_locals Hframe_dom]].
       unfold RuleValidity.runtime_procedure_entry, registered_runtime_procedure_entry in
         Hframe_arguments, Hframe_locals, Hframe_dom.
@@ -801,7 +801,7 @@ Proof.
           { rewrite (@RegionExecution.Primitives.Model.concrete_procedure_return_lookup _ _
               callee_variables procedure _ callee (formal_env_of_values values)
               (formal_env_of_values exit_values) callee_valuation
-              (term_semantic_body_exit_store _ body) Hnames).
+              (term_semantic_body_exit_store _ body) Hcallee_wf Hnames).
             rewrite (term_semantic_body_exit_return _ body).
             reflexivity. }
           have Hvalues_weakened : interp_expr_list formals
@@ -865,7 +865,7 @@ Proof.
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         formals binders valuation store
@@ -874,7 +874,7 @@ Proof.
           (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
-    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
+    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure)
       (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments) = length (Assertion.procedure_args procedure).
     { apply RuntimeErasure.runtime_expr_list_length. }
     unfold RegionExecution.Primitives.operation_wp,
@@ -887,9 +887,9 @@ Proof.
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (interp_store formals binders valuation store)))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
-      (@RuntimeErasure.runtime_variable Γ (Assertion.procedure_return procedure)
+      (@RuntimeErasure.runtime_variable Γ _ (Assertion.procedure_return procedure)
         (RegionExecution.Primitives.Model.runtime_names Γ runtime) target)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
       (term_interp_core formals binders valuation
@@ -924,9 +924,9 @@ Proof.
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
       destruct Hlayout as [Hcallee_wf Hregistered].
-      have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
+      have Hnames : NoDup (@RuntimeErasure.runtime_frame_names callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
-      { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
+      { apply RuntimeErasure.runtime_procedure_frame_names_nodup; assumption. }
       destruct Hframe as [Hframe_arguments [Hframe_locals Hframe_dom]].
       unfold RuleValidity.runtime_procedure_entry, registered_runtime_procedure_entry in
         Hframe_arguments, Hframe_locals, Hframe_dom.
@@ -1031,7 +1031,7 @@ Proof.
           { rewrite (@RegionExecution.Primitives.Model.concrete_procedure_return_lookup _ _
               callee_variables procedure _ callee (formal_env_of_values values)
                     (formal_env_of_values exit_values) callee_valuation
-              (term_semantic_body_exit_store _ body) Hnames).
+              (term_semantic_body_exit_store _ body) Hcallee_wf Hnames).
             rewrite (term_semantic_body_exit_return _ body).
             reflexivity. }
           have Hvalues_weakened : interp_expr_list formals
@@ -1094,7 +1094,7 @@ Proof.
           (RegionExecution.Primitives.Model.runtime_names Γ runtime)
           (interp_store formals binders valuation store)))
         (RuntimeLang.Val value))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values).
     { eapply (@RegionExecution.Primitives.Model.runtime_expr_list_sound _ Γ F Δ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         formals binders valuation store
@@ -1103,7 +1103,7 @@ Proof.
           (interp_store formals binders valuation store))) arguments values).
       - apply RegionExecution.Primitives.Model.runtime_stack_frame_corresponds.
       - exact Hvalues. }
-    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure)
+    have Hlength : length (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure)
       (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments) = length (Assertion.procedure_args procedure).
     { apply RuntimeErasure.runtime_expr_list_length. }
     unfold RegionExecution.Primitives.operation_wp,
@@ -1116,7 +1116,7 @@ Proof.
       (RuntimeLang.StackFrame (@RegionExecution.Primitives.Model.concrete_locals _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (interp_store formals binders valuation store)))
-      (@RuntimeErasure.runtime_expr_list _ Γ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
+      (@RuntimeErasure.runtime_expr_list _ Γ _ (Assertion.procedure_args procedure) (RegionExecution.Primitives.Model.runtime_names Γ runtime) arguments)
       (@RegionExecution.Primitives.Model.tval_list_to_list _ (Assertion.procedure_args procedure) values)
       (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
       (term_interp_core formals binders valuation
@@ -1138,9 +1138,9 @@ Proof.
         (pack_typed_procedure callee) Hin) as Hlayout.
       simpl in Hlayout.
       destruct Hlayout as [Hcallee_wf Hregistered].
-      have Hnames : NoDup (@RuntimeErasure.runtime_variables callee_variables
+      have Hnames : NoDup (@RuntimeErasure.runtime_frame_names callee_variables
         (@RuntimeErasure.runtime_procedure_names _ _ callee_variables procedure callee)).
-      { apply RuntimeErasure.runtime_procedure_names_nodup; assumption. }
+      { apply RuntimeErasure.runtime_procedure_frame_names_nodup; assumption. }
       destruct Hframe as [Hframe_arguments [Hframe_locals Hframe_dom]].
       unfold RuleValidity.runtime_procedure_entry, registered_runtime_procedure_entry in
         Hframe_arguments, Hframe_locals, Hframe_dom.

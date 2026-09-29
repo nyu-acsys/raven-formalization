@@ -173,7 +173,7 @@ Definition invariant_instance_key_of_arguments {F Δ invariant}
     snapshot pass may replace either side without changing this interface. *)
 Record invariant_access_boundary_equality {Γ F Δ} (invariant : inv_id)
     (opening_arguments closing_arguments :
-      pexpr_list Γ (invariant_args invariant))
+      gexpr_list Γ (invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ) : Type := {
   invariant_boundary_instance_equality :
     invariant_instance_equality invariant
@@ -877,7 +877,7 @@ Class ProcedureContractCoherence := ProcedureContractCoherenceData {
       obtained by the computable lookup [lookup_typed_procedure_at]. *)
   procedure_selects : forall identity,
     ResourceHoare.procedure_verified identity ->
-    { callee_variables : context &
+    { callee_variables : decl_context &
       { procedure : typed_procedure callee_variables identity |
         lookup_typed_procedure coherent_procedures identity =
           Some (pack_typed_procedure procedure) } };
@@ -981,16 +981,17 @@ Definition procedure_wfb {Γ identity} (procedure : typed_procedure Γ identity)
     (named_context_names (procedure_variables _ _ procedure))) &&
   bool_decide (NoDup (pvar_list_indices
     (procedure_formal_variables _ _ procedure))) &&
-  bool_decide (~ In (member_index (procedure_return_variable _ _ procedure))
+  bool_decide (~ In (lvar_index (procedure_return_variable _ _ procedure))
     (pvar_list_indices (procedure_formal_variables _ _ procedure))) &&
   core_entry_freeb (procedure_precondition _ _ procedure) &&
-  core_entry_freeb (procedure_postcondition _ _ procedure).
+  core_entry_freeb (procedure_postcondition _ _ procedure) &&
+  forallb keep_runtime Γ.
 
 Lemma procedure_wfb_sound {Γ identity} (procedure : typed_procedure Γ identity) :
   procedure_wfb procedure = true -> procedure_wf procedure.
 Proof.
   unfold procedure_wfb. rewrite !andb_true_iff, !bool_decide_eq_true.
-  intros [[[[[Hnames Hreserved] Hformals] Hreturn] Hpre] Hpost].
+  intros [[[[[[Hnames Hreserved] Hformals] Hreturn] Hpre] Hpost] Hruntime].
   constructor.
   - apply NoDup_ListNoDup. exact Hnames.
   - exact Hreserved.
@@ -998,6 +999,7 @@ Proof.
   - exact Hreturn.
   - apply core_entry_freeb_sound. exact Hpre.
   - apply core_entry_freeb_sound. exact Hpost.
+  - exact Hruntime.
 Qed.
 
 Definition packed_procedure_wfb (procedure : packed_typed_procedure) : bool :=
@@ -1105,7 +1107,7 @@ Definition module_contracts : ResourceHoare.ResourceContractEnv :=
 
 Definition module_procedure_selects identity :
     module_procedure_verified identity ->
-    { callee_variables : context &
+    { callee_variables : decl_context &
       { procedure : typed_procedure callee_variables identity |
         lookup_typed_procedure (module_procedures M) identity =
           Some (pack_typed_procedure procedure) } }.
@@ -1247,7 +1249,7 @@ Definition make_module (procedures : typed_procedure_environment)
 
 (** The typed procedure a module declares under an identifier. *)
 Definition module_procedure (M : module) (identity : proc_id) :
-    option { Γ : context & typed_procedure Γ identity } :=
+    option { Γ : decl_context & typed_procedure Γ identity } :=
   lookup_typed_procedure_at identity (procedure_entries (module_procedures M)).
 
 End WithSignature.

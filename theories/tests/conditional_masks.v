@@ -20,18 +20,20 @@ Import Core IR IR.Core.
 Module Atomicity := RuleValidity.GenericRegions.Atomicity.
 
 (** Local variables [x : Ref] and [b : Bool]. *)
-Notation Γ := [TRef; TBool].
+Notation Γ := [runtime_var TRef; runtime_var TBool].
 
-Definition x : pexpr Γ TRef := PEVar MHere.
-Definition b : pexpr Γ TBool := PEVar (MThere MHere).
+Definition x {keep} (Hkeep : keep (runtime_var TRef) = true) :
+    pexpr keep Γ TRef :=
+  PEVar (LHere Hkeep).
+Definition b : rexpr Γ TBool := PEVar (LThere (LHere eq_refl)).
 
 Definition invariant_arguments :
-    pexpr_list Γ (Assertion.invariant_args counter_invariant) :=
-  ltac:(vm_compute; exact (PECons x PENil)).
+    gexpr_list Γ (Assertion.invariant_args counter_invariant) :=
+  ltac:(vm_compute; exact (PECons (x eq_refl) PENil)).
 
 Definition read_arguments :
-    pexpr_list Γ (Assertion.procedure_args read_procedure) :=
-  ltac:(vm_compute; exact (PECons x PENil)).
+    rexpr_list Γ (Assertion.procedure_args read_procedure) :=
+  ltac:(vm_compute; exact (PECons (x eq_refl) PENil)).
 
 Definition allocate : stmt Γ := TFold counter_invariant invariant_arguments.
 

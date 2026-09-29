@@ -18,7 +18,8 @@ Open Scope Z_scope.
       (calls); [spawn p(args)]; [fpu(x . f, old, new)]; [unfold p(args)] and
       [fold p(args)] (invariant or predicate, resolved by name);
       [atomic { s }]; [if (e) { s } else { s }] and [if (e) { s }];
-      [assert e]; [s1; s2]; [done].
+      [assert e]; [ghost val x := e; s] and [ghost val x : T := e; s];
+      [s1; s2]; [done].
     - Assertions: [true], [false], [pure(e)], [own(x . f, v, q)] (heap
       field with fraction [q]), [own(x . f, v)] (ghost field), [p(args)]
       (invariant or predicate), [a && b].
@@ -110,17 +111,30 @@ Inductive source_stmt :=
     elaborator resolves [p] by name. *)
 | SSUnfold (name : source_name) (args : list source_expr)
 | SSFold (name : source_name) (args : list source_expr)
-| SSAtomic (body : source_stmt).
+| SSAtomic (body : source_stmt)
+(** [ghost val x := e; body]: an immutable ghost local, scoped over [body];
+    the annotation, if any, must match the type of [e]. *)
+| SSGhostVal (name : source_name) (annotation : option source_typ)
+    (initializer : source_expr) (body : source_stmt)
+(** The write in [s] initializes its target, which may then be a [val]. *)
+| SSInit (s : source_stmt).
 
 Record source_var_decl := SourceVarDecl {
   source_var_name : source_name;
   source_var_type : source_typ;
 }.
 
+Inductive source_mutability := SMVal | SMVar.
+
+Record source_local := SourceLocal {
+  source_local_mutability : source_mutability;
+  source_local_decl : source_var_decl;
+}.
+
 Record source_proc := SourceProc {
   source_proc_name : source_name;
   source_proc_args : list source_var_decl;
-  source_proc_locals : list source_var_decl;
+  source_proc_locals : list source_local;
   source_proc_return : option source_var_decl;
   source_proc_pre : source_assertion;
   source_proc_post : source_assertion;
@@ -156,11 +170,18 @@ Record source_module := SourceModule {
   source_module_procedures : list source_proc;
 }.
 
-(** A procedure body: its local declarations and its statement. *)
+(** A procedure body: its local declarations and its statement.  A [val]
+    declaration's initializing write runs before the rest of the body. *)
 Definition source_body_var (name : source_name) (t : source_typ)
-    (body : list source_var_decl * source_stmt) :
-    list source_var_decl * source_stmt :=
-  (SourceVarDecl name t :: fst body, snd body).
+    (body : list source_local * source_stmt) :
+    list source_local * source_stmt :=
+  (SourceLocal SMVar (SourceVarDecl name t) :: fst body, snd body).
+
+Definition source_body_val (name : source_name) (t : source_typ)
+    (initializer : source_stmt) (body : list source_local * source_stmt) :
+    list source_local * source_stmt :=
+  (SourceLocal SMVal (SourceVarDecl name t) :: fst body,
+   SSSeq (SSInit initializer) (snd body)).
 
 (** A procedure header clause.  As in Raven, the clauses may come in any
     order: several [requires] (or [ensures]) clauses are conjoined, a missing
@@ -188,7 +209,7 @@ Definition clauses_conjunction
 
 Definition source_procedure (name : source_name)
     (args : list source_var_decl) (clauses : list source_clause)
-    (body : list source_var_decl * source_stmt) : source_proc :=
+    (body : list source_local * source_stmt) : source_proc :=
   SourceProc name args (fst body) (clauses_return clauses)
     (clauses_conjunction
       (fun clause => match clause with SCRequires c => Some c | _ => None end)
@@ -392,6 +413,22 @@ Notation "d , .. , e" := (cons d .. (cons e nil) ..)
 Notation "'var' x ':' T ';' body" := (source_body_var x T body)
   (in custom raven_body at level 100,
    x constr at level 0, T constr at level 0, body custom raven_body at level 100).
+Notation "'val' x ':' T ':=' e ';' body" :=
+  (source_body_val x T (source_assign x e) body)
+  (in custom raven_body at level 100,
+   x constr at level 0, T constr at level 0, e custom raven_expr at level 99,
+   body custom raven_body at level 100).
+Notation "'val' x ':' T ':=' 'new' '(' ')' ';' body" :=
+  (source_body_val x T (SSAlloc x []) body)
+  (in custom raven_body at level 100,
+   x constr at level 0, T constr at level 0,
+   body custom raven_body at level 100).
+Notation "'val' x ':' T ':=' 'new' '(' fields ')' ';' body" :=
+  (source_body_val x T (SSAlloc x fields) body)
+  (in custom raven_body at level 100,
+   x constr at level 0, T constr at level 0,
+   fields custom raven_inits at level 1,
+   body custom raven_body at level 100).
 Notation "s" := ([], s)
   (in custom raven_body at level 100, s custom raven_stmt at level 99).
 Notation "'returns' '(' r ')'" := (SCReturns r)
@@ -527,6 +564,14 @@ Notation "'if' '(' condition ')' '{' then_branch '}' 'else' '{' else_branch '}'"
    condition custom raven_expr at level 99,
    then_branch custom raven_stmt at level 99,
    else_branch custom raven_stmt at level 99).
+Notation "'ghost' 'val' x ':=' e ';' body" := (SSGhostVal x None e body)
+  (in custom raven_stmt at level 90,
+   x constr at level 0, e custom raven_expr at level 99,
+   body custom raven_stmt at level 90).
+Notation "'ghost' 'val' x ':' T ':=' e ';' body" := (SSGhostVal x (Some T) e body)
+  (in custom raven_stmt at level 90,
+   x constr at level 0, T constr at level 0, e custom raven_expr at level 99,
+   body custom raven_stmt at level 90).
 Notation "first ; second" := (SSSeq first second)
   (in custom raven_stmt at level 90, right associativity,
    first custom raven_stmt, second custom raven_stmt at level 90).
@@ -601,7 +646,8 @@ Example procedure_declaration :
       v := c . value
     }
   }} =
-    SourceProc counter [SourceVarDecl c SRef] [SourceVarDecl value SInt]
+    SourceProc counter [SourceVarDecl c SRef]
+      [SourceLocal SMVar (SourceVarDecl value SInt)]
       (Some (SourceVarDecl v SInt)) SATrue SATrue
       (SSAssign v (SEField (SEVar c) value)).
 Proof. reflexivity. Qed.
@@ -615,6 +661,30 @@ Example procedure_without_result :
     SourceProc counter [SourceVarDecl c SRef] [] None
       (SAPredicate counter [SEVar c]) SATrue
       (SSFieldWrite (SEVar c) value (SEVal (SVInt 1))).
+Proof. reflexivity. Qed.
+
+Example ghost_val_scopes_over_rest :
+  raven_stmt {{ ghost val v := c; unfold counter(v); fold counter(v) }} =
+    SSGhostVal v None (SEVar c)
+      (SSSeq (SSUnfold counter [SEVar v]) (SSFold counter [SEVar v])).
+Proof. reflexivity. Qed.
+
+Example annotated_ghost_val :
+  raven_stmt {{ ghost val v : Ref := c; done }} =
+    SSGhostVal v (Some SRef) (SEVar c) SSDone.
+Proof. reflexivity. Qed.
+
+Example val_declaration_initializes :
+  raven_proc {{
+    proc counter() returns (v : Ref) {
+      val c : Ref := new(value: 0);
+      v := c
+    }
+  }} =
+    SourceProc counter [] [SourceLocal SMVal (SourceVarDecl c SRef)]
+      (Some (SourceVarDecl v SRef)) SATrue SATrue
+      (SSSeq (SSInit (SSAlloc c [(value, SEVal (SVInt 0))]))
+        (SSAssign v (SEVar c))).
 Proof. reflexivity. Qed.
 
 Example assign_of_nullary_call :

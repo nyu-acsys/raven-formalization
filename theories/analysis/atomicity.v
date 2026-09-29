@@ -12,7 +12,7 @@ Module AnalysisView.
 Import Core.
 
 
-Inductive statement_view (statement : context -> Type) (Γ : context) : Type :=
+Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) : Type :=
 | ViewLeaf
 (* The empty continuation.  Unlike a leaf it is never charged a cost: it is
    the identity on the analysis state by construction. *)
@@ -22,7 +22,9 @@ Inductive statement_view (statement : context -> Type) (Γ : context) : Type :=
 | ViewSequence (first second : statement Γ)
 | ViewConditional (then_branch else_branch : statement Γ)
 | ViewStructuredAccess (invariant : inv_id) (body : statement Γ)
-| ViewAtomic (body : statement Γ).
+| ViewAtomic (body : statement Γ)
+(* A scope for a new local; the analysis state is unaffected by it. *)
+| ViewScope (d : decl) (body : statement (d :: Γ)).
 
 Arguments ViewLeaf {_ _}.
 Arguments ViewDone {_ _}.
@@ -32,11 +34,12 @@ Arguments ViewSequence {_ _} _ _.
 Arguments ViewConditional {_ _} _ _.
 Arguments ViewStructuredAccess {_ _} _ _.
 Arguments ViewAtomic {_ _} _.
+Arguments ViewScope {_ _} _ _.
 
 (** A statement family together with its control view: the analyzer's
     whole interface to a language. *)
 Class AnalysisSyntax := AnalysisSyntaxData {
-  syntax_statement : context -> Type;
+  syntax_statement : decl_context -> Type;
   syntax_view : forall Γ, syntax_statement Γ -> statement_view syntax_statement Γ;
   syntax_size : forall Γ, syntax_statement Γ -> nat;
   syntax_size_positive : forall Γ (statement : syntax_statement Γ),
@@ -53,6 +56,9 @@ Class AnalysisSyntax := AnalysisSyntaxData {
   syntax_atomic_body_smaller : forall Γ statement body,
     syntax_view Γ statement = ViewAtomic body ->
     syntax_size Γ body < syntax_size Γ statement;
+  syntax_scope_body_smaller : forall Γ statement d body,
+    syntax_view Γ statement = ViewScope d body ->
+    syntax_size (d :: Γ) body < syntax_size Γ statement;
 }.
 
 
@@ -459,6 +465,7 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
                   else inl AtomicBlockLeaksAccess
               end
           end
+      | ViewScope _ body => analyze_fuel fuel' state body
       end
   end.
 
@@ -556,7 +563,11 @@ Inductive analysis_certificate :
     analysis_certificate Γ state statement
       (AnalysisState (analysis_mask inner) (analysis_open inner)
         (analysis_step_taken outer || analysis_step_taken inner)
-        (analysis_in_atomic outer)).
+        (analysis_in_atomic outer))
+| CertScope Γ state statement d body exit :
+    syntax_view Γ statement = ViewScope d body ->
+    analysis_certificate (d :: Γ) state body exit ->
+    analysis_certificate Γ state statement exit.
 
 Lemma analysis_certificate_preserves_in_atomic
     {Γ entry statement exit}
@@ -572,6 +583,7 @@ Proof.
   - etrans; eassumption.
   - exact IHcertificate1.
   - eapply take_step_preserves_in_atomic. exact e0.
+  - exact IHcertificate.
 Qed.
 
 Definition access_marker : Type := (inv_id * gset inv_id)%type.
@@ -608,6 +620,8 @@ Fixpoint lifo_certificate {Γ entry statement exit}
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       lifo_certificate body_certificate stack_in stack_in /\
       stack_out = stack_in
+  | CertScope _ _ _ _ _ _ _ body_certificate =>
+      lifo_certificate body_certificate stack_in stack_out
   end.
 
 (** Executable replay of the auxiliary access stack.  This is certification
@@ -656,6 +670,8 @@ Fixpoint replay_lifo_certificate {Γ entry statement exit}
           if decide (body_stack = stack_in) then Some stack_in else None
       | None => None
       end
+  | CertScope _ _ _ _ _ _ _ body_certificate =>
+      replay_lifo_certificate body_certificate stack_in
   end.
 
 Lemma replay_lifo_certificate_sound {Γ entry statement exit}
@@ -697,6 +713,7 @@ Proof.
     destruct (decide (body_stack = stack_in)) as [->|Hdifferent];
       inversion Hreplay; subst.
     split; [apply IHcertificate; assumption|reflexivity].
+  - apply IHcertificate. exact Hreplay.
 Qed.
 
 (** A fused, certificate-free executable pass.  Unlike
@@ -779,6 +796,7 @@ Fixpoint analyze_lifo_fuel {Γ} (fuel : nat)
               | None => None
               end
           end
+      | ViewScope _ body => analyze_lifo_fuel fuel' state stack body
       end
   end.
 
@@ -854,6 +872,8 @@ Proof.
     destruct Hclose as [Hopen _].
     simpl. rewrite Hview, Hstep, Hbody'.
     rewrite bool_decide_true; [reflexivity|exact Hopen].
+  - specialize (IH _ state stack body exit stack_out Hrun) as Hbody'.
+    simpl. rewrite Hview. exact Hbody'.
 Qed.
 
 Lemma analyze_lifo_projects {Γ}
@@ -904,6 +924,7 @@ Proof.
     subst mid2. eauto.
   - destruct H1 as [Hthen1 _]. destruct H2 as [Hthen2 _]. eauto.
   - destruct H1 as [_ Heq1]. destruct H2 as [_ Heq2]. congruence.
+  - eauto.
 Qed.
 
 (** Logical Raven masks that may be available anywhere in a certified
@@ -924,6 +945,8 @@ Fixpoint certificate_footprint {Γ entry statement exit}
       certificate_footprint then_certificate ∪
       certificate_footprint else_certificate
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
+      certificate_footprint body_certificate
+  | CertScope _ _ _ _ _ _ _ body_certificate =>
       certificate_footprint body_certificate
   | _ => ∅
   end.
@@ -964,6 +987,8 @@ Fixpoint certificate_height {Γ entry statement exit}
       S (Nat.max (certificate_height then_certificate)
         (certificate_height else_certificate))
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
+      S (certificate_height body_certificate)
+  | CertScope _ _ _ _ _ _ _ body_certificate =>
       S (certificate_height body_certificate)
   end.
 
@@ -1045,6 +1070,7 @@ Proof.
           else inl AtomicBlockLeaksAccess
       end = inr exit).
     rewrite Hbody, Hclose. exact Hrun.
+  - apply IH. exact Hrun.
 Qed.
 
 Lemma analyze_fuel_monotone {Γ fuel target} state
@@ -1081,6 +1107,7 @@ Proof.
   - rewrite e, e0.
     rewrite IHcertificate.
     rewrite bool_decide_true; [reflexivity|exact e1].
+  - rewrite e. exact IHcertificate.
 Qed.
 
 Lemma certificate_height_le_size {Γ entry statement exit}
@@ -1099,6 +1126,8 @@ Proof.
       else_branch e) as [Hthen Helse].
     lia.
   - pose proof (syntax_atomic_body_smaller Γ statement body e) as Hbody.
+    lia.
+  - pose proof (syntax_scope_body_smaller Γ statement d body e) as Hbody.
     lia.
 Qed.
 
@@ -1126,6 +1155,7 @@ Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
             statement_allocations_fuel fuel' else_branch
       | ViewStructuredAccess _ body | ViewAtomic body =>
           statement_allocations_fuel fuel' body
+      | ViewScope _ body => statement_allocations_fuel fuel' body
       | ViewDone | ViewUnfold _ => ∅
       end
   end.
@@ -1183,6 +1213,10 @@ Proof.
     pose proof (certificate_exit_subset_footprint certificate).
     pose proof (certificate_exit_open_subset_footprint certificate).
     simpl in *. set_solver.
+  - pose proof (IHcertificate fuel ltac:(lia)) as Hbody.
+    pose proof (certificate_exit_subset_footprint certificate).
+    pose proof (certificate_exit_open_subset_footprint certificate).
+    set_solver.
 Qed.
 
 (** Every invariant in a certificate footprint is available or open on entry,
@@ -1334,6 +1368,9 @@ Proof.
     destruct Hclose as [_ Hstack]. subst body_stack.
     specialize (IHcertificate _ _ _ Hbody) as Hbody_replay.
     rewrite Hbody_replay. rewrite decide_True; [reflexivity|reflexivity].
+  - intros [|fuel] stack_in stack_out Hrun; cbn in Hrun |- *;
+      [discriminate|].
+    rewrite e in Hrun. exact (IHcertificate _ _ _ Hrun).
 Qed.
 
 Lemma analyze_lifo_fuel_sound {Γ fuel entry statement exit}
@@ -1392,6 +1429,11 @@ Proof.
     apply JMeq_eq in x. subst certificate0.
     rewrite (IHcertificate1 certificate2).
     f_equal; apply proof_irrelevance.
+  - pose proof (eq_trans (eq_sym e) e0) as Hview.
+    injection Hview as <- Hbody.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst body0.
+    rewrite (IHcertificate1 certificate2).
+    f_equal; apply proof_irrelevance.
 Qed.
 
 Theorem certificate_preserves_wf {Γ} state
@@ -1415,6 +1457,7 @@ Proof.
   - cbn. apply IHcertificate.
     pose proof (take_step_preserves_wf _ _ _ Hwf e0) as Houter.
     exact Houter.
+  - exact (IHcertificate Hwf).
 Qed.
 
 Theorem analyze_fuel_builds_certificate {Γ fuel} state
@@ -1456,6 +1499,7 @@ Proof.
     apply bool_decide_eq_true in Hscope.
     inversion Hanalyze; subst exit.
     eapply CertAtomic; eauto.
+  - eapply CertScope; [exact Hview | eapply IH; exact Hanalyze].
 Defined.
 
 Corollary analyze_builds_certificate {Γ} state

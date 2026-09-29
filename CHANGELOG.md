@@ -16,9 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core entailment duplicates any duplicable assertion (pure facts,
   invariant knowledge, and their conjunctions, existentials, and
   conditionals) through `CESDuplicate`, which replaces `CESInvariantDup`.
+- Program locals are indexed by a declaration context recording each
+  local's phase (runtime or ghost) and mutability (`val` or `var`).
+  Runtime statements read only runtime locals; proof-only statements may
+  read every local. Write statements carry an initialization flag, and only
+  an initializing write may target a runtime `val`. Procedure-level locals
+  must be runtime locals (`procedure_wf`).
 
 ### Added
 
+- Scoped ghost values: `ghost val x := e; s` (optionally annotated with a
+  type) elaborates to `TGhostVal`, with a Hoare rule, analysis and
+  normalization support, and an Iris soundness proof in which ghost locals
+  have no runtime frame slot. The counter example's `read` snapshots its
+  invariant argument this way.
+- Immutable runtime locals: a procedure body may declare
+  `val x : T := e;` or `val x : T := new(...);`, elaborated to a runtime
+  `val` local and its initializing write. The counter example's `make`
+  declares its allocated counter this way.
 - Analyzer regression tests for asymmetric allocation in conditionals
   (`dune build @tests`).
 

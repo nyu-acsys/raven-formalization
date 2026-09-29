@@ -195,7 +195,7 @@ Definition restricted_footprinted_normalization_exists
 Definition normalization_close_one_marker_target
     {Γ F Δ entry opened inner}
     {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
     (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
@@ -229,7 +229,7 @@ Definition normalization_close_one_marker_target
 Definition normalization_close_one_marker_target_then
     {Γ F Δ entry opened inner exit}
     {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre
       (TSeq (TUnfold invariant arguments)
@@ -280,7 +280,7 @@ Defined.
     body and continuation certificates are arbitrary analyzer results. *)
 Definition access_then_source_certificate
     {Γ entry opened inner exit} invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work : stmt Γ)
     (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
@@ -324,7 +324,7 @@ Definition access_then_source_certificate
 Definition normalization_close_one_marker_target_then_footprinted
     {Γ F Δ entry opened inner exit}
     {pre post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ)
     (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
@@ -399,7 +399,7 @@ Defined.
 Lemma footprinted_normalization_continued_access_from_worker
     {Γ F Δ entry opened inner exit}
     {pre middle post : Resource.resource_prenex Γ F Δ}
-    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized : stmt Γ)
     (body_analysis : GenericRegions.Atomicity.analysis_certificate Γ
       opened body inner)
@@ -796,6 +796,48 @@ Proof.
   reflexivity.
 Defined.
 
+(** A ghost value binder normalizes by normalizing its body. *)
+Definition normalization_ghost_val
+    {Γ F Δ entry exit}
+    {store : symbolic_store Γ F Δ} {frame : Resource.core_assertion F Δ}
+    {name t} {initializer : gexpr Γ t} {body : stmt (ghost_val t :: Γ)}
+    {post : Resource.resource_prenex (ghost_val t :: Γ) F (t :: Δ)}
+    (body_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState (StoreCons (d := ghost_val t) (RefBound MHere)
+          (Assertions.weaken_store store))
+        (Resource.CAnd (Resource.weaken_core frame)
+          (Resource.CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
+            (Assertions.weaken_expr (IR.symbolize_expr store initializer))))))
+      body post)
+    (body_certificate : GenericRegions.Atomicity.analysis_certificate
+      (ghost_val t :: Γ) entry body exit)
+    (body_normalization : @normalization_result (ghost_val t :: Γ) F (t :: Δ)
+      entry exit _ post body body_derivation body_certificate)
+    (view : RegionSyntax.view (TGhostVal name t initializer body) =
+      AnalysisView.ViewScope (ghost_val t) body) :
+  @normalization_result Γ F Δ entry exit
+    (Resource.RState store frame)
+    (Resource.ResourceExists t (Resource.drop_head_prenex post))
+    (TGhostVal name t initializer body)
+    (RavenHoareRules.RTGhostVal name t initializer body store frame post
+      body_derivation)
+    (GenericRegions.Atomicity.CertScope Γ entry
+      (TGhostVal name t initializer body) (ghost_val t) body exit view
+      body_certificate).
+Proof.
+  refine {| normalized_statement := TGhostVal name t initializer
+      body_normalization.(normalized_statement);
+    normalization_target_derivation :=
+      RavenHoareRules.RTGhostVal name t initializer _ store frame post
+        body_normalization.(normalization_target_derivation);
+    normalization_target_certificate :=
+      StructuredGhostVal Γ entry name t initializer _ exit
+        body_normalization.(normalization_target_certificate) |}.
+  intros names stack. simpl.
+  exact (body_normalization.(normalization_runtime_erasure)
+    (NCCons name (ghost_val t) names) stack).
+Defined.
+
 (** *** Footprint transport
 
     A proof-only Hoare wrapper leaves both the normalized syntax and its
@@ -1101,6 +1143,21 @@ Inductive certificate_aligned :
       (GenericRegions.Atomicity.CertAtomic Γ state (TAtomic body)
         body outer inner view step body_certificate open_equal)
       (RavenHoareRules.RTAtomicBlock pre post body body_derivation)
+| AlignedGhostVal : forall Γ F Δ state name t initializer body exit
+    (store : symbolic_store Γ F Δ) (frame : Resource.core_assertion F Δ)
+    (post : Resource.resource_prenex (ghost_val t :: Γ) F (t :: Δ))
+    (view : RegionSyntax.view (TGhostVal name t initializer body) =
+      AnalysisView.ViewScope (ghost_val t) body)
+    (body_certificate : GenericRegions.Atomicity.analysis_certificate
+      (ghost_val t :: Γ) state body exit)
+    body_derivation,
+    certificate_aligned body_certificate body_derivation ->
+    certificate_aligned
+      (GenericRegions.Atomicity.CertScope Γ state
+        (TGhostVal name t initializer body) (ghost_val t) body exit view
+        body_certificate)
+      (RavenHoareRules.RTGhostVal name t initializer body store frame post
+        body_derivation)
 | AlignedFrame : forall Γ F Δ entry exit statement
     (store : symbolic_store Γ F Δ)
     (pre_body frame : Resource.core_assertion F Δ)
@@ -1258,6 +1315,13 @@ Proof.
              _ _ _ _ d _ _ certificate) as [Abody _];
            unshelve eexists;
              [eapply AlignedAtomic; eassumption | exact I]
+       | [ |- context [RavenHoareRules.RTGhostVal _ _ _ _ _ _ _ ?d] ] =>
+           cbn in e; injection e as Hd Hscope_body; subst;
+           apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body; subst;
+           destruct (certificate_aligned_complete_exists _ F
+             _ _ _ _ d _ _ certificate) as [Abody _];
+           unshelve eexists;
+             [eapply AlignedGhostVal; eassumption | exact I]
        end.
 Qed.
 
@@ -1541,6 +1605,46 @@ Proof.
   reflexivity.
 Qed.
 
+Definition footprinted_normalization_ghost_val
+    {Γ F Δ entry exit}
+    {store : symbolic_store Γ F Δ} {frame : Resource.core_assertion F Δ}
+    {name t} {initializer : gexpr Γ t} {body : stmt (ghost_val t :: Γ)}
+    {post : Resource.resource_prenex (ghost_val t :: Γ) F (t :: Δ)}
+    (body_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState (StoreCons (d := ghost_val t) (RefBound MHere)
+          (Assertions.weaken_store store))
+        (Resource.CAnd (Resource.weaken_core frame)
+          (Resource.CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
+            (Assertions.weaken_expr (IR.symbolize_expr store initializer))))))
+      body post)
+    (body_certificate : GenericRegions.Atomicity.analysis_certificate
+      (ghost_val t :: Γ) entry body exit)
+    (body_result : @footprinted_normalization_result (ghost_val t :: Γ) F
+      (t :: Δ) entry exit _ post body body_derivation body_certificate)
+    (view : RegionSyntax.view (TGhostVal name t initializer body) =
+      AnalysisView.ViewScope (ghost_val t) body) :
+  @footprinted_normalization_result Γ F Δ entry exit
+    (Resource.RState store frame)
+    (Resource.ResourceExists t (Resource.drop_head_prenex post))
+    (TGhostVal name t initializer body)
+    (RavenHoareRules.RTGhostVal name t initializer body store frame post
+      body_derivation)
+    (GenericRegions.Atomicity.CertScope Γ entry
+      (TGhostVal name t initializer body) (ghost_val t) body exit view
+      body_certificate).
+Proof.
+  refine {| footprinted_normalization :=
+    normalization_ghost_val body_derivation body_certificate
+      body_result.(footprinted_normalization) view |}.
+  - intros marker Hmember.
+    simpl in Hmember |- *.
+    repeat rewrite elem_of_union in Hmember |- *.
+    pose proof (body_result.(footprinted_normalization_subset) marker)
+      as Hbody.
+    tauto.
+  - exact body_result.(footprinted_normalization_safe).
+Defined.
+
 (** The matched access, footprinted.  The two extra hypotheses are what
     the recognizer can supply and the packaging needs: the body's
     structured footprint is dominated by the *source* certificate's, and
@@ -1551,7 +1655,7 @@ Qed.
 Definition footprinted_normalization_close_one_marker_target
     {Γ F Δ entry opened inner}
     {pre post : Resource.resource_prenex Γ F Δ} {source : stmt Γ}
-    invariant (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    invariant (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ)
     (source_derivation : RavenHoareRules.RavenHoareTriple pre source post)
     (source_certificate : GenericRegions.Atomicity.analysis_certificate Γ
@@ -1606,7 +1710,7 @@ Defined.
 Lemma raw_access_target : forall
     {Γ F Δ}
     (invariant : inv_id)
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) (pre post : Resource.resource_prenex Γ F Δ),
   pexpr_list_dependencies arguments ## statement_writes body ->
   RavenHoareRules.RavenHoareTriple pre
@@ -1669,7 +1773,7 @@ Proof.
 Qed.
 
 Lemma baseline_normalizable_unfold_absurd {Γ} invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant)) :
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant)) :
   baseline_normalizable (TUnfold invariant arguments) -> False.
 Proof. intro H. inversion H; cbn in *; contradiction. Qed.
 
@@ -1699,7 +1803,7 @@ Qed.
 
 Lemma restricted_normalize_terminal_access_inv {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body normalized : stmt Γ) :
   restricted_normalize_statement_fuel fuel
     (TSeq (TUnfold invariant arguments)
@@ -1725,7 +1829,7 @@ Qed.
 
 Lemma restricted_normalize_continued_access_inv {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized : stmt Γ) :
   restricted_normalize_statement_fuel fuel
     (TSeq (TUnfold invariant arguments)
@@ -1860,6 +1964,97 @@ Proof.
       certificate result store_equal). exact Hresult.
   - destruct (IHaligned condition then_branch else_branch derivation0
       certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_bound_weaken derivation0
+      certificate result). exact Hresult.
+Qed.
+
+(** Completeness for a ghost value binder, given completeness for its body.
+    Proof wrappers around the binder rule are transported unchanged. *)
+Lemma ghost_val_normalization_complete_from_worker
+    {Γ F Δ entry exit name t initializer body}
+    {pre post : Resource.resource_prenex Γ F Δ}
+    (derivation : RavenHoareRules.RavenHoareTriple pre
+      (TGhostVal name t initializer body) post)
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ entry
+      (TGhostVal name t initializer body) exit)
+    (Hbody : forall F0 Δ0 body_exit
+      (body_pre body_post : Resource.resource_prenex (ghost_val t :: Γ) F0 Δ0)
+      (body_derivation : RavenHoareRules.RavenHoareTriple body_pre
+        body body_post)
+      (body_certificate : GenericRegions.Atomicity.analysis_certificate
+        (ghost_val t :: Γ) entry body body_exit),
+      GenericRegions.Atomicity.lifo_certificate body_certificate [] [] ->
+      forall fuel normalized,
+      restricted_normalize_statement_fuel fuel body = Some normalized ->
+      exists result : @footprinted_normalization_result (ghost_val t :: Γ)
+          F0 Δ0 entry body_exit body_pre body_post body body_derivation
+          body_certificate,
+        normalized_statement
+          result.(footprinted_normalization) = normalized) :
+  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  forall fuel normalized,
+  restricted_normalize_statement_fuel fuel
+    (TGhostVal name t initializer body) = Some normalized ->
+  exists result : @footprinted_normalization_result Γ F Δ
+      entry exit pre post (TGhostVal name t initializer body)
+      derivation certificate,
+    normalized_statement
+      result.(footprinted_normalization) = normalized.
+Proof.
+  destruct (certificate_aligned_complete_exists Δ pre post
+    (TGhostVal name t initializer body) derivation entry exit
+    certificate) as (aligned & _).
+  dependent induction aligned generalizing name t initializer body
+    derivation certificate Hbody; try discriminate.
+  all: intros Hlifo fuel normalized Hworker.
+  - destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
+      in Hworker; try discriminate.
+    remember (restricted_normalize_statement_fuel fuel body)
+      as body_worker eqn:Hbody_worker.
+    destruct body_worker as [normalized_body|]; try discriminate.
+    injection Hworker as <-.
+    destruct (Hbody F (t :: Δ) exit _ post body_derivation body_certificate
+      Hlifo fuel normalized_body (eq_sym Hbody_worker))
+      as (body_result & Hbody_result).
+    exists (footprinted_normalization_ghost_val body_derivation
+      body_certificate body_result view).
+    change (TGhostVal name t initializer
+      (normalized_statement (footprinted_normalization body_result)) =
+      TGhostVal name t initializer normalized_body).
+    rewrite Hbody_result. reflexivity.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_frame frame derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_elim derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_preserve derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_consequence derivation0
+      certificate result pre_entails post_entails). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_consequence derivation0
+      certificate result pre_entails post_entails). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_stack_rewrite derivation0
+      certificate result store_equal). exact Hresult.
+  - destruct (IHaligned name t initializer body derivation0
+      certificate Hbody eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
       fuel normalized Hworker) as (result & Hresult).
     exists (footprinted_normalization_bound_weaken derivation0
       certificate result). exact Hresult.
@@ -2117,6 +2312,10 @@ Proof.
         invariant state state0 e0) as (_ & _ & _ & Hopened).
       rewrite (access_neutral_preserves_open certificate2_1 a), Hopened.
       apply elem_of_union_l, elem_of_singleton_2. reflexivity.
+  - eapply ghost_val_normalization_complete_from_worker; try eassumption.
+    intros F0 Δ0 body_exit body_pre body_post body_derivation
+      body_certificate Hbody_lifo fuel0 normalized0 Hbody_worker.
+    eapply IHHbaseline; eassumption.
 Qed.
 
 (** Closed analyzer-facing completeness.  Successful restricted analysis

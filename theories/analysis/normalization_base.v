@@ -29,6 +29,7 @@ Fixpoint unfold_free {Γ} (statement : stmt Γ) : Prop :=
   match statement with
   | TUnfold _ _ => False
   | TInvAccess _ _ body | TAtomic body => unfold_free body
+  | TGhostVal _ _ _ body => unfold_free body
   | TIf _ then_branch else_branch =>
       unfold_free then_branch /\ unfold_free else_branch
   | TSeq first second => unfold_free first /\ unfold_free second
@@ -39,6 +40,7 @@ Fixpoint access_neutral {Γ} (statement : stmt Γ) : Prop :=
   match statement with
   | TUnfold _ _ | TFold _ _ => False
   | TInvAccess _ _ body | TAtomic body => access_neutral body
+  | TGhostVal _ _ _ body => access_neutral body
   | TIf _ then_branch else_branch =>
       access_neutral then_branch /\ access_neutral else_branch
   | TSeq first second => access_neutral first /\ access_neutral second
@@ -85,7 +87,10 @@ Inductive baseline_normalizable {Γ} : stmt Γ -> Type :=
       (TSeq (TUnfold invariant opening_arguments)
         (TSeq body
           (TSeq
-            (TFold invariant closing_arguments) work))).
+            (TFold invariant closing_arguments) work)))
+| BaselineGhostVal name t initializer body :
+    @baseline_normalizable (ghost_val t :: Γ) body ->
+    baseline_normalizable (TGhostVal name t initializer body).
 
 (** Executable recognizers for the source-shape portion of the restricted
     analysis.  Argument stability and write effects are intentionally not
@@ -95,6 +100,7 @@ Fixpoint unfold_freeb {Γ} (statement : stmt Γ) : bool :=
   match statement with
   | TUnfold _ _ => false
   | TInvAccess _ _ body | TAtomic body => unfold_freeb body
+  | TGhostVal _ _ _ body => unfold_freeb body
   | TIf _ then_branch else_branch =>
       unfold_freeb then_branch && unfold_freeb else_branch
   | TSeq first second => unfold_freeb first && unfold_freeb second
@@ -105,6 +111,7 @@ Fixpoint access_neutralb {Γ} (statement : stmt Γ) : bool :=
   match statement with
   | TUnfold _ _ | TFold _ _ => false
   | TInvAccess _ _ body | TAtomic body => access_neutralb body
+  | TGhostVal _ _ _ body => access_neutralb body
   | TIf _ then_branch else_branch =>
       access_neutralb then_branch && access_neutralb else_branch
   | TSeq first second => access_neutralb first && access_neutralb second
@@ -120,6 +127,7 @@ Fixpoint restricted_fragment_shape_check {Γ} (statement : stmt Γ) : bool :=
   match statement with
   | TUnfold _ _ => false
   | TInvAccess _ _ body | TAtomic body => unfold_freeb body
+  | TGhostVal _ _ _ body => restricted_fragment_shape_check body
   | TIf _ then_branch else_branch =>
       restricted_fragment_shape_check then_branch &&
         restricted_fragment_shape_check else_branch
@@ -147,20 +155,20 @@ Definition restricted_fragment_shape {Γ} (statement : stmt Γ) : Prop :=
     every invariant argument to be a stack variable makes equality reduce to
     ordinary list equality and avoids proof-generated dependent transports.
     Literal and compound keys can be added later without changing callers. *)
-Fixpoint restricted_argument_variable_indices {Γ ts}
-    (expressions : pexpr_list Γ ts) : option (list nat) :=
+Fixpoint restricted_argument_variable_indices {keep Γ ts}
+    (expressions : pexpr_list keep Γ ts) : option (list nat) :=
   match expressions with
   | PENil => Some []
   | PECons expression tail =>
       match expression, restricted_argument_variable_indices tail with
       | PEVar variable, Some indices =>
-          Some (member_index variable :: indices)
+          Some (lvar_index variable :: indices)
       | _, _ => None
       end
   end.
 
-Definition restricted_pexpr_list_eqb {Γ ts}
-    (left right : pexpr_list Γ ts) : bool :=
+Definition restricted_pexpr_list_eqb {keep Γ ts}
+    (left right : pexpr_list keep Γ ts) : bool :=
   match restricted_argument_variable_indices left,
       restricted_argument_variable_indices right with
   | Some left_indices, Some right_indices =>
@@ -168,49 +176,14 @@ Definition restricted_pexpr_list_eqb {Γ ts}
   | _, _ => false
   end.
 
-Lemma member_index_injective {Γ t} (left right : member Γ t) :
-  member_index left = member_index right -> left = right.
-Proof.
-  induction left; dependent destruction right; cbn; intro Hindex;
-    try discriminate.
-  - reflexivity.
-  - f_equal. apply IHleft. now injection Hindex.
-Qed.
-
-Lemma normalization_lookup_store_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) :
-  lookup_store (StoreCons head tail) _ MHere = head.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
-Qed.
-
-Lemma normalization_lookup_store_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (variable : pvar tail_context t) :
-  lookup_store (StoreCons head tail) _ (MThere variable) =
-    lookup_store tail _ variable.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)). reflexivity.
-Qed.
-
-Lemma normalization_lookup_weaken_store {Γ F Δ t u}
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t) :
+Lemma normalization_lookup_weaken_store {Γ F Δ keep t u}
+    (store : symbolic_store Γ F Δ) (variable : lvar keep Γ t) :
   lookup_store (@Assertions.weaken_store Γ F Δ u store) t variable =
     @Assertions.weaken_ref F Δ t u (lookup_store store t variable).
-Proof.
-  induction store; dependent destruction variable.
-  - cbn [Assertions.weaken_store].
-    rewrite !normalization_lookup_store_here. reflexivity.
-  - cbn [Assertions.weaken_store].
-    rewrite !normalization_lookup_store_there. apply IHstore.
-Qed.
+Proof. apply IR.lookup_weaken_store. Qed.
 
-Lemma symbolize_expr_weaken_store {Γ F Δ t u}
-    (store : symbolic_store Γ F Δ) (expression : pexpr Γ t) :
+Lemma symbolize_expr_weaken_store {Γ F Δ keep t u}
+    (store : symbolic_store Γ F Δ) (expression : pexpr keep Γ t) :
   IR.symbolize_expr (@Assertions.weaken_store Γ F Δ u store) expression =
     Assertions.weaken_expr (IR.symbolize_expr store expression).
 Proof.
@@ -221,8 +194,8 @@ Proof.
   - f_equal; assumption.
 Qed.
 
-Lemma symbolize_expr_list_weaken_store {Γ F Δ ts u}
-    (store : symbolic_store Γ F Δ) (expressions : pexpr_list Γ ts) :
+Lemma symbolize_expr_list_weaken_store {Γ F Δ keep ts u}
+    (store : symbolic_store Γ F Δ) (expressions : pexpr_list keep Γ ts) :
   IR.symbolize_expr_list (@Assertions.weaken_store Γ F Δ u store)
     expressions =
     Assertions.weaken_expr_list (IR.symbolize_expr_list store expressions).
@@ -233,8 +206,8 @@ Proof.
   - f_equal; auto using symbolize_expr_weaken_store.
 Qed.
 
-Lemma restricted_argument_variable_indices_injective {Γ ts}
-    (left right : pexpr_list Γ ts) indices :
+Lemma restricted_argument_variable_indices_injective {keep Γ ts}
+    (left right : pexpr_list keep Γ ts) indices :
   restricted_argument_variable_indices left = Some indices ->
   restricted_argument_variable_indices right = Some indices ->
   left = right.
@@ -252,13 +225,13 @@ Proof.
       eqn:Hright_indices; try discriminate.
     inversion Hleft; inversion Hright; subst.
     f_equal.
-    + f_equal. apply member_index_injective. congruence.
+    + f_equal. apply lvar_index_injective. congruence.
     + eapply IHleft; [reflexivity|].
       rewrite Hright_indices. f_equal. congruence.
 Qed.
 
-Lemma restricted_pexpr_list_eqb_sound {Γ ts}
-    (left right : pexpr_list Γ ts) :
+Lemma restricted_pexpr_list_eqb_sound {keep Γ ts}
+    (left right : pexpr_list keep Γ ts) :
   restricted_pexpr_list_eqb left right = true -> left = right.
 Proof.
   unfold restricted_pexpr_list_eqb.
@@ -272,7 +245,7 @@ Qed.
 
 Definition restricted_access_boundary_check {Γ invariant}
     (opening_arguments closing_arguments :
-      pexpr_list Γ (Assertion.invariant_args invariant))
+      gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) : bool :=
   restricted_pexpr_list_eqb opening_arguments closing_arguments &&
     bool_decide (pexpr_list_dependencies opening_arguments ##
@@ -280,7 +253,7 @@ Definition restricted_access_boundary_check {Γ invariant}
 
 Lemma restricted_access_boundary_check_sound {Γ invariant}
     (opening_arguments closing_arguments :
-      pexpr_list Γ (Assertion.invariant_args invariant)) body :
+      gexpr_list Γ (Assertion.invariant_args invariant)) body :
   restricted_access_boundary_check opening_arguments closing_arguments body =
     true ->
   opening_arguments = closing_arguments /\
@@ -298,6 +271,7 @@ Qed.
 Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
   match statement with
   | TInvAccess _ _ body | TAtomic body => restricted_access_effect_check body
+  | TGhostVal _ _ _ body => restricted_access_effect_check body
   | TIf _ then_branch else_branch =>
       restricted_access_effect_check then_branch &&
         restricted_access_effect_check else_branch
@@ -309,7 +283,7 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
           | left Heq =>
               restricted_access_boundary_check opening_arguments
                 (eq_rect _ (fun invariant =>
-                  pexpr_list Γ (Assertion.invariant_args invariant))
+                  gexpr_list Γ (Assertion.invariant_args invariant))
                   closing_arguments _ (eq_sym Heq)) body
           | right _ => false
           end
@@ -320,7 +294,7 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
           | left Heq =>
               restricted_access_boundary_check opening_arguments
                 (eq_rect _ (fun invariant =>
-                  pexpr_list Γ (Assertion.invariant_args invariant))
+                  gexpr_list Γ (Assertion.invariant_args invariant))
                   closing_arguments _ (eq_sym Heq)) body &&
                 restricted_access_effect_check work
           | right _ => false
@@ -343,6 +317,7 @@ Fixpoint normalization_statement_size {Γ} (statement : stmt Γ) : nat :=
   match statement with
   | TInvAccess _ _ body | TAtomic body =>
       S (normalization_statement_size body)
+  | TGhostVal _ _ _ body => S (normalization_statement_size body)
   | TIf _ then_branch else_branch | TSeq then_branch else_branch =>
       S (normalization_statement_size then_branch +
         normalization_statement_size else_branch)
@@ -370,6 +345,12 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
           | Some normalized_body => Some (TAtomic normalized_body)
           | None => None
           end
+      | TGhostVal name t initializer body =>
+          match restricted_normalize_statement_fuel fuel' body with
+          | Some normalized_body =>
+              Some (TGhostVal name t initializer normalized_body)
+          | None => None
+          end
       | TIf condition then_branch else_branch =>
           match restricted_normalize_statement_fuel fuel' then_branch,
               restricted_normalize_statement_fuel fuel' else_branch with
@@ -385,7 +366,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
                     (eq_rect _ (fun invariant =>
-                      pexpr_list Γ (Assertion.invariant_args invariant))
+                      gexpr_list Γ (Assertion.invariant_args invariant))
                       closing_arguments _ (eq_sym Heq)) body
                   then Some (TInvAccess opening_invariant opening_arguments body)
                   else None
@@ -398,7 +379,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
               | left Heq =>
                   if restricted_access_boundary_check opening_arguments
                     (eq_rect _ (fun invariant =>
-                      pexpr_list Γ (Assertion.invariant_args invariant))
+                      gexpr_list Γ (Assertion.invariant_args invariant))
                       closing_arguments _ (eq_sym Heq)) body
                   then
                     match restricted_normalize_statement_fuel fuel' work with
@@ -463,12 +444,21 @@ Lemma restricted_fragment_shape_check_sound {Γ} (statement : stmt Γ) :
   restricted_access_effect_check statement = true ->
   baseline_normalizable statement.
 Proof.
-  refine (well_founded_induction_type
-    (well_founded_ltof _ (@normalization_statement_size Γ))
-    (fun current => restricted_fragment_shape current ->
-      restricted_access_effect_check current = true ->
-      baseline_normalizable current) _ statement).
-  intros current IH Hcheck Heffects.
+  enough (Hsized : forall n Γ (current : stmt Γ),
+    normalization_statement_size current < n ->
+    restricted_fragment_shape current ->
+    restricted_access_effect_check current = true ->
+    baseline_normalizable current) by eauto.
+  intros n. induction n as [|n IHn];
+    intros Γ' current Hsize Hcheck Heffects; [lia|].
+  assert (IH : forall Γ'' (smaller : stmt Γ''),
+    normalization_statement_size smaller <
+      normalization_statement_size current ->
+    restricted_fragment_shape smaller ->
+    restricted_access_effect_check smaller = true ->
+    baseline_normalizable smaller).
+  { intros Γ'' smaller Hsmaller. apply IHn. lia. }
+  clear IHn Hsize.
   destruct current; cbn [restricted_fragment_shape
     restricted_fragment_shape_check] in Hcheck |- *;
     try (apply BaselineUnfoldFree; cbn; done).
@@ -541,8 +531,13 @@ Proof.
       [Harguments Hdisjoint].
     apply BaselineAccessThen; [exact Hbody | exact Harguments | exact Hdisjoint |].
     apply IH; [unfold ltof; cbn; lia | exact Hwork | exact Hwork_effects].
+    apply BaselineBalancedSequence.
+    + apply IH; [unfold ltof; cbn; lia | exact Hfirst | exact Hfirst_effects].
+    + apply IH; [unfold ltof; cbn; lia | exact Hsecond | exact Hsecond_effects].
   - apply BaselineUnfoldFree. cbn.
     apply unfold_freeb_spec. exact Hcheck.
+  - apply BaselineGhostVal.
+    apply IH; [unfold ltof; cbn; lia | exact Hcheck | exact Heffects].
 Qed.
 
 Corollary restricted_fragment_check_sound {Γ} (statement : stmt Γ) :
@@ -597,6 +592,9 @@ Proof.
   - destruct (IHstatement fuel Hfree ltac:(lia)) as
       [normalized Hnormalized].
     rewrite Hnormalized. eexists; reflexivity.
+  - destruct (IHstatement fuel Hfree ltac:(lia)) as
+      [normalized Hnormalized].
+    rewrite Hnormalized. eexists; reflexivity.
 Qed.
 
 Corollary unfold_free_normalize_statement_succeeds {Γ}
@@ -644,11 +642,14 @@ Proof.
   - destruct (restricted_normalize_statement_fuel fuel statement) eqn:Hbody;
       try discriminate.
     inversion Hworker; subst. f_equal. eapply IHstatement; eauto.
+  - destruct (restricted_normalize_statement_fuel fuel statement) eqn:Hbody;
+      try discriminate.
+    injection Hworker as <-. f_equal. eapply IHstatement; eauto.
 Qed.
 
 Lemma restricted_normalize_terminal_access {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel (S fuel)
@@ -665,7 +666,7 @@ Qed.
 
 Lemma restricted_normalize_continued_access {Γ} fuel
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work normalized_work : stmt Γ) :
   restricted_access_boundary_check arguments arguments body = true ->
   restricted_normalize_statement_fuel fuel work = Some normalized_work ->
@@ -686,7 +687,7 @@ Qed.
 
 Lemma restricted_terminal_access_accepted_inv {Γ}
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body : stmt Γ) :
   restricted_fragment_accepted
     (TSeq (TUnfold invariant arguments)
@@ -708,7 +709,7 @@ Qed.
 
 Lemma restricted_continued_access_accepted_inv {Γ}
     invariant
-    (arguments : pexpr_list Γ (Assertion.invariant_args invariant))
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (body work : stmt Γ) :
   restricted_fragment_accepted
     (TSeq (TUnfold invariant arguments)
@@ -749,6 +750,7 @@ Proof.
       rewrite Hcheck1, Hcheck2; reflexivity).
     all: rewrite Hcheck2; exact Hcheck1.
   - now rewrite IHstatement.
+  - exact (IHstatement Hneutral).
 Qed.
 
 Lemma access_neutral_sequence_effect_check {Γ}
@@ -777,15 +779,24 @@ Lemma restricted_normalize_statement_succeeds_with_fuel {Γ}
     restricted_normalize_statement_fuel fuel statement = Some normalized.
 Proof.
   revert fuel.
-  refine (well_founded_induction_type
-    (well_founded_ltof _ (@normalization_statement_size Γ))
-    (fun current => forall fuel,
-      restricted_fragment_accepted current ->
-      normalization_statement_size current < fuel ->
-      exists normalized,
-        restricted_normalize_statement_fuel fuel current = Some normalized)
-    _ statement).
-  intros current IH fuel Haccepted Hfuel.
+  enough (Hsized : forall n Γ (current : stmt Γ),
+    normalization_statement_size current < n -> forall fuel,
+    restricted_fragment_accepted current ->
+    normalization_statement_size current < fuel ->
+    exists normalized,
+      restricted_normalize_statement_fuel fuel current = Some normalized)
+    by eauto.
+  intros n. induction n as [|n IHn];
+    intros Γ' current Hsize fuel Haccepted Hfuel; [lia|].
+  assert (IH : forall Γ'' (smaller : stmt Γ''),
+    normalization_statement_size smaller <
+      normalization_statement_size current -> forall fuel,
+    restricted_fragment_accepted smaller ->
+    normalization_statement_size smaller < fuel ->
+    exists normalized,
+      restricted_normalize_statement_fuel fuel smaller = Some normalized).
+  { intros Γ'' smaller Hsmaller. apply IHn. lia. }
+  clear IHn Hsize.
   destruct fuel as [|fuel]; [cbn in Hfuel; lia|].
   unfold restricted_fragment_accepted, restricted_fragment_check in Haccepted.
   apply Bool.andb_true_iff in Haccepted as [Hshape Heffect].
@@ -807,11 +818,11 @@ Proof.
     rewrite Hnormalized. eexists; reflexivity.
   - apply Bool.andb_true_iff in Hshape as [Hshape1 Hshape2].
     apply Bool.andb_true_iff in Heffect as [Heffect1 Heffect2].
-    destruct (IH current1 ltac:(unfold ltof; cbn; lia) fuel
+    destruct (IH _ current1 ltac:(cbn; lia) fuel
       ltac:(unfold restricted_fragment_accepted, restricted_fragment_check;
         apply Bool.andb_true_iff; auto) ltac:(lia)) as
       [normalized1 Hnormalized1].
-    destruct (IH current2 ltac:(unfold ltof; cbn; lia) fuel
+    destruct (IH _ current2 ltac:(cbn; lia) fuel
       ltac:(unfold restricted_fragment_accepted, restricted_fragment_check;
         apply Bool.andb_true_iff; auto) ltac:(lia)) as
       [normalized2 Hnormalized2].
@@ -831,12 +842,12 @@ Proof.
       apply Bool.andb_true_iff in Heffect as [Heffect1 Heffect2];
       match goal with
       | |- context [TSeq ?first ?second] =>
-          destruct (IH first ltac:(unfold ltof; cbn; lia) fuel
+          destruct (IH _ first ltac:(cbn; lia) fuel
             ltac:(unfold restricted_fragment_accepted,
               restricted_fragment_check;
               apply Bool.andb_true_iff; auto) ltac:(lia)) as
             [normalized1 Hnormalized1];
-          destruct (IH second ltac:(unfold ltof; cbn; lia) fuel
+          destruct (IH _ second ltac:(cbn; lia) fuel
             ltac:(unfold restricted_fragment_accepted,
               restricted_fragment_check;
               apply Bool.andb_true_iff; auto) ltac:(lia)) as
@@ -878,17 +889,17 @@ Proof.
         restricted_fragment_accepted current2_2_2).
       { unfold restricted_fragment_accepted, restricted_fragment_check.
         apply Bool.andb_true_iff. split; assumption. }
-      assert (Hwork_smaller : ltof (stmt Γ) normalization_statement_size
-        current2_2_2
-        (TSeq (TUnfold invariant arguments)
-          (TSeq current2_1
-            (TSeq (TFold invariant arguments0)
-              current2_2_2)))).
-      { unfold ltof. cbn. lia. }
+      assert (Hwork_smaller : normalization_statement_size current2_2_2 <
+        normalization_statement_size
+          (TSeq (TUnfold invariant arguments)
+            (TSeq current2_1
+              (TSeq (TFold invariant arguments0)
+                current2_2_2)))).
+      { cbn. lia. }
       assert (Hwork_fuel :
         normalization_statement_size current2_2_2 < fuel).
       { cbn in Hfuel. lia. }
-      destruct (IH current2_2_2 Hwork_smaller fuel Hwork_accepted Hwork_fuel)
+      destruct (IH _ current2_2_2 Hwork_smaller fuel Hwork_accepted Hwork_fuel)
         as [normalized_work Hwork].
       cbn [restricted_normalize_statement_fuel].
       destruct (decide (invariant = invariant)) as [Heq0 | Hneq];
@@ -905,6 +916,12 @@ Proof.
       | None => None
       end = Some normalized0).
     rewrite Hnormalized. eexists; reflexivity.
+  - destruct (IH _ current ltac:(cbn; lia) fuel
+      ltac:(unfold restricted_fragment_accepted, restricted_fragment_check;
+        apply Bool.andb_true_iff; auto) ltac:(lia)) as
+      [normalized Hnormalized].
+    cbn [restricted_normalize_statement_fuel]. rewrite Hnormalized.
+    eexists; reflexivity.
 Qed.
 
 Corollary restricted_normalize_statement_succeeds {Γ} (statement : stmt Γ) :
@@ -965,6 +982,10 @@ Proof.
     + apply IHcertificate2. exact Helse.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     split; [apply IHcertificate | reflexivity]. exact Hneutral.
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hneutral. apply IHcertificate. exact Hneutral.
 Qed.
 
 Lemma access_neutral_preserves_open {Γ entry statement exit}
@@ -990,6 +1011,10 @@ Proof.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     eapply eq_trans; [exact e1|].
     eapply GenericRegions.Atomicity.take_step_preserves_open; eauto.
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hneutral. exact (IHcertificate Hneutral).
 Qed.
 
 (** An unfold-free analyzed region entered with no open invariant is LIFO
@@ -1033,6 +1058,10 @@ Proof.
     rewrite Hclosed in Houter.
     destruct (IHcertificate Hfree Houter) as [Hlifo Hinner].
     split; [split; [exact Hlifo|reflexivity]|exact Hinner].
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hfree. exact (IHcertificate Hfree Hclosed).
 Qed.
 
 Lemma structured_certificate_unfold_free {Γ entry statement exit}
@@ -1060,6 +1089,8 @@ Fixpoint structured_accesses_outside_atomic
       structured_accesses_outside_atomic body
   | StructuredInvAccess _ access_entry _ _ _ _ _ _ body _ =>
       GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
+      structured_accesses_outside_atomic body
+  | StructuredGhostVal _ _ _ _ _ _ _ body =>
       structured_accesses_outside_atomic body
   | _ => True
   end.
@@ -1091,6 +1122,10 @@ Proof.
     destruct Hlifo as [Hthen _]. eauto.
   - destruct statement; cbn in e; try discriminate; inversion e; subst.
     cbn in Hfree. destruct Hlifo as [Hbody ->]. eauto.
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hfree. eauto.
 Qed.
 
 Lemma unfold_free_lifo_same_length {Γ entry statement exit}
@@ -1125,6 +1160,10 @@ Proof.
     eauto.
   - destruct statement; cbn in e; try discriminate; inversion e; subst; clear e.
     destruct Hlifo as [Hbody ->]. reflexivity.
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hfree. eauto.
 Qed.
 
 Definition choose_lifo_sequence_middle
@@ -1257,6 +1296,13 @@ Proof.
           rewrite (access_neutral_preserves_open certificate2_1 a), Hopened;
           apply elem_of_union_l; apply elem_of_singleton_2; reflexivity
       end.
+  - dependent destruction certificate; try discriminate.
+    match goal with
+    | Hview : @AnalysisView.syntax_view _ _ (TGhostVal _ _ _ _) = _ |- _ =>
+        cbn in Hview; injection Hview as Hd Hscope_body
+    end.
+    subst. apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst.
+    eapply IHHbaseline. exact Hlifo.
 Qed.
 
 (** Accepted source regions are balanced at a closed procedure boundary.
@@ -1382,6 +1428,13 @@ Proof.
     + eexists. split; [reflexivity|]. eexists. split; [exact Hbody|].
       eexists. split; [exact Hfold|exact Hwork].
     + exact Hexit.
+  - dependent destruction certificate; try discriminate.
+    match goal with
+    | Hview : @AnalysisView.syntax_view _ _ (TGhostVal _ _ _ _) = _ |- _ =>
+        cbn in Hview; injection Hview as Hd Hscope_body
+    end.
+    subst. apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst.
+    simpl. exact (IHHbaseline _ _ _ Hentry).
 Qed.
 
 (** In the focused one-marker traversal, an unfold-free sequence has only
@@ -1478,6 +1531,11 @@ Proof.
     eapply StructuredConditional; eauto using (proj1 Hlifo), (proj2 Hlifo).
   - destruct statement; cbn in e; try discriminate; inversion e; subst; clear e.
     cbn in Hfree. eapply StructuredAtomic; eauto using (proj1 Hlifo).
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hfree. apply StructuredGhostVal.
+    apply (IHcertificate stack); assumption.
 Qed.
 
 (** Footprint-preserving form used by the public dispatcher.  The older
@@ -1596,6 +1654,21 @@ Proof.
     + simpl. repeat rewrite elem_of_union. tauto.
     + specialize (Hbody_subset Hbody). simpl. tauto.
     + exact body_result.(balanced_structured_safe).
+  - destruct statement; cbn in e; try discriminate.
+    injection e as Hd Hscope_body. subst d.
+    apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
+    cbn in Hfree.
+    pose (body_result := IHcertificate stack Hfree Hlifo).
+    refine {| balanced_structured_certificate :=
+        StructuredGhostVal Γ state name t initializer _ exit
+          body_result.(balanced_structured_certificate) |}.
+    intros invariant Hmember.
+    simpl in Hmember |- *.
+    repeat rewrite elem_of_union in Hmember |- *.
+    pose proof (body_result.(balanced_structured_footprint) invariant) as
+      Hbody_subset.
+    tauto.
+    exact body_result.(balanced_structured_safe).
 Defined.
 
 End WithSignature.

@@ -1,6 +1,6 @@
 From Coq Require Import String ZArith List PArith Program.Equality
-  Logic.FunctionalExtensionality.
-From stdpp Require Import base countable.
+  Logic.FunctionalExtensionality ProofIrrelevance Lia.
+From stdpp Require Import base countable list.
 
 From raven Require Import surface.syntax.
 
@@ -35,7 +35,6 @@ Inductive member : context -> typ -> Type :=
 Arguments MHere {_ _}.
 Arguments MThere {_ _ _} _.
 
-Definition pvar := member.
 Definition formal := member.
 Definition bvar := member.
 
@@ -102,6 +101,178 @@ Proof.
   - specialize (IHleft _ right (Nat.succ_inj _ _ Heq)).
     inversion IHleft. reflexivity.
 Qed.
+
+(** Program locals.  A local's phase says whether it exists at runtime; its
+    mutability says whether it may be written. *)
+Inductive phase := PRuntime | PGhost.
+Inductive mutability := MVal | MVar.
+
+Record decl := Decl {
+  decl_phase : phase;
+  decl_mutability : mutability;
+  decl_type : typ;
+}.
+
+Global Instance phase_eq_dec : EqDecision phase.
+Proof. solve_decision. Defined.
+Global Instance mutability_eq_dec : EqDecision mutability.
+Proof. solve_decision. Defined.
+Global Instance decl_eq_dec : EqDecision decl.
+Proof. solve_decision. Defined.
+
+(** The locals of a procedure, most recently declared first. *)
+Definition decl_context := list decl.
+
+Definition runtime_var (t : typ) : decl := Decl PRuntime MVar t.
+Definition ghost_val (t : typ) : decl := Decl PGhost MVal t.
+Definition runtime_val (t : typ) : decl := Decl PRuntime MVal t.
+
+Definition decl_types (D : decl_context) : context := map decl_type D.
+
+(** Which locals a variable may denote. *)
+Definition keep_all (_ : decl) : bool := true.
+
+Definition keep_runtime (d : decl) : bool :=
+  match decl_phase d with PRuntime => true | PGhost => false end.
+
+Definition keep_runtime_var (d : decl) : bool :=
+  match d with Decl PRuntime MVar _ => true | _ => false end.
+
+Lemma keep_runtime_var_runtime d :
+  keep_runtime_var d = true -> keep_runtime d = true.
+Proof.
+  destruct d as [[] [] ?]; simpl; intros; first [reflexivity | discriminate].
+Qed.
+
+(** Write targets: only the initializing write of a runtime [val] may
+    target it. *)
+Definition keep_write (init : bool) : decl -> bool :=
+  if init then keep_runtime else keep_runtime_var.
+
+(** A local of [D] whose declaration satisfies [keep]. *)
+Inductive lvar (keep : decl -> bool) : decl_context -> typ -> Type :=
+| LHere d D : keep d = true -> lvar keep (d :: D) (decl_type d)
+| LThere d D t : lvar keep D t -> lvar keep (d :: D) t.
+
+#[global] Arguments LHere {keep d D} & _.
+#[global] Arguments LThere {keep d D t} & _.
+
+(** Program variables readable by proof-only constructs. *)
+Definition pvar := lvar keep_all.
+
+Fixpoint lvar_index {keep D t} (variable : lvar keep D t) : nat :=
+  match variable with
+  | LHere _ => 0
+  | LThere variable' => S (lvar_index variable')
+  end.
+
+Lemma lvar_index_spec {keep D t} (variable : lvar keep D t) :
+  exists d, D !! lvar_index variable = Some d /\ keep d = true /\
+    decl_type d = t.
+Proof.
+  induction variable as [d D Hkeep | d D t variable IH]; simpl.
+  - exists d. auto.
+  - exact IH.
+Qed.
+
+Lemma lvar_index_lt {keep D t} (variable : lvar keep D t) :
+  (lvar_index variable < length D)%nat.
+Proof. induction variable; simpl; lia. Qed.
+
+Lemma lvar_index_injective {keep D t} (left right : lvar keep D t) :
+  lvar_index left = lvar_index right -> left = right.
+Proof.
+  induction left as [d D Hkeep | d D t left IH]; intros Hindex;
+    dependent destruction right; cbn [lvar_index] in Hindex;
+    try discriminate.
+  - f_equal. apply proof_irrelevance.
+  - f_equal. apply IH. congruence.
+Qed.
+
+Lemma lvar_index_sig_injective {keep D}
+    (left right : { t : typ & lvar keep D t }) :
+  lvar_index (projT2 left) = lvar_index (projT2 right) -> left = right.
+Proof.
+  destruct left as [left_type left], right as [right_type right].
+  revert right_type right. induction left as [d D Hkeep | d D t left IH];
+    intros right_type right Hindex; dependent destruction right;
+    cbn [lvar_index] in Hindex; try discriminate.
+  - f_equal. f_equal. apply proof_irrelevance.
+  - specialize (IH _ right (eq_add_S _ _ Hindex)).
+    inversion IH. reflexivity.
+Qed.
+
+(** Every variable is readable by proof-only constructs. *)
+Fixpoint lvar_forget {keep D t} (variable : lvar keep D t) : pvar D t :=
+  match variable with
+  | LHere _ => LHere eq_refl
+  | LThere variable' => LThere (lvar_forget variable')
+  end.
+
+Lemma lvar_forget_index {keep D t} (variable : lvar keep D t) :
+  lvar_index (lvar_forget variable) = lvar_index variable.
+Proof. induction variable; simpl; congruence. Qed.
+
+Fixpoint runtime_var_read {D t} (variable : lvar keep_runtime_var D t) :
+    lvar keep_runtime D t :=
+  match variable with
+  | LHere Hkeep => LHere (keep_runtime_var_runtime _ Hkeep)
+  | LThere variable' => LThere (runtime_var_read variable')
+  end.
+
+Lemma runtime_var_read_index {D t} (variable : lvar keep_runtime_var D t) :
+  lvar_index (runtime_var_read variable) = lvar_index variable.
+Proof. induction variable; simpl; congruence. Qed.
+
+(** Filters that admit only runtime locals. *)
+Class RuntimeKeep (keep : decl -> bool) : Prop :=
+  runtime_keep : forall d, keep d = true -> keep_runtime d = true.
+
+Global Instance runtime_keep_runtime : RuntimeKeep keep_runtime.
+Proof. intros d Hkeep. exact Hkeep. Qed.
+
+Global Instance runtime_keep_runtime_var : RuntimeKeep keep_runtime_var.
+Proof. exact keep_runtime_var_runtime. Qed.
+
+Global Instance runtime_keep_write init : RuntimeKeep (keep_write init).
+Proof.
+  destruct init; [exact runtime_keep_runtime | exact runtime_keep_runtime_var].
+Qed.
+
+(** Whether a variable denotes a runtime local. *)
+Fixpoint lvar_runtime {keep D t} (variable : lvar keep D t) : bool :=
+  match variable with
+  | @LHere _ d _ _ => keep_runtime d
+  | LThere variable' => lvar_runtime variable'
+  end.
+
+Lemma lvar_runtime_keep {keep D t} `{!RuntimeKeep keep}
+    (variable : lvar keep D t) :
+  lvar_runtime variable = true.
+Proof.
+  induction variable as [d D Hkeep | d D t variable IH]; simpl;
+    [apply runtime_keep; exact Hkeep | exact IH].
+Qed.
+
+Lemma lvar_runtime_all {keep D t} (variable : lvar keep D t) :
+  forallb keep_runtime D = true -> lvar_runtime variable = true.
+Proof.
+  induction variable as [d D Hkeep | d D t variable IH]; simpl;
+    rewrite andb_true_iff; intros [Hhead Htail];
+    [exact Hhead | exact (IH Htail)].
+Qed.
+
+Lemma lvar_runtime_forget {keep D t} (variable : lvar keep D t) :
+  lvar_runtime (lvar_forget variable) = lvar_runtime variable.
+Proof. induction variable; simpl; congruence. Qed.
+
+Global Instance lvar_eq_dec keep D t : EqDecision (lvar keep D t).
+Proof.
+  intros left right.
+  destruct (decide (lvar_index left = lvar_index right)) as [Heq|Hne].
+  - left. apply lvar_index_injective. exact Heq.
+  - right. intros ->. apply Hne. reflexivity.
+Defined.
 
 (** Typed symbolic identities.  Constant symbols retain their compact
     positive identifier, while procedure-entry symbols are generated from the
@@ -732,28 +903,54 @@ Proof.
       dependent destruction value2; eexists; reflexivity.
 Qed.
 
-(** A typed symbolic store is aligned structurally with the program-variable
-    context.  This makes lookup and update compute without dependent equality
-    transports. *)
-Inductive store_data (F Δ : context) : context -> Type :=
+(** A typed symbolic store is aligned structurally with the declaration
+    context.  Lookup recurses on the variable, so it computes on concrete
+    variables without dependent equality transports. *)
+Inductive store_data (F Δ : context) : decl_context -> Type :=
 | StoreNil : store_data F Δ []
-| StoreCons t Γ : value_ref F Δ t -> store_data F Δ Γ ->
-    store_data F Δ (t :: Γ).
+| StoreCons d D : value_ref F Δ (decl_type d) -> store_data F Δ D ->
+    store_data F Δ (d :: D).
 
 #[global] Arguments StoreNil {_ _}.
-#[global] Arguments StoreCons {_ _ _ _} _ _.
+#[global] Arguments StoreCons {_ _ _ _} & _ _.
 
-Definition symbolic_store (Γ F Δ : context) := store_data F Δ Γ.
+Definition symbolic_store (D : decl_context) (F Δ : context) :=
+  store_data F Δ D.
 
-Fixpoint lookup_store {Γ F Δ} (store : symbolic_store Γ F Δ) :
-    forall t, pvar Γ t -> value_ref F Δ t.
-Proof.
-  destruct store as [| head_type tail_context value tail].
-  - intros t variable. dependent destruction variable.
-  - intros t variable. dependent destruction variable.
-    + exact value.
-    + exact (@lookup_store tail_context F Δ tail _ variable).
-Defined.
+Definition store_head {F Δ d D} (store : store_data F Δ (d :: D)) :
+    value_ref F Δ (decl_type d) :=
+  match store in store_data _ _ D0 return
+    match D0 with [] => unit | d0 :: _ => value_ref F Δ (decl_type d0) end
+  with
+  | StoreNil => tt
+  | StoreCons reference _ => reference
+  end.
+
+Definition store_tail {F Δ d D} (store : store_data F Δ (d :: D)) :
+    store_data F Δ D :=
+  match store in store_data _ _ D0 return
+    match D0 with [] => unit | _ :: D1 => store_data F Δ D1 end
+  with
+  | StoreNil => tt
+  | StoreCons _ tail => tail
+  end.
+
+Lemma store_eta {F Δ d D} (store : store_data F Δ (d :: D)) :
+  store = StoreCons (store_head store) (store_tail store).
+Proof. dependent destruction store. reflexivity. Qed.
+
+Fixpoint lookup_variable {F Δ keep D t} (variable : lvar keep D t) :
+    store_data F Δ D -> value_ref F Δ t :=
+  match variable in lvar _ D0 t0 return store_data F Δ D0 -> value_ref F Δ t0
+  with
+  | LHere _ => fun store => store_head store
+  | LThere variable' => fun store =>
+      lookup_variable variable' (store_tail store)
+  end.
+
+Definition lookup_store {D F Δ} (store : symbolic_store D F Δ) {keep} t
+    (variable : lvar keep D t) : value_ref F Δ t :=
+  lookup_variable variable store.
 
 (** Extending the binder context is structural. *)
 Definition weaken_bvar {Δ t u} (x : bvar Δ t) : bvar (u :: Δ) t :=

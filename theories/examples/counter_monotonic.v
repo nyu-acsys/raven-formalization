@@ -21,6 +21,7 @@ Definition x := name "x".
 Definition v1 := name "v1".
 Definition v2 := name "v2".
 Definition new_v1 := name "new_v1".
+Definition gx := name "gx".
 Definition res := name "res".
 Definition call_res := name "call_res".
 Definition ret := name "ret".
@@ -57,9 +58,10 @@ Definition counter_declarations : source_module :=
         requires counterInv(x)
       {
         var v1 : Int;
-        unfold counterInv(x);
+        ghost val gx := x;
+        unfold counterInv(gx);
         v1 := x . c;
-        fold counterInv(x);
+        fold counterInv(gx);
         ret := v1
       }
 
@@ -97,8 +99,7 @@ Definition counter_declarations : source_module :=
       proc make() returns (ret : Ref)
         ensures counterInv(ret)
       {
-        var x : Ref;
-        x := new(c: 0, h: 0);
+        val x : Ref := new(c: 0, h: 0);
         fold counterInv(x);
         ret := x
       }
@@ -156,20 +157,20 @@ Definition counter_module : RuleValidity.Hoare.module :=
     (elaborate_module counter_declarations)
     ltac:(vm_compute; exact I).
 
-Definition read_typed_procedure : typed_procedure [TRef; TInt; TInt] read_procedure :=
+Definition read_typed_procedure : typed_procedure (runtime_decls [TRef; TInt; TInt]) read_procedure :=
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module read_procedure) ltac:(vm_compute; exact I)).
 
 Definition incr_typed_procedure :
-    typed_procedure [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] incr_procedure :=
+    typed_procedure (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]) incr_procedure :=
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module incr_procedure) ltac:(vm_compute; exact I)).
 
-Definition make_typed_procedure : typed_procedure [TRef; TRef] make_procedure :=
+Definition make_typed_procedure : typed_procedure ([runtime_val TRef; runtime_var TRef]) make_procedure :=
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module make_procedure) ltac:(vm_compute; exact I)).
 
-Definition client_typed_procedure : typed_procedure [TInt; TRef] client_procedure :=
+Definition client_typed_procedure : typed_procedure (runtime_decls [TInt; TRef]) client_procedure :=
   Eval vm_compute in projT2 (elaborated
     (declared_procedure counter_module client_procedure) ltac:(vm_compute; exact I)).
 
@@ -204,7 +205,7 @@ Definition cas_source : source_stmt :=
 (** The sole trusted hardware component used by this program: the body of
     [incr]'s atomic block. *)
 Definition cas_typed_body :
-    stmt [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] :=
+    stmt (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]) :=
   elaborated
     (elaborate_stmt counter_environment incr_variables cas_source)
     ltac:(vm_compute; exact I).
@@ -324,190 +325,39 @@ Proof.
   rewrite lookup_expr_list_here.
   reflexivity.
 Qed.
-Lemma read_entry_location :
-  RuleValidity.IR.symbolize_expr read_entry_store (PEVar MHere) =
-    ERef (RefFormal MHere).
-Proof.
-  unfold read_entry_store, procedure_entry_store,
-    canonical_procedure_entry_store, RuleValidity.IR.symbolize_expr.
-  apply f_equal.
-  apply lookup_canonical_procedure_entry_store_singleton.
-Qed.
 
-Lemma read_entry_arguments :
-  RuleValidity.IR.symbolize_expr_list read_entry_store
-      (PECons (PEVar MHere) PENil) =
+(** The body of [read] runs under the snapshot [gx], whose slot holds the
+    formal once the snapshot equality is used. *)
+Definition read_body_decls : decl_context :=
+  ghost_val TRef :: runtime_decls [TRef; TInt; TInt].
+
+Definition read_snapshot_store : symbolic_store read_body_decls [TRef] [] :=
+  StoreCons (RefFormal MHere) read_entry_store.
+
+Lemma read_snapshot_arguments {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr_list read_snapshot_store
+      (PECons (PEVar (LHere Hkeep)) PENil) =
     ExprCons (ERef (RefFormal MHere)) ExprNil.
-Proof.
-  cbn [RuleValidity.IR.symbolize_expr_list].
-  rewrite read_entry_location.
-  reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_entry_location :
-  RuleValidity.IR.symbolize_expr incr_entry_store (PEVar MHere) =
-    ERef (RefFormal MHere).
-Proof.
-  unfold incr_entry_store, procedure_entry_store,
-    canonical_procedure_entry_store, RuleValidity.IR.symbolize_expr.
-  apply f_equal.
-  apply lookup_canonical_procedure_entry_store_singleton.
-Qed.
-Lemma incr_entry_arguments :
+Lemma incr_entry_arguments {keep} (Hkeep : keep _ = true) :
   RuleValidity.IR.symbolize_expr_list incr_entry_store
-      (PECons (PEVar MHere) PENil) =
+      (PECons (PEVar (LHere Hkeep)) PENil) =
     ExprCons (ERef (RefFormal MHere)) ExprNil.
-Proof.
-  cbn [RuleValidity.IR.symbolize_expr_list].
-  rewrite incr_entry_location.
-  reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Definition read_open_store :
-    symbolic_store [TRef; TInt; TInt] [TRef] [TInt] :=
-  weaken_store read_entry_store.
+Definition read_open_store : symbolic_store read_body_decls [TRef] [TInt] :=
+  weaken_store read_snapshot_store.
 
-Lemma read_open_location :
-  RuleValidity.IR.symbolize_expr read_open_store (PEVar MHere) =
+Lemma read_open_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr read_open_store (PEVar (LThere (LHere Hkeep))) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof read_entry_location as Hentry.
-  unfold RuleValidity.IR.symbolize_expr in Hentry.
-  injection Hentry as Hlookup.
-  unfold symbolize_expr, read_open_store.
-  rewrite RuleValidity.IR.lookup_weaken_store.
-  f_equal.
-  assert (Hweaken : forall
-      (reference : value_ref [TRef] [] TRef),
-      reference = RefFormal MHere ->
-      @weaken_ref [TRef] [] TRef TInt reference = RefFormal MHere).
-  { intros reference Hreference.
-    dependent destruction reference; cbn in Hreference |-; try discriminate.
-    inversion Hreference. reflexivity. }
-  apply Hweaken, Hlookup.
-Qed.
+Proof. reflexivity. Qed.
 
 Definition read_field_store :
-    symbolic_store [TRef; TInt; TInt] [TRef] [TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound read_open_store (MThere MHere).
-
-Lemma update_store_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (target : pvar tail_context t) :
-  RuleValidity.IR.update_store_with_bound
-      (StoreCons head tail) (MThere target) =
-    StoreCons (weaken_ref head)
-      (RuleValidity.IR.update_store_with_bound tail target).
-Proof.
-  unfold RuleValidity.IR.update_store_with_bound,
-    Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)).
-  reflexivity.
-Qed.
-
-Lemma lookup_store_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) :
-  lookup_store (StoreCons head tail) _ MHere = head.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)).
-  reflexivity.
-Qed.
-
-Lemma lookup_store_there {F Δ head_type tail_context t}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ)
-    (target : pvar tail_context t) :
-  lookup_store (StoreCons head tail) _ (MThere target) =
-    lookup_store tail _ target.
-Proof.
-  unfold lookup_store, Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)).
-  reflexivity.
-Qed.
-
-Lemma update_store_here {F Δ head_type tail_context}
-    (head : value_ref F Δ head_type)
-    (tail : symbolic_store tail_context F Δ) :
-  RuleValidity.IR.update_store_with_bound (StoreCons head tail) MHere =
-    StoreCons (RefBound MHere) (weaken_store tail).
-Proof.
-  unfold RuleValidity.IR.update_store_with_bound,
-    Equality.simplification_heq.
-  rewrite (Eqdep.EqdepTheory.UIP_refl _ _ (JMeq_eq JMeq_refl)).
-  reflexivity.
-Qed.
-
-Lemma lookup_update_store_same {Γ F Δ t}
-    (store : symbolic_store Γ F Δ) (target : pvar Γ t) :
-  lookup_store (RuleValidity.IR.update_store_with_bound store target) _ target =
-    RefBound MHere.
-Proof.
-  induction store; dependent destruction target.
-  - rewrite update_store_here, lookup_store_here. reflexivity.
-  - rewrite update_store_there, lookup_store_there. apply IHstore.
-Qed.
-
-Lemma lookup_update_store_preserves_second
-    {tail_context F Δ first_type second_type target_type}
-    (store : symbolic_store (first_type :: second_type :: tail_context) F Δ)
-    (target : pvar tail_context target_type) :
-  lookup_store
-      (RuleValidity.IR.update_store_with_bound store
-        (MThere (MThere target))) second_type (MThere MHere) =
-    weaken_ref (lookup_store store second_type (MThere MHere)).
-Proof.
-  dependent destruction store. dependent destruction store.
-  rewrite !update_store_there, !lookup_store_there, !lookup_store_here.
-  reflexivity.
-Qed.
-
-Lemma lookup_weaken_store {Γ F Δ t u}
-    (store : symbolic_store Γ F Δ) (variable : pvar Γ t) :
-  lookup_store (@weaken_store Γ F Δ u store) t variable =
-    @weaken_ref F Δ t u (lookup_store store t variable).
-Proof.
-  induction store; dependent destruction variable.
-  - cbn [weaken_store]. rewrite !lookup_store_here. reflexivity.
-  - cbn [weaken_store]. rewrite !lookup_store_there. apply IHstore.
-Qed.
-
-(** Updating one stack slot leaves every other slot alone, modulo the
-    binder the update introduces.  Stating the disequality on
-    [member_index] keeps it homogeneous, so the induction needs no
-    heterogeneous-equality reasoning.  [lookup_update_store_same] and
-    [lookup_update_store_preserves_second] are the two special cases that
-    predate it. *)
-(** Weakening never disturbs a formal reference, so a slot known to hold
-    one keeps holding it after any number of binder introductions.  Stated
-    as an implication so [apply] can absorb the index differences the
-    canonical entry stores introduce. *)
-Lemma weaken_ref_formal_eq {F Δ t u}
-    (reference : value_ref F Δ t) (variable : formal F t) :
-  reference = RefFormal variable ->
-  @weaken_ref F Δ t u reference = RefFormal variable.
-Proof. intros ->. reflexivity. Qed.
-
-Lemma lookup_update_store_other {Γ F Δ t u}
-    (store : symbolic_store Γ F Δ) (target : pvar Γ u) (variable : pvar Γ t) :
-  member_index target <> member_index variable ->
-  lookup_store (RuleValidity.IR.update_store_with_bound store target) t variable =
-    weaken_ref (lookup_store store t variable).
-Proof.
-  revert u target t variable.
-  induction store as [| head_type tail_context head tail IH];
-    intros u target t variable Hne.
-  - dependent destruction target.
-  - dependent destruction target; dependent destruction variable.
-    + exfalso. apply Hne. reflexivity.
-    + rewrite update_store_here, !lookup_store_there.
-      apply lookup_weaken_store.
-    + rewrite update_store_there, !lookup_store_here. reflexivity.
-    + rewrite update_store_there, !lookup_store_there.
-      apply IH. cbn in Hne. congruence.
-Qed.
+    symbolic_store read_body_decls [TRef] [TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    read_open_store (LThere (LThere (LHere eq_refl))).
 
 Lemma rename_bound_store_weaken_store {Γ F Δ u}
     (store : symbolic_store Γ F Δ) :
@@ -519,26 +369,27 @@ Proof.
   - f_equal. exact IHstore.
 Qed.
 
-Lemma read_field_location :
-  RuleValidity.IR.symbolize_expr read_field_store (PEVar MHere) =
+Lemma read_field_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr read_field_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof read_open_location as Hopen.
-  unfold RuleValidity.IR.symbolize_expr in Hopen. injection Hopen as Hopen.
-  unfold RuleValidity.IR.symbolize_expr, read_field_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite Hopen. reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 Lemma counter_mask_close :
   (counter_mask ∖ {[counter_invariant]}) ∪ {[counter_invariant]} =
     counter_mask.
 Proof.
   unfold counter_mask. set_solver.
 Qed.
+Definition read_body_exit_store :
+    symbolic_store read_body_decls [TRef] [TInt; TInt; TInt] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var)
+    read_field_store (LThere (LThere (LThere (LHere eq_refl)))).
+
+(** The snapshot is the outermost binder of [read]'s exit telescope. *)
 Definition read_exit_store :
-    symbolic_store [TRef; TInt; TInt] [TRef] [TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound read_field_store
-    (MThere (MThere MHere)).
+    symbolic_store (runtime_decls [TRef; TInt; TInt]) [TRef]
+      [TInt; TInt; TInt; TRef] :=
+  StoreCons (RefFormal MHere)
+    (StoreCons (RefBound (MThere MHere)) (StoreCons (RefBound MHere) StoreNil)).
 Lemma interp_typed_equality_true_early {F Δ t}
     (formals : formal_env F) (binders : binder_env Δ) valuation
     (left right : expr F Δ t) :
@@ -605,6 +456,10 @@ Module Rules.
   Notation RTGhostUpdate := (HoareRules.RTGhostUpdate (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTIf := (HoareRules.RTIf (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTPostOpenCoreExists := (HoareRules.RTPostOpenCoreExists (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTGhostVal := (HoareRules.RTGhostVal (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTStackRewrite := (HoareRules.RTStackRewrite (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTBoundWeaken := (HoareRules.RTBoundWeaken (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
+  Notation RTPrenexConsequence := (HoareRules.RTPrenexConsequence (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTPrenexPreserve := (HoareRules.RTPrenexPreserve (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTSeq := (HoareRules.RTSeq (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
   Notation RTUnfoldInvariant := (HoareRules.RTUnfoldInvariant (RAs := RuntimeErasure.RAValues.ra_values (RAs := CounterRAConfig.ra_config)) (Logic := counter_logic) (Contracts := counter_contracts)).
@@ -670,9 +525,9 @@ Qed.
     that the rest of the body can be derived under the binder. *)
 Lemma read_unfold_open :
   HoareRules.RavenHoareTriple
-    (Resource.RState read_entry_store
+    (Resource.RState read_snapshot_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState read_open_store read_open_core)).
 Proof.
@@ -681,7 +536,7 @@ Proof.
   unfold counter_token_core.
   change (Assertion.procedure_args read_procedure) with ([TRef] : context).
   rewrite <- counter_invariant_at_formal.
-  rewrite <- read_entry_arguments.
+  rewrite <- (read_snapshot_arguments (keep := keep_all) eq_refl).
   apply Rules.RTUnfoldInvariant.
 Qed.
 
@@ -701,7 +556,8 @@ Definition read_field_core : Resource.core_assertion [TRef] [TInt; TInt] :=
 Lemma read_field_read :
   HoareRules.RavenHoareTriple
     (Resource.RState read_open_store read_open_core)
-    (TFieldRead counter_field (MThere MHere) (PEVar MHere))
+    (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
+      (PEVar (LThere (LHere eq_refl))))
     (Resource.ResourceExists TInt
       (Resource.RState read_field_store read_field_core)).
 Proof.
@@ -714,7 +570,7 @@ Proof.
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
   - eapply Rules.RTFrame.
     change (Assertion.field_type counter_field) with TInt.
-    rewrite <- read_open_location.
+    rewrite <- (read_open_location (keep := keep_runtime) eq_refl).
     eapply Rules.RTFieldRead.
   - apply Rules.CEntailsStep. apply Rules.CESAndComm.
   - rewrite read_open_location. apply Rules.resource_prenex_entails_refl.
@@ -760,7 +616,7 @@ Qed.
 Lemma read_fold :
   HoareRules.RavenHoareTriple
     (Resource.RState read_field_store read_field_core)
-    (TFold counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.RState read_field_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
@@ -784,11 +640,12 @@ Lemma read_assign :
   HoareRules.RavenHoareTriple
     (Resource.RState read_field_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign (MThere (MThere MHere)) (PEVar (MThere MHere)))
+    (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+      (PEVar (LThere (LThere (LHere eq_refl)))))
     (Resource.ResourceExists TInt
-      (Resource.RState read_exit_store Resource.CTrue)).
+      (Resource.RState read_body_exit_store Resource.CTrue)).
 Proof.
-  unfold read_exit_store.
+  unfold read_body_exit_store.
   eapply Rules.RTConsequence; [eapply Rules.RTAssign | | ].
   - apply Rules.CEntailsStep. apply Rules.CESTrueIntro.
   - apply Rules.RPEMono. apply Rules.RPEBody.
@@ -799,14 +656,15 @@ Lemma read_rest :
   HoareRules.RavenHoareTriple
     (Resource.RState read_open_store read_open_core)
     (TSeq
-      (TFieldRead counter_field (MThere MHere) (PEVar MHere))
+      (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
+        (PEVar (LThere (LHere eq_refl))))
       (TSeq
-        (TFold counter_invariant (PECons (PEVar MHere) PENil))
-        (TAssign (MThere (MThere MHere))
-          (PEVar (MThere MHere)))))
+        (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
+        (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+          (PEVar (LThere (LThere (LHere eq_refl)))))))
     (Resource.ResourceExists TInt
       (Resource.ResourceExists TInt
-        (Resource.RState read_exit_store Resource.CTrue))).
+        (Resource.RState read_body_exit_store Resource.CTrue))).
 Proof.
   eapply Rules.RTSeq.
   - exact read_field_read.
@@ -814,6 +672,28 @@ Proof.
     eapply Rules.RTSeq.
     + exact read_fold.
     + exact read_assign.
+Qed.
+
+Lemma read_snapshot_derivation :
+  HoareRules.RavenHoareTriple
+    (Resource.RState read_snapshot_store
+      (counter_token_core (ERef (RefFormal MHere))))
+    (TSeq (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
+      (TSeq
+        (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
+          (PEVar (LThere (LHere eq_refl))))
+        (TSeq
+          (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
+          (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
+            (PEVar (LThere (LThere (LHere eq_refl))))))))
+    (Resource.ResourceExists TInt
+      (Resource.ResourceExists TInt
+        (Resource.ResourceExists TInt
+          (Resource.RState read_body_exit_store Resource.CTrue)))).
+Proof.
+  eapply Rules.RTSeq; [exact read_unfold_open |].
+  apply Rules.RTPrenexPreserve.
+  exact read_rest.
 Qed.
 
 Lemma read_resource_body_derivation :
@@ -829,9 +709,28 @@ Proof.
     procedure_postcondition RuleValidity.Hoare.existentially_close_prenex
     RuleValidity.Hoare.existentially_close_prenex_at
     Resource.subst_bound_core].
-  eapply Rules.RTSeq; [exact read_unfold_open |].
-  apply Rules.RTPrenexPreserve.
-  exact read_rest.
+  eapply Rules.RTPrenexConsequence;
+    [| apply Rules.resource_prenex_entails_refl |].
+  - eapply Rules.RTGhostVal.
+    (* The snapshot equality puts the formal into the slot of [gx]. *)
+    eapply Rules.RTStackRewrite;
+      [| apply RH.StoreEqualCons;
+         [apply Rules.CEntailsStep, Rules.CESAndElimR
+         | apply RH.store_equal_under_refl]].
+    eapply Rules.RTConsequence;
+      [| apply Rules.CEntailsStep, Rules.CESAndElimL
+       | apply Rules.resource_prenex_entails_refl].
+    exact (Rules.RTBoundWeaken TRef _ _ _ read_snapshot_derivation).
+  - match goal with
+    | |- RH.resource_prenex_entails ?left ?right =>
+        replace left with right
+    end;
+    [|unfold read_body_exit_store, read_field_store, read_open_store,
+        read_snapshot_store, read_exit_store; cbn;
+      repeat (unfold HoareRules.Resource.Assertions.lift_bound_renaming ||
+        rewrite view_member_here || rewrite view_member_there);
+      reflexivity].
+    apply Rules.resource_prenex_entails_refl.
 Qed.
 
 Module CounterAtomicity := RuleValidity.GenericRegions.Atomicity.
@@ -845,25 +744,23 @@ Definition read_exit_state : CounterAtomicity.analysis_state :=
     ((counter_mask ∖ {[counter_invariant]}) ∪ {[counter_invariant]}).
 (** The allocation in [make] creates the concrete and ghost halves of a
     fresh counter at zero. *)
-Definition make_initializers : list (field_init [TRef; TRef]) :=
+Definition make_initializers : list (field_init ([runtime_val TRef; runtime_var TRef])) :=
   [FieldInit counter_field (PEVal (VInt 0%Z));
    FieldInit ghost_field
      (PEUnOp (URAOfInt h_ra) (PEVal (VInt 0%Z)))].
 
 Definition make_alloc_store :
-    symbolic_store [TRef; TRef] [] [TRef] :=
-  RuleValidity.IR.update_store_with_bound make_entry_store MHere.
+    symbolic_store ([runtime_val TRef; runtime_var TRef]) [] [TRef] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_write true)
+    make_entry_store (LHere eq_refl).
 
-Lemma make_alloc_location :
-  RuleValidity.IR.symbolize_expr make_alloc_store (PEVar MHere) =
+Lemma make_alloc_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr make_alloc_store (PEVar (LHere Hkeep)) =
     ERef (RefBound MHere).
-Proof.
-  unfold make_alloc_store, RuleValidity.IR.symbolize_expr.
-  f_equal. apply lookup_update_store_same.
-Qed.
+Proof. reflexivity. Qed.
 Definition make_exit_store :
-    symbolic_store [TRef; TRef] [] [TRef; TRef] :=
-  RuleValidity.IR.update_store_with_bound make_alloc_store (MThere MHere).
+    symbolic_store ([runtime_val TRef; runtime_var TRef]) [] [TRef; TRef] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) make_alloc_store (LThere (LHere eq_refl)).
 Lemma make_ghost_initializers_valid :
   RH.core_entails (@Resource.CTrue _ _ [] [])
     (RH.ghost_initializers_valid_core make_entry_store
@@ -884,7 +781,7 @@ Qed.
 Lemma make_alloc :
   HoareRules.RavenHoareTriple
     (Resource.RState make_entry_store Resource.CTrue)
-    (TAlloc MHere make_initializers)
+    (TAlloc true (LHere eq_refl) make_initializers)
     (Resource.ResourceExists TRef
       (Resource.RState make_alloc_store
         (RH.allocated_fields_core make_entry_store make_initializers))).
@@ -932,8 +829,8 @@ Lemma make_fold_assign :
     (Resource.RState make_alloc_store
       (RH.allocated_fields_core make_entry_store make_initializers))
     (TSeq
-      (TFold counter_invariant (PECons (PEVar MHere) PENil))
-      (TAssign (MThere MHere) (PEVar MHere)))
+      (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
+      (TAssign false (LThere (LHere eq_refl)) (PEVar (LHere eq_refl))))
     (Resource.ResourceExists TRef
       (Resource.RState make_exit_store
         (counter_token_core (ERef (RefBound MHere))))).
@@ -992,121 +889,72 @@ Proof.
   exact make_fold_assign.
 Qed.
 Definition incr_open1_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt] :=
   weaken_store incr_entry_store.
 
 Definition incr_read1_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound incr_open1_store (MThere MHere).
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_open1_store (LThere (LHere eq_refl)).
 
 Definition incr_new_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound incr_read1_store
-    (MThere (MThere MHere)).
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_read1_store
+    (LThere (LThere (LHere eq_refl))).
 
 Definition incr_open2_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt; TInt; TInt; TInt] :=
   weaken_store incr_new_store.
 
 Definition incr_cas_read_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt; TInt; TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound incr_open2_store
-    (MThere (MThere (MThere MHere))).
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_open2_store
+    (LThere (LThere (LThere (LHere eq_refl)))).
 
 Definition incr_res_store :
-    symbolic_store [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    symbolic_store (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] :=
-  RuleValidity.IR.update_store_with_bound incr_cas_read_store
-    (MThere (MThere (MThere (MThere MHere)))).
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) incr_cas_read_store
+    (LThere (LThere (LThere (LThere (LHere eq_refl))))).
 
-Lemma incr_open1_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_open1_store (PEVar MHere) =
+Lemma incr_open1_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_open1_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_entry_location as Hentry.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hentry.
-  injection Hentry as Hlookup.
-  unfold symbolize_expr, incr_open1_store.
-  rewrite RuleValidity.IR.lookup_weaken_store.
-  f_equal.
-  assert (Hweaken : forall (reference : value_ref [TRef] [] TRef),
-      reference = RefFormal MHere ->
-      @weaken_ref [TRef] [] TRef TInt reference = RefFormal MHere).
-  { intros reference Hreference.
-    dependent destruction reference; cbn in Hreference |-; try discriminate.
-    inversion Hreference. reflexivity. }
-  apply Hweaken, Hlookup.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_read1_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_read1_store (PEVar MHere) =
+Lemma incr_read1_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_read1_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_open1_location as Hopen.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hopen.
-  injection Hopen as Hopen.
-  unfold RuleValidity.Translation.IR.symbolize_expr, incr_read1_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite Hopen. reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_new_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_new_store (PEVar MHere) =
+Lemma incr_new_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_new_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_read1_location as Hread.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hread.
-  injection Hread as Hread.
-  unfold RuleValidity.Translation.IR.symbolize_expr, incr_new_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite Hread. reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_open2_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_open2_store (PEVar MHere) =
+Lemma incr_open2_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_open2_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_new_location as Hnew.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hnew.
-  injection Hnew as Hlookup.
-  unfold symbolize_expr, incr_open2_store.
-  rewrite RuleValidity.IR.lookup_weaken_store.
-  f_equal. apply weaken_ref_formal_eq, Hlookup.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_cas_read_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_cas_read_store (PEVar MHere) =
+Lemma incr_cas_read_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_cas_read_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_open2_location as Hopen.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hopen.
-  injection Hopen as Hlookup.
-  unfold symbolize_expr, incr_cas_read_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  f_equal. apply weaken_ref_formal_eq, Hlookup.
-Qed.
+Proof. reflexivity. Qed.
 
-Lemma incr_res_location :
-  RuleValidity.Translation.IR.symbolize_expr incr_res_store (PEVar MHere) =
+Lemma incr_res_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.Translation.IR.symbolize_expr incr_res_store (PEVar (LHere Hkeep)) =
     ERef (RefFormal MHere).
-Proof.
-  pose proof incr_cas_read_location as Hcas.
-  unfold RuleValidity.Translation.IR.symbolize_expr in Hcas.
-  injection Hcas as Hlookup.
-  unfold symbolize_expr, incr_res_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  f_equal. apply weaken_ref_formal_eq, Hlookup.
-Qed.
+Proof. reflexivity. Qed.
 Lemma incr_unfold1_open :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_entry_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState incr_open1_store read_open_core)).
 Proof.
@@ -1115,14 +963,14 @@ Proof.
   unfold counter_token_core.
   try change (Assertion.procedure_args incr_procedure) with ([TRef] : context).
   rewrite <- counter_invariant_at_formal.
-  rewrite <- incr_entry_arguments.
+  rewrite <- (incr_entry_arguments (keep := keep_all) eq_refl).
   apply Rules.RTUnfoldInvariant.
 Qed.
 
 Lemma incr_field1_read :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open1_store read_open_core)
-    (TFieldRead counter_field (MThere MHere) (PEVar MHere))
+    (TFieldRead false counter_field (LThere (LHere eq_refl)) (PEVar (LHere eq_refl)))
     (Resource.ResourceExists TInt
       (Resource.RState incr_read1_store read_field_core)).
 Proof.
@@ -1135,7 +983,7 @@ Proof.
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
   - eapply Rules.RTFrame.
     change (Assertion.field_type counter_field) with TInt.
-    rewrite <- incr_open1_location.
+    rewrite <- (incr_open1_location (keep := keep_runtime) eq_refl).
     eapply Rules.RTFieldRead.
   - apply Rules.CEntailsStep. apply Rules.CESAndComm.
   - rewrite incr_open1_location. apply Rules.resource_prenex_entails_refl.
@@ -1144,7 +992,7 @@ Qed.
 Lemma incr_fold1 :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_read1_store read_field_core)
-    (TFold counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.RState incr_read1_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
@@ -1179,15 +1027,15 @@ Definition counter_open_core {Delta : context} :
 Definition incr_new_equality_core :
     expr [TRef] [TInt; TInt; TInt] TBool :=
   EBinOp (BEq TInt) (ERef (RefBound MHere))
-    (weaken_expr (RuleValidity.IR.symbolize_expr incr_read1_store
-      (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z))))).
+    (weaken_expr (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_read1_store
+      (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z))))).
 
 Lemma incr_assign_new :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_read1_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign (MThere (MThere MHere))
-      (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z))))
+    (TAssign false (LThere (LThere (LHere eq_refl)))
+      (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z))))
     (Resource.ResourceExists TInt
       (Resource.RState incr_new_store
         (Resource.CAnd (Resource.CExpr incr_new_equality_core)
@@ -1214,7 +1062,7 @@ Lemma incr_unfold2 :
     (Resource.RState incr_new_store
       (Resource.CAnd (Resource.CExpr incr_new_equality_core)
         (counter_token_core (ERef (RefFormal MHere)))))
-    (TUnfold counter_invariant (PECons (PEVar MHere) PENil))
+    (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.ResourceExists TInt
       (Resource.RState incr_open2_store
         (Resource.CAnd (@counter_open_core [TInt; TInt; TInt])
@@ -1244,12 +1092,12 @@ Definition incr_cas_old_core :
 
 Definition incr_cas_new_core :
     expr [TRef] [TInt; TInt; TInt; TInt; TInt] TInt :=
-  RuleValidity.IR.symbolize_expr incr_cas_read_store
-    (PEVar (MThere (MThere MHere))).
+  RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
+    (PEVar (LThere (LThere (LHere eq_refl)))).
 
 Definition incr_cas_expected_core :
     expr [TRef] [TInt; TInt; TInt; TInt; TInt] TInt :=
-  RuleValidity.IR.symbolize_expr incr_cas_read_store (PEVar (MThere MHere)).
+  RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store (PEVar (LThere (LHere eq_refl))).
 
 (** The block's own read lands [v2] in binder zero. *)
 Definition incr_cas_failure_core :
@@ -1280,7 +1128,7 @@ Definition incr_cas_read_core :
 
 (** The joined post of the block, discriminated by the result bit. *)
 Definition incr_cas_join_prenex :
-    Resource.resource_prenex [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]
+    Resource.resource_prenex (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit])
       [TRef] [TInt; TInt; TInt; TInt] :=
   Resource.ResourceExists TInt
     (Resource.ResourceExists TBool
@@ -1292,8 +1140,8 @@ Definition incr_cas_join_prenex :
 Lemma incr_cas_read :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_open2_store counter_open_core)
-    (TFieldRead counter_field (MThere (MThere (MThere MHere)))
-      (PEVar MHere))
+    (TFieldRead false counter_field (LThere (LThere (LThere (LHere eq_refl))))
+      (PEVar (LHere eq_refl)))
     (Resource.ResourceExists TInt
       (Resource.RState incr_cas_read_store incr_cas_read_core)).
 Proof.
@@ -1307,7 +1155,7 @@ Proof.
         (EUnOp (URAOfInt h_ra) (ERef (RefBound MHere))))).
   - eapply Rules.RTFrame.
     change (Assertion.field_type counter_field) with TInt.
-    rewrite <- incr_open2_location.
+    rewrite <- (incr_open2_location (keep := keep_runtime) eq_refl).
     eapply Rules.RTFieldRead.
   - apply Rules.CEntailsStep. apply Rules.CESAndComm.
   - rewrite incr_open2_location. apply Rules.resource_prenex_entails_refl.
@@ -1317,13 +1165,13 @@ Lemma incr_cas_success_branch :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_cas_read_store
       (Resource.CAnd incr_cas_read_core
-        (Resource.CExpr (RuleValidity.IR.symbolize_expr incr_cas_read_store
-          (PEBinOp (BEq TInt) (PEVar (MThere (MThere (MThere MHere))))
-            (PEVar (MThere MHere)))))))
+        (Resource.CExpr (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
+          (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LHere eq_refl)))))
+            (PEVar (LThere (LHere eq_refl))))))))
     (TSeq
-      (TFieldWrite counter_field (PEVar MHere)
-        (PEVar (MThere (MThere MHere))))
-      (TAssign (MThere (MThere (MThere (MThere MHere))))
+      (TFieldWrite counter_field (PEVar (LHere eq_refl))
+        (PEVar (LThere (LThere (LHere eq_refl)))))
+      (TAssign false (LThere (LThere (LThere (LThere (LHere eq_refl)))))
         (PEVal (VBool true))))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1373,7 +1221,8 @@ Proof.
          _ _ Heq) as Hvalue.
        unfold incr_cas_expected_core, RuleValidity.IR.symbolize_expr.
        unfold incr_cas_read_store in Hvalue |- *.
-       rewrite lookup_update_store_same in Hvalue.
+       cbn [lookup_store lookup_variable RuleValidity.IR.update_store_with_bound
+         store_head store_tail] in Hvalue |- *.
        cbn [interp_expr] in Hvalue |- *.
        injection Hvalue as Hvalue.
        cbn [RH.Core.interp_ref] in Hvalue |- *.
@@ -1387,10 +1236,10 @@ Proof.
           (EUnOp (URAOfInt h_ra) incr_cas_expected_core)))).
   - eapply Rules.RTConsequence;
       [eapply Rules.RTFrame; eapply Rules.RTFieldWrite | | ].
-    + rewrite <- incr_cas_read_location. apply Rules.CEntailsRefl.
+    + rewrite <- (incr_cas_read_location (keep := keep_runtime) eq_refl). apply Rules.CEntailsRefl.
     + unfold incr_cas_new_core.
       cbn [RuleValidity.Hoare.ResourceHoare.Resource.prenex_and].
-      rewrite <- incr_cas_read_location.
+      rewrite <- (incr_cas_read_location (keep := keep_runtime) eq_refl).
       apply Rules.resource_prenex_entails_refl.
   - unfold incr_res_store.
     eapply Rules.RTConsequence;
@@ -1423,10 +1272,10 @@ Lemma incr_cas_failure_branch :
     (Resource.RState incr_cas_read_store
       (Resource.CAnd incr_cas_read_core
         (Resource.CExpr (EUnOp UNot
-          (RuleValidity.IR.symbolize_expr incr_cas_read_store
-            (PEBinOp (BEq TInt) (PEVar (MThere (MThere (MThere MHere))))
-              (PEVar (MThere MHere))))))))
-    (TAssign (MThere (MThere (MThere (MThere MHere))))
+          (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_cas_read_store
+            (PEBinOp (BEq TInt) (PEVar (LThere (LThere (LThere (LHere eq_refl)))))
+              (PEVar (LThere (LHere eq_refl)))))))))
+    (TAssign false (LThere (LThere (LThere (LThere (LHere eq_refl)))))
       (PEVal (VBool false)))
     (Resource.ResourceExists TBool
       (Resource.RState incr_res_store
@@ -1496,13 +1345,13 @@ Qed.
 Definition incr_fpu_old_core :
     expr [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] (TRA h_ra) :=
   EUnOp (URAOfInt h_ra)
-    (RuleValidity.IR.symbolize_expr incr_res_store (PEVar (MThere MHere))).
+    (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store (PEVar (LThere (LHere eq_refl)))).
 
 Definition incr_fpu_new_core :
     expr [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] (TRA h_ra) :=
   EUnOp (URAOfInt h_ra)
     (EBinOp BAdd
-      (RuleValidity.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)))
+      (RuleValidity.IR.symbolize_expr (keep := keep_runtime) incr_res_store (PEVar (LThere (LHere eq_refl))))
       (EVal (VInt 1%Z))).
 
 Lemma incr_fpu_allowed :
@@ -1514,10 +1363,11 @@ Proof.
   intros formals binders valuation old_value new_value Hold Hnew.
   unfold incr_fpu_old_core, incr_fpu_new_core in Hold, Hnew.
   cbn [interp_expr interp_ref interp_unop interp_binop] in Hold, Hnew.
-  remember (interp_expr formals binders valuation
-    (RuleValidity.IR.symbolize_expr incr_res_store
-      (PEVar (MThere MHere)))) as current_result.
-  destruct current_result as [current_value |]; [| discriminate].
+  cbn in Hold, Hnew.
+  match type of Hold with
+  | context [binders ?t ?variable] => generalize dependent (binders t variable)
+  end.
+  intros current_value Hold Hnew.
   dependent destruction current_value.
   cbn in Hold, Hnew.
   inversion Hold; subst. inversion Hnew; subst.
@@ -1525,62 +1375,11 @@ Proof.
   apply h_ra_fpuValid_mono. reflexivity.
 Qed.
 
-(** The result assignment does not disturb [v1]'s slot. *)
-Lemma incr_v1_weaken :
-  weaken_expr
-      (RuleValidity.IR.symbolize_expr incr_cas_read_store (PEVar (MThere MHere))) =
-    RuleValidity.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)).
-Proof.
-  unfold incr_res_store, RuleValidity.IR.symbolize_expr.
-  cbn [weaken_expr].
-  f_equal. symmetry. apply lookup_update_store_preserves_second.
-Qed.
-
 (** *** Slot equations
 
     Every symbolic slot the post-CAS reasoning mentions, resolved to an
-    explicit binder reference.  All five are chains of
-    [lookup_update_store_other], [lookup_update_store_same] and
-    [lookup_weaken_store] through the store sequence built by the body. *)
-
-Lemma incr_read1_v1_slot :
-  RuleValidity.IR.symbolize_expr incr_read1_store (PEVar (MThere MHere)) =
-    ERef (RefBound MHere).
-Proof.
-  unfold incr_read1_store, RuleValidity.IR.symbolize_expr.
-  f_equal. apply lookup_update_store_same.
-Qed.
-
-Lemma incr_cas_read_new_v1_slot :
-  RuleValidity.IR.symbolize_expr incr_cas_read_store
-      (PEVar (MThere (MThere MHere))) =
-    ERef (RefBound (MThere (MThere MHere))).
-Proof.
-  unfold incr_cas_read_store, incr_open2_store, incr_new_store,
-    RuleValidity.IR.symbolize_expr.
-  f_equal.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite lookup_weaken_store.
-  rewrite lookup_update_store_same.
-  reflexivity.
-Qed.
-Lemma incr_res_v1_slot :
-  RuleValidity.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)) =
-    ERef (RefBound (MThere (MThere (MThere (MThere MHere))))).
-Proof.
-  unfold incr_res_store, incr_cas_read_store, incr_open2_store,
-    incr_new_store, RuleValidity.IR.symbolize_expr.
-  f_equal.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite lookup_update_store_other by (cbn; congruence).
-  rewrite lookup_weaken_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  change (RuleValidity.IR.Core.lookup_store incr_read1_store TInt (MThere MHere))
-    with (RuleValidity.IR.Core.lookup_store incr_read1_store TInt (MThere MHere)).
-  pose proof incr_read1_v1_slot as Hslot.
-  unfold RuleValidity.IR.symbolize_expr in Hslot.
-  injection Hslot as Hslot. rewrite Hslot. reflexivity.
-Qed.
+    explicit binder reference.  Each holds by computation through the store
+    sequence built by the body. *)
 
 (** *** Step 5: the post-CAS conditional
 
@@ -1590,15 +1389,6 @@ Qed.
     [ghost(v1 + 1)] with [ghost(new_v1)] on the success side, which is why
     the frame around the atomic block has to extend over this conditional
     as well. *)
-
-Lemma incr_res_slot :
-  RuleValidity.IR.symbolize_expr incr_res_store
-      (PEVar (MThere (MThere (MThere (MThere MHere))))) =
-    ERef (RefBound MHere).
-Proof.
-  unfold incr_res_store, RuleValidity.IR.symbolize_expr.
-  f_equal. apply lookup_update_store_same.
-Qed.
 
 Definition incr_threaded_equality_core :
     Resource.core_assertion [TRef] [TBool; TInt; TInt; TInt; TInt; TInt] :=
@@ -1623,10 +1413,10 @@ Lemma incr_fpu_branch :
     (Resource.RState incr_res_store
       (Resource.CAnd incr_cas_result_core
         (Resource.CExpr (ERef (RefBound MHere)))))
-    (TGhostUpdate ghost_field (PEVar MHere)
-      (PEUnOp (URAOfInt h_ra) (PEVar (MThere MHere)))
+    (TGhostUpdate ghost_field (PEVar (LHere eq_refl))
+      (PEUnOp (URAOfInt h_ra) (PEVar (LThere (LHere eq_refl))))
       (PEUnOp (URAOfInt h_ra)
-        (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z)))))
+        (PEBinOp BAdd (PEVar (LThere (LHere eq_refl))) (PEVal (VInt 1%Z)))))
     (Resource.RState incr_res_store incr_post_cas_core).
 Proof.
   eapply Rules.RTConsequence;
@@ -1658,8 +1448,6 @@ Proof.
          Resource.Assertions.weaken_bound_renaming incr_cas_expected_core)
          with (weaken_expr (u := TBool) incr_cas_expected_core).
        unfold incr_cas_expected_core.
-       rewrite incr_v1_weaken.
-       rewrite <- incr_res_location.
        change (Assertion.field_type ghost_field) with (TRA h_ra).
        eapply Rules.CEntailsTrans;
          [apply Rules.CEntailsStep; apply Rules.CESAndTrueIntro |].
@@ -1690,36 +1478,13 @@ Proof.
   apply Rules.CEntailsAndMono; [| apply Rules.CEntailsRefl].
   unfold incr_threaded_equality_core, incr_new_equality_core.
   cbn [Resource.weaken_core].
-  rewrite <- incr_res_location.
+  rewrite <- (incr_res_location (keep := keep_runtime) eq_refl).
   apply Rules.CEntailsStep. apply Rules.CESGhostOwnChunkEqAssume.
   intros formals binders valuation Heq.
-  change (RuleValidity.IR.symbolize_expr incr_read1_store
-    (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z))))
-    with (EBinOp BAdd
-      (RuleValidity.IR.symbolize_expr incr_read1_store (PEVar (MThere MHere)))
-      (EVal (VInt 1%Z))) in Heq.
-  rewrite incr_read1_v1_slot in Heq.
-  unfold weaken_expr in Heq.
-  cbn [Resource.Assertions.rename_bound_expr
-    Resource.Assertions.rename_bound_ref] in Heq.
-  change (RuleValidity.IR.symbolize_expr incr_res_store
-    (PEUnOp (URAOfInt h_ra)
-      (PEBinOp BAdd (PEVar (MThere MHere)) (PEVal (VInt 1%Z)))))
-    with (EUnOp (URAOfInt h_ra) (EBinOp BAdd
-      (RuleValidity.IR.symbolize_expr incr_res_store (PEVar (MThere MHere)))
-      (EVal (VInt 1%Z)))).
-  rewrite incr_res_v1_slot.
-  unfold incr_cas_new_core.
-  rewrite incr_cas_read_new_v1_slot.
-  unfold weaken_expr.
-  cbn [Resource.Assertions.rename_bound_expr
-    Resource.Assertions.rename_bound_ref].
-  cbn [Resource.Assertions.rename_bound_ref weaken_ref
-    Resource.Assertions.weaken_ref] in Heq |- *.
-  unfold Resource.Assertions.weaken_bound_renaming in Heq |- *.
   pose proof (interp_typed_equality_true_early formals binders valuation _ _ Heq)
     as Hvalue.
-  cbn [interp_expr interp_ref] in Hvalue |- *.
+  cbn in Hvalue |- *.
+  unfold Resource.Assertions.weaken_bound_renaming in Hvalue.
   rewrite <- Hvalue. reflexivity.
 Qed.
 
@@ -1760,7 +1525,7 @@ Qed.
 Lemma incr_fold2 :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store incr_post_cas_core)
-    (TFold counter_invariant (PECons (PEVar MHere) PENil))
+    (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere)))).
 Proof.
@@ -1810,7 +1575,7 @@ Lemma incr_retry_call :
     (Resource.RState incr_res_store
       (Resource.CAnd (counter_token_core (ERef (RefFormal MHere)))
         (Resource.CExpr (EUnOp UNot (ERef (RefBound MHere))))))
-    (TCall incr_procedure (PECons (PEVar MHere) PENil)
+    (TCall incr_procedure (PECons (PEVar (LHere eq_refl)) PENil)
       (@CTDiscard _ TUnit))
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
@@ -1869,25 +1634,15 @@ Lemma incr_retry_conditional :
   HoareRules.RavenHoareTriple
     (Resource.RState incr_res_store
       (counter_token_core (ERef (RefFormal MHere))))
-    (TIf (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere))))))
-      (TCall incr_procedure (PECons (PEVar MHere) PENil)
+    (TIf (PEUnOp UNot (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))))
+      (TCall incr_procedure (PECons (PEVar (LHere eq_refl)) PENil)
         (@CTDiscard _ TUnit))
       TDone)
     (Resource.RState incr_res_store Resource.CTrue).
 Proof.
   eapply Rules.RTIf.
-  - change (RuleValidity.IR.symbolize_expr incr_res_store
-      (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere)))))))
-      with (EUnOp UNot (RuleValidity.IR.symbolize_expr incr_res_store
-        (PEVar (MThere (MThere (MThere (MThere MHere))))))).
-    rewrite incr_res_slot.
-    apply incr_retry_call.
-  - change (RuleValidity.IR.symbolize_expr incr_res_store
-      (PEUnOp UNot (PEVar (MThere (MThere (MThere (MThere MHere)))))))
-      with (EUnOp UNot (RuleValidity.IR.symbolize_expr incr_res_store
-        (PEVar (MThere (MThere (MThere (MThere MHere))))))).
-    rewrite incr_res_slot.
-    apply incr_retry_done.
+  - exact incr_retry_call.
+  - exact incr_retry_done.
 Qed.
 
 Lemma incr_resource_body_derivation :
@@ -1919,9 +1674,9 @@ Proof.
     + eapply Rules.RTFrame. apply incr_atomic_cas.
     + apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
       eapply (Rules.RTIf incr_res_store incr_cas_result_core
-        (PEVar (MThere (MThere (MThere (MThere MHere))))) _ _ _).
-      * rewrite incr_res_slot. apply incr_fpu_branch.
-      * rewrite incr_res_slot. apply incr_done_branch.
+        (PEVar (LThere (LThere (LThere (LThere (LHere eq_refl)))))) _ _ _).
+      * exact incr_fpu_branch.
+      * exact incr_done_branch.
   - apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
     eapply Rules.RTSeq; [apply incr_fold2 |].
     apply incr_retry_conditional.
@@ -1981,33 +1736,27 @@ Proof.
 Qed.
 
 Definition client_made_store :
-    symbolic_store [TInt; TRef] (procedure_args client_procedure) [TRef] :=
-  RuleValidity.IR.update_store_with_bound client_entry_store (MThere MHere).
+    symbolic_store (runtime_decls [TInt; TRef]) (procedure_args client_procedure) [TRef] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) client_entry_store (LThere (LHere eq_refl)).
 
 Definition client_exit_store :
-    symbolic_store [TInt; TRef] (procedure_args client_procedure) [TInt; TRef] :=
-  RuleValidity.IR.update_store_with_bound client_made_store MHere.
+    symbolic_store (runtime_decls [TInt; TRef]) (procedure_args client_procedure) [TInt; TRef] :=
+  RuleValidity.IR.update_store_with_bound (keep := keep_runtime_var) client_made_store (LHere eq_refl).
 
-Lemma client_made_location :
-  RuleValidity.IR.symbolize_expr client_made_store (PEVar (MThere MHere)) =
+Lemma client_made_location {keep} (Hkeep : keep _ = true) :
+  RuleValidity.IR.symbolize_expr client_made_store (PEVar (LThere (LHere Hkeep))) =
     ERef (RefBound MHere).
-Proof.
-  unfold RuleValidity.IR.symbolize_expr, client_made_store.
-  rewrite lookup_update_store_same. reflexivity.
-Qed.
+Proof. reflexivity. Qed.
 
 Lemma client_exit_return :
-  lookup_store client_exit_store _ (MThere MHere) = RefBound (MThere MHere).
-Proof.
-  unfold client_exit_store.
-  rewrite lookup_update_store_other by (cbn; congruence).
-  unfold client_made_store. rewrite lookup_update_store_same. reflexivity.
-Qed.
+  lookup_store client_exit_store _ (LThere (LHere (keep := keep_all) eq_refl)) =
+    RefBound (MThere MHere).
+Proof. reflexivity. Qed.
 
 Lemma client_make_call :
   HoareRules.RavenHoareTriple
     (Resource.RState client_entry_store Resource.CTrue)
-    (TCall make_procedure PENil (CTStore (MThere MHere)))
+    (TCall make_procedure PENil (CTStore false (LThere (LHere eq_refl))))
     (Resource.ResourceExists TRef
       (Resource.RState client_made_store
         (counter_token_core (ERef (RefBound MHere))))).
@@ -2026,7 +1775,7 @@ Lemma client_spawn :
   HoareRules.RavenHoareTriple
     (Resource.RState client_made_store
       (counter_token_core (ERef (RefBound MHere))))
-    (TSpawn incr_procedure (PECons (PEVar (MThere MHere)) PENil))
+    (TSpawn incr_procedure (PECons (PEVar (LThere (LHere eq_refl))) PENil))
     (Resource.RState client_made_store
       (counter_token_core (ERef (RefBound MHere)))).
 Proof.
@@ -2045,8 +1794,8 @@ Lemma client_read_call :
   HoareRules.RavenHoareTriple
     (Resource.RState client_made_store
       (counter_token_core (ERef (RefBound MHere))))
-    (TCall read_procedure (PECons (PEVar (MThere MHere)) PENil)
-      (CTStore MHere))
+    (TCall read_procedure (PECons (PEVar (LThere (LHere eq_refl))) PENil)
+      (CTStore false (LHere eq_refl)))
     (Resource.ResourceExists TInt
       (Resource.RState client_exit_store
         (counter_token_core (ERef (RefBound (MThere MHere)))))).
@@ -2175,15 +1924,15 @@ Definition read_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    [TRef; TInt; TInt] read_procedure read_typed_procedure counter_mask
+    (runtime_decls [TRef; TInt; TInt]) read_procedure read_typed_procedure counter_mask
     (counter_closed_state counter_mask) read_exit_state
-    [TInt; TInt; TInt] read_exit_store (RefBound MHere)
+    [TInt; TInt; TInt; TRef] read_exit_store (RefBound MHere)
     _ _ _ _ _ _ _ _).
   8: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
                  CN.analyzed_hoare := read_resource_body_derivation;
                  CN.analyzed_restricted :=
                    read_restricted_fragment_accepted |}. }
-  - apply lookup_update_store_same.
+  - reflexivity.
   - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
   - reflexivity.
   - reflexivity.
@@ -2197,7 +1946,7 @@ Definition incr_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit] incr_procedure
+    (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]) incr_procedure
     incr_typed_procedure counter_mask
     (counter_closed_state counter_mask)
     (counter_closed_state counter_mask)
@@ -2221,7 +1970,7 @@ Definition make_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    [TRef; TRef] make_procedure make_typed_procedure ∅
+    ([runtime_val TRef; runtime_var TRef]) make_procedure make_typed_procedure ∅
     (counter_closed_state ∅)
     (counter_closed_state counter_mask)
     [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _).
@@ -2229,7 +1978,7 @@ Proof.
                  CN.analyzed_hoare := make_resource_body_derivation;
                  CN.analyzed_restricted :=
                    make_restricted_fragment_accepted |}. }
-  - apply lookup_update_store_same.
+  - reflexivity.
   - unfold CounterAtomicity.state_wf, counter_closed_state. simpl. set_solver.
   - reflexivity.
   - reflexivity.
@@ -2243,7 +1992,7 @@ Definition client_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    [TInt; TRef] client_procedure client_typed_procedure ∅
+    (runtime_decls [TInt; TRef]) client_procedure client_typed_procedure ∅
     (counter_closed_state ∅)
     (counter_closed_state counter_mask)
     [TInt; TRef] client_exit_store (RefBound (MThere MHere))

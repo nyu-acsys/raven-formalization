@@ -30,25 +30,27 @@ Context {RAs : RAValueConfig} {Logic : LogicSignature}.
 (** Argument stability belongs to the resource rule's interface.  The
     normalizer and analyzer reuse these definitions rather than maintaining a
     second, potentially divergent write-footprint computation. *)
-Fixpoint pexpr_dependencies {Γ t} (expression : pexpr Γ t) : gset nat :=
+Fixpoint pexpr_dependencies {keep Γ t} (expression : pexpr keep Γ t) :
+    gset nat :=
   match expression with
-  | PEVar variable => {[member_index variable]}
+  | PEVar variable => {[lvar_index variable]}
   | PEVal _ => ∅
   | PEUnOp _ operand => pexpr_dependencies operand
   | PEBinOp _ operand1 operand2 =>
       pexpr_dependencies operand1 ∪ pexpr_dependencies operand2
   end.
 
-Fixpoint pexpr_list_dependencies {Γ ts}
-    (expressions : pexpr_list Γ ts) : gset nat :=
+Fixpoint pexpr_list_dependencies {keep Γ ts}
+    (expressions : pexpr_list keep Γ ts) : gset nat :=
   match expressions with
   | PENil => ∅
   | PECons expression tail =>
       pexpr_dependencies expression ∪ pexpr_list_dependencies tail
   end.
 
-Lemma pexpr_list_dependencies_append {Γ left_types right_types}
-    (left : pexpr_list Γ left_types) (right : pexpr_list Γ right_types) :
+Lemma pexpr_list_dependencies_append {keep Γ left_types right_types}
+    (left : pexpr_list keep Γ left_types)
+    (right : pexpr_list keep Γ right_types) :
   pexpr_list_dependencies (IR.pexpr_list_append left right) =
     pexpr_list_dependencies left ∪ pexpr_list_dependencies right.
 Proof.
@@ -59,18 +61,68 @@ Proof.
     + intros [Hempty | Hslot].
       * rewrite elem_of_empty in Hempty. contradiction.
       * exact Hslot.
-  - rewrite IH. apply set_eq. intros slot.
-    repeat rewrite elem_of_union. tauto.
+  - transitivity (pexpr_dependencies expression ∪
+      (pexpr_list_dependencies tail ∪ pexpr_list_dependencies right)).
+    + f_equal. exact IH.
+    + apply set_eq. intros slot.
+      repeat rewrite elem_of_union. tauto.
+Qed.
+
+(** The slots of an enclosing scope, as seen from the scope's body. *)
+Definition unshift_slots (slots : gset nat) : gset nat :=
+  list_to_set (omap (fun slot =>
+    match slot with 0 => None | S slot' => Some slot' end) (elements slots)).
+
+Lemma elem_of_unshift_slots slot slots :
+  slot ∈ unshift_slots slots <-> S slot ∈ slots.
+Proof.
+  unfold unshift_slots. rewrite elem_of_list_to_set, elem_of_list_omap.
+  split.
+  - intros ([|slot'] & Hin & Hsome); [discriminate|].
+    injection Hsome as ->. apply elem_of_elements in Hin. exact Hin.
+  - intros Hin. exists (S slot).
+    split; [apply elem_of_elements; exact Hin|reflexivity].
+Qed.
+
+Lemma pexpr_dependencies_shift {keep d Γ t} (expression : pexpr keep Γ t)
+    slot :
+  slot ∈ pexpr_dependencies (pexpr_shift (d := d) expression) ->
+  exists slot', slot = S slot' /\ slot' ∈ pexpr_dependencies expression.
+Proof.
+  induction expression; simpl; intros Hslot.
+  - apply elem_of_singleton in Hslot as ->.
+    eexists. split; [reflexivity | apply elem_of_singleton; reflexivity].
+  - set_solver.
+  - exact (IHexpression Hslot).
+  - apply elem_of_union in Hslot as [Hslot | Hslot].
+    + destruct (IHexpression1 Hslot) as (slot' & -> & Hin).
+      exists slot'. set_solver.
+    + destruct (IHexpression2 Hslot) as (slot' & -> & Hin).
+      exists slot'. set_solver.
+Qed.
+
+Lemma pexpr_list_dependencies_shift_disjoint {keep d Γ ts}
+    (expressions : pexpr_list keep Γ ts) slots :
+  pexpr_list_dependencies expressions ## unshift_slots slots ->
+  pexpr_list_dependencies (pexpr_list_shift (d := d) expressions) ## slots.
+Proof.
+  intros Hdisjoint. induction expressions; simpl in *; [set_solver|].
+  apply disjoint_union_l. split; [|apply IHexpressions; set_solver].
+  intros slot Hslot Hwritten.
+  destruct (pexpr_dependencies_shift _ _ Hslot) as (slot' & -> & Hin).
+  apply (Hdisjoint slot'); [set_solver|].
+  apply elem_of_unshift_slots. exact Hwritten.
 Qed.
 
 Fixpoint statement_writes {Γ} (statement : stmt Γ) : gset nat :=
   match statement with
-  | TAssign target _ | TFieldRead _ target _ | TAlloc target _ =>
-      {[member_index target]}
-  | TCall _ _ (CTStore target) => {[member_index target]}
+  | TAssign _ target _ | TFieldRead _ _ target _ | TAlloc _ target _ =>
+      {[lvar_index target]}
+  | TCall _ _ (CTStore _ target) => {[lvar_index target]}
   | TInvAccess _ _ body | TAtomic body => statement_writes body
   | TIf _ then_branch else_branch | TSeq then_branch else_branch =>
       statement_writes then_branch ∪ statement_writes else_branch
+  | TGhostVal _ _ _ body => unshift_slots (statement_writes body)
   | _ => ∅
   end.
 
@@ -817,12 +869,12 @@ Fixpoint ghost_initializers_valid_core {Γ F Δ}
 Inductive store_equal_under {F Δ} (body : core_assertion F Δ) :
     forall Γ, symbolic_store Γ F Δ -> symbolic_store Γ F Δ -> Prop :=
 | StoreEqualNil : store_equal_under body [] StoreNil StoreNil
-| StoreEqualCons t Γ (left right : value_ref F Δ t)
+| StoreEqualCons d Γ (left right : value_ref F Δ (decl_type d))
     (left_tail right_tail : symbolic_store Γ F Δ) :
     core_entails body
-      (CExpr (EBinOp (BEq t) (ERef left) (ERef right))) ->
+      (CExpr (EBinOp (BEq (decl_type d)) (ERef left) (ERef right))) ->
     store_equal_under body Γ left_tail right_tail ->
-    store_equal_under body (t :: Γ)
+    store_equal_under body (d :: Γ)
       (StoreCons left left_tail) (StoreCons right right_tail).
 
 Lemma store_equal_under_frame {Γ F Δ}
@@ -838,6 +890,17 @@ Proof.
       * apply CEntailsStep, CESAndElimL.
       * exact H.
     + exact IHHstore.
+Qed.
+
+Lemma store_equal_under_refl {Γ F Δ} (body : core_assertion F Δ)
+    (store : symbolic_store Γ F Δ) :
+  store_equal_under body Γ store store.
+Proof.
+  induction store; constructor; [|exact IHstore].
+  eapply CEntailsTrans; [apply CEntailsStep, CESTrueIntro|].
+  apply CEntailsStep, CESExprTrue. intros formals binders valuation.
+  cbn [interp_expr interp_binop].
+  rewrite (proj2 (tval_eqb_eq _ _ _) eq_refl). reflexivity.
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -1011,7 +1074,7 @@ Inductive access_closure {Γ F} (invariant : inv_id) :
     access_closure invariant Δ arguments invariant_body
       (RState store' body) closed
 | AccessArgumentStoreRewrite Δ
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     opening_store closing_store body closed :
     access_closure invariant Δ
       (symbolize_expr_list closing_store program_arguments)
@@ -1089,7 +1152,7 @@ Qed.
     store; [AccessArgumentStoreRewrite] transports both stack
     ownership and the symbolized argument vector back to the opening store. *)
 Lemma access_closure_fold_store_rewrite {Γ F Δ} invariant
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (opening_store closing_store : symbolic_store Γ F Δ)
     (fold_pre : core_assertion F Δ) (post : resource_prenex Γ F Δ) :
   core_entails fold_pre
@@ -1137,7 +1200,7 @@ Qed.
     assertion endpoints: opening and closing may use different structural
     wrappers around the same scoped access. *)
 Inductive access_focus {Γ F} (invariant : inv_id)
-    (program_arguments : pexpr_list Γ (invariant_args invariant)) :
+    (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     context -> Type :=
 | AccessFocusBase Δ
     (focus_arguments : expr_list F Δ (invariant_args invariant)) :
@@ -1153,7 +1216,7 @@ Inductive access_focus {Γ F} (invariant : inv_id)
     access_focus invariant program_arguments Δ.
 
 Inductive access_opening {Γ F} (invariant : inv_id)
-    (program_arguments : pexpr_list Γ (invariant_args invariant)) :
+    (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     forall {Δ}, access_focus invariant program_arguments Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
 | AccessOpeningBase Δ (store : symbolic_store Γ F Δ) :
@@ -1215,7 +1278,7 @@ Inductive access_opening {Γ F} (invariant : inv_id)
       (RState store' pre_body) body_pre.
 
 Inductive access_closing {Γ F} (invariant : inv_id)
-    (program_arguments : pexpr_list Γ (invariant_args invariant)) :
+    (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     forall {Δ}, access_focus invariant program_arguments Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
 | AccessClosingBase Δ (store : symbolic_store Γ F Δ) :
@@ -1274,7 +1337,7 @@ Inductive access_closing {Γ F} (invariant : inv_id)
     runtime soundness file from expanding a large dependent-induction proof
     term merely to eliminate impossible binder-focus constructors. *)
 Inductive access_base_opening {Γ F Δ} (invariant : inv_id)
-    (program_arguments : pexpr_list Γ (invariant_args invariant)) :
+    (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     expr_list F Δ (invariant_args invariant) ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
 | AccessBaseOpening (store : symbolic_store Γ F Δ) :
@@ -1320,7 +1383,7 @@ Inductive access_base_opening {Γ F Δ} (invariant : inv_id)
       (RState store' pre_body) body_pre.
 
 Lemma access_opening_base_view {Γ F Δ} invariant
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (focus_arguments : expr_list F Δ (invariant_args invariant))
     (external body_pre : resource_prenex Γ F Δ) :
   access_opening invariant program_arguments
@@ -1348,7 +1411,7 @@ Proof.
 Qed.
 
 Inductive access_boundary {Γ F} (invariant : inv_id)
-    (program_arguments : pexpr_list Γ (invariant_args invariant)) :
+    (program_arguments : gexpr_list Γ (invariant_args invariant)) :
     forall {Δ}, resource_prenex Γ F Δ -> resource_prenex Γ F Δ ->
       resource_prenex Γ F Δ -> resource_prenex Γ F Δ -> Prop :=
 | AccessBoundaryBase Δ (store : symbolic_store Γ F Δ)
@@ -1415,7 +1478,7 @@ Inductive access_boundary {Γ F} (invariant : inv_id)
       (prenex_and external_post frame).
 
 Lemma access_boundary_base {Γ F Δ} invariant
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (store : symbolic_store Γ F Δ) (frame : core_assertion F Δ)
     (body_post external_post : resource_prenex Γ F Δ) :
   access_closure invariant Δ
@@ -1436,7 +1499,7 @@ Proof.
 Qed.
 
 Lemma access_boundary_consequence {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (external_pre external_pre' body_pre body_post
       external_post external_post' : resource_prenex Γ F Δ) :
   resource_prenex_entails external_pre' external_pre ->
@@ -1457,7 +1520,7 @@ Proof.
 Qed.
 
 Lemma access_boundary_base_view {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (external_pre body_pre body_post external_post :
       resource_prenex Γ F Δ) :
   access_boundary invariant arguments
@@ -1569,19 +1632,20 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
       (RState store (CAnd body (CExpr (symbolize_expr store condition))))
       (TAssert condition)
       (RState store (CAnd body (CExpr (symbolize_expr store condition))))
-| RTAssign {Δ} t (store : symbolic_store Γ F Δ) target value :
+| RTAssign {Δ} init t (store : symbolic_store Γ F Δ)
+    (target : write_target init Γ t) value :
     RavenHoareTriple
       (RState store CTrue)
-      (TAssign target value)
+      (TAssign init target value)
       (ResourceExists t
         (RState (update_store_with_bound store target)
           (CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
             (weaken_expr (symbolize_expr store value))))))
-| RTFieldRead {Δ} (store : symbolic_store Γ F Δ) field
-    (target : pvar Γ (field_type field)) base chunk :
+| RTFieldRead {Δ} (store : symbolic_store Γ F Δ) field init
+    (target : write_target init Γ (field_type field)) base chunk :
     RavenHoareTriple
       (RState store (COwn field (symbolize_expr store base) chunk))
-      (TFieldRead field target base)
+      (TFieldRead init field target base)
       (ResourceExists (field_type field)
         (RState (update_store_with_bound store target)
           (CAnd
@@ -1590,14 +1654,15 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
             (CExpr (EBinOp (BEq (field_type field))
               (ERef (RefBound MHere)) (weaken_expr chunk))))))
 | RTFieldWrite {Δ} (store : symbolic_store Γ F Δ) field base
-    (value : pexpr Γ (field_type field)) old_chunk :
+    (value : rexpr Γ (field_type field)) old_chunk :
     RavenHoareTriple
       (RState store (COwn field (symbolize_expr store base) old_chunk))
       (TFieldWrite field base value)
       (RState store
         (COwn field (symbolize_expr store base)
           (symbolize_expr store value)))
-| RTAlloc {Δ} (store : symbolic_store Γ F Δ) target fields :
+| RTAlloc {Δ} (store : symbolic_store Γ F Δ) init
+    (target : write_target init Γ TRef) fields :
     NoDup (map field_init_id fields) ->
     NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
     ghost_initializers_require_physical fields ->
@@ -1605,7 +1670,7 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
       (RState store
         (ghost_initializers_valid_core store
           (ghost_field_initializers fields)))
-      (TAlloc target fields)
+      (TAlloc init target fields)
       (ResourceExists TRef
         (RState (update_store_with_bound store target)
           (allocated_fields_core store fields)))
@@ -1704,10 +1769,27 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
     RavenHoareTriple pre body post ->
     RavenHoareTriple pre (TAtomic body) post
 
+(** *** Ghost values.  The initializer's value is bound in the telescope and
+    held by the new store slot; the slot is dropped when the scope ends. *)
+| RTGhostVal {Δ} name t (initializer : gexpr Γ t)
+    (body : stmt (ghost_val t :: Γ)) (store : symbolic_store Γ F Δ)
+    (frame : core_assertion F Δ)
+    (post : resource_prenex (ghost_val t :: Γ) F (t :: Δ)) :
+    RavenHoareTriple
+      (RState (StoreCons (d := ghost_val t) (RefBound MHere)
+          (weaken_store store))
+        (CAnd (weaken_core frame)
+          (CExpr (EBinOp (BEq t) (ERef (RefBound MHere))
+            (weaken_expr (symbolize_expr store initializer))))))
+      body post ->
+    RavenHoareTriple (RState store frame)
+      (TGhostVal name t initializer body)
+      (ResourceExists t (drop_head_prenex post))
+
 (** *** Calls and spawn.  The result binder lands in the telescope; the
     "callee is declared and verified" guard is an explicit premise. *)
 | RTCallDiscard {Δ} procedure (store : symbolic_store Γ F Δ)
-    (typed_arguments : pexpr_list Γ (procedure_args procedure)) :
+    (typed_arguments : rexpr_list Γ (procedure_args procedure)) :
     procedure_verified procedure ->
     RavenHoareTriple
       (RState store
@@ -1721,21 +1803,21 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
             (weaken_expr_list
               (symbolize_expr_list store typed_arguments)))))
 | RTCallStore {Δ} procedure (store : symbolic_store Γ F Δ)
-    (typed_arguments : pexpr_list Γ (procedure_args procedure))
-    (target : pvar Γ (procedure_return procedure)) :
+    (typed_arguments : rexpr_list Γ (procedure_args procedure))
+    init (target : write_target init Γ (procedure_return procedure)) :
     procedure_verified procedure ->
     RavenHoareTriple
       (RState store
         (instantiated_pre procedure
           (symbolize_expr_list store typed_arguments)))
-      (TCall procedure typed_arguments (CTStore target))
+      (TCall procedure typed_arguments (CTStore init target))
       (ResourceExists (procedure_return procedure)
         (RState (update_store_with_bound store target)
           (instantiated_post procedure
             (weaken_expr_list
               (symbolize_expr_list store typed_arguments)))))
 | RTSpawn {Δ} procedure (store : symbolic_store Γ F Δ)
-    (typed_arguments : pexpr_list Γ (procedure_args procedure)) :
+    (typed_arguments : rexpr_list Γ (procedure_args procedure)) :
     procedure_verified procedure ->
     RavenHoareTriple
       (RState store
@@ -1750,7 +1832,7 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
     discharges it around the whole access, and weakening runs an access that
     is independent of the fresh binder. *)
 Lemma RTInvAccessPrenexPreserve {Γ F Δ} t invariant
-    (arguments : pexpr_list Γ (invariant_args invariant)) body
+    (arguments : gexpr_list Γ (invariant_args invariant)) body
     (pre post : resource_prenex Γ F (t :: Δ)) :
   RavenHoareTriple pre (TInvAccess invariant arguments body) post ->
   RavenHoareTriple (ResourceExists t pre)
@@ -1758,7 +1840,7 @@ Lemma RTInvAccessPrenexPreserve {Γ F Δ} t invariant
 Proof. apply RTPrenexPreserve. Qed.
 
 Lemma RTInvAccessPrenexElim {Γ F Δ} t invariant
-    (arguments : pexpr_list Γ (invariant_args invariant)) body
+    (arguments : gexpr_list Γ (invariant_args invariant)) body
     (pre : resource_prenex Γ F (t :: Δ))
     (post : resource_prenex Γ F Δ) :
   RavenHoareTriple pre (TInvAccess invariant arguments body)
@@ -1768,7 +1850,7 @@ Lemma RTInvAccessPrenexElim {Γ F Δ} t invariant
 Proof. apply RTPrenexElim. Qed.
 
 Lemma RTInvAccessBoundWeaken {Γ F Δ} t invariant
-    (arguments : pexpr_list Γ (invariant_args invariant)) body
+    (arguments : gexpr_list Γ (invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
   RavenHoareTriple pre (TInvAccess invariant arguments body) post ->
   RavenHoareTriple (weaken_resource_prenex (u := t) pre)
@@ -1777,7 +1859,7 @@ Lemma RTInvAccessBoundWeaken {Γ F Δ} t invariant
 Proof. apply RTBoundWeaken. Qed.
 
 Lemma access_opening_triple {Γ F Δ invariant}
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (focus : access_focus invariant program_arguments Δ)
     (external body_pre : resource_prenex Γ F Δ) :
   access_opening invariant program_arguments focus
@@ -1797,7 +1879,7 @@ Proof.
 Qed.
 
 Lemma access_opening_complete {Γ F Δ invariant}
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (external body_pre : resource_prenex Γ F Δ)
     (derivation : RavenHoareTriple external
       (TUnfold invariant program_arguments) body_pre) :
@@ -1846,7 +1928,7 @@ Qed.
     derivation; the joint access cut later reconciles it with the opening
     focus through the body derivation. *)
 Lemma access_closing_complete {Γ F Δ invariant}
-    (program_arguments : pexpr_list Γ (invariant_args invariant))
+    (program_arguments : gexpr_list Γ (invariant_args invariant))
     (body_post external_post : resource_prenex Γ F Δ)
     (derivation : RavenHoareTriple body_post
       (TFold invariant program_arguments) external_post) :
@@ -1894,7 +1976,7 @@ Qed.
     than built into the calculus. *)
 Lemma RTInvAccessBase {Γ F Δ} invariant
     (store : symbolic_store Γ F Δ)
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (frame : core_assertion F Δ) body
     (opened_post closed_post : resource_prenex Γ F Δ) :
   RavenHoareTriple
@@ -2034,6 +2116,7 @@ Proof.
   - apply RTAtomicBlock.
     apply RavenHoareTriple_denormalize_endpoints.
     apply RavenHoareTriple_normalize_boundaries. exact derivation.
+  - apply RTGhostVal. exact derivation.
   - apply RTCallDiscard. assumption.
   - apply RTCallStore. assumption.
   - apply RTSpawn. assumption.
@@ -2357,7 +2440,7 @@ Qed.
     be exposed without inspecting the proof term's outer structural rules. *)
 Lemma RavenHoareTriple_unfold_body_fold_decompose {Γ F Δ}
     invariant
-    (arguments : pexpr_list Γ (invariant_args invariant)) body
+    (arguments : gexpr_list Γ (invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
   RavenHoareTriple pre
     (TSeq (TUnfold invariant arguments)
@@ -2383,7 +2466,7 @@ Qed.
     sequence inversion and wrapper extraction are now fully discharged. *)
 Lemma RavenHoareTriple_unfold_body_fold_spines {Γ F Δ}
     invariant
-    (arguments : pexpr_list Γ (invariant_args invariant)) body
+    (arguments : gexpr_list Γ (invariant_args invariant)) body
     (pre post : resource_prenex Γ F Δ) :
   RavenHoareTriple pre
     (TSeq (TUnfold invariant arguments)
@@ -2436,7 +2519,7 @@ Qed.
     need only entail the continuation precondition; telescope binders may
     already occur inside [opened_post] and [closed_post]. *)
 Lemma RTInvAccessThen {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (store : symbolic_store Γ F Δ) (frame : core_assertion F Δ) body
     (opened_post closed_post consumer_pre consumer_post :
       resource_prenex Γ F Δ) work :
@@ -2472,7 +2555,7 @@ Qed.
     context.  Ordinary fold consequence supplies both the strengthened fold
     precondition and the cut into the following statement. *)
 Lemma RTInvAccessThenFoldConsequence {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (input_store fold_store : symbolic_store Γ F Δ)
     (frame pre_body : core_assertion F Δ) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
@@ -2514,7 +2597,7 @@ Qed.
 (** Complete access-plus-continuation leaf when the fold is performed after a
     proof-only symbolic-store rewrite. *)
 Lemma RTInvAccessThenFoldStoreRewrite {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (input_store closing_store : symbolic_store Γ F Δ)
     (frame fold_pre : core_assertion F Δ) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :
@@ -2552,7 +2635,7 @@ Qed.
 
 (** Terminal form of [RTInvAccessThenFoldStoreRewrite]. *)
 Lemma RTInvAccessFoldStoreRewrite {Γ F Δ} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (input_store closing_store : symbolic_store Γ F Δ)
     (frame fold_pre : core_assertion F Δ) body
     (post : resource_prenex Γ F Δ) :
@@ -2591,7 +2674,7 @@ Qed.
     telescope of result binders around the complete access-plus-continuation
     segment. *)
 Lemma RTInvAccessThenConsumerCut {Γ F Δ t} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (store : symbolic_store Γ F (t :: Δ))
     (frame : core_assertion F (t :: Δ)) body
     (opened_post closed_post : resource_prenex Γ F (t :: Δ))
@@ -2628,7 +2711,7 @@ Qed.
     Repeated application handles any result telescope produced by the access
     body before the continuation resumes in the outer context. *)
 Lemma RTInvAccessThenFoldConsequenceConsumerCut {Γ F Δ t} invariant
-    (arguments : pexpr_list Γ (invariant_args invariant))
+    (arguments : gexpr_list Γ (invariant_args invariant))
     (input_store fold_store : symbolic_store Γ F (t :: Δ))
     (frame fold_pre : core_assertion F (t :: Δ)) body
     (consumer_pre consumer_post : resource_prenex Γ F Δ) work :

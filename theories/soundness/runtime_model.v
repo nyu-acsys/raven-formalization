@@ -98,7 +98,7 @@ Definition granted_mask (procedure : proc_id) : gset inv_id :=
 Definition contract_cost_model : forall Γ, stmt Γ -> Atomicity.step_cost :=
   fun Γ statement =>
     match statement with
-    | TAssign _ _ | TFieldRead _ _ _ | TFieldWrite _ _ _ | TAlloc _ _ =>
+    | TAssign _ _ _ | TFieldRead _ _ _ _ | TFieldWrite _ _ _ | TAlloc _ _ _ =>
         Atomicity.AtomicStep
     | TCall procedure _ _ =>
         Atomicity.ProcedureCallStep (required_mask procedure)
@@ -138,7 +138,7 @@ Proof. intros Γ statement. destruct statement; exact I || reflexivity. Qed.
 Lemma certified_call_step_effect
     (Hcost : procedure_cost_model_sound)
     Γ procedure
-    (arguments : pexpr_list Γ (Assertion.procedure_args procedure))
+    (arguments : rexpr_list Γ (Assertion.procedure_args procedure))
     (target : call_target Γ (Assertion.procedure_return procedure)) entry exit :
   Atomicity.take_step
       (AnalysisView.leaf_cost Γ (@TCall _ _ Γ procedure arguments target))
@@ -155,7 +155,7 @@ Qed.
 Lemma certified_spawn_step_effect
     (Hcost : procedure_cost_model_sound)
     Γ procedure
-    (arguments : pexpr_list Γ (Assertion.procedure_args procedure)) entry exit :
+    (arguments : rexpr_list Γ (Assertion.procedure_args procedure)) entry exit :
   Atomicity.take_step
       (AnalysisView.leaf_cost Γ (@TSpawn _ _ Γ procedure arguments)) entry = inr exit ->
   required_mask procedure ⊆ Atomicity.analysis_mask entry /\
@@ -165,9 +165,9 @@ Proof.
   intros Hstep. exact (Atomicity.procedure_spawn_step_success _ _ _ Hstep).
 Qed.
 
-Lemma unfold_analysis_mask {Γ : context} {entry : Atomicity.analysis_state}
+Lemma unfold_analysis_mask {Γ : decl_context} {entry : Atomicity.analysis_state}
     {invariant : inv_id}
-    {arguments : pexpr_list Γ (Assertion.invariant_args invariant)}
+    {arguments : gexpr_list Γ (Assertion.invariant_args invariant)}
     {exit : Atomicity.analysis_state}
     (view : RegionSyntax.view (TUnfold invariant arguments) =
       AnalysisView.ViewUnfold invariant)
@@ -574,14 +574,17 @@ Theorem procedure_entry_frame_corresponds {Γ F}
       (formal_env_of_values values) empty_binder_env callee_valuation
       (procedure_entry_store _ _ procedure) frame /\
     dom frame.(RuntimeLang.locals) =
-      list_to_set (runtime_variables (runtime_procedure_names procedure)).
+      list_to_set (runtime_frame_names (runtime_procedure_names procedure)).
 Proof.
   intros Hwf Harguments Hlocals Hdom.
   destruct (procedure_frame_entry_symbol_valuation_exist caller_valuation procedure frame
     Hlocals) as (callee_valuation & Hagree & Hlocal).
   exists callee_valuation. split; [exact Hagree|]. split.
-  - intros t variable.
-    destruct (in_dec Nat.eq_dec (member_index variable)
+  - intros keep t variable _.
+    rewrite <- (lookup_store_forget _ variable).
+    rewrite <- (runtime_variable_forget _ variable).
+    generalize (lvar_forget variable). clear variable. intros variable.
+    destruct (in_dec Nat.eq_dec (lvar_index variable)
       (pvar_list_indices (procedure_formal_variables _ _ procedure)))
     as [Hformal | Hnot].
     + destruct (pvar_list_index_member
@@ -599,13 +602,14 @@ Proof.
     + unfold procedure_entry_store, canonical_procedure_entry_store.
       rewrite lookup_canonical_entry_store_absent; [|exact Hnot].
       cbn [interp_ref]. apply Hlocal. exact Hnot.
-  - rewrite Hdom. apply runtime_procedure_declaration_names_cover. exact Hwf.
+  - rewrite Hdom runtime_procedure_frame_names; [|exact Hwf].
+    apply runtime_procedure_declaration_names_cover. exact Hwf.
 Qed.
 
-Lemma runtime_expr_list_sound {Γ F Δ ts} (names : named_context Γ)
-    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+Lemma runtime_expr_list_sound {Γ F Δ ts}
+    (names : named_context Γ) (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame)
-    (expressions : pexpr_list Γ ts) (values : tval_list ts) :
+    (expressions : pexpr_list keep_runtime Γ ts) (values : tval_list ts) :
   stack_corresponds names formals binders valuation store frame ->
   interp_expr_list formals binders valuation
     (IR.symbolize_expr_list store expressions) = Some values ->
@@ -667,48 +671,59 @@ Proof.
     apply IH in Htail. subst. reflexivity.
 Qed.
 
-Fixpoint concrete_locals_by_store {Γ} (store : concrete_store Γ) :
-    named_context Γ -> gmap RuntimeLang.var RuntimeLang.val.
-Proof.
-  destruct store as [|head_type tail_context value tail].
-  - intros names. dependent destruction names. exact ∅.
-  - intros names.
-    dependent destruction names.
-    exact (<[name := tval_to_val value]>
-      (@concrete_locals_by_store tail_context tail names)).
-Defined.
+Definition concrete_head {d D} (store : concrete_store (d :: D)) :
+    tval (decl_type d) :=
+  match store in concrete_store D0 return
+    match D0 with [] => unit | d0 :: _ => tval (decl_type d0) end
+  with
+  | ConcreteNil => tt
+  | ConcreteCons value _ => value
+  end.
 
-Definition concrete_locals {Γ} (names : named_context Γ)
-    (store : concrete_store Γ) : gmap RuntimeLang.var RuntimeLang.val :=
-  concrete_locals_by_store store names.
+Definition concrete_tail {d D} (store : concrete_store (d :: D)) :
+    concrete_store D :=
+  match store in concrete_store D0 return
+    match D0 with [] => unit | _ :: D1 => concrete_store D1 end
+  with
+  | ConcreteNil => tt
+  | ConcreteCons _ tail => tail
+  end.
+
+Fixpoint concrete_locals {Γ} (names : named_context Γ) :
+    concrete_store Γ -> gmap RuntimeLang.var RuntimeLang.val :=
+  match names in named_context Γ0 return
+    concrete_store Γ0 -> gmap RuntimeLang.var RuntimeLang.val
+  with
+  | NCNil => fun _ => ∅
+  | NCCons name d tail => fun store =>
+      if keep_runtime d then
+        <[name := tval_to_val (concrete_head store)]>
+          (concrete_locals tail (concrete_tail store))
+      else concrete_locals tail (concrete_tail store)
+  end.
 
 Lemma concrete_locals_interp_lookup {Γ F Δ} (names : named_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
-  NoDup (runtime_variables names) ->
-  forall t (variable : pvar Γ t),
+  NoDup (runtime_frame_names names) ->
+  forall keep t (variable : lvar keep Γ t),
+    lvar_runtime variable = true ->
     concrete_locals names (interp_store formals binders valuation store) !!
         runtime_variable names variable =
       Some (tval_to_val
         (interp_ref formals binders valuation (lookup_store store t variable))).
 Proof.
-  induction names; intros Hnames u variable.
-  - dependent destruction variable.
-  - dependent destruction store. dependent destruction variable.
-    + unfold concrete_locals. cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t :: Γ) (t :: Γ) JMeq_refl) eq_refl).
-      cbn. apply lookup_insert.
-    + inversion Hnames as [|? ? Hfresh Htail].
-      unfold concrete_locals. cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t :: Γ) (t :: Γ) JMeq_refl) eq_refl).
-      cbn. rewrite lookup_insert_ne.
-      * apply IHnames; assumption.
+  intros Hnames keep t variable Hruntime. revert names store Hnames.
+  induction variable as [d D Hkeep | d D t variable IH];
+    intros names store Hnames; dependent destruction names;
+    dependent destruction store; simpl in Hruntime.
+  - cbn. rewrite Hruntime. apply lookup_insert.
+  - cbn in Hnames |- *. destruct (keep_runtime d).
+    + inversion Hnames as [|? ? Hfresh Htail]. rewrite lookup_insert_ne.
+      * apply IH; assumption.
       * intros Heq. apply Hfresh. rewrite Heq.
-        apply runtime_variable_member.
+        exact (runtime_variable_frame_member names t variable Hruntime).
+    + apply IH; assumption.
 Qed.
 
 Lemma concrete_procedure_return_lookup {Γ F Δ}
@@ -716,64 +731,53 @@ Lemma concrete_procedure_return_lookup {Γ F Δ}
     (formals : formal_env (Assertion.procedure_args F))
     (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ (Assertion.procedure_args F) Δ) :
-  NoDup (runtime_variables (runtime_procedure_names procedure)) ->
+  procedure_wf procedure ->
+  NoDup (runtime_frame_names (runtime_procedure_names procedure)) ->
   concrete_locals (runtime_procedure_names procedure)
       (interp_store formals binders valuation store) !! "#ret_val" =
     Some (tval_to_val (interp_ref formals binders valuation
       (lookup_store store _ (procedure_return_variable _ _ procedure)))).
 Proof.
-  intros Hnames. rewrite <- (runtime_procedure_return_name procedure).
-  apply concrete_locals_interp_lookup. exact Hnames.
-Qed.
-
-Lemma runtime_name_has_variable {Γ} (names : named_context Γ) name :
-  List.In name (runtime_variables names) ->
-  exists t (variable : pvar Γ t), runtime_variable names variable = name.
-Proof.
-  induction names as [|Γ head t names IH]; simpl.
-  - tauto.
-  - intros [<- | Hin].
-    + exists t, MHere. reflexivity.
-    + destruct (IH Hin) as (u & variable & Hvariable).
-      exists u, (MThere variable). exact Hvariable.
+  intros Hwf Hnames. rewrite <- (runtime_procedure_return_name procedure).
+  apply concrete_locals_interp_lookup; [exact Hnames|].
+  apply lvar_runtime_all. exact (procedure_locals_runtime _ Hwf).
 Qed.
 
 Lemma concrete_locals_lookup_none {Γ} (names : named_context Γ)
     (store : concrete_store Γ) name :
-  ~ List.In name (runtime_variables names) ->
+  ~ List.In name (runtime_frame_names names) ->
   concrete_locals names store !! name = None.
 Proof.
-  induction names as [|Γ head t names IH]; intros Hfresh.
-  - dependent destruction store. apply lookup_empty.
-  - dependent destruction store. unfold concrete_locals. cbn.
-    unfold simplification_heq.
-    rewrite (Eqdep_dec.UIP_dec
-      (fun left right : context => decide (left = right))
-      (@JMeq_eq context (t :: Γ) (t :: Γ) JMeq_refl) eq_refl).
-    cbn. rewrite lookup_insert_ne.
-    + apply IH. intros Hin. apply Hfresh. now right.
-    + intros Heq. apply Hfresh. left. exact Heq.
+  induction names as [|Γ head d names IH]; intros Hfresh.
+  - apply lookup_empty.
+  - dependent destruction store. cbn in Hfresh |- *.
+    destruct (keep_runtime d).
+    + rewrite lookup_insert_ne.
+      * apply IH. intros Hin. apply Hfresh. now right.
+      * intros Heq. apply Hfresh. left. exact Heq.
+    + apply IH. exact Hfresh.
 Qed.
 
 Lemma stack_corresponds_canonical_frame_eq {Γ F Δ}
     (names : named_context Γ) (formals : formal_env F)
     (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) (frame : RuntimeLang.stack_frame) :
-  NoDup (runtime_variables names) ->
+  NoDup (runtime_frame_names names) ->
   stack_corresponds names formals binders valuation store frame ->
-  dom frame.(RuntimeLang.locals) = list_to_set (runtime_variables names) ->
+  dom frame.(RuntimeLang.locals) = list_to_set (runtime_frame_names names) ->
   frame = RuntimeLang.StackFrame
     (concrete_locals names (interp_store formals binders valuation store)).
 Proof.
   intros Hnames Hcorresponds Hdom. destruct frame as [locals]. simpl in *.
   f_equal. apply map_eq. intros name.
-  destruct (in_dec String.string_dec name (runtime_variables names))
+  destruct (in_dec String.string_dec name (runtime_frame_names names))
     as [Hin | Hnot].
-  - destruct (runtime_name_has_variable names name Hin)
+  - destruct (runtime_frame_name_has_variable names name Hin)
       as (t & variable & Hvariable).
     rewrite <- Hvariable.
-    rewrite Hcorresponds.
-    symmetry. apply concrete_locals_interp_lookup. exact Hnames.
+    rewrite Hcorresponds; [|apply lvar_runtime_keep].
+    symmetry. apply concrete_locals_interp_lookup;
+      [exact Hnames | apply lvar_runtime_keep].
   - have Hleft : locals !! name = None.
     { apply not_elem_of_dom. rewrite Hdom.
       rewrite elem_of_list_to_set. intros Hin.
@@ -782,68 +786,61 @@ Proof.
     apply concrete_locals_lookup_none. exact Hnot.
 Qed.
 
-Lemma concrete_locals_update_store {Γ F Δ t} (names : named_context Γ)
+Lemma concrete_locals_update_store {Γ F Δ keep t} (names : named_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (target : pvar Γ t)
+    (store : symbolic_store Γ F Δ) (target : lvar keep Γ t)
     (value : tval t) :
-  NoDup (runtime_variables names) ->
+  lvar_runtime target = true ->
+  NoDup (runtime_frame_names names) ->
   concrete_locals names
       (interp_store formals (binder_cons value binders) valuation
         (IR.update_store_with_bound store target)) =
     <[runtime_variable names target := tval_to_val value]>
       (concrete_locals names (interp_store formals binders valuation store)).
 Proof.
-  induction names; intros Hnames.
-  - dependent destruction target.
-  - dependent destruction store. dependent destruction target.
-    + unfold concrete_locals. cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t0 :: Γ) (t0 :: Γ) JMeq_refl) eq_refl).
-      cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t0 :: Γ) (t0 :: Γ) JMeq_refl) eq_refl).
-      cbn. rewrite interp_weaken_store.
-      unfold binder_cons. rewrite view_member_here. rewrite insert_insert.
-      reflexivity.
+  revert names store. induction target as [d D Hkeep | d D t target IH];
+    intros names store Hruntime Hnames; dependent destruction names;
+    dependent destruction store; simpl in Hruntime.
+  - cbn. rewrite Hruntime. rewrite interp_weaken_store.
+    unfold binder_cons. rewrite view_member_here. rewrite insert_insert.
+    reflexivity.
+  - cbn in Hnames |- *. destruct (keep_runtime d).
     + inversion Hnames as [|? ? Hfresh Htail].
-      unfold concrete_locals. cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t0 :: Γ) (t0 :: Γ) JMeq_refl) eq_refl).
-      cbn. unfold simplification_heq.
-      rewrite (Eqdep_dec.UIP_dec
-        (fun left right : context => decide (left = right))
-        (@JMeq_eq context (t0 :: Γ) (t0 :: Γ) JMeq_refl) eq_refl).
-      cbn. rewrite interp_weaken_ref. unfold concrete_locals in IHnames.
-      rewrite IHnames; [|exact Htail].
+      rewrite interp_weaken_ref. rewrite IH; [|exact Hruntime|exact Htail].
       apply insert_commute. intros Heq. apply Hfresh. rewrite Heq.
-      apply runtime_variable_member.
+      exact (runtime_variable_frame_member names t target Hruntime).
+    + apply IH; assumption.
 Qed.
 
 Lemma concrete_stack_corresponds {Γ F Δ} (names : named_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) :
-  NoDup (runtime_variables names) ->
+  NoDup (runtime_frame_names names) ->
   stack_corresponds names formals binders valuation store
     (RuntimeLang.StackFrame
       (concrete_locals names (interp_store formals binders valuation store))).
 Proof.
-  intros Hnames t variable.
-  apply concrete_locals_interp_lookup. exact Hnames.
+  intros Hnames keep t variable Hruntime.
+  apply concrete_locals_interp_lookup; assumption.
 Qed.
 
-Record stack_context_data (Γ : context) := StackContext {
+Record stack_context_data (Γ : decl_context) := StackContext {
   runtime_stack_id : RuntimeLang.stack_id;
   runtime_names : named_context Γ;
-  runtime_names_nodup : NoDup (runtime_variables runtime_names);
+  runtime_names_nodup : NoDup (runtime_frame_names runtime_names);
 }.
 
-Definition stack_context : context -> Type := stack_context_data.
+Definition stack_context : decl_context -> Type := stack_context_data.
 
 Definition empty_stack_context : stack_context [].
 Proof. refine (StackContext [] 0%Z NCNil _). constructor. Defined.
+
+(** A ghost binder names a slot that the runtime frame does not have. *)
+Definition ghost_stack_context {Γ} name t (runtime : stack_context Γ) :
+    stack_context (ghost_val t :: Γ) :=
+  StackContext (ghost_val t :: Γ) (runtime_stack_id _ runtime)
+    (NCCons name (ghost_val t) (runtime_names _ runtime))
+    (runtime_names_nodup _ runtime).
 
 Section WithRuntime.
 Context {Σ : gFunctors} `{RG : !runtimeG Σ}.
@@ -874,6 +871,13 @@ Proof.
   iApply (RuntimeGhost.stack_frame_own_exclusive with "Hleft Hright").
 Qed.
 
+Lemma core_stack_own_ghost {Γ} name t (runtime : stack_context Γ) value
+    (store : concrete_store Γ) :
+  core_stack_own (ghost_val t :: Γ) (ghost_stack_context name t runtime)
+      (ConcreteCons value store) =
+    core_stack_own Γ runtime store.
+Proof. reflexivity. Qed.
+
 Local Notation stack_own := core_stack_own.
 Local Notation concrete_heapG := core_heapG.
 Local Notation concrete_irisG := core_irisG.
@@ -888,8 +892,8 @@ Lemma runtime_stack_frame_corresponds {Γ F Δ}
       (concrete_locals (runtime_names _ runtime)
         (interp_store formals binders valuation store))).
 Proof.
-  intros t variable. apply concrete_locals_interp_lookup.
-  apply runtime_names_nodup.
+  intros keep t variable Hruntime. apply concrete_locals_interp_lookup;
+    [apply runtime_names_nodup | exact Hruntime].
 Qed.
 
 Definition core_field_own field
@@ -1163,8 +1167,8 @@ Qed.
 
 Lemma runtime_assignment_wp {Γ F Δ t} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (target : pvar Γ t)
-    (expression : pexpr Γ t) (mask : coPset) :
+    (store : symbolic_store Γ F Δ) {init} (target : write_target init Γ t)
+    (expression : rexpr Γ t) (mask : coPset) :
   stack_own Γ runtime (interp_store formals binders valuation store) ⊢
   runtime_wp mask
     (RuntimeLang.RTAssign
@@ -1198,14 +1202,16 @@ Proof.
     - exact Hvalue. }
   iNext. iIntros "[Hstack Hcredit]". iSplit; first done. iExists value.
   iSplit; first done.
-  unfold stack_own. simpl. rewrite concrete_locals_update_store.
-  iExact "Hstack". apply runtime_names_nodup.
+  unfold stack_own. simpl.
+  rewrite concrete_locals_update_store;
+    [|apply lvar_runtime_keep | apply runtime_names_nodup].
+  iExact "Hstack".
 Qed.
 
 Lemma runtime_field_write_wp {Γ F Δ} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) field (base : pexpr Γ TRef)
-    (expression : pexpr Γ (Assertion.field_type field))
+    (store : symbolic_store Γ F Δ) field (base : rexpr Γ TRef)
+    (expression : rexpr Γ (Assertion.field_type field))
     (location : tval TRef) (old_value : tval (Assertion.field_type field))
     (mask : coPset) :
   interp_program_expr formals binders valuation store base = Some location ->
@@ -1259,7 +1265,7 @@ Qed.
 Lemma runtime_field_read_wp {Γ F Δ} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
     (store : symbolic_store Γ F Δ) field
-    (target : pvar Γ (Assertion.field_type field)) (base : pexpr Γ TRef)
+    {init} (target : write_target init Γ (Assertion.field_type field)) (base : rexpr Γ TRef)
     (location : tval TRef) (chunk : tval (Assertion.field_type field))
     (mask : coPset) :
   interp_program_expr formals binders valuation store base = Some location ->
@@ -1299,8 +1305,9 @@ Proof.
       Hlocation). }
   iNext. iIntros "[Hstack [Hfield Hcredit]]". iSplit; first done.
   iExists chunk. iSplit; first done. unfold stack_own, field_own. simpl.
-  rewrite concrete_locals_update_store.
-  iFrame. apply runtime_names_nodup.
+  rewrite concrete_locals_update_store;
+    [|apply lvar_runtime_keep | apply runtime_names_nodup].
+  iFrame.
 Qed.
 
 Fixpoint allocated_physical_fields_own {Γ F Δ} (runtime : stack_context Γ)
@@ -1532,7 +1539,7 @@ Qed.
 
 Lemma runtime_allocation_wp {Γ F Δ} (runtime : stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (target : pvar Γ TRef)
+    (store : symbolic_store Γ F Δ) {init} (target : write_target init Γ TRef)
     (fields : list (field_init Γ)) (mask : coPset) :
   NoDup (map field_init_id fields) ->
   NoDup (map ghost_field_init_id (ghost_field_initializers fields)) ->
@@ -1597,8 +1604,10 @@ Proof.
     { exact Hmask. }
     iModIntro. iSplit; first done. iExists address.
     iSplitL "Hstack".
-    + unfold stack_own. simpl. rewrite concrete_locals_update_store.
-      iExact "Hstack". apply runtime_names_nodup.
+    + unfold stack_own. simpl.
+      rewrite concrete_locals_update_store;
+        [|apply lvar_runtime_keep | apply runtime_names_nodup].
+      iExact "Hstack".
     + iSplitL "Hfields".
       * iApply (field_values_match_own runtime formals binders valuation store
           (physical_field_initializers fields) values address Hvalues).
@@ -1882,7 +1891,7 @@ Section WithSignature.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature} {Cost : AnalysisView.LeafCost}.
 
 Definition make_stack_context {Γ} (stack_id : RuntimeLang.stack_id)
-    (names : named_context Γ) (Hnames : NoDup (RuntimeErasure.runtime_variables names)) :
+    (names : named_context Γ) (Hnames : NoDup (RuntimeErasure.runtime_frame_names names)) :
     Model.stack_context Γ :=
   @Model.StackContext Γ stack_id names Hnames.
 
@@ -1929,7 +1938,8 @@ Definition semantic_data : Translation.semantic_config_data (iPropI Σ) :=
 Lemma semantic_stack_own_update {Γ F Δ t}
     (runtime : Model.stack_context Γ) (formals : formal_env F)
     (binders : binder_env Δ) (valuation : symbol_valuation)
-    (store : symbolic_store Γ F Δ) (target : pvar Γ t) (value : tval t) :
+    (store : symbolic_store Γ F Δ) {init} (target : lvar (keep_write init) Γ t)
+    (value : tval t) :
   Translation.data_stack_own semantic_data runtime
       (interp_store formals (binder_cons value binders) valuation
         (IR.update_store_with_bound store target)) ⊣⊢
@@ -1943,8 +1953,8 @@ Lemma semantic_stack_own_update {Γ F Δ t}
 Proof.
   unfold semantic_data, Control.semantic_data, Model.core_semantic_data.
   simpl. unfold Model.core_stack_own.
-  rewrite Model.concrete_locals_update_store; [reflexivity|].
-  apply Model.runtime_names_nodup.
+  rewrite Model.concrete_locals_update_store;
+    [reflexivity | apply lvar_runtime_keep | apply Model.runtime_names_nodup].
 Qed.
 
 Definition ambient_physical_leaf_wp {Γ} (runtime : Model.stack_context Γ)
@@ -1962,13 +1972,13 @@ Definition ambient_leaf_wp {Γ} (runtime : Model.stack_context Γ)
         (RuntimeErasure.runtime_stmt (Model.runtime_names _ runtime)
           (Model.runtime_stack_id _ runtime) statement) post
   | TDone | TAssert _ => post
-  | TAssign target expression =>
+  | TAssign _ target expression =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTAssign
           (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)
           (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) expression)
           (Model.runtime_stack_id _ runtime)) post
-  | TFieldRead field target base =>
+  | TFieldRead _ field target base =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTFldRd
           (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)
@@ -1981,7 +1991,7 @@ Definition ambient_leaf_wp {Γ} (runtime : Model.stack_context Γ)
           (field_name field)
           (RuntimeErasure.runtime_expr (Model.runtime_names _ runtime) expression)
           (Model.runtime_stack_id _ runtime)) post
-  | TAlloc target fields =>
+  | TAlloc _ target fields =>
       ambient_physical_leaf_wp runtime ambient entry
         (RuntimeLang.RTAlloc
           (RuntimeErasure.runtime_variable (Model.runtime_names _ runtime) target)

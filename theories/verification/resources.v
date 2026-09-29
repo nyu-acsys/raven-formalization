@@ -102,7 +102,7 @@ Fixpoint core_entry_free {F Δ} (formula : core_assertion F Δ) : Prop :=
 Definition CTrue {F Δ} : core_assertion F Δ := CPure True.
 
 (** Exactly one symbolic stack, by construction. *)
-Record resource_assertion (Γ F Δ : context) : Type := ResourceState {
+Record resource_assertion (Γ : decl_context) (F Δ : context) : Type := ResourceState {
   resource_stack : symbolic_store Γ F Δ;
   resource_body : core_assertion F Δ;
 }.
@@ -115,7 +115,7 @@ Record resource_assertion (Γ F Δ : context) : Type := ResourceState {
     Ordinary existentials whose variable occurs only in [resource_body]
     stay as [CExists].  Only existential resource binders are provided: a
     resource-level universal is not added speculatively. *)
-Inductive resource_prenex (Γ F : context) : context -> Type :=
+Inductive resource_prenex (Γ : decl_context) (F : context) : context -> Type :=
 | ResourceBody (Δ : context) (state : resource_assertion Γ F Δ) :
     resource_prenex Γ F Δ
 | ResourceExists (Δ : context) (t : typ)
@@ -453,6 +453,16 @@ Definition head_bound_ref_subst {F Δ t} (witness : value_ref F Δ t) :
 
 (* ------------------------------------------------------------------ *)
 (** ** 5. Conjoining a core frame under a telescope *)
+
+(** Leaving a local's scope drops its store slot. *)
+Fixpoint drop_head_prenex {d Γ F Δ} (prenex : resource_prenex (d :: Γ) F Δ) :
+    resource_prenex Γ F Δ :=
+  match prenex with
+  | ResourceBody state =>
+      ResourceBody (ResourceState (store_tail (resource_stack state))
+        (resource_body state))
+  | ResourceExists t rest => ResourceExists t (drop_head_prenex rest)
+  end.
 
 Fixpoint prenex_and {Γ F Δ} (prenex : resource_prenex Γ F Δ)
     (frame : core_assertion F Δ) {struct prenex} : resource_prenex Γ F Δ :=
