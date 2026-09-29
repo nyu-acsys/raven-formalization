@@ -358,7 +358,10 @@ Inductive stmt (D : decl_context) : Type :=
 | TAtomic (body : stmt D)
 (** A ghost value scoped over [body], initialized once and never written. *)
 | TGhostVal (name : source_name) t (initializer : gexpr D t)
-    (body : stmt (ghost_val t :: D)).
+    (body : stmt (ghost_val t :: D))
+(** A proof-only conditional: its guard may read ghost locals, and its
+    branches must be proof-only ([proof_onlyb]). *)
+| TGhostIf (condition : gexpr D TBool) (then_branch else_branch : stmt D).
 
 #[global] Arguments TDone {_}.
 #[global] Arguments TAssert {_} & _.
@@ -378,6 +381,21 @@ Inductive stmt (D : decl_context) : Type :=
 #[global] Arguments TSeq {_} & _ _.
 #[global] Arguments TAtomic {_} & _.
 #[global] Arguments TGhostVal {_} & _ _ _ _.
+#[global] Arguments TGhostIf {_} & _ _ _.
+
+(** Statements without runtime effect: they erase to the terminal
+    statement. *)
+Fixpoint proof_onlyb {D} (statement : stmt D) : bool :=
+  match statement with
+  | TDone | TAssert _ | TGhostUpdate _ _ _ _ | TUnfold _ _ | TFold _ _
+  | TPredicateUnfold _ _ | TPredicateFold _ _ => true
+  | TInvAccess _ _ body => proof_onlyb body
+  | TGhostVal _ _ _ body => proof_onlyb body
+  | TIf _ then_branch else_branch | TGhostIf _ then_branch else_branch
+  | TSeq then_branch else_branch =>
+      proof_onlyb then_branch && proof_onlyb else_branch
+  | _ => false
+  end.
 
 (** Canonical procedure-entry stores.  Every frame slot starts as a fresh
     procedure-local symbolic symbol; installing the formal-variable embedding

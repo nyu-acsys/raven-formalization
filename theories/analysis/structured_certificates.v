@@ -18,7 +18,7 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
     | TUnfold invariant _ => AnalysisView.ViewUnfold invariant
     | TFold invariant _ => AnalysisView.ViewFold invariant
     | TSeq first second => AnalysisView.ViewSequence first second
-    | TIf _ then_branch else_branch =>
+    | TIf _ then_branch else_branch | TGhostIf _ then_branch else_branch =>
         AnalysisView.ViewConditional then_branch else_branch
     | TInvAccess invariant _ body =>
         AnalysisView.ViewStructuredAccess invariant body
@@ -29,7 +29,8 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
     end.
   Fixpoint size {Γ} (statement : statement Γ) : nat :=
     match statement with
-    | TSeq first second | TIf _ first second => S (size first + size second)
+    | TSeq first second | TIf _ first second | TGhostIf _ first second =>
+        S (size first + size second)
     | TAtomic body => S (size body)
     | TGhostVal _ _ _ body => S (size body)
     | _ => 1
@@ -46,8 +47,8 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
       (statement then_branch else_branch : statement Γ) :
     region_view statement = AnalysisView.ViewConditional then_branch else_branch ->
     size then_branch < size statement /\ size else_branch < size statement.
-  Proof. destruct statement; cbn; intros Hview; try discriminate.
-    inversion Hview; subst. lia. Qed.
+  Proof. destruct statement; cbn; intros Hview; try discriminate;
+    inversion Hview; subst; lia. Qed.
   Lemma atomic_body_smaller (Γ : decl_context) (statement body : statement Γ) :
     region_view statement = AnalysisView.ViewAtomic body ->
     size body < size statement.
@@ -146,7 +147,24 @@ Inductive structured_certificate :
       (AnalysisView.fold_invariant invariant inner)
 | StructuredGhostVal Γ entry name t initializer body exit :
     structured_certificate (ghost_val t :: Γ) entry body exit ->
-    structured_certificate Γ entry (TGhostVal name t initializer body) exit.
+    structured_certificate Γ entry (TGhostVal name t initializer body) exit
+| StructuredGhostConditional Γ entry condition then_branch else_branch
+    then_exit else_exit :
+    structured_certificate Γ entry then_branch then_exit ->
+    structured_certificate Γ entry else_branch else_exit ->
+    AnalysisView.analysis_open then_exit =
+      AnalysisView.analysis_open else_exit ->
+    AnalysisView.analysis_in_atomic then_exit =
+      AnalysisView.analysis_in_atomic else_exit ->
+    structured_certificate Γ entry
+      (TGhostIf condition then_branch else_branch)
+      (AnalysisView.AnalysisState
+        (AnalysisView.analysis_mask then_exit ∩
+          AnalysisView.analysis_mask else_exit)
+        (AnalysisView.analysis_open then_exit)
+        (AnalysisView.analysis_step_taken then_exit ||
+          AnalysisView.analysis_step_taken else_exit)
+        (AnalysisView.analysis_in_atomic then_exit)).
 
 (** Logical Raven masks that may be needed while interpreting a structured
     certificate.  The footprint keeps both the masks and open sets at the
@@ -174,6 +192,10 @@ Fixpoint structured_certificate_footprint
       structured_certificate_footprint body_certificate
   | StructuredGhostVal _ _ _ _ _ _ _ body_certificate =>
       structured_certificate_footprint body_certificate
+  | StructuredGhostConditional _ _ _ _ _ _ _
+      then_certificate else_certificate _ _ =>
+      structured_certificate_footprint then_certificate ∪
+      structured_certificate_footprint else_certificate
   | _ => ∅
   end.
 

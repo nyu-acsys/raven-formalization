@@ -120,7 +120,8 @@ Fixpoint statement_writes {Γ} (statement : stmt Γ) : gset nat :=
       {[lvar_index target]}
   | TCall _ _ (CTStore _ target) => {[lvar_index target]}
   | TInvAccess _ _ body | TAtomic body => statement_writes body
-  | TIf _ then_branch else_branch | TSeq then_branch else_branch =>
+  | TIf _ then_branch else_branch | TGhostIf _ then_branch else_branch
+  | TSeq then_branch else_branch =>
       statement_writes then_branch ∪ statement_writes else_branch
   | TGhostVal _ _ _ body => unshift_slots (statement_writes body)
   | _ => ∅
@@ -1824,7 +1825,22 @@ Inductive RavenHoareTriple {Γ F} : forall {Δ},
         (instantiated_pre procedure
           (symbolize_expr_list store typed_arguments)))
       (TSpawn procedure typed_arguments)
-      (RState store CTrue).
+      (RState store CTrue)
+
+(** *** Proof-only conditionals.  As [RTIf], for proof-only branches. *)
+| RTGhostIf {Δ} (store : symbolic_store Γ F Δ) (body : core_assertion F Δ)
+    condition then_branch else_branch (post : resource_prenex Γ F Δ) :
+    proof_onlyb then_branch = true ->
+    proof_onlyb else_branch = true ->
+    RavenHoareTriple
+      (RState store (CAnd body (CExpr (symbolize_expr store condition))))
+      then_branch post ->
+    RavenHoareTriple
+      (RState store
+        (CAnd body (CExpr (EUnOp UNot (symbolize_expr store condition)))))
+      else_branch post ->
+    RavenHoareTriple (RState store body)
+      (TGhostIf condition then_branch else_branch) post.
 
 (** An assertion whose symbolic condition always holds leaves the state
     unchanged. *)
@@ -2170,6 +2186,7 @@ Proof.
   - apply RTCallDiscard. assumption.
   - apply RTCallStore. assumption.
   - apply RTSpawn. assumption.
+  - eapply RTGhostIf; eassumption.
 Defined.
 
 (** *** Derived rule: move a postcondition's core existential into the

@@ -72,44 +72,4 @@ Lemma snapshot_argument_analyzed :
     Some (closed {[counter_invariant]}).
 Proof. vm_compute. reflexivity. Qed.
 
-(** [unfold I(y); if (b) { fold I(y) } else { fold I(y) }]: the branch-local
-    folds make the control result of the conditional worth saving. *)
-Definition b {keep} (Hkeep : keep (runtime_var TRef) = true) :
-    pexpr keep Γ TBool :=
-  PEBinOp (BEq TRef) (y Hkeep) (PEVar (LThere (LHere Hkeep))).
-
-Definition branch_local_folds : stmt Γ :=
-  TSeq (TUnfold counter_invariant arguments)
-    (TIf (b eq_refl)
-      (TFold counter_invariant arguments)
-      (TFold counter_invariant arguments)).
-
-Definition snapshot_fold : stmt (ghost_val TBool :: ghost_val TRef :: Γ) :=
-  TSeq (TFold counter_invariant
-      ltac:(vm_compute; exact (PECons (PEVar (LThere (LHere eq_refl))) PENil)))
-    (TAssert (PEBinOp (BEq TRef) (PEVar (LThere (LHere eq_refl)))
-      (PEVar (LThere (LThere (LHere eq_refl)))))).
-
-(** [ghost val g := y; unfold I(g); ghost val gb := b; if (b) { fold I(g);
-    assert (g == y) } else { ... }] *)
-Lemma branch_local_folds_snapshot :
-  Snapshots.snapshot_accesses branch_local_folds =
-    TGhostVal Snapshots.snapshot_name TRef (y eq_refl)
-      (TSeq (TUnfold counter_invariant
-          ltac:(vm_compute; exact (PECons (PEVar (LHere eq_refl)) PENil)))
-        (TGhostVal Snapshots.guard_snapshot_name TBool
-          (PEBinOp (BEq TRef) (PEVar (LThere (LHere eq_refl)))
-            (PEVar (LThere (LThere (LHere eq_refl)))))
-          (TIf
-            (PEBinOp (BEq TRef) (PEVar (LThere (LThere (LHere eq_refl))))
-              (PEVar (LThere (LThere (LThere (LHere eq_refl))))))
-            snapshot_fold snapshot_fold))).
-Proof. vm_compute. reflexivity. Qed.
-
-Lemma branch_local_folds_analyzed :
-  Atomicity.analyze_lifo (closed {[counter_invariant]})
-    (Snapshots.snapshot_accesses branch_local_folds) =
-    Some (closed {[counter_invariant]}).
-Proof. vm_compute. reflexivity. Qed.
-
 End ArgumentSnapshots.

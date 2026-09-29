@@ -36,9 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the snapshot, and asserts after the matching fold that its written
   arguments equal the snapshot. An access whose argument variables are
   reassigned inside it is thereby accepted by the normalizer. The rewrite
-  erases exactly to the source program (`snapshot_accesses_erasure`). A
-  conditional whose branches close an open access also saves its control
-  result in a ghost `val` at its evaluation point.
+  erases exactly to the source program (`snapshot_accesses_erasure`).
   Derived rules `RTGhostValVar` and `RTAssertTrue` discharge the generated
   binders and checks, as in the counter example's `read` and `incr`.
 - Immutable runtime locals: a procedure body may declare

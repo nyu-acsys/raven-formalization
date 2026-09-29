@@ -139,16 +139,8 @@ Proof.
     specialize (IHstatement1 snapshots names stack).
     specialize (IHstatement2 snapshots names stack).
     rewrite Hleft in IHstatement1. rewrite Hright in IHstatement2.
-    cbn in IHstatement1, IHstatement2.
-    assert (Hshift : renaming_preserves_names (shift_renaming (ghost_val TBool))
-      names (NCCons guard_snapshot_name (ghost_val TBool) names))
-      by (intros ? ? ? _; reflexivity).
-    destruct (left_closed || right_closed); cbn.
-    + rewrite (runtime_expr_rename _ _ _ _ Hshift),
-        !(runtime_stmt_rename _ _ _ _ _ _ Hshift),
-        IHstatement1, IHstatement2.
-      reflexivity.
-    + rewrite IHstatement1, IHstatement2. reflexivity.
+    cbn in IHstatement1, IHstatement2 |- *.
+    rewrite IHstatement1, IHstatement2. reflexivity.
   - (* sequence *)
     destruct (matching_fold invariant snapshots statement1)
       as [[closing check]|] eqn:Hmatch.
@@ -178,6 +170,11 @@ Proof.
     cbn. specialize (IHstatement (pexpr_list_shift snapshots)
       (NCCons name (ghost_val t) names) stack).
     rewrite Hbody in IHstatement. exact IHstatement.
+  - (* ghost conditional *)
+    destruct (close_access invariant snapshots statement1) as [left left_closed].
+    destruct (close_access invariant snapshots statement2)
+      as [right right_closed].
+    reflexivity.
 Qed.
 
 Lemma snapshot_arguments_erasure {D0 ts} (arguments : gexpr_list D0 ts) :

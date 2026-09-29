@@ -210,7 +210,10 @@ Inductive elaboration_error :=
 | EEUnsupportedStatement
 | EEUnsupportedAssertion
 | EEIllFormedModule
-| EEUndeclaredProcedure.
+| EEUndeclaredProcedure
+(** A conditional whose guard reads a ghost local has a branch with runtime
+    effect. *)
+| EEGhostGuard.
 
 Definition packed_pexpr keep Γ := { t : typ & pexpr keep Γ t }.
 
@@ -609,19 +612,28 @@ Fixpoint elaborate_stmt_init {Γ} (init : bool)
           end
       end
   | SSIf condition then_branch else_branch =>
-      match elaborate_expr keep_runtime variables condition with
-      | inl error => inl error
-      | inr condition' =>
-          match expect_pexpr TBool condition' with
-          | inl error => inl error
-          | inr condition'' =>
-              match elaborate_stmt_init false environment variables then_branch with
+      match elaborate_stmt_init false environment variables then_branch,
+            elaborate_stmt_init false environment variables else_branch with
+      | inl error, _ | _, inl error => inl error
+      | inr then_branch', inr else_branch' =>
+          match elaborate_expr keep_runtime variables condition with
+          | inr condition' =>
+              match expect_pexpr TBool condition' with
               | inl error => inl error
-              | inr then_branch' =>
-                  match elaborate_stmt_init false environment variables else_branch with
+              | inr condition'' => inr (TIf condition'' then_branch' else_branch')
+              end
+          | inl runtime_error =>
+              (* A guard that reads a ghost local makes a proof-only
+                 conditional. *)
+              match elaborate_expr keep_all variables condition with
+              | inl _ => inl runtime_error
+              | inr condition' =>
+                  match expect_pexpr TBool condition' with
                   | inl error => inl error
-                  | inr else_branch' =>
-                      inr (TIf condition'' then_branch' else_branch')
+                  | inr condition'' =>
+                      if proof_onlyb then_branch' && proof_onlyb else_branch'
+                      then inr (TGhostIf condition'' then_branch' else_branch')
+                      else inl EEGhostGuard
                   end
               end
           end
@@ -1195,5 +1207,22 @@ Example val_is_readable :
     elaborate_stmt environment val_variables
       (SSFieldRead "v" (SEVar "r") "value") = inr result.
 Proof. eexists. reflexivity. Qed.
+
+Example ghost_conditional_elaborates :
+  exists result,
+    elaborate_stmt environment variables
+      (SSGhostVal "g" None (SEVar "v")
+        (SSIf (SEBinOp SBEq (SEVar "g") (SEVal (SVInt 0)))
+          (SSAssert (SEBinOp SBEq (SEVar "v") (SEVal (SVInt 0)))) SSDone)) =
+    inr result.
+Proof. eexists. reflexivity. Qed.
+
+Example ghost_guard_is_proof_only :
+  elaborate_stmt environment variables
+      (SSGhostVal "g" None (SEVar "v")
+        (SSIf (SEBinOp SBEq (SEVar "g") (SEVal (SVInt 0)))
+          (SSAssign "v" (SEVal (SVInt 1))) SSDone)) =
+    inl EEGhostGuard.
+Proof. reflexivity. Qed.
 
 End ElaborationExamples.

@@ -119,15 +119,15 @@ Fixpoint stmt_rename {D D'} (renaming : lvar_renaming D D')
   | TGhostVal name t initializer body =>
       TGhostVal name t (pexpr_rename renaming initializer)
         (stmt_rename (lift_renaming _ renaming) body)
+  | TGhostIf condition then_branch else_branch =>
+      TGhostIf (pexpr_rename renaming condition)
+        (stmt_rename renaming then_branch) (stmt_rename renaming else_branch)
   end.
 
 (** ** Snapshots *)
 
 Definition snapshot_name : source_name := "#snapshot"%string.
-Definition guard_snapshot_name : source_name := "#guard"%string.
 
-Definition shift_renaming {D} d : lvar_renaming D (d :: D) :=
-  fun _ _ variable => LThere variable.
 
 Definition pexpr_list_nil {keep D ts} (expressions : pexpr_list keep D ts) :
     bool :=
@@ -203,9 +203,7 @@ Definition matching_fold {D} invariant
   end.
 
 (** Rewrites the first fold of [invariant] on each path; the flag records
-    whether every path through [statement] closed the access.  A conditional
-    with a branch-local fold also saves its control result in a ghost [val]
-    at its evaluation point. *)
+    whether every path through [statement] closed the access. *)
 Fixpoint close_access {D} invariant
     (snapshots : gexpr_list D (Assertion.invariant_args invariant))
     (statement : stmt D) : stmt D * bool :=
@@ -230,13 +228,7 @@ Fixpoint close_access {D} invariant
         close_access invariant snapshots then_branch in
       let (else_branch', else_closed) :=
         close_access invariant snapshots else_branch in
-      if then_closed || else_closed then
-        (TGhostVal guard_snapshot_name TBool (pexpr_forget condition)
-          (TIf (pexpr_rename (shift_renaming _) condition)
-            (stmt_rename (shift_renaming _) then_branch')
-            (stmt_rename (shift_renaming _) else_branch')),
-         then_closed && else_closed)
-      else (TIf condition then_branch' else_branch', then_closed && else_closed)
+      (TIf condition then_branch' else_branch', then_closed && else_closed)
   | TAtomic body =>
       let (body', closed) := close_access invariant snapshots body in
       (TAtomic body', closed)
@@ -247,6 +239,13 @@ Fixpoint close_access {D} invariant
       let (body', closed) :=
         close_access invariant (pexpr_list_shift snapshots) body in
       (TGhostVal name t initializer body', closed)
+  | TGhostIf condition then_branch else_branch =>
+      let (then_branch', then_closed) :=
+        close_access invariant snapshots then_branch in
+      let (else_branch', else_closed) :=
+        close_access invariant snapshots else_branch in
+      (TGhostIf condition then_branch' else_branch',
+       then_closed && else_closed)
   | _ => (statement, false)
   end.
 
@@ -276,6 +275,9 @@ Fixpoint snapshot_accesses {D} (statement : stmt D) : stmt D :=
       TInvAccess invariant arguments (snapshot_accesses body)
   | TGhostVal name t initializer body =>
       TGhostVal name t initializer (snapshot_accesses body)
+  | TGhostIf condition then_branch else_branch =>
+      TGhostIf condition (snapshot_accesses then_branch)
+        (snapshot_accesses else_branch)
   | _ => statement
   end.
 

@@ -1235,7 +1235,43 @@ Inductive certificate_aligned :
       pre statement post),
     certificate_aligned certificate derivation ->
     certificate_aligned certificate
-      (RavenHoareRules.RTBoundWeaken t statement pre post derivation).
+      (RavenHoareRules.RTBoundWeaken t statement pre post derivation)
+| AlignedGhostConditional : forall Γ F Δ state
+    (store : symbolic_store Γ F Δ) (body : Resource.core_assertion F Δ)
+    condition then_branch else_branch then_exit else_exit
+    (post : Resource.resource_prenex Γ F Δ)
+    (view : RegionSyntax.view (TGhostIf condition then_branch else_branch) =
+      AnalysisView.ViewConditional then_branch else_branch)
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      state then_branch then_exit)
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      state else_branch else_exit)
+    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit)
+    (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
+      GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (then_proof_only : proof_onlyb then_branch = true)
+    (else_proof_only : proof_onlyb else_branch = true)
+    (then_derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (IR.symbolize_expr store condition))))
+      then_branch post)
+    (else_derivation : @RavenHoareRules.RavenHoareTriple _ _ _ Γ F Δ
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (Core.EUnOp Core.UNot
+            (IR.symbolize_expr store condition)))))
+      else_branch post),
+    certificate_aligned then_certificate then_derivation ->
+    certificate_aligned else_certificate else_derivation ->
+    certificate_aligned
+      (GenericRegions.Atomicity.CertConditional Γ state
+        (TGhostIf condition then_branch else_branch) then_branch else_branch
+        then_exit else_exit view then_certificate else_certificate
+        open_equal atomic_equal)
+      (RavenHoareRules.RTGhostIf store body condition then_branch else_branch
+        post then_proof_only else_proof_only then_derivation else_derivation).
 
 (** *** Alignment is complete
 
@@ -1309,6 +1345,17 @@ Proof.
              _ _ _ _ d2 _ _ certificate2) as [Aelse _];
            unshelve eexists;
              [eapply AlignedConditional; eassumption | exact I]
+       | [ |- context [RavenHoareRules.RTGhostIf _ _ _ _ _ _ _ _ ?d1 ?d2] ] =>
+           match goal with
+           | Hview : RegionSyntax.view (TGhostIf _ _ _) = _ |- _ =>
+               cbn in Hview; dependent destruction Hview
+           end;
+           destruct (certificate_aligned_complete_exists Γ F
+             _ _ _ _ d1 _ _ certificate1) as [Athen _];
+           destruct (certificate_aligned_complete_exists Γ F
+             _ _ _ _ d2 _ _ certificate2) as [Aelse _];
+           unshelve eexists;
+             [eapply AlignedGhostConditional; eassumption | exact I]
        | [ |- context [RavenHoareRules.RTAtomicBlock _ _ _ ?d] ] =>
            cbn in e; dependent destruction e;
            destruct (certificate_aligned_complete_exists Γ F
@@ -1602,6 +1649,223 @@ Proof.
   exists (footprinted_normalization_conditional
     then_derivation then_certificate then_result else_derivation
     else_certificate else_result open_equal atomic_equal view).
+  reflexivity.
+Qed.
+
+Definition normalization_ghost_conditional
+    {Γ F Δ entry then_exit else_exit}
+    {store : symbolic_store Γ F Δ}
+    {body : Resource.core_assertion F Δ}
+    {condition then_branch else_branch}
+    {post : Resource.resource_prenex Γ F Δ}
+    (then_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (IR.symbolize_expr store condition))))
+      then_branch post)
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry then_branch then_exit)
+    (then_normalization : @normalization_result Γ F Δ entry
+      then_exit _ post then_branch then_derivation then_certificate)
+    (else_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (Core.EUnOp Core.UNot
+            (IR.symbolize_expr store condition)))))
+      else_branch post)
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry else_branch else_exit)
+    (else_normalization : @normalization_result Γ F Δ entry
+      else_exit _ post else_branch else_derivation else_certificate)
+    (Hopen_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit)
+    (Hatomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
+      GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (view : RegionSyntax.view (TGhostIf condition then_branch else_branch) =
+      AnalysisView.ViewConditional then_branch else_branch)
+    (then_proof_only : proof_onlyb then_branch = true)
+    (else_proof_only : proof_onlyb else_branch = true)
+    (normalized_then_proof_only :
+      proof_onlyb then_normalization.(normalized_statement) = true)
+    (normalized_else_proof_only :
+      proof_onlyb else_normalization.(normalized_statement) = true) :
+  let source := TGhostIf condition then_branch else_branch in
+  let joined := GenericRegions.Atomicity.AnalysisState
+    (GenericRegions.Atomicity.analysis_mask then_exit ∩
+      GenericRegions.Atomicity.analysis_mask else_exit)
+    (GenericRegions.Atomicity.analysis_open then_exit)
+    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
+      GenericRegions.Atomicity.analysis_step_taken else_exit)
+    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let source_derivation := RavenHoareRules.RTGhostIf store body condition
+    then_branch else_branch post then_proof_only else_proof_only
+    then_derivation else_derivation in
+  let source_certificate := GenericRegions.Atomicity.CertConditional Γ
+    entry source then_branch else_branch then_exit else_exit view
+      then_certificate else_certificate Hopen_equal Hatomic_equal in
+  @normalization_result Γ F Δ entry joined
+    (Resource.RState store body) post source
+    source_derivation source_certificate.
+Proof.
+  simpl.
+  refine {| normalized_statement := TGhostIf condition
+      then_normalization.(normalized_statement)
+      else_normalization.(normalized_statement);
+    normalization_target_derivation :=
+      RavenHoareRules.RTGhostIf store body condition _ _ post
+        normalized_then_proof_only normalized_else_proof_only
+        then_normalization.(normalization_target_derivation)
+        else_normalization.(normalization_target_derivation);
+    normalization_target_certificate :=
+      StructuredGhostConditional Γ entry condition _ _ then_exit
+        else_exit
+        then_normalization.(normalization_target_certificate)
+        else_normalization.(normalization_target_certificate)
+        Hopen_equal Hatomic_equal |}.
+  intros names stack. reflexivity.
+Defined.
+
+Definition footprinted_normalization_ghost_conditional
+    {Γ F Δ entry then_exit else_exit}
+    {store : symbolic_store Γ F Δ} {body : Resource.core_assertion F Δ}
+    {post : Resource.resource_prenex Γ F Δ}
+    {condition} {then_branch else_branch : stmt Γ}
+    (then_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body (Resource.CExpr (IR.symbolize_expr store condition))))
+      then_branch post)
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry then_branch then_exit)
+    (then_result : @footprinted_normalization_result Γ F Δ entry
+      then_exit _ post then_branch then_derivation then_certificate)
+    (else_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (Core.EUnOp Core.UNot
+            (IR.symbolize_expr store condition)))))
+      else_branch post)
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry else_branch else_exit)
+    (else_result : @footprinted_normalization_result Γ F Δ entry
+      else_exit _ post else_branch else_derivation else_certificate)
+    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit)
+    (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
+      GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (view : RegionSyntax.view (TGhostIf condition then_branch else_branch) =
+      AnalysisView.ViewConditional then_branch else_branch)
+    (then_proof_only : proof_onlyb then_branch = true)
+    (else_proof_only : proof_onlyb else_branch = true)
+    (normalized_then_proof_only : proof_onlyb
+      then_result.(footprinted_normalization).(normalized_statement) = true)
+    (normalized_else_proof_only : proof_onlyb
+      else_result.(footprinted_normalization).(normalized_statement) = true) :
+  let source := TGhostIf condition then_branch else_branch in
+  let joined := GenericRegions.Atomicity.AnalysisState
+    (GenericRegions.Atomicity.analysis_mask then_exit ∩
+      GenericRegions.Atomicity.analysis_mask else_exit)
+    (GenericRegions.Atomicity.analysis_open then_exit)
+    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
+      GenericRegions.Atomicity.analysis_step_taken else_exit)
+    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let source_derivation := RavenHoareRules.RTGhostIf store body condition
+    then_branch else_branch post then_proof_only else_proof_only
+    then_derivation else_derivation in
+  let source_certificate := GenericRegions.Atomicity.CertConditional Γ
+    entry source then_branch else_branch then_exit else_exit view
+      then_certificate else_certificate open_equal atomic_equal in
+  @footprinted_normalization_result Γ F Δ entry joined
+    (Resource.RState store body) post source source_derivation
+    source_certificate.
+Proof.
+  simpl.
+  refine {| footprinted_normalization :=
+    normalization_ghost_conditional then_derivation then_certificate
+      then_result.(footprinted_normalization) else_derivation
+      else_certificate else_result.(footprinted_normalization)
+      open_equal atomic_equal view then_proof_only else_proof_only
+      normalized_then_proof_only normalized_else_proof_only |}.
+  - intros marker Hmember.
+    simpl in Hmember |- *.
+    repeat rewrite elem_of_union in Hmember |- *.
+    pose proof (then_result.(footprinted_normalization_subset)
+      marker) as Hthen.
+    pose proof (else_result.(footprinted_normalization_subset)
+      marker) as Helse.
+    tauto.
+  - intros Hentry. split.
+    + exact (then_result.(footprinted_normalization_safe) Hentry).
+    + exact (else_result.(footprinted_normalization_safe) Hentry).
+Defined.
+
+Lemma footprinted_normalization_ghost_conditional_from_worker
+    {Γ F Δ entry then_exit else_exit}
+    {store : symbolic_store Γ F Δ} {body : Resource.core_assertion F Δ}
+    {post : Resource.resource_prenex Γ F Δ}
+    {condition} {then_branch else_branch normalized_then normalized_else
+      normalized : stmt Γ}
+    (then_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body (Resource.CExpr (IR.symbolize_expr store condition))))
+      then_branch post)
+    (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry then_branch then_exit)
+    (then_result : @footprinted_normalization_result Γ F Δ entry
+      then_exit _ post then_branch then_derivation then_certificate)
+    (Hthen_result : normalized_statement
+      then_result.(footprinted_normalization) = normalized_then)
+    (else_derivation : RavenHoareRules.RavenHoareTriple
+      (Resource.RState store
+        (Resource.CAnd body
+          (Resource.CExpr (Core.EUnOp Core.UNot
+            (IR.symbolize_expr store condition)))))
+      else_branch post)
+    (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+      entry else_branch else_exit)
+    (else_result : @footprinted_normalization_result Γ F Δ entry
+      else_exit _ post else_branch else_derivation else_certificate)
+    (Helse_result : normalized_statement
+      else_result.(footprinted_normalization) = normalized_else)
+    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit)
+    (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
+      GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (view : RegionSyntax.view (TGhostIf condition then_branch else_branch) =
+      AnalysisView.ViewConditional then_branch else_branch)
+    (then_proof_only : proof_onlyb then_branch = true)
+    (else_proof_only : proof_onlyb else_branch = true)
+    fuel
+    (Hthen_worker : restricted_normalize_statement_fuel fuel then_branch =
+      Some normalized_then)
+    (Helse_worker : restricted_normalize_statement_fuel fuel else_branch =
+      Some normalized_else)
+    (Hworker : restricted_normalize_statement_fuel (S fuel)
+      (TGhostIf condition then_branch else_branch) = Some normalized) :
+  exists result : @footprinted_normalization_result Γ F Δ entry
+      _ _ post (TGhostIf condition then_branch else_branch)
+      (RavenHoareRules.RTGhostIf store body condition then_branch else_branch
+        post then_proof_only else_proof_only then_derivation else_derivation)
+      (GenericRegions.Atomicity.CertConditional Γ entry
+        (TGhostIf condition then_branch else_branch) then_branch else_branch
+        then_exit else_exit view then_certificate else_certificate
+        open_equal atomic_equal),
+    normalized_statement
+      result.(footprinted_normalization) = normalized.
+Proof.
+  cbn [restricted_normalize_statement_fuel] in Hworker.
+  rewrite Hthen_worker, Helse_worker in Hworker. inversion Hworker; subst.
+  assert (Hthen_normalized : proof_onlyb
+      then_result.(footprinted_normalization).(normalized_statement) = true).
+  { rewrite (restricted_normalize_statement_proof_only _ _ _ Hthen_worker).
+    exact then_proof_only. }
+  assert (Helse_normalized : proof_onlyb
+      else_result.(footprinted_normalization).(normalized_statement) = true).
+  { rewrite (restricted_normalize_statement_proof_only _ _ _ Helse_worker).
+    exact else_proof_only. }
+  exists (footprinted_normalization_ghost_conditional
+    then_derivation then_certificate then_result else_derivation
+    else_certificate else_result open_equal atomic_equal view
+    then_proof_only else_proof_only Hthen_normalized Helse_normalized).
   reflexivity.
 Qed.
 
@@ -1969,6 +2233,116 @@ Proof.
       certificate result). exact Hresult.
 Qed.
 
+Lemma ghost_conditional_normalization_complete_from_worker
+    {Γ F Δ entry exit condition then_branch else_branch}
+    {pre post : Resource.resource_prenex Γ F Δ}
+    (derivation : RavenHoareRules.RavenHoareTriple pre
+      (TGhostIf condition then_branch else_branch) post)
+    (certificate : GenericRegions.Atomicity.analysis_certificate Γ entry
+      (TGhostIf condition then_branch else_branch) exit)
+    (Hthen : forall F0 Δ0 then_exit
+      (then_pre then_post : Resource.resource_prenex Γ F0 Δ0)
+      (then_derivation : RavenHoareRules.RavenHoareTriple then_pre
+        then_branch then_post)
+      (then_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+        entry then_branch then_exit),
+      GenericRegions.Atomicity.lifo_certificate then_certificate [] [] ->
+      forall fuel normalized,
+      restricted_normalize_statement_fuel fuel then_branch = Some normalized ->
+      exists result : @footprinted_normalization_result Γ F0 Δ0
+          entry then_exit then_pre then_post then_branch then_derivation
+          then_certificate,
+        normalized_statement
+          result.(footprinted_normalization) = normalized)
+    (Helse : forall F0 Δ0 else_exit
+      (else_pre else_post : Resource.resource_prenex Γ F0 Δ0)
+      (else_derivation : RavenHoareRules.RavenHoareTriple else_pre
+        else_branch else_post)
+      (else_certificate : GenericRegions.Atomicity.analysis_certificate Γ
+        entry else_branch else_exit),
+      GenericRegions.Atomicity.lifo_certificate else_certificate [] [] ->
+      forall fuel normalized,
+      restricted_normalize_statement_fuel fuel else_branch = Some normalized ->
+      exists result : @footprinted_normalization_result Γ F0 Δ0
+          entry else_exit else_pre else_post else_branch else_derivation
+          else_certificate,
+        normalized_statement
+          result.(footprinted_normalization) = normalized) :
+  GenericRegions.Atomicity.lifo_certificate certificate [] [] ->
+  forall fuel normalized,
+  restricted_normalize_statement_fuel fuel
+    (TGhostIf condition then_branch else_branch) = Some normalized ->
+  exists result : @footprinted_normalization_result Γ F Δ
+      entry exit pre post (TGhostIf condition then_branch else_branch)
+      derivation certificate,
+    normalized_statement
+      result.(footprinted_normalization) = normalized.
+Proof.
+  destruct (certificate_aligned_complete_exists Δ pre post
+    (TGhostIf condition then_branch else_branch) derivation entry exit
+    certificate) as (aligned & _).
+  dependent induction aligned generalizing condition then_branch else_branch
+    derivation certificate Hthen Helse; try discriminate.
+  all: intros Hlifo fuel normalized Hworker.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_frame frame derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_elim derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_preserve derivation0
+      certificate result). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_prenex_consequence derivation0
+      certificate result pre_entails post_entails). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_consequence derivation0
+      certificate result pre_entails post_entails). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_stack_rewrite derivation0
+      certificate result store_equal). exact Hresult.
+  - destruct (IHaligned condition then_branch else_branch derivation0
+      certificate Hthen Helse eq_refl (JMeq_refl _) (JMeq_refl _) Hlifo
+      fuel normalized Hworker) as (result & Hresult).
+    exists (footprinted_normalization_bound_weaken derivation0
+      certificate result). exact Hresult.
+  - destruct Hlifo as [Hthen_lifo Helse_lifo].
+    destruct fuel as [|fuel]; cbn [restricted_normalize_statement_fuel]
+      in Hworker; try discriminate.
+    remember (restricted_normalize_statement_fuel fuel then_branch)
+      as then_result eqn:Hthen_worker.
+    remember (restricted_normalize_statement_fuel fuel else_branch)
+      as else_result eqn:Helse_worker.
+    destruct then_result as [normalized_then|]; try discriminate.
+    destruct else_result as [normalized_else|]; try discriminate.
+    destruct (Hthen F Δ then_exit _ post then_derivation then_certificate
+      Hthen_lifo fuel normalized_then (eq_sym Hthen_worker))
+      as (then_result & Hthen_result).
+    destruct (Helse F Δ else_exit _ post else_derivation else_certificate
+      Helse_lifo fuel normalized_else (eq_sym Helse_worker))
+      as (else_result & Helse_result).
+    eapply footprinted_normalization_ghost_conditional_from_worker
+      with (then_result := then_result) (else_result := else_result)
+      (fuel := fuel); try eassumption.
+    + symmetry. exact Hthen_worker.
+    + symmetry. exact Helse_worker.
+    + cbn [restricted_normalize_statement_fuel].
+      rewrite <- Hthen_worker, <- Helse_worker. exact Hworker.
+Qed.
+
 (** Completeness for a ghost value binder, given completeness for its body.
     Proof wrappers around the binder rule are transported unchanged. *)
 Lemma ghost_val_normalization_complete_from_worker
@@ -2316,6 +2690,14 @@ Proof.
     intros F0 Δ0 body_exit body_pre body_post body_derivation
       body_certificate Hbody_lifo fuel0 normalized0 Hbody_worker.
     eapply IHHbaseline; eassumption.
+  - eapply ghost_conditional_normalization_complete_from_worker;
+      try eassumption.
+    + intros F0 Δ0 then_exit then_pre then_post then_derivation
+        then_certificate Hthen_lifo fuel0 normalized0 Hthen_worker.
+      eapply IHHbaseline1; eassumption.
+    + intros F0 Δ0 else_exit else_pre else_post else_derivation
+        else_certificate Helse_lifo fuel0 normalized0 Helse_worker.
+      eapply IHHbaseline2; eassumption.
 Qed.
 
 (** Closed analyzer-facing completeness.  Successful restricted analysis

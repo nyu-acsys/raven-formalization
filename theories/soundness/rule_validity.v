@@ -2398,6 +2398,7 @@ Proof.
     + intros Hcandidate. split; [right; exact Hcandidate|].
       intros ->. apply Hfresh. exact Hcandidate.
   - exact IHcertificate.
+  - exact IHcertificate1.
 Qed.
 
 Lemma term_invariant_namespace_active_from_footprint
@@ -2791,6 +2792,57 @@ Proof.
 Qed.
 
 
+
+(** A ghost conditional erases to nothing: its wp is that of the branch
+    its guard selects. *)
+Lemma translated_runtime_wp_ghost_if_total_join {Γ F Δ}
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ) (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (store : symbolic_store Γ F Δ) ambient state condition
+    (then_branch else_branch : stmt Γ) then_exit else_exit post P
+    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit) :
+  proof_onlyb then_branch = true ->
+  proof_onlyb else_branch = true ->
+  (interp_expr formals binders valuation
+      (IR.symbolize_expr store condition) = Some (VBool true) ->
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
+      translated_runtime_wp runtime ambient state then_exit
+        then_branch post) ->
+  (interp_expr formals binders valuation
+      (IR.symbolize_expr store condition) = Some (VBool false) ->
+    @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
+      translated_runtime_wp runtime ambient state else_exit
+        else_branch post) ->
+  @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
+    translated_runtime_wp runtime ambient state
+      (GenericRegions.Atomicity.AnalysisState
+        (GenericRegions.Atomicity.analysis_mask then_exit ∩
+          GenericRegions.Atomicity.analysis_mask else_exit)
+        (GenericRegions.Atomicity.analysis_open then_exit)
+        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
+          GenericRegions.Atomicity.analysis_step_taken else_exit)
+        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
+      (TGhostIf condition then_branch else_branch) post.
+Proof.
+  intros Hthen_proof Helse_proof Hthen Helse.
+  destruct (interp_expr_total formals binders valuation
+    (IR.symbolize_expr store condition)) as [value Hvalue].
+  dependent destruction value. destruct b.
+  - rewrite (term_translated_runtime_wp_runtime_stmt_ext runtime ambient state _
+      (TGhostIf condition then_branch else_branch) then_branch post).
+    + rewrite <- translated_runtime_wp_then_join_transport.
+      apply Hthen. exact Hvalue.
+    + cbn [RuntimeErasure.runtime_stmt].
+      rewrite RuntimeErasure.runtime_stmt_proof_only; [reflexivity|exact Hthen_proof].
+  - rewrite (term_translated_runtime_wp_runtime_stmt_ext runtime ambient state _
+      (TGhostIf condition then_branch else_branch) else_branch post).
+    + rewrite <- (translated_runtime_wp_else_join_transport runtime ambient state
+        then_exit else_exit else_branch post open_equal).
+      apply Helse. exact Hvalue.
+    + cbn [RuntimeErasure.runtime_stmt].
+      rewrite RuntimeErasure.runtime_stmt_proof_only; [reflexivity|exact Helse_proof].
+Qed.
 
 Lemma term_structured_runtime_fresh_fold_valid {Γ F Δ entry invariant
     arguments} {store : symbolic_store Γ F Δ}
@@ -4765,6 +4817,114 @@ Proof.
     + iFrame "Hstack Hglobal Hbody". iPureIntro. exact Harguments.
 Qed.
 
+Lemma term_structured_runtime_arguments_ghost_conditional_valid
+    {Γ F Δ state condition then_branch else_branch
+     then_exit else_exit ts}
+    (then_certificate : Structured.structured_certificate
+      Γ state then_branch then_exit)
+    (else_certificate : Structured.structured_certificate
+      Γ state else_branch else_exit)
+    (open_equal : GenericRegions.Atomicity.analysis_open then_exit =
+      GenericRegions.Atomicity.analysis_open else_exit)
+    (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
+      GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (arguments : gexpr_list Γ ts)
+    (store : symbolic_store Γ F Δ)
+    (body : Translation.Resource.core_assertion F Δ)
+    (post : Translation.Resource.resource_prenex Γ F Δ)
+    (then_proof_only : proof_onlyb then_branch = true)
+    (else_proof_only : proof_onlyb else_branch = true) :
+  term_structured_runtime_arguments_valid then_certificate
+    arguments
+    (Translation.Resource.RState store
+      (Translation.Resource.CAnd body
+        (Translation.Resource.CExpr (IR.symbolize_expr store condition))))
+    post ->
+  term_structured_runtime_arguments_valid else_certificate
+    arguments
+    (Translation.Resource.RState store
+      (Translation.Resource.CAnd body
+        (Translation.Resource.CExpr (EUnOp UNot
+          (IR.symbolize_expr store condition))))) post ->
+  term_structured_runtime_arguments_valid
+    (Structured.StructuredGhostConditional Γ state condition
+      then_branch else_branch then_exit else_exit then_certificate
+      else_certificate open_equal atomic_equal)
+    arguments (Translation.Resource.RState store body) post.
+Proof.
+  intros Hthen Helse Hdisjoint values runtime formals binders valuation ambient
+    Henvelope.
+  cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
+  have Hthen_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies arguments
+      ## Hoare.ResourceHoare.statement_writes then_branch.
+  { intros slot Hargument Hwrite. apply (Hdisjoint slot Hargument).
+    apply elem_of_union_l. exact Hwrite. }
+  have Helse_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies arguments
+      ## Hoare.ResourceHoare.statement_writes else_branch.
+  { intros slot Hargument Hwrite. apply (Hdisjoint slot Hargument).
+    apply elem_of_union_r. exact Hwrite. }
+  have Hthen_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint then_certificate ∪
+        term_registered_invariants) ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
+  have Helse_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint else_certificate ∪
+        term_registered_invariants) ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
+  cbn [term_interp_resource_prenex_at_arguments].
+  iIntros "[#Hglobal [[Hstack Hbody] %Harguments]]".
+  destruct (interp_expr_total formals binders valuation
+    (IR.symbolize_expr store condition)) as [value Hvalue].
+  dependent destruction value. destruct b.
+  - iApply (translated_runtime_wp_ghost_if_total_join runtime formals binders valuation
+      store ambient state condition then_branch else_branch then_exit
+      else_exit
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
+         arguments values post)
+      (global_world_context valuation ∗
+       (term_interp_core formals binders valuation body ∗
+        ⌜interp_expr_list formals binders valuation
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal
+      then_proof_only else_proof_only).
+    + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
+      iApply (Hthen Hthen_disjoint values runtime formals binders valuation ambient
+        Hthen_envelope).
+      cbn [term_interp_resource_prenex_at_arguments].
+      iFrame "Hglobal' Hstack Hbody". iPureIntro. split;
+        [exact Hvalue | exact Harguments'].
+    + intros Hfalse. rewrite Hvalue in Hfalse. discriminate.
+    + iFrame "Hstack Hglobal Hbody". iPureIntro. exact Harguments.
+  - iApply (translated_runtime_wp_ghost_if_total_join runtime formals binders valuation
+      store ambient state condition then_branch else_branch then_exit
+      else_exit
+      (global_world_context valuation ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
+         arguments values post)
+      (global_world_context valuation ∗
+       (term_interp_core formals binders valuation body ∗
+        ⌜interp_expr_list formals binders valuation
+          (IR.symbolize_expr_list store arguments) = Some values⌝)) open_equal
+      then_proof_only else_proof_only).
+    + intros Htrue. rewrite Hvalue in Htrue. discriminate.
+    + intros _. iIntros "[Hstack [#Hglobal' [Hbody %Harguments']]]".
+      iApply (Helse Helse_disjoint values runtime formals binders valuation ambient
+        Helse_envelope).
+      cbn [term_interp_resource_prenex_at_arguments].
+      iFrame "Hglobal' Hstack Hbody". iPureIntro. split.
+      * simpl. rewrite Hvalue. reflexivity.
+      * exact Harguments'.
+    + iFrame "Hstack Hglobal Hbody". iPureIntro. exact Harguments.
+Qed.
+
 
 (** Argument-indexed counterpart of the canonical-boundary interpretation.
     This follows the same proof-only opening spine while preserving the
@@ -5631,6 +5791,11 @@ Fixpoint term_structured_certificate_trusted_runtime_atomicity
       fun runtime =>
         term_structured_certificate_trusted_runtime_atomicity body_certificate
           (RegionExecution.Primitives.Model.ghost_stack_context name t runtime)
+  | Structured.StructuredGhostConditional _ _ _ _ _ _ _ then_branch
+      else_branch _ _ =>
+      fun runtime =>
+        term_structured_certificate_trusted_runtime_atomicity then_branch runtime /\
+        term_structured_certificate_trusted_runtime_atomicity else_branch runtime
   | _ => fun _ => True
   end.
 
@@ -5661,6 +5826,13 @@ Proof.
     apply GenericRegions.Atomicity.fold_invariant_preserves_wf.
     exact (IHcertificate Hopened_wf).
   - exact (IHcertificate Hwf).
+  - have Hthen_wf := IHcertificate1 Hwf.
+    unfold GenericRegions.Atomicity.state_wf in *.
+    rewrite elem_of_disjoint in Hthen_wf |- *.
+    intros candidate Hcandidate_open Hcandidate_mask.
+    apply (Hthen_wf candidate Hcandidate_open).
+    rewrite elem_of_intersection in Hcandidate_mask.
+    destruct Hcandidate_mask as [Hcandidate_mask _]. exact Hcandidate_mask.
 Qed.
 
 Lemma term_structured_certificate_preserves_nonatomic
@@ -5692,6 +5864,7 @@ Proof.
     destruct (bool_decide (invariant ∈
       GenericRegions.Atomicity.analysis_open inner)); simpl; exact Hinner.
   - exact (IHcertificate Hin_atomic).
+  - apply IHcertificate1. exact Hin_atomic.
 Qed.
 
 Lemma term_runtime_conditional_statement_atomic {Γ}
@@ -5911,7 +6084,9 @@ Proof.
       | Γ state body outer inner step body_certificate IHbody open_equal
       | Γ state invariant arguments body opened inner step body_certificate
         IHbody open_equal
-      | Γ state name t initializer body exit body_certificate IHbody];
+      | Γ state name t initializer body exit body_certificate IHbody
+      | Γ state condition then_branch else_branch then_exit else_exit
+        then_certificate IHthen else_certificate IHelse open_equal atomic_equal];
     simpl in *.
   - destruct (RuntimeErasure.runtime_is_noop
       (@RuntimeErasure.runtime_stmt _ _ Γ
@@ -6074,6 +6249,15 @@ Proof.
     exact IHbody.
   - exact (IHbody (RegionExecution.Primitives.Model.ghost_stack_context
       name t runtime) Hopen Hin_atomic).
+  - (* a ghost conditional takes no step, and its exit keeps the then
+       branch's step bit *)
+    specialize (IHthen runtime Hopen Hin_atomic). revert IHthen.
+    unfold term_analysis_step_bit, term_runtime_step_count.
+    cbn [GenericRegions.Atomicity.analysis_step_taken].
+    destruct (GenericRegions.Atomicity.analysis_step_taken state),
+      (GenericRegions.Atomicity.analysis_step_taken then_exit),
+      (GenericRegions.Atomicity.analysis_step_taken else_exit);
+      cbn; repeat case_match; lia.
 Qed.
 
 Lemma term_open_structured_certificate_runtime_atomic
@@ -6103,7 +6287,9 @@ Proof.
       | Γ state body outer inner step body_certificate IHbody open_equal
       | Γ state invariant arguments body opened inner step body_certificate
         IHbody open_equal
-      | Γ state name t initializer body exit body_certificate IHbody];
+      | Γ state name t initializer body exit body_certificate IHbody
+      | Γ state condition then_branch else_branch then_exit else_exit
+        then_certificate IHthen else_certificate IHelse open_equal atomic_equal];
     simpl in Htrusted |- *.
   - eapply term_open_leaf_runtime_atomic; eauto.
   - (* done erases to the terminal statement, which takes no step *)
@@ -6188,6 +6374,7 @@ Proof.
     eapply IHbody; eauto.
   - exact (IHbody (RegionExecution.Primitives.Model.ghost_stack_context
       name t runtime) Hopen Hin_atomic Htrusted).
+  - exact runtime_noop_atomic.
 Qed.
 
 
@@ -6570,6 +6757,28 @@ Proof.
           Hview Hstep); [constructor; exact H | exact Hwf |
             exact Hprocedure_cost]
     end.
+  - (* ghost conditional *)
+    destruct (IHderivation1 entry then_exit certificate1 Hwf Hcost
+      Hprocedure_cost
+      (fun invariant Hin => Hregistered invariant
+        ltac:(simpl; repeat rewrite elem_of_union; tauto))
+      (proj1 Hsafe)) as [Hthen Hthen_trusted].
+    destruct (IHderivation2 entry else_exit certificate2 Hwf Hcost
+      Hprocedure_cost
+      (fun invariant Hin => Hregistered invariant
+        ltac:(simpl; repeat rewrite elem_of_union; tauto))
+      (proj2 Hsafe)) as [Helse Helse_trusted].
+    split.
+    + intros ts tracked.
+      match goal with
+      | Hthen_proof : proof_onlyb then_branch = true,
+        Helse_proof : proof_onlyb else_branch = true |- _ =>
+          exact (term_structured_runtime_arguments_ghost_conditional_valid
+            certificate1 certificate2 _ _ tracked _ _ _ Hthen_proof Helse_proof
+            (Hthen ts tracked) (Helse ts tracked))
+      end.
+    + intros runtime. simpl. split;
+        [apply Hthen_trusted | apply Helse_trusted].
 Qed.
 
 Theorem term_structured_certificate_resource_prenex_valid

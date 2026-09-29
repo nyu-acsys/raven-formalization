@@ -1389,11 +1389,28 @@ Fixpoint runtime_stmt {Γ} (names : named_context Γ)
         stack
   | TGhostVal name t _ body =>
       runtime_stmt (NCCons name (ghost_val t) names) stack body
+  | TGhostIf _ _ _ => runtime_noop
   end.
 
 End WithSignature.
 Section WithSignature.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}.
+Lemma runtime_stmt_proof_only {Γ} (names : named_context Γ) stack
+    (statement : stmt Γ) :
+  proof_onlyb statement = true ->
+  runtime_stmt names stack statement = runtime_noop.
+Proof.
+  revert names. induction statement; intros names Hproof;
+    cbn [proof_onlyb] in Hproof; try discriminate; cbn [runtime_stmt];
+    rewrite ?Bool.andb_true_iff in Hproof; try reflexivity.
+  - apply IHstatement. exact Hproof.
+  - destruct Hproof as [Hthen Helse].
+    rewrite (IHstatement1 _ Hthen) (IHstatement2 _ Helse). reflexivity.
+  - destruct Hproof as [Hfirst Hsecond].
+    rewrite (IHstatement1 _ Hfirst) (IHstatement2 _ Hsecond). reflexivity.
+  - apply IHstatement. exact Hproof.
+Qed.
+
 Lemma runtime_stmt_atomic {Γ} (names : named_context Γ) stack
     (body : stmt Γ) :
   runtime_stmt names stack (TAtomic body) =
