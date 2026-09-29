@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elaboration groups the statements of an access up to its close into one
   body, and groups a closing conditional with its unfold when further
   statements follow, where the runtime erasure is unchanged.
+- Invariant accesses inside trusted atomic blocks: an access spanning the
+  block, possibly followed by proof-only statements, is moved around it by
+  procedure elaboration, with unchanged runtime erasure. The counter
+  example's `read` accesses its invariant inside an atomic block.
 - Analyzer regression tests for asymmetric allocation in conditionals and
   for snapshotted invariant arguments, and normalization tests for
   conditional accesses (`dune build @tests`).

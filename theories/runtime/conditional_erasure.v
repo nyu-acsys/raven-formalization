@@ -250,6 +250,40 @@ Proof.
     + right. right. apply runtime_stmt_proof_only. exact Hafter.
 Qed.
 
+Lemma hoist_atomic_erasure :
+  forall {Γ} (body : stmt Γ) names stack,
+  runtime_stmt names stack (hoist_atomic body) =
+    runtime_stmt names stack (TAtomic body).
+Proof.
+  fix IH 2. intros Γ body names stack.
+  destruct body; try reflexivity.
+  - (* sequence *)
+    destruct body1; try reflexivity.
+    destruct body2; try reflexivity.
+    destruct body2_2; try reflexivity; cbn [hoist_atomic].
+    + destruct (fold_is invariant arguments (TFold invariant0 arguments0))
+        eqn:Hfold; [|reflexivity].
+      rewrite (runtime_stmt_atomic_congruence names names stack _ body2_1)
+        by (intros stack'; cbn [runtime_stmt];
+          rewrite runtime_seq_noop_l, runtime_seq_noop_r; reflexivity).
+      cbn [runtime_stmt]. rewrite IH, runtime_seq_noop_l, runtime_seq_noop_r.
+      reflexivity.
+    + destruct (fold_is invariant arguments body2_2_1 &&
+        proof_onlyb body2_2_2) eqn:Hclosing; [|reflexivity].
+      apply andb_prop in Hclosing as [Hfold Hrest].
+      apply fold_is_sound in Hfold. subst body2_2_1.
+      rewrite (runtime_stmt_atomic_congruence names names stack _ body2_1)
+        by (intros stack'; cbn [runtime_stmt];
+          rewrite (runtime_stmt_proof_only _ _ body2_2_2 Hrest),
+            runtime_seq_noop_l, !runtime_seq_noop_r; reflexivity).
+      cbn [runtime_stmt]. rewrite IH.
+      rewrite (runtime_stmt_proof_only _ _ body2_2_2 Hrest).
+      rewrite runtime_seq_noop_l, !runtime_seq_noop_r.
+      reflexivity.
+  - (* ghost value *)
+    cbn [hoist_atomic runtime_stmt]. rewrite IH. reflexivity.
+Qed.
+
 Theorem access_layout_erasure {D} (statement : stmt D) :
   forall names stack,
   runtime_stmt names stack (layout_accesses statement) =
@@ -263,7 +297,8 @@ Proof.
       try (rewrite IHstatement1, IHstatement2; reflexivity).
     rewrite layout_unfold_erasure. cbn [runtime_stmt].
     rewrite IHstatement2. reflexivity.
-  - apply runtime_stmt_atomic_congruence. intros stack'. apply IHstatement.
+  - rewrite hoist_atomic_erasure.
+    apply runtime_stmt_atomic_congruence. intros stack'. apply IHstatement.
   - cbn. apply IHstatement.
 Qed.
 

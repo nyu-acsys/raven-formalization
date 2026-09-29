@@ -270,6 +270,33 @@ Definition layout_unfold {Γ} invariant
   | None => TSeq opening rest
   end.
 
+(** ** Accesses inside trusted atomic blocks
+
+    [hoist_atomic body] replaces [atomic { body }].  An access spanning the
+    whole block, possibly followed by proof-only statements, is moved around
+    it: the invariant is then held across the block's single physical step.
+    Ghost values scoping the access are moved out with it. *)
+Fixpoint hoist_atomic {Γ} (body : stmt Γ) : stmt Γ :=
+  match body with
+  | TGhostVal name t initializer inner =>
+      TGhostVal name t initializer (hoist_atomic inner)
+  | TSeq (TUnfold invariant arguments) (TSeq inner closing) =>
+      match closing with
+      | TFold _ _ =>
+          if fold_is invariant arguments closing
+          then TSeq (TUnfold invariant arguments)
+            (TSeq (hoist_atomic inner) closing)
+          else TAtomic body
+      | TSeq fold rest =>
+          if fold_is invariant arguments fold && proof_onlyb rest
+          then TSeq (TUnfold invariant arguments)
+            (TSeq (hoist_atomic inner) (TSeq fold rest))
+          else TAtomic body
+      | _ => TAtomic body
+      end
+  | _ => TAtomic body
+  end.
+
 Fixpoint layout_accesses {Γ} (statement : stmt Γ) : stmt Γ :=
   match statement with
   | TSeq first second =>
@@ -280,7 +307,7 @@ Fixpoint layout_accesses {Γ} (statement : stmt Γ) : stmt Γ :=
       end
   | TIf condition then_branch else_branch =>
       TIf condition (layout_accesses then_branch) (layout_accesses else_branch)
-  | TAtomic body => TAtomic (layout_accesses body)
+  | TAtomic body => hoist_atomic (layout_accesses body)
   | TInvAccess invariant arguments body =>
       TInvAccess invariant arguments (layout_accesses body)
   | TGhostVal name t initializer body =>

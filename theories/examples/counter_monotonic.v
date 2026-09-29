@@ -57,9 +57,11 @@ Definition counter_declarations : source_module :=
         requires counterInv(x)
       {
         var v1 : Int;
-        unfold counterInv(x);
-        v1 := x . c;
-        fold counterInv(x);
+        atomic {
+          unfold counterInv(x);
+          v1 := x . c;
+          fold counterInv(x)
+        };
         ret := v1
       }
 
@@ -614,72 +616,51 @@ Proof.
     unfold counter_token_core. apply Rules.resource_prenex_entails_refl.
 Qed.
 
-Lemma read_assign :
-  HoareRules.RavenHoareTriple
-    (Resource.RState read_field_store
-      (counter_token_core (ERef (RefFormal MHere))))
-    (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
-      (PEVar (LThere (LThere (LHere eq_refl)))))
-    (Resource.ResourceExists TInt
-      (Resource.RState read_body_exit_store Resource.CTrue)).
-Proof.
-  unfold read_body_exit_store.
-  eapply Rules.RTConsequence; [eapply Rules.RTAssign | | ].
-  - apply Rules.CEntailsStep. apply Rules.CESTrueIntro.
-  - apply Rules.RPEMono. apply Rules.RPEBody.
-    split; [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro].
-Qed.
-
 (** The generated check that the fold names the opened instance. *)
 Definition read_snapshot_check : stmt read_body_decls :=
   TAssert (PEBinOp (BEq TRef) (PEVar (LHere eq_refl))
     (PEVar (LThere (LHere eq_refl)))).
 
-Lemma read_rest :
-  HoareRules.RavenHoareTriple
-    (Resource.RState read_open_store read_open_core)
-    (TSeq
-      (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
-        (PEVar (LThere (LHere eq_refl))))
-      (TSeq
-        (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
-        (TSeq read_snapshot_check
-          (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
-            (PEVar (LThere (LThere (LHere eq_refl))))))))
-    (Resource.ResourceExists TInt
-      (Resource.ResourceExists TInt
-        (Resource.RState read_body_exit_store Resource.CTrue))).
-Proof.
-  eapply Rules.RTSeq.
-  - exact read_field_read.
-  - apply Rules.RTPrenexPreserve.
-    eapply Rules.RTSeq; [exact read_fold |].
-    eapply Rules.RTSeq; [| exact read_assign].
-    apply Rules.RTAssertTrue. intros formals binders valuation.
-    apply interp_equality_same.
-Qed.
-
-Lemma read_snapshot_derivation :
+(** The access, hoisted around the atomic block: the invariant is held
+    across the block's one physical step. *)
+Lemma read_access_derivation :
   HoareRules.RavenHoareTriple
     (Resource.RState read_snapshot_store
       (counter_token_core (ERef (RefFormal MHere))))
     (TSeq (TUnfold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
       (TSeq
-        (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
-          (PEVar (LThere (LHere eq_refl))))
+        (TAtomic (TFieldRead false counter_field (LThere (LThere (LHere eq_refl)))
+          (PEVar (LThere (LHere eq_refl)))))
         (TSeq
           (TFold counter_invariant (PECons (PEVar (LHere eq_refl)) PENil))
-          (TSeq read_snapshot_check
-            (TAssign false (LThere (LThere (LThere (LHere eq_refl))))
-              (PEVar (LThere (LThere (LHere eq_refl)))))))))
+          read_snapshot_check)))
     (Resource.ResourceExists TInt
       (Resource.ResourceExists TInt
-        (Resource.ResourceExists TInt
-          (Resource.RState read_body_exit_store Resource.CTrue)))).
+        (Resource.RState read_field_store
+          (counter_token_core (ERef (RefFormal MHere)))))).
 Proof.
   eapply Rules.RTSeq; [exact read_unfold_open |].
   apply Rules.RTPrenexPreserve.
-  exact read_rest.
+  eapply Rules.RTSeq; [apply Rules.RTAtomicBlock; exact read_field_read |].
+  apply Rules.RTPrenexPreserve.
+  eapply Rules.RTSeq; [exact read_fold |].
+  apply Rules.RTAssertTrue. intros formals binders valuation.
+  apply interp_equality_same.
+Qed.
+
+Lemma read_assign :
+  HoareRules.RavenHoareTriple
+    (Resource.RState (store_tail read_field_store)
+      (counter_token_core (ERef (RefFormal MHere))))
+    (TAssign false (LThere (LThere (LHere eq_refl)))
+      (PEVar (LThere (LHere eq_refl))))
+    (Resource.ResourceExists TInt
+      (Resource.RState read_exit_store Resource.CTrue)).
+Proof.
+  eapply Rules.RTConsequence; [eapply Rules.RTAssign | | ].
+  - apply Rules.CEntailsStep. apply Rules.CESTrueIntro.
+  - apply Rules.RPEMono. apply Rules.RPEBody.
+    split; [reflexivity | apply Rules.CEntailsStep; apply Rules.CESTrueIntro].
 Qed.
 
 Lemma read_resource_body_derivation :
@@ -697,7 +678,11 @@ Proof.
     Resource.subst_bound_core].
   eapply Rules.RTPrenexConsequence;
     [| apply Rules.resource_prenex_entails_refl |].
-  - apply Rules.RTGhostValVar. exact read_snapshot_derivation.
+  - eapply Rules.RTSeq;
+      [apply Rules.RTGhostValVar; exact read_access_derivation |].
+    cbn [Resource.drop_head_prenex].
+    apply Rules.RTPrenexPreserve. apply Rules.RTPrenexPreserve.
+    exact read_assign.
   - apply Rules.resource_prenex_entails_refl.
 Qed.
 

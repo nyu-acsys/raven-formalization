@@ -214,6 +214,12 @@ inserts `done` for missing pieces, in each case only where the runtime
 erasure is unchanged
 ([`verification/access_layout.v`](../theories/verification/access_layout.v)).
 
+An access that spans a trusted atomic block,
+`atomic { unfold I(x); body; fold I(x) }`, is moved around the block by the
+same layout pass, giving `unfold I(x); atomic { body }; fold I(x)`: the
+invariant is held across the block's single physical step, and the block's
+erased body, hence its trusted transition, is unchanged.
+
 The transformation is proof-producing. It retains:
 
 - the source Hoare derivation;
@@ -373,8 +379,8 @@ analysis:
   must be proof-only and may not open invariants;
 - ghost locals are immutable (`ghost val`); Raven's ghost `var`s are not
   yet supported;
-- invariant accesses nested inside a trusted atomic block are not yet
-  supported; and
+- an invariant access inside a trusted atomic block must span the block,
+  up to trailing proof-only statements; and
 - logically atomic procedure specifications and atomic-update tokens are not
   yet formalized.
 
