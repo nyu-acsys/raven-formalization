@@ -224,5 +224,39 @@ Proof.
   - cbn. apply IHstatement.
 Qed.
 
+Lemma guard_unfolds_erasure {D} (statement : stmt D) :
+  forall accesses names stack,
+  runtime_stmt names stack (fst (guard_unfolds accesses statement)) =
+    runtime_stmt names stack statement.
+Proof.
+  induction statement; intros accesses names stack; cbn [guard_unfolds];
+    try reflexivity.
+  - cbn [fst]. destruct (open_instances invariant accesses); reflexivity.
+  - cbn [fst runtime_stmt]. apply IHstatement.
+  - destruct (guard_unfolds accesses statement1) as [then_branch exit]
+      eqn:Hthen.
+    specialize (IHstatement1 accesses names stack).
+    rewrite Hthen in IHstatement1. cbn [fst] in IHstatement1 |- *.
+    cbn [runtime_stmt]. rewrite IHstatement1, IHstatement2. reflexivity.
+  - destruct (guard_unfolds accesses statement1) as [first middle] eqn:Hfirst.
+    destruct (guard_unfolds middle statement2) as [second exit] eqn:Hsecond.
+    specialize (IHstatement1 accesses names stack).
+    specialize (IHstatement2 middle names stack).
+    rewrite Hfirst in IHstatement1. rewrite Hsecond in IHstatement2.
+    cbn [fst] in IHstatement1, IHstatement2 |- *.
+    cbn [runtime_stmt]. rewrite IHstatement1, IHstatement2. reflexivity.
+  - cbn [fst]. apply runtime_stmt_atomic_congruence. intros stack'.
+    apply IHstatement.
+  - cbn [fst runtime_stmt]. apply IHstatement.
+  - destruct (guard_unfolds accesses statement1) as [then_branch exit].
+    reflexivity.
+Qed.
+
+Theorem distinctness_assertions_erasure {D} (statement : stmt D) names
+    stack :
+  runtime_stmt names stack (distinctness_assertions statement) =
+    runtime_stmt names stack statement.
+Proof. apply guard_unfolds_erasure. Qed.
+
 End WithSignature.
 End SnapshotErasure.

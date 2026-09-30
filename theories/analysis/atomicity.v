@@ -128,6 +128,7 @@ Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) 
    the identity on the analysis state by construction. *)
 | ViewDone
 | ViewUnfold (invariant : inv_id) (key : access_key)
+    (excluded : list access_key)
 | ViewFold (invariant : inv_id) (key : access_key)
 | ViewSequence (first second : statement Γ)
 | ViewConditional (then_branch else_branch : statement Γ)
@@ -138,7 +139,7 @@ Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) 
 
 Arguments ViewLeaf {_ _}.
 Arguments ViewDone {_ _}.
-Arguments ViewUnfold {_ _} _ _.
+Arguments ViewUnfold {_ _} _ _ _.
 Arguments ViewFold {_ _} _ _.
 Arguments ViewSequence {_ _} _ _.
 Arguments ViewConditional {_ _} _ _.
@@ -241,7 +242,8 @@ Definition analysis_mask (state : analysis_state) : gset inv_id :=
 
 (** At most one instance of a declaration is open. *)
 Definition state_wf state : Prop :=
-  NoDup (map record_invariant (analysis_records state)).
+  NoDup (map (fun record => (record_invariant record, record_key record))
+    (analysis_records state)).
 
 (** Replaces the derived declaration sets in the goal by variables, for
     [set_solver]. *)
@@ -867,7 +869,242 @@ Proof.
   destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
   unfold state_wf in *. cbn. constructor; [|exact Hwf].
   unfold analysis_open in Hclosed. intros Hin. apply Hclosed.
-  apply elem_of_list_to_set. exact Hin.
+  apply elem_of_list_to_set. apply elem_of_list_In in Hin.
+  apply in_map_iff in Hin as (record & Hrecord & Hin).
+  injection Hrecord as <- _. apply elem_of_list_In, in_map. exact Hin.
+Qed.
+
+(** A further instance of an open declaration: its key and the keys of the
+    declaration's open instances are atoms, and pairwise distinct. *)
+Definition nested_admissible (invariant : inv_id) (key : access_key) state :
+    bool :=
+  bool_decide (key <> None) &&
+  forallb (fun record =>
+    if decide (record_invariant record = invariant)
+    then bool_decide (record_key record <> None /\ record_key record <> key)
+    else true) (analysis_records state).
+
+(** The entry a nested opening consumes: its own, or the declaration-wide
+    entry an enclosing opening of the declaration holds. *)
+Definition nested_entry (invariant : inv_id) (key : access_key) state :
+    option mask_entry :=
+  match select_entry invariant (resolve_key (analysis_aliases state) key)
+      (analysis_entries state) with
+  | Some entry => Some entry
+  | None =>
+      if existsb (fun record =>
+          bool_decide (record_consumed record = (invariant, None)))
+        (analysis_records state)
+      then Some (invariant, None) else None
+  end.
+
+(** Every open instance of [invariant] has an atom key among
+    [excluded]. *)
+Definition records_covered (invariant : inv_id)
+    (excluded : list access_key) (records : list open_record) : bool :=
+  forallb (fun record =>
+    if decide (record_invariant record = invariant)
+    then bool_decide (record_key record <> None /\
+      record_key record ∈ excluded)
+    else true) records.
+
+(** Opening an instance: of a closed declaration, or a further instance of
+    an open one that is known to differ from its open instances, the
+    [excluded] ones. *)
+Definition open_access (invariant : inv_id) (key : access_key)
+    (excluded : list access_key) state :
+    analysis_error + analysis_state :=
+  if bool_decide (invariant ∈ analysis_open state) then
+    if nested_admissible invariant key state &&
+      records_covered invariant excluded (analysis_records state) then
+      match nested_entry invariant key state with
+      | Some entry =>
+          inr (AnalysisState (analysis_entries state ∖ {[entry]})
+            ((invariant, key, consumed_entry invariant key entry) ::
+              analysis_records state)
+            (analysis_aliases state)
+            (analysis_step_taken state) (analysis_in_atomic state))
+      | None => inl (MissingInvariant invariant)
+      end
+    else inl (ReentrantInvariant invariant)
+  else open_invariant invariant key state.
+
+Lemma open_invariant_access invariant key excluded state exit :
+  open_invariant invariant key state = inr exit ->
+  open_access invariant key excluded state = inr exit.
+Proof.
+  intros Hopen. unfold open_access.
+  rewrite bool_decide_false; [exact Hopen|].
+  exact (proj1 (open_invariant_success _ _ _ _ Hopen)).
+Qed.
+
+Lemma open_access_fresh invariant key excluded state exit :
+  invariant ∉ analysis_open state ->
+  open_access invariant key excluded state = inr exit ->
+  open_invariant invariant key state = inr exit.
+Proof.
+  intros Hclosed. unfold open_access. rewrite bool_decide_false; [done|].
+  exact Hclosed.
+Qed.
+
+Lemma records_covered_nil invariant state :
+  invariant ∈ analysis_open state ->
+  records_covered invariant [] (analysis_records state) = false.
+Proof.
+  unfold analysis_open. intros Hin.
+  apply elem_of_list_to_set, elem_of_list_In, in_map_iff in Hin
+    as (record & Hinvariant & Hrecord).
+  unfold records_covered. apply not_true_iff_false. rewrite forallb_forall.
+  intros Hall. specialize (Hall record Hrecord).
+  rewrite decide_True in Hall by exact Hinvariant.
+  apply bool_decide_eq_true in Hall as [_ Hnil].
+  apply elem_of_nil in Hnil. exact Hnil.
+Qed.
+
+(** Without excluded instances, only a closed declaration is opened. *)
+Lemma open_access_nil invariant key state exit :
+  open_access invariant key [] state = inr exit ->
+  open_invariant invariant key state = inr exit.
+Proof.
+  intros Hopen.
+  destruct (decide (invariant ∈ analysis_open state)) as [Hin|Hout].
+  - unfold open_access in Hopen. rewrite bool_decide_true in Hopen by exact Hin.
+    rewrite records_covered_nil in Hopen by exact Hin.
+    rewrite andb_false_r in Hopen. discriminate.
+  - exact (open_access_fresh _ _ _ _ _ Hout Hopen).
+Qed.
+
+Lemma open_access_records invariant key excluded state exit :
+  open_access invariant key excluded state = inr exit ->
+  exists entry,
+    exit = AnalysisState (analysis_entries state ∖ {[entry]})
+      ((invariant, key, consumed_entry invariant key entry) ::
+        analysis_records state)
+      (analysis_aliases state)
+      (analysis_step_taken state) (analysis_in_atomic state).
+Proof.
+  unfold open_access.
+  destruct (bool_decide (invariant ∈ analysis_open state)).
+  - destruct (nested_admissible invariant key state && _); [|discriminate].
+    destruct (nested_entry invariant key state) as [entry|]; [|discriminate].
+    intros [= <-]. eauto.
+  - intros Hopen. destruct (open_invariant_records _ _ _ _ Hopen)
+      as (entry & _ & ->). eauto.
+Qed.
+
+Lemma open_access_preserves_in_atomic invariant key excluded state exit :
+  open_access invariant key excluded state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  intros Hopen.
+  destruct (open_access_records _ _ _ _ _ Hopen) as (entry & ->).
+  reflexivity.
+Qed.
+
+(** A nested opening leaves the open declarations, hence the mask, alone. *)
+Lemma open_access_nested invariant key excluded state exit :
+  invariant ∈ analysis_open state ->
+  open_access invariant key excluded state = inr exit ->
+  nested_admissible invariant key state = true /\
+  records_covered invariant excluded (analysis_records state) = true /\
+  analysis_open exit = analysis_open state /\
+  analysis_mask exit = analysis_mask state.
+Proof.
+  intros Hopen_state Hopen. pose proof Hopen as Hrecords.
+  unfold open_access in Hopen. rewrite bool_decide_true in Hopen;
+    [|exact Hopen_state].
+  destruct (nested_admissible invariant key state) eqn:Hadmissible;
+    [|discriminate].
+  destruct (records_covered invariant excluded (analysis_records state))
+    eqn:Hcovered; [|discriminate].
+  destruct (nested_entry invariant key state) as [entry|] eqn:Hentry;
+    [|discriminate].
+  injection Hopen as <-.
+  assert (Hdeclaration : entry.1 = invariant).
+  { unfold nested_entry in Hentry.
+    destruct (select_entry invariant _ _) as [selected|] eqn:Hselect.
+    - injection Hentry as <-.
+      exact (proj2 (select_entry_sound _ _ _ _ Hselect)).
+    - destruct (existsb _ _); [|discriminate]. injection Hentry as <-.
+      reflexivity. }
+  assert (Hopen_exit : analysis_open (AnalysisState
+      (analysis_entries state ∖ {[entry]})
+      ((invariant, key, consumed_entry invariant key entry) ::
+        analysis_records state)
+      (analysis_aliases state) (analysis_step_taken state)
+      (analysis_in_atomic state)) = analysis_open state).
+  { unfold analysis_open in *. cbn. set_solver. }
+  split; [reflexivity|]. split; [reflexivity|]. split; [exact Hopen_exit|].
+  unfold analysis_mask. rewrite Hopen_exit. cbn [analysis_entries].
+  apply set_eq. intros other.
+  rewrite !elem_of_difference. split.
+  - intros [Hin Hclosed]. split; [|exact Hclosed].
+    unfold entry_declarations in *. apply elem_of_map in Hin
+      as (other_entry & -> & Hother). apply elem_of_map.
+    exists other_entry. split; [reflexivity|]. set_solver.
+  - intros [Hin Hclosed]. split; [|exact Hclosed].
+    unfold entry_declarations in *. apply elem_of_map in Hin
+      as (other_entry & -> & Hother). apply elem_of_map.
+    exists other_entry. split; [reflexivity|].
+    apply elem_of_difference. split; [exact Hother|].
+    intros Heq. apply elem_of_singleton in Heq. subst other_entry.
+    apply Hclosed. rewrite Hdeclaration. exact Hopen_state.
+Qed.
+
+(** Both kinds of opening add the declaration to the open set and remove it
+    from the mask. *)
+Lemma open_access_success invariant key excluded state exit :
+  open_access invariant key excluded state = inr exit ->
+  analysis_mask exit = analysis_mask state ∖ {[invariant]} /\
+  analysis_open exit = {[invariant]} ∪ analysis_open state.
+Proof.
+  intros Hopen.
+  destruct (decide (invariant ∈ analysis_open state)) as [Hnested|Hclosed].
+  - destruct (open_access_nested _ _ _ _ _ Hnested Hopen)
+      as (_ & _ & Hopen_exit & Hmask_exit).
+    rewrite Hmask_exit, Hopen_exit. split.
+    + apply set_eq. intros other. rewrite elem_of_difference, elem_of_singleton.
+      split; [|tauto]. intros Hin. split; [exact Hin|]. intros ->.
+      unfold analysis_mask in Hin. apply elem_of_difference in Hin as [_ Hin].
+      contradiction.
+    + set_solver.
+  - destruct (open_invariant_success _ _ _ _
+      (open_access_fresh _ _ _ _ _ Hclosed Hopen)) as (_ & _ & Hmask & Hopen').
+    split; assumption.
+Qed.
+
+Lemma open_access_available invariant key excluded state exit :
+  open_access invariant key excluded state = inr exit ->
+  invariant ∈ analysis_mask state ∪ analysis_open state.
+Proof.
+  intros Hopen.
+  destruct (decide (invariant ∈ analysis_open state)) as [Hnested|Hclosed].
+  - apply elem_of_union_r. exact Hnested.
+  - apply elem_of_union_l.
+    exact (proj1 (proj2 (open_invariant_success _ _ _ _
+      (open_access_fresh _ _ _ _ _ Hclosed Hopen)))).
+Qed.
+
+Lemma open_access_preserves_wf invariant key excluded state exit :
+  state_wf state -> open_access invariant key excluded state = inr exit ->
+  state_wf exit.
+Proof.
+  intros Hwf Hopen.
+  destruct (decide (invariant ∈ analysis_open state)) as [Hnested|Hclosed].
+  - pose proof (proj1 (open_access_nested _ _ _ _ _ Hnested Hopen))
+      as Hadmissible.
+    destruct (open_access_records _ _ _ _ _ Hopen) as (entry & ->).
+    unfold state_wf in *. cbn. constructor; [|exact Hwf].
+    intros Hin. apply elem_of_list_In in Hin.
+    apply in_map_iff in Hin as (record & Hrecord & Hin).
+    unfold nested_admissible in Hadmissible.
+    apply andb_true_iff in Hadmissible as [_ Hall].
+    rewrite forallb_forall in Hall. specialize (Hall record Hin).
+    injection Hrecord as Hinvariant Hkey.
+    rewrite decide_True in Hall; [|exact Hinvariant].
+    apply bool_decide_eq_true in Hall as [_ Hdistinct]. contradiction.
+  - apply (open_invariant_preserves_wf invariant key state exit Hwf).
+    exact (open_access_fresh _ _ _ _ _ Hclosed Hopen).
 Qed.
 
 Lemma fold_invariant_preserves_in_atomic invariant key state :
@@ -909,7 +1146,8 @@ Definition records_consume_own (records : list open_record) : Prop :=
     records.
 
 Lemma fold_open_invariant invariant key state :
-  state_wf state -> records_consume_own (analysis_records state) ->
+  NoDup (map record_invariant (analysis_records state)) ->
+  records_consume_own (analysis_records state) ->
   fold_admissible invariant key state = true ->
   invariant ∈ analysis_open state ->
   analysis_mask (fold_invariant invariant key state) =
@@ -924,7 +1162,7 @@ Proof.
   destruct (decide (record_invariant record = invariant)) as [Heq|Hne].
   2: { apply bool_decide_eq_true in Hadmissible. contradiction. }
   rewrite (fold_invariant_closes _ _ _ _ _ Hrecords Heq).
-  unfold state_wf in Hwf. rewrite ?Hrecords in Hwf. cbn in Hwf.
+  rewrite ?Hrecords in Hwf. cbn in Hwf.
   inversion Hwf as [|? ? Hfresh _]. subst.
   unfold records_consume_own in Hown. rewrite ?Hrecords in Hown.
   inversion Hown as [|? ? Hconsumed _]. subst.
@@ -1047,7 +1285,8 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
           take_leaf (leaf_cost Γ statement) (syntax_leaf_write Γ statement)
             state
       | ViewDone => inr state
-      | ViewUnfold invariant key => open_invariant invariant key state
+      | ViewUnfold invariant key excluded =>
+          open_access invariant key excluded state
       | ViewFold invariant key =>
           if fold_admissible invariant key state
           then inr (fold_invariant invariant key state)
@@ -1107,9 +1346,9 @@ Inductive analysis_certificate :
 | CertDone Γ state statement :
     syntax_view Γ statement = ViewDone ->
     analysis_certificate Γ state statement state
-| CertUnfold Γ state statement invariant key exit :
-    syntax_view Γ statement = ViewUnfold invariant key ->
-    open_invariant invariant key state = inr exit ->
+| CertUnfold Γ state statement invariant key excluded exit :
+    syntax_view Γ statement = ViewUnfold invariant key excluded ->
+    open_access invariant key excluded state = inr exit ->
     analysis_certificate Γ state statement exit
 | CertFold Γ state statement invariant key :
     syntax_view Γ statement = ViewFold invariant key ->
@@ -1154,7 +1393,7 @@ Proof.
   induction certificate; simpl.
   - eapply take_leaf_preserves_in_atomic. exact e0.
   - reflexivity.
-  - eapply open_invariant_preserves_in_atomic. exact e0.
+  - eapply open_access_preserves_in_atomic. exact e0.
   - apply fold_invariant_preserves_in_atomic.
   - etrans; eassumption.
   - exact IHcertificate1.
@@ -1213,7 +1452,7 @@ Fixpoint certificate_height {Γ entry statement exit}
   match certificate with
   | CertLeaf _ _ _ _ _ _ => 1
   | CertDone _ _ _ _ => 1
-  | CertUnfold _ _ _ _ _ _ _ _ => 1
+  | CertUnfold _ _ _ _ _ _ _ _ _ => 1
   | CertFold _ _ _ _ _ _ _ => 1
   | CertSequence _ _ _ _ _ _ _ _ first_certificate second_certificate =>
       S (Nat.max (certificate_height first_certificate)
@@ -1387,7 +1626,7 @@ Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
       | ViewStructuredAccess _ body | ViewAtomic body =>
           statement_allocations_fuel fuel' body
       | ViewScope _ _ body => statement_allocations_fuel fuel' body
-      | ViewDone | ViewUnfold _ _ => ∅
+      | ViewDone | ViewUnfold _ _ _ => ∅
       end
   end.
 
@@ -1434,13 +1673,13 @@ Proof.
       destruct (decide (x = invariant)); set_solver.
 Qed.
 
-Lemma open_invariant_consume_own invariant key state exit :
+Lemma open_access_consume_own invariant key excluded state exit :
   records_consume_own (analysis_records state) ->
-  open_invariant invariant key state = inr exit ->
+  open_access invariant key excluded state = inr exit ->
   records_consume_own (analysis_records exit).
 Proof.
   intros Hown Hopen.
-  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
+  destruct (open_access_records _ _ _ _ _ Hopen) as (entry & ->).
   constructor; [reflexivity | exact Hown].
 Qed.
 
@@ -1465,7 +1704,7 @@ Proof.
   induction certificate; intros Hown; cbn.
   - rewrite (take_leaf_preserves_records _ _ _ _ e0). exact Hown.
   - exact Hown.
-  - eapply open_invariant_consume_own; eassumption.
+  - eapply open_access_consume_own; eassumption.
   - apply fold_invariant_consume_own. exact Hown.
   - apply IHcertificate2, IHcertificate1, Hown.
   - apply IHcertificate1, Hown.
@@ -1487,7 +1726,8 @@ Proof.
     rewrite e.
   - pose proof (take_leaf_resources_bound _ _ _ _ e0). set_solver.
   - set_solver.
-  - apply open_invariant_success in e0 as (_ & Havailable & Hmask & Hopen).
+  - pose proof (open_access_available _ _ _ _ _ e0) as Havailable.
+    apply open_access_success in e0 as (Hmask & Hopen).
     rewrite Hmask, Hopen. set_solver.
   - pose proof (fold_invariant_resources_bound invariant key state Hown).
     set_solver.
@@ -1609,6 +1849,7 @@ Proof.
   - f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
     assert (key0 = key) by congruence. subst key0.
+    assert (excluded0 = excluded) by congruence. subst excluded0.
     f_equal; apply proof_irrelevance.
   - assert (invariant0 = invariant) by congruence. subst invariant0.
     assert (key0 = key) by congruence. subst key0.
@@ -1657,7 +1898,7 @@ Proof.
   intros Hwf certificate. induction certificate.
   - eapply take_leaf_preserves_wf; eauto.
   - exact Hwf.
-  - eapply open_invariant_preserves_wf; eauto.
+  - eapply open_access_preserves_wf; eauto.
   - apply fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
   - exact (IHcertificate1 Hwf).

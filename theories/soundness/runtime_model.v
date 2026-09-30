@@ -2176,7 +2176,7 @@ Definition operation_wp {Γ}
     (exit : GenericRegions.Atomicity.analysis_state) (post : iProp) : iProp :=
   match RegionSyntax.view statement with
   | AnalysisView.ViewLeaf => ambient_leaf_wp runtime ambient entry statement post
-  | AnalysisView.ViewUnfold _ _ | AnalysisView.ViewFold _ _ =>
+  | AnalysisView.ViewUnfold _ _ _ | AnalysisView.ViewFold _ _ =>
       (|={Model.active_runtime_mask ambient entry,
           Model.active_runtime_mask ambient exit}=> post)%I
   | AnalysisView.ViewAtomic body =>
@@ -2192,7 +2192,7 @@ Lemma operation_mono Operations InvariantOps Γ runtime ambient entry statement 
     @operation_wp Γ Operations InvariantOps runtime ambient entry statement exit Q.
 Proof.
   intros HPQ. unfold operation_wp, RegionSyntax.view.
-  destruct statement; simpl; try exact HPQ; try reflexivity;
+  destruct statement; simpl; try (destruct (RegionSyntax.guarded_unfold _ _) as [[[? ?] ?]|]; simpl); try exact HPQ; try reflexivity;
     try (apply ambient_leaf_mono; exact HPQ);
     try (apply (TermControlOperations.term_atomic_mono semantic_data Operations); exact HPQ).
   all: try (apply ambient_physical_leaf_mono; exact HPQ).
@@ -2205,7 +2205,7 @@ Lemma operation_frame Operations InvariantOps Γ runtime ambient entry statement
   @operation_wp Γ Operations InvariantOps runtime ambient entry statement exit P ∗ R ⊢
     @operation_wp Γ Operations InvariantOps runtime ambient entry statement exit (P ∗ R).
 Proof.
-  unfold operation_wp, RegionSyntax.view. destruct statement; simpl;
+  unfold operation_wp, RegionSyntax.view. destruct statement; simpl; try (destruct (RegionSyntax.guarded_unfold _ _) as [[[? ?] ?]|]; simpl);
     try reflexivity; try apply ambient_leaf_frame;
     try apply (TermControlOperations.term_atomic_frame semantic_data Operations);
     try (iIntros "[H _]"; done).

@@ -201,6 +201,193 @@ Fixpoint pexpr_list_append {keep D left_types right_types}
       PECons expression (pexpr_list_append tail right)
   end.
 
+Definition pexpr_list_nil {keep D ts} (expressions : pexpr_list keep D ts) :
+    bool :=
+  match expressions with PENil => true | PECons _ _ => false end.
+
+Definition pexpr_list_head {keep D t ts}
+    (expressions : pexpr_list keep D (t :: ts)) : pexpr keep D t :=
+  match expressions in pexpr_list _ _ ts0
+    return match ts0 with [] => unit | t0 :: _ => pexpr keep D t0 end
+  with
+  | PENil => tt
+  | PECons expression _ => expression
+  end.
+
+Definition pexpr_list_tail {keep D t ts}
+    (expressions : pexpr_list keep D (t :: ts)) : pexpr_list keep D ts :=
+  match expressions in pexpr_list _ _ ts0
+    return match ts0 with [] => unit | _ :: ts1 => pexpr_list keep D ts1 end
+  with
+  | PENil => tt
+  | PECons _ tail => tail
+  end.
+
+(** [left != right], as a tuple. *)
+Fixpoint arguments_differ {keep D ts} (left : pexpr_list keep D ts) :
+    pexpr_list keep D ts -> pexpr keep D TBool :=
+  match left in pexpr_list _ _ ts0
+    return pexpr_list keep D ts0 -> pexpr keep D TBool with
+  | PENil => fun _ => PEVal (VBool false)
+  | PECons expression tail => fun right =>
+      let head := PEBinOp (BNe _) expression (pexpr_list_head right) in
+      if pexpr_list_nil tail then head
+      else PEBinOp BOr head (arguments_differ tail (pexpr_list_tail right))
+  end.
+
+(** [arguments] differs from each of [excluded]. *)
+Fixpoint arguments_distinct {keep D ts} (arguments : pexpr_list keep D ts)
+    (excluded : list (pexpr_list keep D ts)) : pexpr keep D TBool :=
+  match excluded with
+  | [] => PEVal (VBool true)
+  | [other] => arguments_differ arguments other
+  | other :: rest =>
+      PEBinOp BAnd (arguments_differ arguments other)
+        (arguments_distinct arguments rest)
+  end.
+
+(** Syntactic equality of expressions, possibly of different types. *)
+Fixpoint pexpr_eqb {keep D t1} (e1 : pexpr keep D t1) {t2}
+    (e2 : pexpr keep D t2) {struct e1} : bool :=
+  match e1, e2 with
+  | @PEVar _ _ t1' v1, @PEVar _ _ t2' v2 =>
+      typ_eqb t1' t2' && Nat.eqb (lvar_index v1) (lvar_index v2)
+  | PEVal v1, PEVal v2 => tval_eqb_het v1 v2
+  | PEUnOp op1 operand1, PEUnOp op2 operand2 =>
+      unop_eqb op1 op2 && pexpr_eqb operand1 operand2
+  | PEBinOp op1 first1 second1, PEBinOp op2 first2 second2 =>
+      binop_eqb op1 op2 && pexpr_eqb first1 first2 &&
+        pexpr_eqb second1 second2
+  | _, _ => false
+  end.
+
+Lemma pexpr_eqb_refl {keep D t} (e : pexpr keep D t) : pexpr_eqb e e = true.
+Proof.
+  induction e; simpl.
+  - rewrite typ_eqb_refl. apply Nat.eqb_refl.
+  - exact (tval_eqb_het_refl value).
+  - rewrite unop_eqb_refl. exact IHe.
+  - rewrite binop_eqb_refl, IHe1. exact IHe2.
+Qed.
+
+Lemma pexpr_eqb_eq {keep D} : forall {t} (e1 e2 : pexpr keep D t),
+  pexpr_eqb e1 e2 = true -> e1 = e2.
+Proof.
+  intros t e1. induction e1; intros e2; dependent destruction e2; simpl;
+    try (intros Hbad; discriminate).
+  - intros Heq. apply andb_prop in Heq as [_ Hindex].
+    apply Nat.eqb_eq in Hindex. f_equal. exact (lvar_index_injective _ _ Hindex).
+  - intros Heq. f_equal. exact (tval_eqb_het_eq _ _ Heq).
+  - intros Heq. apply andb_prop in Heq as [Hop Hoperand].
+    pose proof (unop_eqb_input op op0 Hop) as Hinput. subst input0.
+    rewrite (unop_eqb_eq op op0 Hop). f_equal. exact (IHe1 _ Hoperand).
+  - intros Heq. apply andb_prop in Heq as [Heq Hsecond].
+    apply andb_prop in Heq as [Hop Hfirst].
+    pose proof (binop_eqb_operands op op0 Hop) as [Hleft Hright].
+    subst left0. subst right0.
+    rewrite (binop_eqb_eq op op0 Hop). f_equal.
+    + exact (IHe1_1 _ Hfirst).
+    + exact (IHe1_2 _ Hsecond).
+Qed.
+
+Definition pexpr_cast {keep D t1} t2 (expression : pexpr keep D t1) :
+    option (pexpr keep D t2) :=
+  match typ_eq_dec t1 t2 with
+  | left Heq => Some (eq_rect _ (pexpr keep D) expression _ Heq)
+  | right _ => None
+  end.
+
+(** The right-hand sides of an [arguments_differ] with left-hand side
+    [left]. *)
+Fixpoint differ_candidate {keep D ts} (lefts : pexpr_list keep D ts) :
+    pexpr keep D TBool -> option (pexpr_list keep D ts) :=
+  match lefts in pexpr_list _ _ ts0
+    return pexpr keep D TBool -> option (pexpr_list keep D ts0) with
+  | PENil => fun _ => Some PENil
+  | @PECons _ _ t ts' _ tail => fun condition =>
+      match tail in pexpr_list _ _ ts1
+        return (pexpr keep D TBool -> option (pexpr_list keep D ts1)) ->
+          option (pexpr_list keep D (t :: ts1)) with
+      | PENil => fun _ =>
+          match condition with
+          | PEBinOp _ _ second =>
+              match pexpr_cast t second with
+              | Some second' => Some (PECons second' PENil)
+              | None => None
+              end
+          | _ => None
+          end
+      | PECons _ _ => fun recurse =>
+          match condition with
+          | PEBinOp _ head rest =>
+              match head, pexpr_cast TBool rest with
+              | PEBinOp _ _ second, Some rest' =>
+                  match pexpr_cast t second, recurse rest' with
+                  | Some second', Some others => Some (PECons second' others)
+                  | _, _ => None
+                  end
+              | _, _ => None
+              end
+          | _ => None
+          end
+      end (differ_candidate tail)
+  end.
+
+Definition binop_is_and {first second output}
+    (op : binop first second output) : bool :=
+  match op with BAnd => true | _ => false end.
+
+Fixpoint distinct_candidates {keep D ts} (arguments : pexpr_list keep D ts)
+    {t} (condition : pexpr keep D t) : option (list (pexpr_list keep D ts)) :=
+  let single :=
+    match pexpr_cast TBool condition with
+    | Some condition' =>
+        match differ_candidate arguments condition' with
+        | Some other => Some [other]
+        | None => None
+        end
+    | None => None
+    end in
+  match condition with
+  | PEVal _ => Some []
+  | PEBinOp op first rest =>
+      if binop_is_and op then
+        match pexpr_cast TBool first with
+        | Some first' =>
+            match differ_candidate arguments first',
+                distinct_candidates arguments rest with
+            | Some other, Some others => Some (other :: others)
+            | _, _ => None
+            end
+        | None => None
+        end
+      else single
+  | _ => single
+  end.
+
+(** The excluded vectors of a condition [arguments_distinct arguments _]. *)
+Definition arguments_distinct_parse {keep D ts}
+    (arguments : pexpr_list keep D ts) (condition : pexpr keep D TBool) :
+    option (list (pexpr_list keep D ts)) :=
+  match distinct_candidates arguments condition with
+  | Some excluded =>
+      if pexpr_eqb condition (arguments_distinct arguments excluded)
+      then Some excluded else None
+  | None => None
+  end.
+
+Lemma arguments_distinct_parse_sound {keep D ts}
+    (arguments : pexpr_list keep D ts) condition excluded :
+  arguments_distinct_parse arguments condition = Some excluded ->
+  condition = arguments_distinct arguments excluded.
+Proof.
+  unfold arguments_distinct_parse.
+  destruct (distinct_candidates arguments condition) as [candidates|];
+    [|discriminate].
+  destruct (pexpr_eqb _ _) eqn:Heq; [|discriminate].
+  intros [= <-]. exact (pexpr_eqb_eq _ _ Heq).
+Qed.
+
 (** Runtime expressions are readable by proof-only constructs. *)
 Fixpoint pexpr_forget {keep D t} (expression : pexpr keep D t) : gexpr D t :=
   match expression with

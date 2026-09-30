@@ -4,6 +4,7 @@ From stdpp Require Import gmap.
 From raven Require Import analysis.structured_certificates
   verification.expressions verification.assertions verification.ir
   verification.snapshots soundness.runtime_model soundness.rule_validity
+  analysis.normalization_base
   examples.mono_nat_ra examples.counter_monotonic.
 
 Import ListNotations.
@@ -77,8 +78,8 @@ Lemma declaration_wide_round_trip_restores_entry :
     inr (closed {[counter_invariant]}).
 Proof. vm_compute. reflexivity. Qed.
 
-(** Until the per-instance Iris world is introduced, a second instance of
-    an already-open declaration is rejected even when its key differs. *)
+(** A second instance of an open declaration is rejected unless an
+    assertion that it differs from the open instances precedes it. *)
 Definition reentrant_other_instance : stmt Γ :=
   TSeq (TUnfold counter_invariant x_arguments)
     (TUnfold counter_invariant y_arguments).
@@ -87,6 +88,60 @@ Lemma reentrant_other_instance_rejected :
   Atomicity.analyze (closed {[counter_invariant]})
       reentrant_other_instance =
     inl (Atomicity.ReentrantInvariant counter_invariant).
+Proof. vm_compute. reflexivity. Qed.
+
+(** [unfold I(x); assert (y != x); unfold I(y); fold I(y); fold I(x)],
+    with the inner access laid out and guarded as the preprocessing
+    produces it. *)
+Definition distinct_from_x : gexpr Γ TBool :=
+  IR.arguments_distinct y_arguments [x_arguments].
+
+Definition nested_instances : stmt Γ :=
+  TSeq (TUnfold counter_invariant x_arguments)
+    (TSeq
+      (TSeq (TSeq (TAssert distinct_from_x)
+          (TUnfold counter_invariant y_arguments))
+        (TSeq TDone (TFold counter_invariant y_arguments)))
+      (TFold counter_invariant x_arguments)).
+
+Lemma distinct_from_x_parses :
+  IR.arguments_distinct_parse y_arguments distinct_from_x =
+    Some [x_arguments].
+Proof. vm_compute. reflexivity. Qed.
+
+(** Both instances of the declaration are open at once. *)
+Lemma nested_instances_accepted :
+  Atomicity.analyze (closed {[counter_invariant]}) nested_instances =
+    inr (closed {[counter_invariant]}).
+Proof. vm_compute. reflexivity. Qed.
+
+(** The assertion must exclude the open instance. *)
+Definition misguarded_instances : stmt Γ :=
+  TSeq (TUnfold counter_invariant x_arguments)
+    (TSeq (TAssert (IR.arguments_distinct y_arguments [y_arguments]))
+      (TUnfold counter_invariant y_arguments)).
+
+Lemma misguarded_instances_rejected :
+  Atomicity.analyze (closed {[counter_invariant]}) misguarded_instances =
+    inl (Atomicity.ReentrantInvariant counter_invariant).
+Proof. vm_compute. reflexivity. Qed.
+
+(** The preprocessing generates the assertion. *)
+Lemma nested_instances_generated :
+  Snapshots.distinctness_assertions
+    (TSeq (TUnfold counter_invariant x_arguments)
+      (TSeq
+        (TSeq (TUnfold counter_invariant y_arguments)
+          (TSeq TDone (TFold counter_invariant y_arguments)))
+        (TFold counter_invariant x_arguments))) = nested_instances.
+Proof. vm_compute. reflexivity. Qed.
+
+(** The normalizer accepts the guarded layout and nests the accesses. *)
+Lemma nested_instances_normalized :
+  NormalizationBase.restricted_analyze_and_normalize nested_instances =
+    Some (TInvAccess counter_invariant x_arguments
+      (TSeq (TAssert distinct_from_x)
+        (TInvAccess counter_invariant y_arguments TDone))).
 Proof. vm_compute. reflexivity. Qed.
 
 (** An allocated instance does not make another instance available. *)

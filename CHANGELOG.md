@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accesses that span trusted atomic blocks.
 - Per-instance invariant-mask inference through procedure contracts,
   predicates, and invariant dependencies.
+- Simultaneously open instances of one invariant declaration, justified by
+  generated assertions that each new instance differs from the open ones;
+  the Iris model holds the remaining instances of an open declaration and
+  opens further instances from them.
 - A regression-test suite for mask joins, instance keys, argument snapshots,
   conditional normalization, trusted atomic accesses, and procedure effects.
 

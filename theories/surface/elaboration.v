@@ -974,8 +974,9 @@ Definition elaborate_procedure (environment : elaboration_environment)
                       (LHere (keep := keep_all) (d := runtime_var return_type)
                         (D := []) eq_refl)))
                     precondition postcondition
-                    (AccessLayout.layout_accesses
-                      (Snapshots.snapshot_accesses body))))
+                    (Snapshots.distinctness_assertions
+                      (AccessLayout.layout_accesses
+                        (Snapshots.snapshot_accesses body)))))
             end
           else inl (EETypeMismatch return_type
             (elaborate_typ (source_var_type return_declaration)))

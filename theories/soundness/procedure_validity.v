@@ -74,6 +74,7 @@ Proof.
   intros Γ names stack statement Hview.
   destruct statement; cbn in Hview; try discriminate;
     cbn [Certified.contract_cost_model].
+  all: try (exfalso; guarded_view_cases; fail).
   (* procedure calls and spawns need no witness *)
   all: try exact I.
   (* proof-only leaves erase to the terminal statement *)

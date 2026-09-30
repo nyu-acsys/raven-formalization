@@ -63,10 +63,12 @@ Inductive baseline_normalizable {Γ} : bool -> stmt Γ -> Type :=
     (if nested then access_neutral statement else unfold_free statement) ->
     baseline_normalizable nested statement
 | BaselineSequence nested first second :
+    RegionSyntax.guarded_unfold first second = None ->
     access_neutral first ->
     baseline_normalizable nested second ->
     baseline_normalizable nested (TSeq first second)
 | BaselineBalancedSequence nested first second :
+    RegionSyntax.guarded_unfold first second = None ->
     baseline_normalizable nested first ->
     baseline_normalizable nested second ->
     baseline_normalizable nested (TSeq first second)
@@ -95,6 +97,29 @@ Inductive baseline_normalizable {Γ} : bool -> stmt Γ -> Type :=
         (TSeq body
           (TSeq
             (TFold invariant closing_arguments) work)))
+(** An access opening an instance known to differ from the open ones of
+    its declaration. *)
+| BaselineGuardedAccess nested condition invariant
+    opening_arguments closing_arguments excluded body :
+    IR.arguments_distinct_parse opening_arguments condition = Some excluded ->
+    baseline_normalizable true body ->
+    opening_arguments = closing_arguments ->
+    pexpr_list_dependencies opening_arguments ## statement_writes body ->
+    pexpr_dependencies condition ## statement_writes body ->
+    baseline_normalizable nested
+      (TSeq (TSeq (TAssert condition) (TUnfold invariant opening_arguments))
+        (TSeq body (TFold invariant closing_arguments)))
+| BaselineGuardedAccessThen nested condition invariant
+    opening_arguments closing_arguments excluded body work :
+    IR.arguments_distinct_parse opening_arguments condition = Some excluded ->
+    baseline_normalizable true body ->
+    opening_arguments = closing_arguments ->
+    pexpr_list_dependencies opening_arguments ## statement_writes body ->
+    pexpr_dependencies condition ## statement_writes body ->
+    baseline_normalizable nested work ->
+    baseline_normalizable nested
+      (TSeq (TSeq (TAssert condition) (TUnfold invariant opening_arguments))
+        (TSeq body (TSeq (TFold invariant closing_arguments) work)))
 | BaselineGhostVal nested name t initializer body :
     @baseline_normalizable (ghost_val t :: Γ) nested body ->
     baseline_normalizable nested (TGhostVal name t initializer body)
@@ -196,6 +221,44 @@ Definition conditional_access_stableb {Γ} invariant
   bool_decide (pexpr_list_dependencies arguments ##
     statement_writes (TSeq prefix (TSeq TDone else_prefix))).
 
+(** [assert condition; unfold invariant(arguments)], the opening of a
+    guarded access. *)
+Definition guarded_head {Γ} (first : stmt Γ) :
+    option (gexpr Γ TBool *
+      { invariant : inv_id &
+        gexpr_list Γ (Assertion.invariant_args invariant) }) :=
+  match first with
+  | TSeq (TAssert condition) (TUnfold invariant arguments) =>
+      Some (condition, existT invariant arguments)
+  | _ => None
+  end.
+#[global] Arguments guarded_head : simpl nomatch.
+
+Lemma guarded_head_some {Γ} (first : stmt Γ) condition invariant arguments :
+  guarded_head first = Some (condition, existT invariant arguments) ->
+  first = TSeq (TAssert condition) (TUnfold invariant arguments).
+Proof.
+  unfold guarded_head.
+  destruct first as [| | | | | | | | | | | | | | | first1 first2 | | |];
+    try discriminate.
+  destruct first1; try discriminate. destruct first2; try discriminate.
+  intros Heq. inversion Heq; subst.
+  repeat match goal with
+  | H : existT _ _ = existT _ _ |- _ =>
+      apply Eqdep.EqdepTheory.inj_pair2 in H
+  end.
+  subst. reflexivity.
+Qed.
+
+(** Whether [condition] asserts that [arguments] differ from some excluded
+    vectors. *)
+Definition guarded_parseb {Γ ts} (arguments : gexpr_list Γ ts)
+    (condition : gexpr Γ TBool) : bool :=
+  match IR.arguments_distinct_parse arguments condition with
+  | Some _ => true
+  | None => false
+  end.
+
 (** Conservative executable check for the source layouts handled by the
     baseline normalizer.  A raw unfold is accepted only when its enclosing
     sequence exposes the matching fold, or is a canonical conditional access
@@ -215,6 +278,21 @@ Fixpoint restricted_fragment_shape_check {Γ} (nested : bool)
       restricted_fragment_shape_check nested then_branch &&
         restricted_fragment_shape_check nested else_branch
   | TSeq first second =>
+      match guarded_head first with
+      | Some (condition, existT opening_invariant arguments) =>
+          match second with
+          | TSeq body (TFold closing_invariant _) =>
+              guarded_parseb arguments condition &&
+              bool_decide (opening_invariant = closing_invariant) &&
+              restricted_fragment_shape_check true body
+          | TSeq body (TSeq (TFold closing_invariant _) work) =>
+              guarded_parseb arguments condition &&
+              bool_decide (opening_invariant = closing_invariant) &&
+              restricted_fragment_shape_check true body &&
+              restricted_fragment_shape_check nested work
+          | _ => false
+          end
+      | None =>
       match first, second with
       | TUnfold opening_invariant _,
           TSeq body (TFold closing_invariant _) =>
@@ -258,6 +336,7 @@ Fixpoint restricted_fragment_shape_check {Γ} (nested : bool)
       | _, _ =>
           restricted_fragment_shape_check nested first &&
             restricted_fragment_shape_check nested second
+      end
       end
   | _ => true
   end.
@@ -328,6 +407,38 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
       restricted_access_effect_check then_branch &&
         restricted_access_effect_check else_branch
   | TSeq first second =>
+      match guarded_head first with
+      | Some (condition, existT opening_invariant opening_arguments) =>
+          match second with
+          | TSeq body (TFold closing_invariant closing_arguments) =>
+              match decide (opening_invariant = closing_invariant) with
+              | left Heq =>
+                  restricted_access_boundary_check opening_arguments
+                    (eq_rect _ (fun invariant =>
+                      gexpr_list Γ (Assertion.invariant_args invariant))
+                      closing_arguments _ (eq_sym Heq)) body &&
+                  bool_decide (pexpr_dependencies condition ##
+                    statement_writes body) &&
+                  restricted_access_effect_check body
+              | right _ => false
+              end
+          | TSeq body
+              (TSeq (TFold closing_invariant closing_arguments) work) =>
+              match decide (opening_invariant = closing_invariant) with
+              | left Heq =>
+                  restricted_access_boundary_check opening_arguments
+                    (eq_rect _ (fun invariant =>
+                      gexpr_list Γ (Assertion.invariant_args invariant))
+                      closing_arguments _ (eq_sym Heq)) body &&
+                  bool_decide (pexpr_dependencies condition ##
+                    statement_writes body) &&
+                  restricted_access_effect_check body &&
+                  restricted_access_effect_check work
+              | right _ => false
+              end
+          | _ => false
+          end
+      | None =>
       match first, second with
       | TUnfold opening_invariant opening_arguments,
           TSeq body (TFold closing_invariant closing_arguments) =>
@@ -372,6 +483,7 @@ Fixpoint restricted_access_effect_check {Γ} (statement : stmt Γ) : bool :=
       | _, _ =>
           restricted_access_effect_check first &&
             restricted_access_effect_check second
+      end
       end
   | _ => true
   end.
@@ -461,6 +573,50 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
           | _, _ => None
           end
       | TSeq first second =>
+          match guarded_head first with
+          | Some (condition, existT opening_invariant opening_arguments) =>
+              match second with
+              | TSeq body (TFold closing_invariant closing_arguments) =>
+                  match decide (opening_invariant = closing_invariant) with
+                  | left Heq =>
+                      if restricted_access_boundary_check opening_arguments
+                        (eq_rect _ (fun invariant =>
+                          gexpr_list Γ (Assertion.invariant_args invariant))
+                          closing_arguments _ (eq_sym Heq)) body
+                      then
+                        match restricted_normalize_statement_fuel fuel' body with
+                        | Some normalized_body =>
+                            Some (TSeq (TAssert condition)
+                              (TInvAccess opening_invariant opening_arguments
+                                normalized_body))
+                        | None => None
+                        end
+                      else None
+                  | right _ => None
+                  end
+              | TSeq body
+                  (TSeq (TFold closing_invariant closing_arguments) work) =>
+                  match decide (opening_invariant = closing_invariant) with
+                  | left Heq =>
+                      if restricted_access_boundary_check opening_arguments
+                        (eq_rect _ (fun invariant =>
+                          gexpr_list Γ (Assertion.invariant_args invariant))
+                          closing_arguments _ (eq_sym Heq)) body
+                      then
+                        match restricted_normalize_statement_fuel fuel' body,
+                            restricted_normalize_statement_fuel fuel' work with
+                        | Some normalized_body, Some normalized_work =>
+                            Some (TSeq (TSeq (TAssert condition)
+                              (TInvAccess opening_invariant opening_arguments
+                                normalized_body)) normalized_work)
+                        | _, _ => None
+                        end
+                      else None
+                  | right _ => None
+                  end
+              | _ => None
+              end
+          | None =>
           match first, second with
           | TUnfold opening_invariant opening_arguments,
               TSeq body (TFold closing_invariant closing_arguments) =>
@@ -533,6 +689,7 @@ Fixpoint restricted_normalize_statement_fuel {Γ} (fuel : nat)
                   Some (TSeq normalized_first normalized_second)
               | _, _ => None
               end
+          end
           end
       | _ => Some statement
       end
@@ -630,26 +787,37 @@ Lemma shape_sequence_unfold_free {Γ} nested (first second : stmt Γ) :
   restricted_fragment_shape_check nested (TSeq first second) =
     restricted_fragment_shape_check nested first &&
     restricted_fragment_shape_check nested second.
-Proof. destruct first; cbn; try discriminate; reflexivity. Qed.
+Proof.
+  intros Hfree. destruct first; cbn in Hfree |- *; try discriminate;
+    try reflexivity.
+  destruct (guarded_head (TSeq first1 first2))
+    as [[condition [invariant arguments]]|] eqn:Hhead; [|reflexivity].
+  apply guarded_head_some in Hhead. injection Hhead as -> ->.
+  cbn in Hfree. discriminate.
+Qed.
 
 Lemma shape_sequence_split {Γ} nested (first second : stmt Γ) :
   (forall invariant arguments, first <> TUnfold invariant arguments) ->
+  guarded_head first = None ->
   restricted_fragment_shape_check nested (TSeq first second) =
     restricted_fragment_shape_check nested first &&
     restricted_fragment_shape_check nested second.
 Proof.
-  intros Hfirst. destruct first; try reflexivity.
-  exfalso. eapply Hfirst. reflexivity.
+  intros Hfirst Hunguarded. destruct first; try reflexivity.
+  - exfalso. eapply Hfirst. reflexivity.
+  - cbn. rewrite Hunguarded. reflexivity.
 Qed.
 
 Lemma effect_sequence_split {Γ} (first second : stmt Γ) :
   (forall invariant arguments, first <> TUnfold invariant arguments) ->
+  guarded_head first = None ->
   restricted_access_effect_check (TSeq first second) =
     restricted_access_effect_check first &&
     restricted_access_effect_check second.
 Proof.
-  intros Hfirst. destruct first; try reflexivity.
-  exfalso. eapply Hfirst. reflexivity.
+  intros Hfirst Hunguarded. destruct first; try reflexivity.
+  - exfalso. eapply Hfirst. reflexivity.
+  - cbn. rewrite Hunguarded. reflexivity.
 Qed.
 
 (** Unfold-free statements accepted in a nested position contain no fold. *)
@@ -787,16 +955,68 @@ Proof.
     apply andb_prop in Heffects as [Hthen_effects Helse_effects].
     apply BaselineConditional; (apply IH; [cbn; lia | assumption | assumption]).
   - destruct current1.
+    all: try lazymatch goal with
+      | |- baseline_normalizable _ (TSeq (TSeq ?first ?second) _) =>
+          destruct (guarded_head (TSeq first second))
+            as [[condition [invariant arguments]]|] eqn:Hhead
+      end.
     all: try (rewrite shape_sequence_split in Hcheck
-        by (intros ? ? ?; discriminate);
+        by first [intros ? ? ?; discriminate | reflexivity | assumption];
       rewrite effect_sequence_split in Heffects
-        by (intros ? ? ?; discriminate);
+        by first [intros ? ? ?; discriminate | reflexivity | assumption];
       apply andb_prop in Hcheck as [Hfirst Hsecond];
       apply andb_prop in Heffects as [Hfirst_effects Hsecond_effects];
       apply BaselineBalancedSequence;
-        (apply IH; [cbn; lia | assumption | assumption])).
-    apply restricted_unfold_head_shape_sound; [| exact Hcheck | exact Heffects].
-    intros nested'' smaller Hsmaller. apply IH. exact Hsmaller.
+        [first [reflexivity
+               |destruct current2; try reflexivity; cbn in Hsecond;
+                discriminate]
+        |apply IH; [cbn; lia | assumption | assumption]
+        |apply IH; [cbn; lia | assumption | assumption]]).
+    { apply restricted_unfold_head_shape_sound; [| exact Hcheck | exact Heffects].
+      intros nested'' smaller Hsmaller. apply IH. exact Hsmaller. }
+    (* guarded access *)
+    apply guarded_head_some in Hhead. injection Hhead as -> ->.
+    cbn in Hcheck, Heffects.
+    destruct current2 as [| | | | | | | | | | | | | | | body rest | | |];
+      cbn in Hcheck; try discriminate.
+    destruct rest as [| | | | | | | | | | invariant' closing | | | | |
+      rest1 work | | |]; cbn in Hcheck, Heffects; try discriminate.
+    all: unfold guarded_parseb in Hcheck.
+    all: destruct (IR.arguments_distinct_parse arguments condition)
+      as [excluded|] eqn:Hparse; [|try destruct rest1; discriminate].
+    + apply andb_prop in Hcheck as [Hinvariant Hbody].
+      apply bool_decide_eq_true in Hinvariant. subst invariant'.
+      destruct (decide (invariant = invariant)) as [Heq|]; [|contradiction].
+      replace Heq with (@eq_refl inv_id invariant) in Heffects
+        by apply ProofIrrelevance.proof_irrelevance.
+      cbn in Heffects.
+      apply andb_prop in Heffects as [Heffects Hbody_effects].
+      apply andb_prop in Heffects as [Hboundary Hstable].
+      apply bool_decide_eq_true in Hstable.
+      apply restricted_access_boundary_check_sound in Hboundary as
+        [Harguments Hdisjoint].
+      eapply BaselineGuardedAccess; [exact Hparse | | exact Harguments
+        | exact Hdisjoint | exact Hstable].
+      apply IH; [cbn; lia | exact Hbody | exact Hbody_effects].
+    + destruct rest1 as [| | | | | | | | | | invariant' closing | | | | | | | |];
+        cbn in Hcheck, Heffects; try discriminate.
+      apply andb_prop in Hcheck as [Hcheck Hwork].
+      apply andb_prop in Hcheck as [Hinvariant Hbody].
+      apply bool_decide_eq_true in Hinvariant. subst invariant'.
+      destruct (decide (invariant = invariant)) as [Heq|]; [|contradiction].
+      replace Heq with (@eq_refl inv_id invariant) in Heffects
+        by apply ProofIrrelevance.proof_irrelevance.
+      cbn in Heffects.
+      apply andb_prop in Heffects as [Heffects Hwork_effects].
+      apply andb_prop in Heffects as [Heffects Hbody_effects].
+      apply andb_prop in Heffects as [Hboundary Hstable].
+      apply bool_decide_eq_true in Hstable.
+      apply restricted_access_boundary_check_sound in Hboundary as
+        [Harguments Hdisjoint].
+      eapply BaselineGuardedAccessThen; [exact Hparse | | exact Harguments
+        | exact Hdisjoint | exact Hstable | ].
+      * apply IH; [cbn; lia | exact Hbody | exact Hbody_effects].
+      * apply IH; [cbn; lia | exact Hwork | exact Hwork_effects].
   - cbn in Hcheck. destruct nested'.
     + apply access_neutralb_unfold_freeb in Hcheck. congruence.
     + congruence.
@@ -828,6 +1048,16 @@ Lemma restricted_access_neutral_unfold_free {Γ} (statement : stmt Γ) :
   access_neutral statement -> unfold_free statement.
 Proof.
   induction statement; cbn; intuition.
+Qed.
+
+Lemma unfold_free_guarded_head {Γ} (first : stmt Γ) :
+  unfold_free first -> guarded_head first = None.
+Proof.
+  intros Hfree.
+  destruct (guarded_head first) as [[condition [invariant arguments]]|]
+    eqn:Hhead; [|reflexivity].
+  apply guarded_head_some in Hhead. subst first.
+  cbn in Hfree. tauto.
 Qed.
 
 Lemma unfold_free_normalize_statement_succeeds_with_fuel {Γ}
@@ -862,6 +1092,7 @@ Proof.
     destruct statement1; cbn [unfold_free] in Hfree1;
       try contradiction;
       cbn [restricted_normalize_statement_fuel] in Hnormalized1 |- *;
+      try rewrite (unfold_free_guarded_head (TSeq _ _) Hfree1);
       rewrite Hnormalized1, Hnormalized2;
       eexists; reflexivity.
   - destruct (IHstatement fuel Hfree ltac:(lia)) as
@@ -915,7 +1146,8 @@ Proof.
     remember (restricted_normalize_statement_fuel fuel statement2)
       as second_result eqn:Hsecond_result.
     destruct statement1; cbn [unfold_free] in Hfirst; try contradiction;
-      cbn [restricted_normalize_statement_fuel] in Hworker.
+      cbn [restricted_normalize_statement_fuel] in Hworker;
+      try rewrite (unfold_free_guarded_head (TSeq _ _) Hfirst) in Hworker.
     all: destruct first_result; try discriminate;
       destruct second_result; try discriminate;
       inversion Hworker; subst; f_equal;
@@ -971,6 +1203,47 @@ Proof.
   destruct (decide (invariant = invariant)) as [Heq | Hneq];
     [| contradiction].
   replace Heq with (@eq_refl inv_id invariant) by apply ProofIrrelevance.proof_irrelevance.
+  cbn. now rewrite Hboundary, Hbody, Hwork.
+Qed.
+
+Lemma restricted_normalize_guarded_terminal {Γ} fuel condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (body normalized_body : stmt Γ) :
+  restricted_access_boundary_check arguments arguments body = true ->
+  restricted_normalize_statement_fuel fuel body = Some normalized_body ->
+  restricted_normalize_statement_fuel (S fuel)
+    (TSeq (TSeq (TAssert condition) (TUnfold invariant arguments))
+      (TSeq body (TFold invariant arguments))) =
+    Some (TSeq (TAssert condition)
+      (TInvAccess invariant arguments normalized_body)).
+Proof.
+  intros Hboundary Hbody.
+  cbn [restricted_normalize_statement_fuel guarded_head].
+  destruct (decide (invariant = invariant)) as [Heq | Hneq];
+    [| contradiction].
+  replace Heq with (@eq_refl inv_id invariant)
+    by apply ProofIrrelevance.proof_irrelevance.
+  cbn. now rewrite Hboundary, Hbody.
+Qed.
+
+Lemma restricted_normalize_guarded_continued {Γ} fuel condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (body work normalized_body normalized_work : stmt Γ) :
+  restricted_access_boundary_check arguments arguments body = true ->
+  restricted_normalize_statement_fuel fuel body = Some normalized_body ->
+  restricted_normalize_statement_fuel fuel work = Some normalized_work ->
+  restricted_normalize_statement_fuel (S fuel)
+    (TSeq (TSeq (TAssert condition) (TUnfold invariant arguments))
+      (TSeq body (TSeq (TFold invariant arguments) work))) =
+    Some (TSeq (TSeq (TAssert condition)
+      (TInvAccess invariant arguments normalized_body)) normalized_work).
+Proof.
+  intros Hboundary Hbody Hwork.
+  cbn [restricted_normalize_statement_fuel guarded_head].
+  destruct (decide (invariant = invariant)) as [Heq | Hneq];
+    [| contradiction].
+  replace Heq with (@eq_refl inv_id invariant)
+    by apply ProofIrrelevance.proof_irrelevance.
   cbn. now rewrite Hboundary, Hbody, Hwork.
 Qed.
 
@@ -1120,6 +1393,54 @@ Proof.
     rewrite Hq, Htp, Hep, Hthen, Helse; set_solver.
 Qed.
 
+(** The worker on a guarded access. *)
+Lemma restricted_normalize_guarded_inv {Γ} fuel condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (second normalized : stmt Γ) :
+  restricted_normalize_statement_fuel (S fuel)
+    (TSeq (TSeq (TAssert condition) (TUnfold invariant arguments)) second) =
+    Some normalized ->
+  exists body closing normalized_body,
+    restricted_access_boundary_check arguments closing body = true /\
+    restricted_normalize_statement_fuel fuel body = Some normalized_body /\
+    ((second = TSeq body (TFold invariant closing) /\
+      normalized = TSeq (TAssert condition)
+        (TInvAccess invariant arguments normalized_body)) \/
+     (exists work normalized_work,
+      second = TSeq body (TSeq (TFold invariant closing) work) /\
+      restricted_normalize_statement_fuel fuel work = Some normalized_work /\
+      normalized = TSeq (TSeq (TAssert condition)
+        (TInvAccess invariant arguments normalized_body)) normalized_work)).
+Proof.
+  cbn [restricted_normalize_statement_fuel guarded_head].
+  destruct second as [| | | | | | | | | | | | | | | body rest | | |];
+    try discriminate.
+  destruct rest as [| | | | | | | | | | invariant' closing | | | | |
+    rest1 work | | |]; try discriminate.
+  - destruct (decide (invariant = invariant')) as [Heq|]; [|discriminate].
+    subst invariant'. cbn.
+    destruct (restricted_access_boundary_check arguments closing body)
+      eqn:Hboundary; [|discriminate].
+    destruct (restricted_normalize_statement_fuel fuel body)
+      as [normalized_body|] eqn:Hbody; [|discriminate].
+    intros [= <-]. exists body, closing, normalized_body.
+    split; [exact Hboundary|]. split; [exact Hbody|]. left. split; reflexivity.
+  - destruct rest1 as [| | | | | | | | | | invariant' closing | | | | | | | |];
+      try discriminate.
+    destruct (decide (invariant = invariant')) as [Heq|]; [|discriminate].
+    subst invariant'. cbn.
+    destruct (restricted_access_boundary_check arguments closing body)
+      eqn:Hboundary; [|discriminate].
+    destruct (restricted_normalize_statement_fuel fuel body)
+      as [normalized_body|] eqn:Hbody; [|discriminate].
+    destruct (restricted_normalize_statement_fuel fuel work)
+      as [normalized_work|] eqn:Hwork; [|discriminate].
+    intros [= <-]. exists body, closing, normalized_body.
+    split; [exact Hboundary|]. split; [exact Hbody|]. right.
+    exists work, normalized_work. split; [reflexivity|]. split; [exact Hwork|].
+    reflexivity.
+Qed.
+
 Lemma restricted_normalize_statement_proof_only {Γ} fuel
     (statement normalized : stmt Γ) :
   restricted_normalize_statement_fuel fuel statement = Some normalized ->
@@ -1177,6 +1498,21 @@ Proof.
       destruct (restricted_normalize_statement_fuel fuel statement2_2_2)
         eqn:Hwork; [|discriminate].
       injection Hworker as <-. cbn. rewrite (IH _ _ _ Hbody), (IH _ _ _ Hwork). reflexivity.
+    + destruct (guarded_head (TSeq statement1_1 statement1_2))
+        as [[condition [invariant' arguments']]|] eqn:Hhead.
+      * apply guarded_head_some in Hhead. injection Hhead as -> ->.
+        destruct (restricted_normalize_guarded_inv fuel _ _ _ _ _ Hworker)
+          as (body & closing & normalized_body & _ & Hbody &
+            [[-> ->] | (work & normalized_work & -> & Hwork & ->)]).
+        -- cbn. rewrite (IH _ _ _ Hbody), Bool.andb_true_r. reflexivity.
+        -- cbn. rewrite (IH _ _ _ Hbody), (IH _ _ _ Hwork). reflexivity.
+      * cbv beta iota in Hworker.
+        destruct (restricted_normalize_statement_fuel fuel
+          (TSeq statement1_1 statement1_2)) eqn:Hfirst; [|discriminate].
+        destruct (restricted_normalize_statement_fuel fuel statement2)
+          eqn:Hsecond; [|discriminate].
+        injection Hworker as <-. cbn.
+        rewrite (IH _ _ _ Hfirst), (IH _ _ _ Hsecond). reflexivity.
   - destruct (restricted_normalize_statement_fuel fuel statement) eqn:Hbody;
       [|discriminate].
     injection Hworker as <-. reflexivity.
@@ -1249,6 +1585,21 @@ Proof.
       destruct (restricted_normalize_statement_fuel fuel statement2_2_2)
         eqn:Hwork; [|discriminate].
       injection Hworker as <-. cbn. rewrite (IH _ _ _ Hbody), (IH _ _ _ Hwork). set_solver.
+    + destruct (guarded_head (TSeq statement1_1 statement1_2))
+        as [[condition [invariant' arguments']]|] eqn:Hhead.
+      * apply guarded_head_some in Hhead. injection Hhead as -> ->.
+        destruct (restricted_normalize_guarded_inv fuel _ _ _ _ _ Hworker)
+          as (body & closing & normalized_body & _ & Hbody &
+            [[-> ->] | (work & normalized_work & -> & Hwork & ->)]).
+        -- cbn. rewrite (IH _ _ _ Hbody). set_solver.
+        -- cbn. rewrite (IH _ _ _ Hbody), (IH _ _ _ Hwork). set_solver.
+      * cbv beta iota in Hworker.
+        destruct (restricted_normalize_statement_fuel fuel
+          (TSeq statement1_1 statement1_2)) eqn:Hfirst; [|discriminate].
+        destruct (restricted_normalize_statement_fuel fuel statement2)
+          eqn:Hsecond; [|discriminate].
+        injection Hworker as <-. cbn.
+        rewrite (IH _ _ _ Hfirst), (IH _ _ _ Hsecond). reflexivity.
   - destruct (restricted_normalize_statement_fuel fuel statement) eqn:Hbody;
       [|discriminate].
     injection Hworker as <-. cbn. exact (IH _ _ _ Hbody).
@@ -1265,6 +1616,7 @@ Qed.
 
 Lemma restricted_normalize_sequence_step {Γ} fuel (first second : stmt Γ) :
   (forall invariant arguments, first <> TUnfold invariant arguments) ->
+  guarded_head first = None ->
   restricted_normalize_statement_fuel (S fuel) (TSeq first second) =
     match restricted_normalize_statement_fuel fuel first,
         restricted_normalize_statement_fuel fuel second with
@@ -1273,8 +1625,9 @@ Lemma restricted_normalize_sequence_step {Γ} fuel (first second : stmt Γ) :
     | _, _ => None
     end.
 Proof.
-  intros Hfirst. destruct first; try reflexivity.
-  exfalso. eapply Hfirst. reflexivity.
+  intros Hfirst Hunguarded. destruct first; try reflexivity.
+  - exfalso. eapply Hfirst. reflexivity.
+  - cbn. rewrite Hunguarded. reflexivity.
 Qed.
 
 (** Successful admission is sufficient for the proof-irrelevant normalizer
@@ -1327,9 +1680,9 @@ Proof.
     eexists; reflexivity.
   - destruct current1.
     all: try (rewrite shape_sequence_split in Hshape
-        by (intros ? ? ?; discriminate);
+        by first [intros ? ? ?; discriminate | reflexivity | assumption];
       rewrite effect_sequence_split in Heffect
-        by (intros ? ? ?; discriminate);
+        by first [intros ? ? ?; discriminate | reflexivity | assumption];
       apply andb_prop in Hshape as [Hfirst Hsecond];
       apply andb_prop in Heffect as [Hfirst_effect Hsecond_effect];
       cbn in Hfuel;
@@ -1342,7 +1695,7 @@ Proof.
             ltac:(cbn in *; lia)) as [second' Hsecond']
       end;
       rewrite restricted_normalize_sequence_step
-        by (intros ? ? ?; discriminate);
+        by first [intros ? ? ?; discriminate | reflexivity | assumption];
       rewrite Hfirst', Hsecond'; eexists; reflexivity).
     cbn in Hfuel.
     destruct current2; cbn in Hshape; try discriminate.
@@ -1424,6 +1777,71 @@ Proof.
       cbn [restricted_normalize_statement_fuel].
       erewrite restricted_normalize_conditional_access_succeeds;
         [eexists; reflexivity | eassumption ..].
+    + (* a sequence headed by a sequence *)
+      destruct (guarded_head (TSeq current1_1 current1_2))
+        as [[condition [invariant' arguments']]|] eqn:Hhead.
+      * apply guarded_head_some in Hhead. injection Hhead as -> ->.
+        cbn in Hfuel.
+        cbn [restricted_fragment_shape_check guarded_head] in Hshape.
+        cbn [restricted_access_effect_check guarded_head] in Heffect.
+        destruct current2 as [| | | | | | | | | | | | | | | body rest | | |];
+          try discriminate.
+        destruct rest as [| | | | | | | | | | invariant'' closing | | | | |
+          rest1 work | | |]; try discriminate.
+        -- apply andb_prop in Hshape as [Hshape Hbody].
+           apply andb_prop in Hshape as [_ Hinvariant].
+           apply bool_decide_eq_true in Hinvariant. subst invariant''.
+           destruct (decide (invariant' = invariant')) as [Heq|];
+             [|contradiction].
+           replace Heq with (@eq_refl inv_id invariant') in Heffect
+             by apply ProofIrrelevance.proof_irrelevance.
+           cbn in Heffect.
+           apply andb_prop in Heffect as [Heffect Hbody_effect].
+           apply andb_prop in Heffect as [Hboundary _].
+           destruct (IH _ _ body ltac:(cbn; lia) fuel Hbody Hbody_effect
+             ltac:(cbn in *; lia)) as [body' Hbody'].
+           pose proof (restricted_access_boundary_check_sound _ _ _ Hboundary)
+             as [Harguments _].
+           subst.
+           erewrite restricted_normalize_guarded_terminal;
+             [eexists; reflexivity | ..]; eassumption.
+        -- destruct rest1 as [| | | | | | | | | | invariant'' closing | | | | |
+             | | |]; try discriminate.
+           apply andb_prop in Hshape as [Hshape Hwork_shape].
+           apply andb_prop in Hshape as [Hshape Hbody].
+           apply andb_prop in Hshape as [_ Hinvariant].
+           apply bool_decide_eq_true in Hinvariant. subst invariant''.
+           destruct (decide (invariant' = invariant')) as [Heq|];
+             [|contradiction].
+           replace Heq with (@eq_refl inv_id invariant') in Heffect
+             by apply ProofIrrelevance.proof_irrelevance.
+           cbn in Heffect.
+           apply andb_prop in Heffect as [Heffect Hwork_effect].
+           apply andb_prop in Heffect as [Heffect Hbody_effect].
+           apply andb_prop in Heffect as [Hboundary _].
+           destruct (IH _ _ body ltac:(cbn; lia) fuel Hbody Hbody_effect
+             ltac:(cbn in *; lia)) as [body' Hbody'].
+           destruct (IH _ _ work ltac:(cbn; lia) fuel Hwork_shape
+             Hwork_effect ltac:(cbn in *; lia)) as [work' Hwork'].
+           pose proof (restricted_access_boundary_check_sound _ _ _ Hboundary)
+             as [Harguments _].
+           subst.
+           erewrite restricted_normalize_guarded_continued;
+             [eexists; reflexivity | ..]; eassumption.
+      * rewrite shape_sequence_split in Hshape
+          by first [intros ? ? ?; discriminate | assumption].
+        rewrite effect_sequence_split in Heffect
+          by first [intros ? ? ?; discriminate | assumption].
+        apply andb_prop in Hshape as [Hfirst Hsecond].
+        apply andb_prop in Heffect as [Hfirst_effect Hsecond_effect].
+        cbn in Hfuel.
+        destruct (IH _ _ (TSeq current1_1 current1_2) ltac:(cbn; lia) fuel
+          Hfirst Hfirst_effect ltac:(cbn in *; lia)) as [first' Hfirst'].
+        destruct (IH _ _ current2 ltac:(cbn; lia) fuel Hsecond Hsecond_effect
+          ltac:(cbn in *; lia)) as [second' Hsecond'].
+        rewrite restricted_normalize_sequence_step
+          by first [intros ? ? ?; discriminate | assumption].
+        rewrite Hfirst', Hsecond'. eexists; reflexivity.
   - cbn in Hshape. destruct nested'.
     + apply access_neutralb_unfold_freeb in Hshape. congruence.
     + congruence.
@@ -1494,20 +1912,22 @@ Proof.
   induction certificate; intros Hneutral.
   - eapply Atom.take_leaf_preserves_records; eauto.
   - reflexivity.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hneutral. contradiction.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hneutral. contradiction.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - exfalso. destruct statement; cbn in e; try guarded_view_cases;
+    try discriminate.
+    all: cbn in Hneutral; tauto.
+  - exfalso. destruct statement; cbn in e; try guarded_view_cases;
+    try discriminate.
+    all: cbn in Hneutral; tauto.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn in Hneutral. destruct Hneutral as [Hfirst Hsecond].
     rewrite (IHcertificate2 Hsecond), (IHcertificate1 Hfirst). reflexivity.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     all: cbn in Hneutral; destruct Hneutral as [Hthen _].
     all: exact (IHcertificate1 Hthen).
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn [Atom.analysis_records]. rewrite e1.
     eapply Atom.take_step_preserves_records; eauto.
-  - destruct statement; cbn in e; try discriminate.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
     injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hneutral. exact (IHcertificate Hneutral).
@@ -1531,23 +1951,24 @@ Proof.
   induction certificate; intros Hfree.
   - erewrite Atom.take_leaf_preserves_records by eauto. reflexivity.
   - reflexivity.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hfree. contradiction.
+  - exfalso. destruct statement; cbn in e; try guarded_view_cases;
+    try discriminate.
+    all: cbn in Hfree; tauto.
   - unfold Atom.fold_invariant.
     destruct (Atom.analysis_records state) as [|record rest];
       [reflexivity|].
     destruct (decide (Atom.record_invariant record = invariant)); cbn;
       [apply suffix_cons_r|]; reflexivity.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn in Hfree. destruct Hfree as [Hfirst Hsecond].
     transitivity (Atom.analysis_records middle); auto.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     all: cbn in Hfree; destruct Hfree as [Hthen _].
     all: exact (IHcertificate1 Hthen).
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn [Atom.analysis_records]. rewrite e1.
     erewrite Atom.take_step_preserves_records by eauto. reflexivity.
-  - destruct statement; cbn in e; try discriminate.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
     injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hfree. exact (IHcertificate Hfree).
@@ -1587,26 +2008,40 @@ Lemma structured_certificate_unfold_free {Γ entry statement exit}
     unfold_free statement.
 Proof.
   induction certificate; simpl; intuition.
-  all: destruct statement; cbn in e |- *; try discriminate; exact I.
+  all: destruct statement; cbn in e |- *; try guarded_view_cases; try discriminate; exact I.
 Qed.
 
 (** Safety condition needed by the Iris interpretation: invariant-access
     regions may contain trusted atomic blocks, but may not themselves occur
-    inside one. *)
+    inside one.  An access of an open declaration occurs only right after
+    the assertion that its instance differs from the excluded ones. *)
 Fixpoint structured_accesses_outside_atomic
     {Γ entry statement exit}
     (certificate : structured_certificate Γ entry statement exit) : Prop :=
   match certificate with
-  | StructuredSequence _ _ _ _ _ _ first second =>
+  | StructuredSequence _ _ first_statement _ _ _ first second =>
       structured_accesses_outside_atomic first /\
-      structured_accesses_outside_atomic second
+      match second in structured_certificate Γ0 _ _ _
+        return stmt Γ0 -> Prop with
+      | StructuredInvAccess _ access_entry invariant arguments excluded
+          body_statement _ _ _ body _ => fun first_statement0 =>
+          GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
+          (invariant ∉ GenericRegions.Atomicity.analysis_open access_entry \/
+           first_statement0 =
+             TAssert (IR.arguments_distinct arguments excluded) /\
+           pexpr_dependencies (IR.arguments_distinct arguments excluded) ##
+             statement_writes body_statement) /\
+          structured_accesses_outside_atomic body
+      | second0 => fun _ => structured_accesses_outside_atomic second0
+      end first_statement
   | StructuredConditional _ _ _ _ _ _ _ then_branch else_branch _ _ =>
       structured_accesses_outside_atomic then_branch /\
       structured_accesses_outside_atomic else_branch
   | StructuredAtomic _ _ _ _ _ _ body _ =>
       structured_accesses_outside_atomic body
-  | StructuredInvAccess _ access_entry _ _ _ _ _ _ body _ =>
+  | StructuredInvAccess _ access_entry invariant _ _ _ _ _ _ body _ =>
       GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
+      invariant ∉ GenericRegions.Atomicity.analysis_open access_entry /\
       structured_accesses_outside_atomic body
   | StructuredGhostVal _ _ _ _ _ _ _ body _ =>
       structured_accesses_outside_atomic body
@@ -1615,6 +2050,34 @@ Fixpoint structured_accesses_outside_atomic
       structured_accesses_outside_atomic else_branch
   | _ => True
   end.
+
+Lemma structured_accesses_outside_atomic_sequence
+    {Γ entry first middle second exit}
+    (first_certificate : structured_certificate Γ entry first middle)
+    (second_certificate : structured_certificate Γ middle second exit) :
+  structured_accesses_outside_atomic first_certificate ->
+  structured_accesses_outside_atomic second_certificate ->
+  structured_accesses_outside_atomic
+    (StructuredSequence Γ entry first middle second exit
+      first_certificate second_certificate).
+Proof.
+  intros Hfirst Hsecond. split; [exact Hfirst|].
+  destruct second_certificate; try exact Hsecond.
+  destruct Hsecond as (Hatomic & Hclosed & Hbody). eauto.
+Qed.
+
+Lemma structured_accesses_outside_atomic_access
+    {Γ entry invariant arguments excluded body opened inner}
+    Hopen
+    (body_certificate : structured_certificate Γ opened body inner)
+    Hpreserved :
+  GenericRegions.Atomicity.analysis_in_atomic entry = false ->
+  invariant ∉ GenericRegions.Atomicity.analysis_open entry ->
+  structured_accesses_outside_atomic body_certificate ->
+  structured_accesses_outside_atomic
+    (StructuredInvAccess Γ entry invariant arguments excluded body opened
+      inner Hopen body_certificate Hpreserved).
+Proof. intros Hatomic Hclosed Hbody. split; [|split]; assumption. Qed.
 
 (** ** Certificates of canonical conditional accesses *)
 
@@ -1637,11 +2100,14 @@ Definition closing_branch_certificate {Γ} invariant
   Atom.CertSequence Γ joined
     (canonical_branch invariant arguments branch_prefix continuation)
     branch_prefix closed (TSeq (TFold invariant arguments) continuation) exit
-    eq_refl prefix_certificate
+    (RegionSyntax.region_view_sequence branch_prefix
+      (TSeq (TFold invariant arguments) continuation) I) prefix_certificate
     (Atom.CertSequence Γ closed (TSeq (TFold invariant arguments) continuation)
       (TFold invariant arguments)
       (Atom.fold_invariant invariant (RegionSyntax.argument_key arguments)
-        closed) continuation exit eq_refl
+        closed) continuation exit
+      (RegionSyntax.region_view_sequence_first (TFold invariant arguments)
+        continuation I)
       (Atom.CertFold Γ closed (TFold invariant arguments) invariant
         (RegionSyntax.argument_key arguments) eq_refl Hadmissible)
       continuation_certificate).
@@ -1686,9 +2152,17 @@ Definition conditional_access_certificate {Γ} invariant
       then_continuation else_prefix else_continuation)
     (TUnfold invariant arguments) opened (TSeq prefix conditional) _ eq_refl
     (Atom.CertUnfold Γ entry (TUnfold invariant arguments) invariant
-      (RegionSyntax.argument_key arguments) opened eq_refl Hopen)
+      (RegionSyntax.argument_key arguments) [] opened eq_refl
+      (Atom.open_invariant_access _ _ _ _ _ Hopen))
     (Atom.CertSequence Γ opened (TSeq prefix conditional) prefix joined
-      conditional _ eq_refl prefix_certificate
+      conditional _
+      (RegionSyntax.region_view_sequence prefix
+        (guard_if guard then_branch else_branch)
+        (match guard as guard0 return
+           match guard_if guard0 then_branch else_branch with
+           | TUnfold _ _ => False | _ => True end with
+         | GuardRuntime _ => I | GuardGhost _ => I end))
+      prefix_certificate
       (Atom.CertConditional Γ joined conditional then_branch else_branch
         then_exit else_exit
         (guard_if_view guard _ _)
@@ -1738,7 +2212,8 @@ Record conditional_access_parts {Γ} invariant
 Ltac view_inversion :=
   match goal with
   | Hview : @AnalysisView.syntax_view _ _ _ = _ |- _ =>
-      cbn in Hview; inversion Hview; subst; try clear Hview
+      cbn in Hview; try guarded_view_cases;
+      try (inversion Hview; subst; try clear Hview)
   end.
 
 Lemma conditional_access_certificate_parts {Γ} invariant
@@ -1754,20 +2229,34 @@ Lemma conditional_access_certificate_parts {Γ} invariant
 Proof.
   unfold conditional_access in certificate.
   destruct guard; cbn [guard_if] in certificate.
-  all: dependent destruction certificate; try discriminate; try view_inversion.
-  all: dependent destruction certificate1; try discriminate; try view_inversion.
-  all: dependent destruction certificate2; try discriminate; try view_inversion.
-  all: dependent destruction certificate2_2; try discriminate; try view_inversion.
-  all: dependent destruction certificate2_2_1; try discriminate; try view_inversion.
+  all: dependent destruction certificate; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: dependent destruction certificate1; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: dependent destruction certificate2; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: dependent destruction certificate2_2; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: dependent destruction certificate2_2_1; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
   all: dependent destruction certificate2_2_1_2; try discriminate;
-    try view_inversion.
+    try view_inversion;
+    try guarded_view_cases; try discriminate.
   all: dependent destruction certificate2_2_1_2_1; try discriminate;
-    try view_inversion.
-  all: dependent destruction certificate2_2_2; try discriminate; try view_inversion.
+    try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: dependent destruction certificate2_2_2; try discriminate; try view_inversion;
+    try guarded_view_cases; try discriminate.
   all: dependent destruction certificate2_2_2_2; try discriminate;
-    try view_inversion.
+    try view_inversion;
+    try guarded_view_cases; try discriminate.
   all: dependent destruction certificate2_2_2_2_1; try discriminate;
-    try view_inversion.
+    try view_inversion;
+    try guarded_view_cases; try discriminate.
+  all: match goal with
+    | Hopen : Atom.open_access _ _ [] _ = inr _ |- _ =>
+        pose proof (Atom.open_access_nil _ _ _ _ Hopen)
+    end.
   all: econstructor; try eassumption; reflexivity.
 Qed.
 
@@ -1826,7 +2315,38 @@ Qed.
 Ltac open_transition :=
   match goal with
   | Htransition : Atom.open_invariant _ _ _ = inr _ |- _ => exact Htransition
+  | Htransition : Atom.open_access _ _ [] _ = inr _ |- _ =>
+      exact (Atom.open_access_nil _ _ _ _ Htransition)
   end.
+
+Lemma fold_after_open_access_records invariant key key' excluded outer
+    opened inner :
+  Atom.open_access invariant key excluded outer = inr opened ->
+  Atom.analysis_records inner = Atom.analysis_records opened ->
+  Atom.analysis_records (Atom.fold_invariant invariant key' inner) =
+    Atom.analysis_records outer.
+Proof.
+  intros Hopen Hinner.
+  destruct (Atom.open_access_records _ _ _ _ _ Hopen) as (entry & ->).
+  cbn [Atom.analysis_records] in Hinner.
+  rewrite (Atom.fold_invariant_closes _ _ _ _ _ Hinner eq_refl). reflexivity.
+Qed.
+
+(** The analyzer opens a guarded unfold with its excluded keys. *)
+Lemma guarded_unfold_certificate_open {Γ} condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant)) excluded
+    entry exit :
+  IR.arguments_distinct_parse arguments condition = Some excluded ->
+  Atom.analysis_certificate Γ entry
+    (TSeq (TAssert condition) (TUnfold invariant arguments)) exit ->
+  Atom.open_access invariant (RegionSyntax.argument_key arguments)
+    (map RegionSyntax.argument_key excluded) entry = inr exit.
+Proof.
+  intros Hparse certificate. dependent destruction certificate.
+  all: cbn in e; unfold RegionSyntax.guarded_unfold in e; rewrite Hparse in e;
+    try discriminate.
+  injection e as <- <- <-. exact e0.
+Qed.
 
 (** A nested statement keeps the open records. *)
 Lemma baseline_nested_balanced {Γ} nested (statement : stmt Γ)
@@ -1836,46 +2356,98 @@ Proof.
   induction Hbaseline; intros Hnested entry exit certificate; subst nested.
   - exact (access_neutral_balanced _ y _ _ certificate).
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     rewrite (IHHbaseline eq_refl _ _ certificate2).
     exact (access_neutral_records certificate1 a).
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     rewrite (IHHbaseline2 eq_refl _ _ certificate2).
     exact (IHHbaseline1 eq_refl _ _ certificate1).
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline1 eq_refl _ _ certificate1).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     eapply Atom.fold_after_open_records; [open_transition|].
     exact (IHHbaseline eq_refl _ _ certificate2_1).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2_1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     rewrite (IHHbaseline2 eq_refl _ _ certificate2_2_2).
     eapply Atom.fold_after_open_records; [open_transition|].
     exact (IHHbaseline1 eq_refl _ _ certificate2_1).
+  - subst closing_arguments.
+    dependent destruction certificate; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    match goal with
+    | Hparse : IR.arguments_distinct_parse _ _ = Some _ |- _ =>
+        pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse
+          certificate1) as Hopen
+    end.
+    dependent destruction certificate2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    eapply fold_after_open_access_records; [exact Hopen|].
+    exact (IHHbaseline eq_refl _ _ certificate2_1).
+  - subst closing_arguments.
+    dependent destruction certificate; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    match goal with
+    | Hparse : IR.arguments_distinct_parse _ _ = Some _ |- _ =>
+        pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse
+          certificate1) as Hopen
+    end.
+    dependent destruction certificate2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2_1; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    rewrite (IHHbaseline2 eq_refl _ _ certificate2_2_2).
+    eapply fold_after_open_access_records; [exact Hopen|].
+    exact (IHHbaseline1 eq_refl _ _ certificate2_1).
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline eq_refl _ _ certificate).
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline1 eq_refl _ _ certificate1).
   - revert entry exit certificate. apply conditional_access_balanced;
       [exact (IHHbaseline1 eq_refl) | exact (IHHbaseline2 eq_refl)
@@ -1921,45 +2493,99 @@ Proof.
   induction Hbaseline; intros Hnested entry exit certificate Hentry;
     subst nested.
   - exact (unfold_free_closed certificate y Hentry).
-  - dependent destruction certificate; try discriminate. try view_inversion.
+  - dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     apply (IHHbaseline eq_refl _ _ certificate2).
     rewrite (access_neutral_records certificate1 a). exact Hentry.
-  - dependent destruction certificate; try discriminate. try view_inversion.
+  - dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline2 eq_refl _ _ certificate2
       (IHHbaseline1 eq_refl _ _ certificate1 Hentry)).
-  - dependent destruction certificate; try discriminate. try view_inversion.
+  - dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline1 eq_refl _ _ certificate1 Hentry).
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     rewrite (Atom.fold_after_open_records _ _ _ _ _ _ ltac:(open_transition)
       (baseline_nested_balanced _ _ Hbaseline eq_refl _ _ certificate2_1)).
     exact Hentry.
   - subst closing_arguments.
     dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     dependent destruction certificate2_2_1; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     apply (IHHbaseline2 eq_refl _ _ certificate2_2_2).
     rewrite (Atom.fold_after_open_records _ _ _ _ _ _ ltac:(open_transition)
       (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _ certificate2_1)).
     exact Hentry.
+  - subst closing_arguments.
+    dependent destruction certificate; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    match goal with
+    | Hparse : IR.arguments_distinct_parse _ _ = Some _ |- _ =>
+        pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse
+          certificate1) as Hopen
+    end.
+    dependent destruction certificate2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    rewrite (fold_after_open_access_records _ _ _ _ _ _ _ Hopen
+      (baseline_nested_balanced _ _ Hbaseline eq_refl _ _ certificate2_1)).
+    exact Hentry.
+  - subst closing_arguments.
+    dependent destruction certificate; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    match goal with
+    | Hparse : IR.arguments_distinct_parse _ _ = Some _ |- _ =>
+        pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse
+          certificate1) as Hopen
+    end.
+    dependent destruction certificate2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    dependent destruction certificate2_2_1; try discriminate.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+    apply (IHHbaseline2 eq_refl _ _ certificate2_2_2).
+    rewrite (fold_after_open_access_records _ _ _ _ _ _ _ Hopen
+      (baseline_nested_balanced _ _ Hbaseline1 eq_refl _ _ certificate2_1)).
+    exact Hentry.
   - dependent destruction certificate; try discriminate.
-    try view_inversion.
+    all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline eq_refl _ _ certificate Hentry).
-  - dependent destruction certificate; try discriminate. try view_inversion.
+  - dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     exact (IHHbaseline1 eq_refl _ _ certificate1 Hentry).
   - revert entry exit certificate Hentry. apply conditional_access_closed.
     + exact (baseline_nested_balanced _ _ Hbaseline1 eq_refl).
@@ -2006,15 +2632,16 @@ Proof.
         statement e |}.
     intros invariant Hmember. exact Hmember.
     exact I.
-  - destruct statement; cbn in e; try discriminate.
-    cbn in Hfree. contradiction.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - exfalso. destruct statement; cbn in e; try guarded_view_cases;
+    try discriminate.
+    all: cbn in Hfree; tauto.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     pose proof (fold_keeping_records_fresh _ _ _ e0 Hbalanced) as Hfresh.
     refine {| balanced_structured_certificate :=
         StructuredFreshFold Γ state invariant arguments Hfresh |}.
     intros candidate Hcandidate. exact Hcandidate.
     exact I.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn in Hfree. destruct Hfree as [Hfirst_free Hsecond_free].
     pose proof (unfold_free_records_suffix certificate1 Hfirst_free)
       as Hfirst_suffix.
@@ -2039,9 +2666,10 @@ Proof.
     pose proof (second_result.(balanced_structured_footprint) invariant) as
       Hsecond_subset.
     tauto.
-    split; [exact first_result.(balanced_structured_safe) |
-      exact second_result.(balanced_structured_safe)].
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+    apply structured_accesses_outside_atomic_sequence;
+      [exact first_result.(balanced_structured_safe) |
+       exact second_result.(balanced_structured_safe)].
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     all: cbn in Hfree. all: destruct Hfree as [Hthen_free Helse_free].
     all: cbn [Atom.analysis_records] in Hbalanced.
     all: pose (then_result := IHcertificate1 Hthen_free Hbalanced).
@@ -2075,7 +2703,7 @@ Proof.
         tauto.
       * split; [exact then_result.(balanced_structured_safe) |
           exact else_result.(balanced_structured_safe)].
-  - destruct statement; cbn in e; try discriminate; inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst.
     cbn in Hfree.
     pose (body_result := IHcertificate Hfree e1).
     refine {| balanced_structured_certificate :=
@@ -2094,7 +2722,7 @@ Proof.
     + simpl. repeat rewrite elem_of_union. tauto.
     + specialize (Hbody_subset Hbody). simpl. tauto.
     + exact body_result.(balanced_structured_safe).
-  - destruct statement; cbn in e; try discriminate.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
     injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hfree.

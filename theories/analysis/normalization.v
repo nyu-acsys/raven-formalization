@@ -812,14 +812,31 @@ Inductive certificate_aligned :
 | AlignedUnfold : forall Γ F Δ entry invariant arguments exit
     (store : symbolic_store Γ F Δ)
     (view : RegionSyntax.view (TUnfold invariant arguments) =
-      AnalysisView.ViewUnfold invariant (RegionSyntax.argument_key arguments))
-    (step : GenericRegions.Atomicity.open_invariant invariant
-      (RegionSyntax.argument_key arguments) entry = inr exit),
+      AnalysisView.ViewUnfold invariant (RegionSyntax.argument_key arguments)
+        [])
+    (step : GenericRegions.Atomicity.open_access invariant
+      (RegionSyntax.argument_key arguments) [] entry = inr exit),
     certificate_aligned
       (GenericRegions.Atomicity.CertUnfold Γ entry
         (TUnfold invariant arguments) invariant
-        (RegionSyntax.argument_key arguments) exit view step)
+        (RegionSyntax.argument_key arguments) [] exit view step)
       (RavenHoareRules.RTUnfoldInvariant invariant store arguments)
+| AlignedGuardedUnfold : forall Γ F Δ entry condition invariant' arguments
+    invariant key excluded exit (pre middle post : Resource.resource_prenex Γ F Δ)
+    (assertion : RavenHoareRules.RavenHoareTriple pre (TAssert condition)
+      middle)
+    (opening : RavenHoareRules.RavenHoareTriple middle
+      (TUnfold invariant' arguments) post)
+    (view : RegionSyntax.view (TSeq (TAssert condition)
+      (TUnfold invariant' arguments)) =
+      AnalysisView.ViewUnfold invariant key excluded)
+    (step : GenericRegions.Atomicity.open_access invariant key excluded entry =
+      inr exit),
+    certificate_aligned
+      (GenericRegions.Atomicity.CertUnfold Γ entry
+        (TSeq (TAssert condition) (TUnfold invariant' arguments)) invariant
+        key excluded exit view step)
+      (RavenHoareRules.RTSeq pre middle post _ _ assertion opening)
 | AlignedFold : forall Γ F Δ entry invariant arguments
     (store : symbolic_store Γ F Δ)
     (view : RegionSyntax.view (TFold invariant arguments) =
@@ -1100,6 +1117,16 @@ Proof.
        | [ |- context [RavenHoareRules.RTFoldInvariant _ _ _] ] =>
            cbn in e; dependent destruction e
        end.
+  (* A guarded unfold. *)
+  all: try match goal with
+       | [ |- context [GenericRegions.Atomicity.CertUnfold _ _ _ _ _ _ _ ?view
+             _] ] =>
+           destruct (RegionSyntax.guarded_view_unfold_inv _ _ _ _ _ view)
+             as (? & ? & ? & -> & ->);
+           unshelve eexists; [eapply AlignedGuardedUnfold | exact I]
+       end.
+  (* Impossible views of sequences. *)
+  all: try (exfalso; guarded_view_cases; fail).
   (* Leaves, and the bare unfold and fold. *)
   all: try (unshelve eexists; [solve [constructor] | exact I]).
   (* Sequence, conditional and the trusted atomic block recurse. *)
@@ -1109,7 +1136,7 @@ Proof.
      names. *)
   all: lazymatch goal with
        | [ |- context [RavenHoareRules.RTSeq _ _ _ _ _ ?d1 ?d2] ] =>
-           cbn in e; dependent destruction e;
+           guarded_view_cases;
            destruct (certificate_aligned_complete_exists Γ F
              _ _ _ _ d1 _ _ certificate1) as [A1 _];
            destruct (certificate_aligned_complete_exists Γ F
@@ -1244,7 +1271,7 @@ Proof.
     pose proof (second_result.(footprinted_normalization_subset)
       marker) as Hsecond.
     tauto.
-  - intros Hentry. split.
+  - intros Hentry. apply structured_accesses_outside_atomic_sequence.
     + exact (first_result.(footprinted_normalization_safe) Hentry).
     + apply second_result.(footprinted_normalization_safe).
       rewrite (GenericRegions.Atomicity.analysis_certificate_preserves_in_atomic
@@ -1275,9 +1302,10 @@ Lemma footprinted_normalization_sequence_from_worker
     (view : RegionSyntax.view (TSeq first second) =
       AnalysisView.ViewSequence first second)
     (Hnot_unfold : match RegionSyntax.view first with
-      | AnalysisView.ViewUnfold _ _ => False
+      | AnalysisView.ViewUnfold _ _ _ => False
       | _ => True
       end)
+    (Hunguarded : guarded_head first = None)
     fuel
     (Hfirst_worker : restricted_normalize_statement_fuel fuel first =
       Some normalized_first)
@@ -1295,14 +1323,17 @@ Lemma footprinted_normalization_sequence_from_worker
     normalized_statement
       result.(footprinted_normalization) = normalized.
 Proof.
-  destruct first; cbn in Hnot_unfold, Hworker;
-    try contradiction;
-    rewrite Hfirst_worker, Hsecond_worker in Hworker;
-    inversion Hworker; subst.
-  all: exists (footprinted_normalization_sequence
+  assert (Hfirst : forall invariant arguments,
+      first <> TUnfold invariant arguments)
+    by (intros ? ? ->; exact Hnot_unfold).
+  rewrite restricted_normalize_sequence_step in Hworker
+    by first [exact Hfirst | exact Hunguarded].
+  rewrite Hfirst_worker, Hsecond_worker in Hworker.
+  injection Hworker as <-. subst.
+  exists (footprinted_normalization_sequence
     first_derivation first_certificate first_result second_derivation
-    second_certificate second_result view);
-    cbn; reflexivity.
+    second_certificate second_result view).
+  cbn. reflexivity.
 Qed.
 
 Definition footprinted_normalization_conditional
@@ -1690,27 +1721,18 @@ Lemma restricted_normalize_access_neutral_sequence_inv {Γ} (fuel : nat)
     normalized = TSeq first normalized_second.
 Proof.
   intros Hneutral Hworker.
-  remember (restricted_normalize_statement_fuel fuel first) as first_result
-    eqn:Hfirst.
-  remember (restricted_normalize_statement_fuel fuel second) as second_result
-    eqn:Hsecond.
-  destruct first_result as [normalized_first|]; [|].
-  2: { destruct first; cbn [access_neutral] in Hneutral; try contradiction;
-      cbn [restricted_normalize_statement_fuel] in Hworker;
-      rewrite <- Hfirst in Hworker; discriminate. }
-  destruct second_result as [normalized_second|]; [|].
-  2: { destruct first; cbn [access_neutral] in Hneutral; try contradiction;
-      cbn [restricted_normalize_statement_fuel] in Hworker;
-      rewrite <- Hfirst, <- Hsecond in Hworker; discriminate. }
+  pose proof (restricted_access_neutral_unfold_free first Hneutral) as Hfree.
+  rewrite restricted_normalize_sequence_step in Hworker
+    by first [intros ? ? ->; cbn in Hneutral; contradiction
+             | exact (unfold_free_guarded_head _ Hfree)].
+  destruct (restricted_normalize_statement_fuel fuel first)
+    as [normalized_first|] eqn:Hfirst; [|discriminate].
+  destruct (restricted_normalize_statement_fuel fuel second)
+    as [normalized_second|] eqn:Hsecond; [|discriminate].
+  injection Hworker as <-.
   pose proof (unfold_free_normalize_statement_identity first fuel
-    normalized_first (restricted_access_neutral_unfold_free first Hneutral)
-    (eq_sym Hfirst)) as Hidentity.
-  subst normalized_first.
-  destruct first; cbn [access_neutral] in Hneutral; try contradiction;
-    cbn [restricted_normalize_statement_fuel] in Hworker;
-    rewrite <- Hfirst, <- Hsecond in Hworker;
-    inversion Hworker; subst;
-    exists normalized_second; repeat split; try reflexivity; eauto.
+    normalized_first Hfree Hfirst) as ->.
+  exists normalized_second. auto.
 Qed.
 
 Lemma baseline_normalizable_unfold_absurd {Γ} nested invariant
@@ -1719,6 +1741,40 @@ Lemma baseline_normalizable_unfold_absurd {Γ} nested invariant
 Proof.
   intro H. inversion H; subst; cbn in *; try contradiction.
   destruct nested; contradiction.
+Qed.
+
+(** Accepted source statements are not viewed as unfolds. *)
+Lemma baseline_normalizable_not_unfold {Γ} nested (statement : stmt Γ) :
+  baseline_normalizable nested statement ->
+  match RegionSyntax.view statement with
+  | AnalysisView.ViewUnfold _ _ _ => False
+  | _ => True
+  end.
+Proof.
+  intros Hbaseline. destruct Hbaseline; cbn; try exact I.
+  - destruct statement; cbn; try exact I.
+    + destruct nested; cbn in y; [contradiction|contradiction].
+    + destruct (RegionSyntax.guarded_unfold statement1 statement2)
+        as [guard|] eqn:Hguard; [|exact I].
+      destruct (RegionSyntax.guarded_unfold_some _ _ _ Hguard)
+        as (? & ? & ? & Hguard_first & Hguard_second).
+      subst. destruct nested; cbn in y; tauto.
+  - rewrite e. exact I.
+  - rewrite e. exact I.
+Qed.
+
+(** Accepted source statements are not guarded unfolds. *)
+Lemma baseline_normalizable_guarded_head {Γ} nested (statement : stmt Γ) :
+  baseline_normalizable nested statement -> guarded_head statement = None.
+Proof.
+  intros Hbaseline.
+  destruct (guarded_head statement) as [[condition [invariant arguments]]|]
+    eqn:Hhead; [|reflexivity].
+  apply guarded_head_some in Hhead. subst statement. exfalso.
+  inversion Hbaseline; subst.
+  - destruct nested; cbn in *; tauto.
+  - eapply baseline_normalizable_unfold_absurd. eassumption.
+  - eapply baseline_normalizable_unfold_absurd. eassumption.
 Qed.
 
 Lemma restricted_normalize_baseline_sequence_inv {Γ} nested fuel
@@ -1732,17 +1788,15 @@ Lemma restricted_normalize_baseline_sequence_inv {Γ} nested fuel
     normalized = TSeq normalized_first normalized_second.
 Proof.
   intros Hbaseline Hworker.
-  remember (restricted_normalize_statement_fuel fuel first) as first_result
-    eqn:Hfirst.
-  remember (restricted_normalize_statement_fuel fuel second) as second_result
-    eqn:Hsecond.
-  destruct first_result as [normalized_first|];
-    destruct second_result as [normalized_second|].
-  all: destruct first; cbn [restricted_normalize_statement_fuel] in Hworker;
-    try (exfalso; eapply baseline_normalizable_unfold_absurd; exact Hbaseline);
-    rewrite <- ?Hfirst, <- ?Hsecond in Hworker; try discriminate.
-  all: inversion Hworker; subst;
-    do 2 eexists; repeat split; eauto.
+  rewrite restricted_normalize_sequence_step in Hworker
+    by first [intros ? ? ->; eapply baseline_normalizable_unfold_absurd;
+                exact Hbaseline
+             | exact (baseline_normalizable_guarded_head _ _ Hbaseline)].
+  destruct (restricted_normalize_statement_fuel fuel first)
+    as [normalized_first|] eqn:Hfirst; [|discriminate].
+  destruct (restricted_normalize_statement_fuel fuel second)
+    as [normalized_second|] eqn:Hsecond; [|discriminate].
+  injection Hworker as <-. eauto.
 Qed.
 
 Lemma restricted_normalize_terminal_access_inv {Γ} fuel
@@ -2182,7 +2236,8 @@ Ltac subset_of_union :=
 Ltac view_inversion :=
   match goal with
   | Hview : @AnalysisView.syntax_view _ _ _ = _ |- _ =>
-      cbn in Hview; inversion Hview; subst; try clear Hview
+      cbn in Hview; try guarded_view_cases;
+      try (inversion Hview; subst; try clear Hview)
   end.
 
 Ltac footprint_subset :=
@@ -2290,19 +2345,21 @@ Proof.
     unfold Atom.take_leaf, Atom.take_step, Atom.take_plain_step in e0.
     destruct (_ || _); injection e0 as <-; reflexivity.
   - reflexivity.
-  - destruct statement; cbn in e; try discriminate. contradiction.
-  - destruct statement; cbn in e; try discriminate. contradiction.
-  - destruct statement; cbn in e; try discriminate. inversion e; subst.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
+    all: cbn in Hneutral; tauto.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
+    all: cbn in Hneutral; tauto.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate. inversion e; subst.
     apply andb_prop in Hproof as [Hfirst Hsecond].
     destruct Hneutral as [Hfirst_neutral Hsecond_neutral].
     rewrite IHcertificate2, IHcertificate1; auto.
-  - destruct statement; cbn in e; try discriminate; inversion e; subst;
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate; inversion e; subst;
       apply andb_prop in Hproof as [Hthen Helse];
       destruct Hneutral as [Hthen_neutral Helse_neutral];
       rewrite IHcertificate1, IHcertificate2 by assumption;
       apply analysis_state_join_self.
-  - destruct statement; cbn in e; try discriminate.
-  - destruct statement; cbn in e; try discriminate.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
+  - destruct statement; cbn in e; try guarded_view_cases; try discriminate.
     injection e as Hd Halias Hbody. subst.
     apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst.
     rewrite (IHcertificate Hproof Hneutral).
@@ -2411,11 +2468,16 @@ Proof.
     as (opened_pre & Hunfold & Htail).
   destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Htail)
     as (body_post & Hbody & Hfold).
-  dependent destruction certificate; try discriminate. try view_inversion.
-  dependent destruction certificate1; try discriminate. try view_inversion.
-  dependent destruction certificate2; try discriminate. try view_inversion.
-  dependent destruction certificate2_2; try discriminate. try view_inversion.
-  rename e0 into Hopen, certificate2_1 into body_certificate.
+  dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate1; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  pose proof (Atom.open_access_nil _ _ _ _ e0) as Hopen.
+  rename certificate2_1 into body_certificate.
   pose proof (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
     body_certificate) as Hbody_open.
   destruct (IHbody F Δ _ _ _ _ Hbody body_certificate
@@ -2434,8 +2496,9 @@ Proof.
     eapply RavenHoareRules.RTSeq; [exact Hunfold|].
     eapply RavenHoareRules.RTSeq; [|exact Hfold].
     exact (normalization_target_derivation body_normalization). }
-  pose (target := StructuredInvAccess Γ state invariant arguments body' state0
-    state1 Hopen (normalization_target_certificate body_normalization)
+  pose (target := StructuredInvAccess Γ state invariant arguments [] body'
+    state0 state1 (Atom.open_invariant_access _ _ _ _ _ Hopen)
+    (normalization_target_certificate body_normalization)
     Hbody_open).
   unshelve eexists {| footprinted_normalization :=
     {| normalized_statement := TInvAccess invariant arguments body';
@@ -2446,7 +2509,8 @@ Proof.
   - cbn [target structured_certificate_footprint Atom.certificate_footprint].
     footprint_subset.
   - intros Hentry. cbn [target structured_accesses_outside_atomic].
-    split; [exact Hentry|]. apply Hbody_safe.
+    split; [exact Hentry|]. split; [exact (proj1 (Atom.open_invariant_success _ _ _ _ Hopen))|].
+    apply Hbody_safe.
     rewrite (Atom.open_invariant_preserves_in_atomic _ _ _ _ Hopen). exact Hentry.
   - reflexivity.
 Qed.
@@ -2472,12 +2536,18 @@ Proof.
     as (body_post & Hbody & Hrest).
   destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Hrest)
     as (closed_pre & Hfold & Hwork).
-  dependent destruction certificate; try discriminate. try view_inversion.
-  dependent destruction certificate1; try discriminate. try view_inversion.
-  dependent destruction certificate2; try discriminate. try view_inversion.
-  dependent destruction certificate2_2; try discriminate. try view_inversion.
-  dependent destruction certificate2_2_1; try discriminate. try view_inversion.
-  rename e0 into Hopen, certificate2_1 into body_certificate,
+  dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate1; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2_1; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  pose proof (Atom.open_access_nil _ _ _ _ e0) as Hopen.
+  rename certificate2_1 into body_certificate,
     certificate2_2_2 into work_certificate.
   pose proof (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
     body_certificate) as Hbody_open.
@@ -2514,7 +2584,8 @@ Proof.
     eapply RavenHoareRules.RTSeq; [|exact Hfold].
     exact (normalization_target_derivation body_normalization). }
   pose (target := StructuredSequence Γ state _ _ _ _
-    (StructuredInvAccess Γ state invariant arguments body' state0 state1 Hopen
+    (StructuredInvAccess Γ state invariant arguments [] body' state0 state1
+      (Atom.open_invariant_access _ _ _ _ _ Hopen)
       (normalization_target_certificate body_normalization) Hbody_open)
     (normalization_target_certificate work_normalization)).
   unshelve eexists {| footprinted_normalization :=
@@ -2528,9 +2599,11 @@ Proof.
     reflexivity.
   - cbn [target structured_certificate_footprint Atom.certificate_footprint].
     footprint_subset.
-  - intros Hentry. cbn [target structured_accesses_outside_atomic].
-    split; [split; [exact Hentry|]|].
-    + apply Hbody_safe.
+  - intros Hentry. unfold target.
+    apply structured_accesses_outside_atomic_sequence.
+    + cbn [structured_accesses_outside_atomic].
+      split; [exact Hentry|]. split; [exact (proj1 (Atom.open_invariant_success _ _ _ _ Hopen))|].
+      apply Hbody_safe.
       rewrite (Atom.open_invariant_preserves_in_atomic _ _ _ _ Hopen). exact Hentry.
     + apply Hwork_safe. rewrite fold_invariant_in_atomic,
         (Atom.analysis_certificate_preserves_in_atomic body_certificate),
@@ -2639,8 +2712,9 @@ Proof.
     pose (branch := fun (branch_prefix : stmt Γ) closed
         (prefix_certificate : structured_certificate Γ joined branch_prefix
           closed) Hclosed_open =>
-      StructuredInvAccess Γ entry invariant arguments
-        (TSeq q' (TSeq TDone branch_prefix)) opened closed Hopen
+      StructuredInvAccess Γ entry invariant arguments []
+        (TSeq q' (TSeq TDone branch_prefix)) opened closed
+        (Atom.open_invariant_access _ _ _ _ _ Hopen)
         (StructuredSequence Γ opened q' joined (TSeq TDone branch_prefix)
           closed sq
           (StructuredSequence Γ joined TDone joined branch_prefix closed
@@ -2690,10 +2764,20 @@ Proof.
       structured_accesses_outside_atomic target).
     { intros Hentry. unfold target.
       apply structured_guard_if_safe;
-        cbn [structured_accesses_outside_atomic branch];
-        (split; [split; [exact Hentry|]; split;
+        apply structured_accesses_outside_atomic_sequence;
+        [unfold branch;
+          apply structured_accesses_outside_atomic_access;
+          [exact Hentry | exact (proj1 (Atom.open_invariant_success _ _ _ _ Hopen)) |];
+          apply structured_accesses_outside_atomic_sequence;
           [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|];
-          split; [exact I|] |]).
+          apply structured_accesses_outside_atomic_sequence; [exact I|]
+        | | unfold branch;
+          apply structured_accesses_outside_atomic_access;
+          [exact Hentry | exact (proj1 (Atom.open_invariant_success _ _ _ _ Hopen)) |];
+          apply structured_accesses_outside_atomic_sequence;
+          [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|];
+          apply structured_accesses_outside_atomic_sequence; [exact I|]
+        | ].
       * apply Hstp_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
       * apply Hstc_safe. rewrite fold_invariant_in_atomic,
           (Atom.analysis_certificate_preserves_in_atomic ctp), Hjoined_atomic,
@@ -2733,7 +2817,8 @@ Proof.
         (StructuredDone Γ joined TDone eq_refl)
         (structured_cast (analysis_state_join_self joined) inner))).
     pose (target := StructuredSequence Γ entry _ _ _ _
-      (StructuredInvAccess Γ entry invariant arguments _ opened joined Hopen
+      (StructuredInvAccess Γ entry invariant arguments [] _ opened joined
+        (Atom.open_invariant_access _ _ _ _ _ Hopen)
         body Hjoined_open)
       (structured_guard_if guard stc sec Hrecords_equal Hatomic_equal)).
     assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
@@ -2774,10 +2859,12 @@ Proof.
     assert (Hsafe : Atom.analysis_in_atomic entry = false ->
       structured_accesses_outside_atomic target).
     { intros Hentry. unfold target, body.
-      cbn [structured_accesses_outside_atomic].
-      split; [split; [exact Hentry|]; split;
-        [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|]; split;
-        [exact I|] |].
+      apply structured_accesses_outside_atomic_sequence;
+        [apply structured_accesses_outside_atomic_access;
+          [exact Hentry | exact (proj1 (Atom.open_invariant_success _ _ _ _ Hopen)) |];
+          apply structured_accesses_outside_atomic_sequence;
+          [apply Hsq_safe; rewrite Hopened_atomic; exact Hentry|];
+          apply structured_accesses_outside_atomic_sequence; [exact I|] |].
       * apply structured_cast_safe. unfold inner.
         apply structured_guard_if_safe; cbn; split; try exact I.
         -- apply Hstp_safe. rewrite Hjoined_atomic, Hopened_atomic. exact Hentry.
@@ -2798,6 +2885,222 @@ Proof.
     reflexivity.
 Qed.
 
+(** An assertion leaves the analysis state unchanged. *)
+Lemma assert_leaf_step {Γ} (condition : gexpr Γ TBool) state :
+  Atom.take_leaf (RegionSyntax.cost Γ (TAssert condition))
+    (RegionSyntax.write (TAssert condition)) state = inr state.
+Proof.
+  rewrite (Certified.proof_only_leaf_cost Γ (TAssert condition) eq_refl),
+    (Certified.proof_only_leaf_write Γ (TAssert condition) eq_refl).
+  unfold Atom.take_leaf, Atom.take_step, Atom.take_plain_step.
+  destruct (_ || _); reflexivity.
+Qed.
+
+Lemma guarded_access_normalization_complete_from_worker {Γ} nested
+    condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    excluded (body : stmt Γ) :
+  IR.arguments_distinct_parse arguments condition = Some excluded ->
+  baseline_normalizable true body ->
+  pexpr_list_dependencies arguments ## statement_writes body ->
+  pexpr_dependencies condition ## statement_writes body ->
+  normalization_complete true body ->
+  normalization_complete nested
+    (TSeq (TSeq (TAssert condition) (TUnfold invariant arguments))
+      (TSeq body (TFold invariant arguments))).
+Proof.
+  intros Hparse Hbody_baseline Hstable Hcondition_stable IHbody F Δ entry exit
+    pre post derivation certificate _ Hbalanced fuel normalized Hworker.
+  destruct fuel as [|fuel]; [discriminate|].
+  destruct (restricted_normalize_guarded_inv fuel _ _ _ _ _ Hworker)
+    as (body0 & closing & body' & _ & Hbody_worker &
+      [[Hsecond ->] | (work & work' & Hsecond & _ & _)]);
+    injection Hsecond as Hbody0 Hrest; subst body0; [|discriminate].
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ derivation)
+    as (opened_pre & Hguard & Htail).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Hguard)
+    as (checked_pre & Hassert & Hunfold).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Htail)
+    as (body_post & Hbody & Hfold).
+  dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse certificate1)
+    as Hopen.
+  dependent destruction certificate2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  rename certificate2_1 into body_certificate.
+  try rename invariant0 into invariant.
+  try rename first into body.
+  try rename second into work.
+  pose proof (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
+    body_certificate) as Hbody_open.
+  destruct (IHbody F Δ _ _ _ _ Hbody body_certificate
+    I Hbody_open fuel body' Hbody_worker) as (body_result & Hbody_result).
+  subst body'.
+  pose proof (restricted_normalize_statement_writes _ _ _ Hbody_worker)
+    as Hbody_writes.
+  pose proof (footprinted_normalization_subset body_result) as Hbody_subset.
+  pose proof (footprinted_normalization_safe body_result) as Hbody_safe.
+  set (body_normalization := footprinted_normalization body_result) in *.
+  set (body' := normalized_statement body_normalization) in *.
+  assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+    (TSeq (TAssert condition) (TInvAccess invariant arguments body')) post).
+  { eapply RavenHoareRules.RTSeq; [exact Hassert|].
+    apply RavenHoareTriple_access_of_raw; [rewrite Hbody_writes; exact Hstable|].
+    eapply RavenHoareRules.RTSeq; [exact Hunfold|].
+    eapply RavenHoareRules.RTSeq; [|exact Hfold].
+    exact (normalization_target_derivation body_normalization). }
+  pose (target := StructuredSequence Γ state _ state _ _
+    (StructuredLeaf Γ state (TAssert condition) state eq_refl
+      (assert_leaf_step condition state))
+    (StructuredInvAccess Γ state invariant arguments excluded body'
+      _ _ Hopen (normalization_target_certificate body_normalization)
+      Hbody_open)).
+  unshelve eexists {| footprinted_normalization :=
+    {| normalized_statement :=
+         TSeq (TAssert condition) (TInvAccess invariant arguments body');
+       normalization_target_derivation := Hderivation;
+       normalization_target_certificate := target |} |}.
+  - intros names stack'. cbn. rewrite Erasure.runtime_seq_noop_r.
+    apply normalization_runtime_erasure.
+  - cbn [target structured_certificate_footprint Atom.certificate_footprint].
+    footprint_subset.
+  - intros Hentry. unfold target. split; [exact I|].
+    cbn [structured_accesses_outside_atomic].
+    split; [exact Hentry|]. split.
+    + destruct (decide (invariant ∈ Atom.analysis_open state)) as [Hnested|];
+        [right|left; assumption].
+      rewrite <- (IR.arguments_distinct_parse_sound _ _ _ Hparse).
+      split; [reflexivity|]. rewrite Hbody_writes. exact Hcondition_stable.
+    + apply Hbody_safe.
+      rewrite (Atom.open_access_preserves_in_atomic _ _ _ _ _ Hopen).
+      exact Hentry.
+  - reflexivity.
+Qed.
+
+Lemma guarded_continued_access_normalization_complete_from_worker {Γ} nested
+    condition invariant
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    excluded (body work : stmt Γ) :
+  IR.arguments_distinct_parse arguments condition = Some excluded ->
+  baseline_normalizable true body ->
+  pexpr_list_dependencies arguments ## statement_writes body ->
+  pexpr_dependencies condition ## statement_writes body ->
+  normalization_complete true body ->
+  normalization_complete nested work ->
+  normalization_complete nested
+    (TSeq (TSeq (TAssert condition) (TUnfold invariant arguments))
+      (TSeq body (TSeq (TFold invariant arguments) work))).
+Proof.
+  intros Hparse Hbody_baseline Hstable Hcondition_stable IHbody IHwork F Δ
+    entry exit pre post derivation certificate Hclosed Hbalanced fuel
+    normalized Hworker.
+  destruct fuel as [|fuel]; [discriminate|].
+  destruct (restricted_normalize_guarded_inv fuel _ _ _ _ _ Hworker)
+    as (body0 & closing & body' & _ & Hbody_worker &
+      [[Hsecond _] | (work0 & work' & Hsecond & Hwork_worker & ->)]);
+    injection Hsecond as Hbody0 Hclosing_rest; subst body0; [discriminate|].
+  injection Hclosing_rest; intros; subst.
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ derivation)
+    as (opened_pre & Hguard & Htail).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Hguard)
+    as (checked_pre & Hassert & Hunfold).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Htail)
+    as (body_post & Hbody & Hrest).
+  destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _ Hrest)
+    as (closed_pre & Hfold & Hwork).
+  dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  pose proof (guarded_unfold_certificate_open _ _ _ _ _ _ Hparse certificate1)
+    as Hopen.
+  dependent destruction certificate2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  dependent destruction certificate2_2_1; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
+  rename certificate2_1 into body_certificate,
+    certificate2_2_2 into work_certificate.
+  try rename invariant0 into invariant.
+  try rename first into body.
+  try rename second into work.
+  pose proof (baseline_nested_balanced _ _ Hbody_baseline eq_refl _ _
+    body_certificate) as Hbody_open.
+  pose proof (fold_after_open_access_records invariant _
+    (RegionSyntax.argument_key arguments) _ _ _ _ Hopen Hbody_open)
+    as Hwork_entry.
+  assert (Hwork_closed : if nested then True else
+      Atom.analysis_records (Atom.fold_invariant invariant
+        (RegionSyntax.argument_key arguments) state1) = [])
+    by (destruct nested; [exact I|]; rewrite Hwork_entry; exact Hclosed).
+  destruct (IHbody F Δ _ _ _ _ Hbody body_certificate
+    I Hbody_open fuel body' Hbody_worker) as (body_result & Hbody_result).
+  destruct (IHwork F Δ _ _ _ _ Hwork work_certificate Hwork_closed
+    (eq_trans Hbalanced (eq_sym Hwork_entry))
+    fuel work' Hwork_worker) as (work_result & Hwork_result).
+  subst body' work'.
+  pose proof (restricted_normalize_statement_writes _ _ _ Hbody_worker)
+    as Hbody_writes.
+  pose proof (footprinted_normalization_subset body_result) as Hbody_subset.
+  pose proof (footprinted_normalization_safe body_result) as Hbody_safe.
+  pose proof (footprinted_normalization_subset work_result) as Hwork_subset.
+  pose proof (footprinted_normalization_safe work_result) as Hwork_safe.
+  set (body_normalization := footprinted_normalization body_result) in *.
+  set (work_normalization := footprinted_normalization work_result) in *.
+  set (body' := normalized_statement body_normalization) in *.
+  set (work' := normalized_statement work_normalization) in *.
+  assert (Hderivation : RavenHoareRules.RavenHoareTriple pre
+    (TSeq (TSeq (TAssert condition) (TInvAccess invariant arguments body'))
+      work') post).
+  { eapply RavenHoareRules.RTSeq;
+      [| exact (normalization_target_derivation work_normalization)].
+    eapply RavenHoareRules.RTSeq; [exact Hassert|].
+    apply RavenHoareTriple_access_of_raw; [rewrite Hbody_writes; exact Hstable|].
+    eapply RavenHoareRules.RTSeq; [exact Hunfold|].
+    eapply RavenHoareRules.RTSeq; [|exact Hfold].
+    exact (normalization_target_derivation body_normalization). }
+  pose (access := StructuredSequence Γ state _ state _ _
+    (StructuredLeaf Γ state (TAssert condition) state eq_refl
+      (assert_leaf_step condition state))
+    (StructuredInvAccess Γ state invariant arguments excluded body'
+      _ _ Hopen (normalization_target_certificate body_normalization)
+      Hbody_open)).
+  pose (target := StructuredSequence Γ state _ _ _ _ access
+    (normalization_target_certificate work_normalization)).
+  unshelve eexists {| footprinted_normalization :=
+    {| normalized_statement :=
+         TSeq (TSeq (TAssert condition) (TInvAccess invariant arguments body'))
+           work';
+       normalization_target_derivation := Hderivation;
+       normalization_target_certificate := target |} |}.
+  - intros names stack'. cbn.
+    rewrite (normalization_runtime_erasure body_normalization),
+      (normalization_runtime_erasure work_normalization).
+    reflexivity.
+  - cbn [target access structured_certificate_footprint
+      Atom.certificate_footprint].
+    footprint_subset.
+  - intros Hentry. unfold target.
+    apply structured_accesses_outside_atomic_sequence.
+    + unfold access. split; [exact I|].
+      cbn [structured_accesses_outside_atomic].
+      split; [exact Hentry|]. split.
+      * destruct (decide (invariant ∈ Atom.analysis_open state)) as [Hnested|];
+          [right|left; assumption].
+        rewrite <- (IR.arguments_distinct_parse_sound _ _ _ Hparse).
+        split; [reflexivity|]. rewrite Hbody_writes. exact Hcondition_stable.
+      * apply Hbody_safe.
+        rewrite (Atom.open_access_preserves_in_atomic _ _ _ _ _ Hopen).
+        exact Hentry.
+    + apply Hwork_safe. rewrite fold_invariant_in_atomic,
+        (Atom.analysis_certificate_preserves_in_atomic body_certificate),
+        (Atom.open_access_preserves_in_atomic _ _ _ _ _ Hopen).
+      exact Hentry.
+  - reflexivity.
+Qed.
+
 Lemma baseline_normalization_complete_from_worker
     {Γ} nested (source : stmt Γ)
     (Hbaseline : baseline_normalizable nested source) :
@@ -2808,7 +3111,8 @@ Proof.
     destruct nested; [apply restricted_access_neutral_unfold_free|]; exact y.
   - intros F Δ entry exit pre post derivation certificate Hclosed Hbalanced
       fuel normalized Hworker.
-    dependent destruction certificate; try discriminate. try view_inversion.
+    dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
       derivation) as (middle_assertion & Hfirst & Hsecond).
     pose proof (access_neutral_records certificate1 a) as Hfirst_balanced.
@@ -2834,10 +3138,22 @@ Proof.
       with (first_result := first_result) (second_result := second_result);
       try eassumption.
     all: first [reflexivity
-      | destruct first0; cbn in a |- *; try contradiction; exact I].
+      | exact (unfold_free_guarded_head _ (access_neutral_unfold_free _ a))
+      | (apply RegionSyntax.region_view_unguarded; assumption)
+      | (destruct first0; cbn in a |- *; try contradiction; try exact I;
+         match goal with
+         | |- context [RegionSyntax.guarded_unfold ?first ?second] =>
+             destruct (RegionSyntax.guarded_unfold first second)
+               as [guard|] eqn:Hguard;
+             [destruct (RegionSyntax.guarded_unfold_some _ _ _ Hguard)
+                as (? & ? & ? & Hguard_first & Hguard_second);
+              subst first second; cbn in a; tauto
+             |exact I]
+         end)].
   - intros F Δ entry exit pre post derivation certificate Hclosed Hbalanced
       fuel normalized Hworker.
-    dependent destruction certificate; try discriminate. try view_inversion.
+    dependent destruction certificate; try discriminate. all: try view_inversion;
+    try guarded_view_cases; try discriminate.
     destruct (RavenHoareRules.RavenHoareTriple_sequence_decompose _ _
       derivation) as (middle_assertion & Hfirst & Hsecond).
     assert (Hfirst_balanced : Atom.analysis_records middle =
@@ -2869,8 +3185,9 @@ Proof.
     eapply footprinted_normalization_sequence_from_worker
       with (first_result := first_result) (second_result := second_result);
       try eassumption.
-    destruct first0; cbn; try exact I.
-    exfalso. eapply baseline_normalizable_unfold_absurd. exact Hbaseline1.
+    all: first [(apply RegionSyntax.region_view_unguarded; assumption)
+               |exact (baseline_normalizable_not_unfold _ _ Hbaseline1)
+               |exact (baseline_normalizable_guarded_head _ _ Hbaseline1)].
   - intros F Δ entry exit pre post derivation certificate Hclosed Hbalanced
       fuel normalized Hworker.
     eapply conditional_normalization_complete_from_worker;
@@ -2885,6 +3202,11 @@ Proof.
     apply terminal_access_normalization_complete_from_worker; assumption.
   - subst closing_arguments.
     apply continued_access_normalization_complete_from_worker; assumption.
+  - subst closing_arguments.
+    eapply guarded_access_normalization_complete_from_worker; eassumption.
+  - subst closing_arguments.
+    eapply guarded_continued_access_normalization_complete_from_worker;
+      eassumption.
   - intros F Δ entry exit pre post derivation certificate Hclosed Hbalanced
       fuel normalized Hworker.
     eapply ghost_val_normalization_complete_from_worker; try eassumption.

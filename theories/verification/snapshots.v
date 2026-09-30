@@ -129,28 +129,6 @@ Fixpoint stmt_rename {D D'} (renaming : lvar_renaming D D')
 Definition snapshot_name : source_name := "#snapshot"%string.
 
 
-Definition pexpr_list_nil {keep D ts} (expressions : pexpr_list keep D ts) :
-    bool :=
-  match expressions with PENil => true | PECons _ _ => false end.
-
-Definition pexpr_list_head {keep D t ts}
-    (expressions : pexpr_list keep D (t :: ts)) : pexpr keep D t :=
-  match expressions in pexpr_list _ _ ts0
-    return match ts0 with [] => unit | t0 :: _ => pexpr keep D t0 end
-  with
-  | PENil => tt
-  | PECons expression _ => expression
-  end.
-
-Definition pexpr_list_tail {keep D t ts}
-    (expressions : pexpr_list keep D (t :: ts)) : pexpr_list keep D ts :=
-  match expressions in pexpr_list _ _ ts0
-    return match ts0 with [] => unit | _ :: ts1 => pexpr_list keep D ts1 end
-  with
-  | PENil => tt
-  | PECons _ tail => tail
-  end.
-
 (** [left == right], componentwise. *)
 Fixpoint snapshot_equalities {D ts} (left : gexpr_list D ts) :
     gexpr_list D ts -> gexpr D TBool :=
@@ -280,6 +258,75 @@ Fixpoint snapshot_accesses {D} (statement : stmt D) : stmt D :=
         (snapshot_accesses else_branch)
   | _ => statement
   end.
+
+(** ** Distinctness assertions
+
+    Before an unfold of a declaration with open instances, Raven asserts
+    that the new instance differs from each open one.  The pass follows the
+    open accesses along each path, innermost first. *)
+Definition open_accesses (D : decl_context) :=
+  list { invariant : inv_id & gexpr_list D (Assertion.invariant_args invariant) }.
+
+Definition open_accesses_shift {d D} (stack : open_accesses D) :
+    open_accesses (d :: D) :=
+  map (fun entry => existT (projT1 entry) (pexpr_list_shift (projT2 entry)))
+    stack.
+
+(** The arguments of the open instances of [invariant]. *)
+Fixpoint open_instances {D} (invariant : inv_id) (stack : open_accesses D) :
+    list (gexpr_list D (Assertion.invariant_args invariant)) :=
+  match stack with
+  | [] => []
+  | existT invariant' arguments :: rest =>
+      match decide (invariant' = invariant) with
+      | left Heq =>
+          eq_rect _ (fun invariant0 =>
+            gexpr_list D (Assertion.invariant_args invariant0)) arguments _ Heq
+          :: open_instances invariant rest
+      | right _ => open_instances invariant rest
+      end
+  end.
+
+Fixpoint guard_unfolds {D} (stack : open_accesses D) (statement : stmt D) :
+    stmt D * open_accesses D :=
+  match statement with
+  | TUnfold invariant arguments =>
+      (match open_instances invariant stack with
+       | [] => statement
+       | excluded =>
+           TSeq (TAssert (arguments_distinct arguments excluded)) statement
+       end, existT invariant arguments :: stack)
+  | TFold invariant _ =>
+      (statement,
+       match stack with
+       | existT invariant' _ :: rest =>
+           if decide (invariant' = invariant) then rest else stack
+       | [] => []
+       end)
+  | TSeq first second =>
+      let (first', middle) := guard_unfolds stack first in
+      let (second', exit) := guard_unfolds middle second in
+      (TSeq first' second', exit)
+  | TIf condition then_branch else_branch =>
+      let (then_branch', exit) := guard_unfolds stack then_branch in
+      (TIf condition then_branch' (fst (guard_unfolds stack else_branch)), exit)
+  | TGhostIf condition then_branch else_branch =>
+      let (then_branch', exit) := guard_unfolds stack then_branch in
+      (TGhostIf condition then_branch'
+        (fst (guard_unfolds stack else_branch)), exit)
+  | TAtomic body => (TAtomic (fst (guard_unfolds stack body)), stack)
+  | TInvAccess invariant arguments body =>
+      (TInvAccess invariant arguments
+        (fst (guard_unfolds (existT invariant arguments :: stack) body)),
+       stack)
+  | TGhostVal name t initializer body =>
+      (TGhostVal name t initializer
+        (fst (guard_unfolds (open_accesses_shift stack) body)), stack)
+  | _ => (statement, stack)
+  end.
+
+Definition distinctness_assertions {D} (statement : stmt D) : stmt D :=
+  fst (guard_unfolds [] statement).
 
 (** ** Stability
 

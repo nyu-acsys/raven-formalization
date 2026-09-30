@@ -166,6 +166,11 @@ The essential policy is:
   declaration-wide entry; a fold closes the innermost open access, which
   must be the same instance, and restores the consumed entry, or allocates
   an instance of an invariant that is not open;
+- a further instance of an open declaration is opened only by an unfold
+  preceded by an assertion that its arguments differ from those of each
+  open instance of the declaration, `assert (w != v1 && ...); unfold I(w)`;
+  the keys involved must be atoms and pairwise distinct, and the unfold
+  may use the declaration-wide entry an enclosing access holds;
 - a write to a local forgets the entries and aliases naming it; an access
   whose instance was resolved through a written local restores its entry
   under its own snapshot key;
@@ -195,7 +200,12 @@ step counting inside the block is suspended, while invariant-opening state is
 still tracked.
 
 The Iris interpretation reads only the declaration-level projections of this
-state: the available and the open declarations.
+state: the available and the open declarations. While instances of a
+declaration are open, the enclosing accesses hold the rest of its world:
+the bodies of its other established instances. A further instance is opened
+from that held remainder, which is sound because the preceding assertion,
+known to hold for the pinned arguments of the open instances, rules out the
+instances already open.
 
 ## 7. Why normalization is necessary
 
@@ -239,6 +249,13 @@ closing conditional with its unfold when further statements follow, and
 inserts `done` for missing pieces, in each case only where the runtime
 erasure is unchanged
 ([`verification/access_layout.v`](../theories/verification/access_layout.v)).
+
+The preprocessing inserts the distinctness assertions: before each unfold
+of a declaration with instances open along the path, it asserts that the
+new instance differs from each of them, as Raven does
+([`verification/snapshots.v`](../theories/verification/snapshots.v)). The
+normalizer turns such a guarded access into the assertion followed by the
+structured access.
 
 An access that spans a trusted atomic block,
 `atomic { unfold I(x); body; fold I(x) }`, is moved around the block by the
@@ -402,7 +419,8 @@ analysis:
   an instance is available only if it is named syntactically or through an
   alias (no generated membership assertions);
 - the Iris interpretation uses one namespace per declaration;
-- only one instance of a declaration can be open at once;
+- several instances of a declaration can be open at once only through
+  linear accesses (not conditional accesses) whose keys are atoms;
 - the normalizer does not yet cover every branch-local fold/unfold placement
   accepted by Raven: after the common prefix has consumed an access's
   physical-step budget, the branch prefixes of the resulting factored access

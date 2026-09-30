@@ -713,6 +713,17 @@ Proof.
   iSplit; first done. iExact "Hpost".
 Qed.
 
+Lemma runtime_masked_wp_fupd mask physical (post : iProp) :
+  (|={mask}=> runtime_masked_wp mask mask physical (|={mask}=> post)) ⊢
+  runtime_masked_wp mask mask physical post.
+Proof.
+  unfold runtime_masked_wp, RegionExecution.Primitives.Model.runtime_wp.
+  iIntros "Hwp". iApply fupd_wp. iMod "Hwp". iModIntro.
+  iApply (wp_mono with "Hwp").
+  iIntros (result) "[%Hresult Hpost]". iSplit; first done.
+  iMod "Hpost". iExact "Hpost".
+Qed.
+
 (** Sequencing through the smart constructor: a terminal operand is dropped
     and contributes only its (identity) mask change. *)
 Lemma runtime_masked_wp_seq mask exit_mask first second (post : iProp) :
@@ -2667,16 +2678,36 @@ Definition term_structured_runtime_valid
       (global_world_context valuation ∗
         term_interp_resource_prenex runtime formals binders valuation post).
 
+(** [conditions] are true in every store in which [pinned] evaluates to
+    [values]. *)
+Definition conditions_hold {Γ ts} (conditions : list (gexpr Γ TBool))
+    (pinned : gexpr_list Γ ts) (values : tval_list ts) : Prop :=
+  forall F Δ (store : symbolic_store Γ F Δ) (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation),
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store pinned) = Some values ->
+  Forall (fun condition =>
+    interp_expr formals binders valuation
+      (IR.symbolize_expr store condition) = Some (VBool true)) conditions.
+
+Lemma conditions_hold_nil {Γ ts} (pinned : gexpr_list Γ ts)
+    (values : tval_list ts) :
+  conditions_hold [] pinned values.
+Proof. intros. constructor. Qed.
+
 (** Parametric strengthening used by matched invariant accesses.  For every
     vector whose stack dependencies the statement does not write, the
     certificate transports its evaluated value through the actual telescope
     witnesses selected at run time.  The instances open in enclosing
     accesses are held alongside: their arguments are pinned after the
-    vector's, and the rest of their worlds is framed through. *)
+    vector's, and the rest of their worlds is framed through.  The
+    [conditions] are known to hold wherever the pinned vector has its
+    values. *)
 Definition term_structured_runtime_arguments_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) : Prop :=
   forall types (held : held_list Γ ts types),
@@ -2690,6 +2721,8 @@ Definition term_structured_runtime_arguments_valid
     RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint certificate ∪
         term_registered_invariants) ⊆ ambient ->
+    conditions_hold conditions (held_pinned arguments held)
+      (held_pinned_values values held) ->
     (global_world_context valuation ∗ held_world valuation held ∗
       term_interp_resource_prenex_at_arguments runtime formals binders valuation
         (held_pinned arguments held) (held_pinned_values values held) pre) ⊢
@@ -2697,6 +2730,24 @@ Definition term_structured_runtime_arguments_valid
       (global_world_context valuation ∗ held_world valuation held ∗
        term_interp_resource_prenex_at_arguments runtime formals binders valuation
          (held_pinned arguments held) (held_pinned_values values held) post).
+
+Lemma fold_after_open_access_records invariant key key' excluded outer opened
+    inner :
+  GenericRegions.Atomicity.open_access invariant key excluded outer =
+    inr opened ->
+  GenericRegions.Atomicity.analysis_records inner =
+    GenericRegions.Atomicity.analysis_records opened ->
+  GenericRegions.Atomicity.analysis_records
+    (GenericRegions.Atomicity.fold_invariant invariant key' inner) =
+    GenericRegions.Atomicity.analysis_records outer.
+Proof.
+  intros Hopen Hinner.
+  destruct (GenericRegions.Atomicity.open_access_records _ _ _ _ _ Hopen)
+    as (entry & ->).
+  cbn [GenericRegions.Atomicity.analysis_records] in Hinner.
+  rewrite (GenericRegions.Atomicity.fold_invariant_closes _ _ _ _ _ Hinner
+    eq_refl). reflexivity.
+Qed.
 
 Lemma term_structured_certificate_preserves_records
     {Γ entry statement exit}
@@ -2713,7 +2764,7 @@ Proof.
   - exact IHcertificate1.
   - rewrite e0.
     eapply GenericRegions.Atomicity.take_step_preserves_records; eauto.
-  - eapply GenericRegions.Atomicity.fold_after_open_records; eauto.
+  - eapply fold_after_open_access_records; eauto.
   - exact IHcertificate.
   - exact IHcertificate1.
 Qed.
@@ -2860,6 +2911,7 @@ Proof.
     exact Hopen. }
   destruct statement.
   all: simpl in Hview; try discriminate.
+  all: try (exfalso; guarded_view_cases; fail).
   all: unfold concrete_operation_wp.
   all: unfold RegionExecution.Primitives.operation_wp; simpl.
   all: unfold translated_runtime_wp; simpl.
@@ -3257,6 +3309,313 @@ Qed.
     extends the caller's semantic vector with the values at which the
     invariant is opened.  Thus the body induction can preserve both vectors
     in one invocation, without equating symbolic telescope witnesses. *)
+Lemma interp_expr_list_cons_inv {F Δ t ts} (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (expression : expr F Δ t) (expressions : expr_list F Δ ts)
+    (values : tval_list (t :: ts)) :
+  interp_expr_list formals binders valuation (ExprCons expression expressions) =
+    Some values ->
+  exists value rest, values = TVCons value rest /\
+    interp_expr formals binders valuation expression = Some value /\
+    interp_expr_list formals binders valuation expressions = Some rest.
+Proof.
+  cbn [interp_expr_list].
+  destruct (interp_expr formals binders valuation expression) as [head|];
+    destruct (interp_expr_list formals binders valuation expressions)
+      as [tail|]; try discriminate.
+  intros Heq. injection Heq as <-. eauto.
+Qed.
+
+Definition tval_list_head {t ts} (values : tval_list (t :: ts)) : tval t :=
+  match values in tval_list ts0
+    return match ts0 with [] => unit | t0 :: _ => tval t0 end
+  with
+  | TVNil => tt
+  | TVCons value _ => value
+  end.
+
+Definition tval_list_tail {t ts} (values : tval_list (t :: ts)) :
+    tval_list ts :=
+  match values in tval_list ts0
+    return match ts0 with [] => unit | _ :: ts1 => tval_list ts1 end
+  with
+  | TVNil => tt
+  | TVCons _ rest => rest
+  end.
+
+Lemma pexpr_list_eta {keep D t ts} (expressions : pexpr_list keep D (t :: ts)) :
+  expressions =
+    PECons (IR.pexpr_list_head expressions) (IR.pexpr_list_tail expressions).
+Proof.
+  refine (match expressions as expressions0 in pexpr_list _ _ ts0
+    return match ts0 return pexpr_list keep D ts0 -> Prop with
+           | [] => fun _ => True
+           | _ :: _ => fun expressions1 =>
+               expressions1 = PECons (IR.pexpr_list_head expressions1)
+                 (IR.pexpr_list_tail expressions1)
+           end expressions0
+  with
+  | PENil => I
+  | PECons _ _ => eq_refl
+  end).
+Qed.
+
+(** Any expression can be pinned, at the value it has in the chosen state. *)
+Lemma term_interp_resource_prenex_at_arguments_pin {Γ F Δ ts t}
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (valuation : symbol_valuation)
+    (tracked : gexpr_list Γ ts) (values : tval_list ts)
+    (expression : gexpr Γ t)
+    (prenex : Translation.Resource.resource_prenex Γ F Δ) :
+  forall (binders : binder_env Δ),
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      tracked values prenex ⊢
+    ∃ value : tval t,
+      term_interp_resource_prenex_at_arguments runtime formals binders valuation
+        (PECons expression tracked) (TVCons value values) prenex.
+Proof.
+  induction prenex as [Δ [stack body] | Δ u rest IH]; intros binders.
+  - cbn [term_interp_resource_prenex_at_arguments
+      Translation.Resource.resource_stack].
+    iIntros "[Hstate %Hvalues]".
+    destruct (interp_expr_total formals binders valuation
+      (IR.symbolize_expr stack expression)) as [value Hvalue].
+    iExists value. iFrame. iPureIntro.
+    cbn [IR.symbolize_expr_list interp_expr_list]. rewrite Hvalue Hvalues.
+    reflexivity.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "H". iDestruct "H" as (head) "H".
+    iDestruct (IH with "H") as (value) "H".
+    iExists value, head. iExact "H".
+Qed.
+
+Lemma term_interp_resource_prenex_at_arguments_unpin {Γ F Δ ts t}
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (valuation : symbol_valuation)
+    (tracked : gexpr_list Γ ts) (values : tval_list ts)
+    (expression : gexpr Γ t) (value : tval t)
+    (prenex : Translation.Resource.resource_prenex Γ F Δ) :
+  forall (binders : binder_env Δ),
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      (PECons expression tracked) (TVCons value values) prenex ⊢
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      tracked values prenex.
+Proof.
+  induction prenex as [Δ [stack body] | Δ u rest IH]; intros binders.
+  - cbn [term_interp_resource_prenex_at_arguments
+      Translation.Resource.resource_stack].
+    iIntros "[Hstate %Hvalues]". iFrame. iPureIntro.
+    cbn [IR.symbolize_expr_list] in Hvalues.
+    apply interp_expr_list_cons_inv in Hvalues
+      as (head & rest & Heq & _ & Hrest).
+    have Htail := f_equal tval_list_tail Heq. cbn in Htail.
+    rewrite Htail. exact Hrest.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "H". iDestruct "H" as (head) "H". iExists head.
+    iApply (IH with "H").
+Qed.
+
+(** A derivation of [assert condition] makes the condition true in every
+    state satisfying its precondition, at the value the pinned vector
+    determines. *)
+Lemma term_assert_derivation_true {Γ F Δ}
+    (pre post : Translation.Resource.resource_prenex Γ F Δ) statement :
+  CertifiedNormalization.RavenHoareRules.RavenHoareTriple pre statement post ->
+  forall (condition : gexpr Γ TBool), statement = TAssert condition ->
+  forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (binders : binder_env Δ)
+    (valuation : symbol_valuation) ts (pinned : gexpr_list Γ ts)
+    (values : tval_list ts) (truth : tval TBool),
+  (forall Δ' (store : symbolic_store Γ F Δ') (binders' : binder_env Δ'),
+    interp_expr_list formals binders' valuation
+      (IR.symbolize_expr_list store pinned) = Some values ->
+    interp_expr formals binders' valuation
+      (IR.symbolize_expr store condition) = Some truth) ->
+  term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      pinned values pre ⊢
+    ⌜truth = VBool true⌝.
+Proof.
+  intros Hderivation. induction Hderivation;
+    intros asserted Hstatement runtime formals binders valuation ts pinned
+      values truth Hdetermined; try discriminate.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "H". iDestruct "H" as (head) "H".
+    iApply (IHHderivation asserted Hstatement with "H"). exact Hdetermined.
+  - pose (source_binders := fun u (variable : bvar Δ u) =>
+      binders u (MThere variable)).
+    have Hrenaming : forall u (variable : bvar Δ u),
+        binders u (Assertions.weaken_bound_renaming u variable) =
+          source_binders u variable.
+    { intros. reflexivity. }
+    rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
+      valuation _ _ pre _ Assertions.weaken_bound_renaming source_binders
+      binders Hrenaming).
+    iApply (IHHderivation asserted Hstatement). exact Hdetermined.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "H". iDestruct "H" as (head) "H".
+    iApply (IHHderivation asserted Hstatement with "H"). exact Hdetermined.
+  - iIntros "H". iApply (IHHderivation asserted Hstatement); [exact Hdetermined|].
+    iApply (term_interp_resource_prenex_at_arguments_entails with "H").
+    assumption.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "[[Hstack [Hbody _]] %Harguments]".
+    iApply (IHHderivation asserted Hstatement); [exact Hdetermined|].
+    cbn [term_interp_resource_prenex_at_arguments]. iFrame.
+    iPureIntro. exact Harguments.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "[[Hstack Hbody] %Harguments]".
+    iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
+      (term_predicates valuation) _ _ ltac:(eassumption) formals binders
+      valuation with "Hbody") as "Hbody".
+    iApply (IHHderivation asserted Hstatement); [exact Hdetermined|].
+    cbn [term_interp_resource_prenex_at_arguments]. iFrame.
+    iPureIntro. exact Harguments.
+  - cbn [term_interp_resource_prenex_at_arguments].
+    iIntros "[[Hstack Hbody] %Harguments]".
+    cbn [Translation.Resource.resource_stack] in Harguments.
+    iPoseProof (interp_store_equal_under body store store' H formals
+      binders valuation with "Hbody") as "%Hstores".
+    iEval (rewrite Hstores) in "Hstack".
+    have Hargument_interp := interp_program_expr_list_store_ext formals
+      binders valuation store' store pinned Hstores.
+    unfold interp_program_expr_list in Hargument_interp.
+    rewrite Harguments in Hargument_interp.
+    iApply (IHHderivation asserted Hstatement); [exact Hdetermined|].
+    cbn [term_interp_resource_prenex_at_arguments]. iFrame.
+    iPureIntro. symmetry. exact Hargument_interp.
+  - injection Hstatement as ->.
+    cbn [term_interp_resource_prenex_at_arguments
+      Translation.Resource.resource_stack].
+    iIntros "[[_ [_ Hcondition]] %Harguments]".
+    unfold term_interp_core. cbn [Translation.TermSemantics.interp_core].
+    iDestruct "Hcondition" as %Hcondition.
+    iPureIntro.
+    rewrite (Hdetermined _ store binders Harguments) in Hcondition.
+    injection Hcondition as Htruth. exact Htruth.
+  - destruct (interp_expr_total formals binders valuation value)
+      as [tracked_value Htracked_value].
+    rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
+      valuation _ _ expression pre binders value tracked_value
+      Htracked_value).
+    iApply (IHHderivation asserted Hstatement runtime formals binders
+      valuation _ (PECons expression pinned) (TVCons tracked_value values)).
+    intros Δ' store binders' Hcons.
+    cbn [IR.symbolize_expr_list] in Hcons.
+    apply interp_expr_list_cons_inv in Hcons
+      as (head & rest & Heq & _ & Hrest).
+    have Htail := f_equal tval_list_tail Heq. cbn in Htail. subst rest.
+    exact (Hdetermined Δ' store binders' Hrest).
+Qed.
+
+(** Arguments that evaluate like the opened ones do not differ from them. *)
+Lemma arguments_differ_same {D F Δ keep ts} (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (store : symbolic_store D F Δ) (left right : pexpr_list keep D ts)
+    (values : tval_list ts) :
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store left) = Some values ->
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store right) = Some values ->
+  interp_expr formals binders valuation
+    (IR.symbolize_expr store (IR.arguments_differ left right)) =
+    Some (VBool false).
+Proof.
+  revert right values.
+  induction left as [|t ts expression tail IH]; intros right values Hleft Hright.
+  - reflexivity.
+  - rewrite (pexpr_list_eta right) in Hright.
+    cbn [IR.symbolize_expr_list] in Hleft, Hright.
+    apply interp_expr_list_cons_inv in Hleft
+      as (value & rest & -> & Hhead & Htail).
+    apply interp_expr_list_cons_inv in Hright
+      as (value' & rest' & Hvalues & Hhead' & Htail').
+    have Hvalue := f_equal tval_list_head Hvalues.
+    have Hrest := f_equal tval_list_tail Hvalues.
+    cbn in Hvalue, Hrest. subst value' rest'.
+    cbn [IR.arguments_differ].
+    have Hdiffer : interp_expr formals binders valuation
+        (IR.symbolize_expr store
+          (PEBinOp (BNe t) expression (IR.pexpr_list_head right))) =
+        Some (VBool false).
+    { cbn [IR.symbolize_expr interp_expr]. rewrite Hhead Hhead'.
+      cbn [interp_binop]. rewrite (proj2 (tval_eqb_eq t value value) eq_refl).
+      reflexivity. }
+    destruct (IR.pexpr_list_nil tail); [exact Hdiffer|].
+    have Hrest := IH (IR.pexpr_list_tail right) rest Htail Htail'.
+    transitivity (match interp_expr formals binders valuation
+        (IR.symbolize_expr store
+          (PEBinOp (BNe t) expression (IR.pexpr_list_head right))),
+      interp_expr formals binders valuation
+        (IR.symbolize_expr store
+          (IR.arguments_differ tail (IR.pexpr_list_tail right))) with
+      | Some value1, Some value2 => interp_binop BOr value1 value2
+      | _, _ => None
+      end); [reflexivity|].
+    rewrite Hdiffer Hrest. reflexivity.
+Qed.
+
+(** A true distinctness condition rules out every excluded vector. *)
+Lemma arguments_distinct_excludes {D F Δ keep ts} (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (store : symbolic_store D F Δ) (arguments : pexpr_list keep D ts)
+    (excluded : list (pexpr_list keep D ts)) (values : tval_list ts) :
+  interp_expr formals binders valuation
+    (IR.symbolize_expr store (IR.arguments_distinct arguments excluded)) =
+    Some (VBool true) ->
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store arguments) = Some values ->
+  forall other, List.In other excluded ->
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store other) <> Some values.
+Proof.
+  intros Htrue Harguments other Hin Hother.
+  induction excluded as [|first rest IH]; [contradiction|].
+  have Hfirst : forall first',
+      interp_expr formals binders valuation
+        (IR.symbolize_expr store (IR.arguments_differ arguments first')) =
+        Some (VBool true) ->
+      first' = other -> False.
+  { intros first' Hdiffer ->.
+    rewrite (arguments_differ_same formals binders valuation store arguments
+      other values Harguments Hother) in Hdiffer.
+    discriminate. }
+  destruct rest as [|second rest'].
+  - destruct Hin as [-> | []]. exact (Hfirst other Htrue eq_refl).
+  - change (match interp_expr formals binders valuation
+        (IR.symbolize_expr store (IR.arguments_differ arguments first)),
+      interp_expr formals binders valuation
+        (IR.symbolize_expr store
+          (IR.arguments_distinct arguments (second :: rest'))) with
+      | Some value1, Some value2 => interp_binop BAnd value1 value2
+      | _, _ => None
+      end = Some (VBool true)) in Htrue.
+    destruct (interp_expr formals binders valuation
+      (IR.symbolize_expr store (IR.arguments_differ arguments first)))
+      as [left|] eqn:Hleft; [|discriminate].
+    destruct (interp_expr formals binders valuation
+      (IR.symbolize_expr store (IR.arguments_distinct arguments
+        (second :: rest')))) as [right|] eqn:Hright; [|discriminate].
+    dependent destruction left. dependent destruction right.
+    cbn [interp_binop] in Htrue. injection Htrue as Htrue.
+    apply andb_true_iff in Htrue as [-> ->].
+    destruct Hin as [-> | Hin].
+    + exact (Hfirst other Hleft eq_refl).
+    + exact (IH eq_refl Hin).
+Qed.
+
+(** An opened instance's values, with the anchored vector, as evaluated in
+    one store. *)
+Definition anchor_fact {Γ F ts} (formals : formal_env F)
+    (valuation : symbol_valuation) (anchor : gexpr_list Γ ts)
+    (anchor_values : tval_list ts) {invariant : inv_id}
+    (program_arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (values : tval_list (Assertion.invariant_args invariant)) : Prop :=
+  exists Δ (store : symbolic_store Γ F Δ) (binders : binder_env Δ),
+    interp_expr_list formals binders valuation
+      (IR.symbolize_expr_list store anchor) = Some anchor_values /\
+    interp_expr_list formals binders valuation
+      (IR.symbolize_expr_list store program_arguments) = Some values.
+
 (** The held world of a just-opened instance, with the means to close the
     access once it is returned. *)
 Definition held_access (valuation : symbol_valuation) (invariant : inv_id)
@@ -3280,46 +3639,59 @@ Lemma term_access_opening_arguments_valid {Γ F Δ} invariant
       invariant program_arguments focus external body_pre)
     (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    {anchor_types} (anchor : gexpr_list Γ anchor_types)
+    (anchor_values : tval_list anchor_types)
+    (inner_mask outer_mask : coPset)
+    (result : tval_list (Assertion.invariant_args invariant) -> iProp)
     {tracked_types} (tracked : gexpr_list Γ tracked_types)
-    (tracked_values : tval_list tracked_types) (outer_mask : coPset) :
-  ↑(invariant_namespace invariant) ⊆ outer_mask ->
-  inv (invariant_namespace invariant) (term_world valuation invariant) -∗
+    (tracked_values : tval_list tracked_types) :
+  (∀ values, ⌜anchor_fact formals valuation anchor anchor_values
+      program_arguments values⌝ -∗
+    @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
+      values ={outer_mask, inner_mask}=∗
+    world_body_interp valuation invariant values ∗ result values) -∗
   term_interp_resource_prenex_at_arguments runtime formals binders valuation
-      tracked tracked_values external -∗
-  |={outer_mask, outer_mask ∖ ↑(invariant_namespace invariant)}=>
+      (IR.pexpr_list_append tracked anchor)
+      (Translation.tval_list_append tracked_values anchor_values) external -∗
+  |={outer_mask, inner_mask}=>
     ∃ invariant_values : tval_list (Assertion.invariant_args invariant),
       term_interp_resource_prenex_at_arguments runtime formals binders valuation
-        (IR.pexpr_list_append tracked program_arguments)
-        (Translation.tval_list_append tracked_values invariant_values)
+        (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+          program_arguments)
+        (Translation.tval_list_append
+          (Translation.tval_list_append tracked_values anchor_values)
+          invariant_values)
         body_pre ∗
-      held_access valuation invariant invariant_values outer_mask ∗
+      result invariant_values ∗
       @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
         invariant_values.
 Proof.
-  intros Hnamespace. revert binders tracked_types tracked tracked_values.
+  revert binders tracked_types tracked tracked_values.
   induction Hopening; intros binders tracked_types tracked tracked_values;
-    iIntros "#Hworld Hpre".
+    iIntros "Hopener Hpre".
   - cbn [term_interp_resource_prenex_at_arguments].
     iDestruct "Hpre" as "[[Hstack Htoken] %Htracked]".
     iDestruct "Htoken" as (values) "[%Harguments #Htoken]".
-    iPoseProof "Htoken" as "#Htoken_saved".
-    iMod (term_world_open_held valuation invariant values outer_mask Hnamespace
-      with "Hworld Htoken") as "(Hbody & Hheld & Hclose)".
+    have Hanchor := Htracked.
+    rewrite IR.symbolize_expr_list_append in Hanchor.
+    apply Translation.interp_expr_list_append_some_inv in Hanchor as
+      [_ Hanchor].
+    iMod ("Hopener" $! values with "[] Htoken") as "[Hbody Hresult]".
+    { iPureIntro. exists Δ, store, binders. split; assumption. }
     destruct (term_invariant_definition_compatible formals binders
       valuation invariant (IR.symbolize_expr_list store program_arguments)) as
       (actual_values & Hactual & Hbody_equiv).
     rewrite Harguments in Hactual. injection Hactual as Hvalues.
     subst actual_values.
     iEval (rewrite -Hbody_equiv) in "Hbody".
-    iModIntro. iExists values. unfold held_access.
-    iFrame "Hheld Hclose Htoken_saved".
+    iModIntro. iExists values. iFrame "Hresult Htoken".
     cbn [term_interp_resource_prenex_at_arguments].
     iFrame "Hstack Hbody". iPureIntro.
     rewrite IR.symbolize_expr_list_append.
     apply Translation.interp_expr_list_append_some; assumption.
   - cbn [term_interp_resource_prenex_at_arguments] in *.
     iDestruct "Hpre" as (value) "Hpre".
-    iMod (IHHopening (binder_cons value binders) with "Hworld Hpre") as
+    iMod (IHHopening (binder_cons value binders) with "Hopener Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken". iExists value.
     iExact "Hbody".
@@ -3330,62 +3702,74 @@ Proof.
           source_binders u variable.
     { intros. reflexivity. }
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      valuation tracked tracked_values external _
+      valuation (IR.pexpr_list_append tracked anchor)
+      (Translation.tval_list_append tracked_values anchor_values) external _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming)) in
       "Hpre".
-    iMod (IHHopening source_binders with "Hworld Hpre") as
+    iMod (IHHopening source_binders with "Hopener Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
-      valuation (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values) body_pre _
+      valuation (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values) body_pre _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming)).
     iExact "Hbody".
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as (value) "Hpre".
-    iMod (IHHopening (binder_cons value binders) with "Hworld Hpre") as
+    iMod (IHHopening (binder_cons value binders) with "Hopener Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
       formals binders valuation
-      (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values) value body_pre)) in
+      (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values) value body_pre)) in
       "Hbody".
     iExact "Hbody".
   - iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
-      formals binders valuation tracked tracked_values external' external H
+      formals binders valuation (IR.pexpr_list_append tracked anchor)
+      (Translation.tval_list_append tracked_values anchor_values) external' external H
       with "Hpre") as "Hpre".
-    iMod (IHHopening binders with "Hworld Hpre") as
+    iMod (IHHopening binders with "Hopener Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-      binders valuation (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values)
+      binders valuation (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values)
       body_pre body_pre' H0 with "Hbody").
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as "[[Hstack [Hpre Hframe]] %Htracked]".
-    iMod (IHHopening binders with "Hworld [Hstack Hpre]") as
+    iMod (IHHopening binders with "Hopener [Hstack Hpre]") as
       (values) "[Hbody [Hclose Htoken]]".
     { cbn [term_interp_resource_prenex_at_arguments]. iFrame.
       iPureIntro. exact Htracked. }
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
-      formals binders valuation (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values) body_pre frame)).
+      formals binders valuation (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values) body_pre frame)).
     iFrame.
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as "[[Hstack Hpre] %Htracked]".
     iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
       (term_predicates valuation) _ _ H formals binders valuation with "Hpre") as
       "Hpre".
-    iMod (IHHopening binders with "Hworld [Hstack Hpre]") as
+    iMod (IHHopening binders with "Hopener [Hstack Hpre]") as
       (values) "[Hbody [Hclose Htoken]]".
     { cbn [term_interp_resource_prenex_at_arguments]. iFrame.
       iPureIntro. exact Htracked. }
     iModIntro. iExists values. iFrame "Hclose Htoken".
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
-      binders valuation (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values)
+      binders valuation (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values)
       body_pre body_pre' H0 with "Hbody").
   - iEval (cbn [term_interp_resource_prenex_at_arguments]) in "Hpre".
     iDestruct "Hpre" as "[[Hstack Hbody] %Htracked]".
@@ -3393,24 +3777,27 @@ Proof.
       binders valuation with "Hbody") as "%Hstores".
     iEval (rewrite Hstores) in "Hstack".
     have Hargument_interp := interp_program_expr_list_store_ext formals
-      binders valuation store' store tracked Hstores.
+      binders valuation store' store (IR.pexpr_list_append tracked anchor) Hstores.
     unfold interp_program_expr_list in Hargument_interp.
     rewrite Htracked in Hargument_interp.
-    iApply (IHHopening binders with "Hworld [Hstack Hbody]").
+    iApply (IHHopening binders with "Hopener [Hstack Hbody]").
     cbn [term_interp_resource_prenex_at_arguments]. iFrame.
     iPureIntro. symmetry. exact Hargument_interp.
   - destruct (interp_expr_total formals binders valuation value)
       as [tracked_value Htracked_value].
     iEval (rewrite (term_interp_resource_prenex_at_arguments_track runtime
-      formals valuation tracked tracked_values expression external binders
+      formals valuation (IR.pexpr_list_append tracked anchor)
+      (Translation.tval_list_append tracked_values anchor_values) expression external binders
       value tracked_value Htracked_value)) in "Hpre".
     iMod (IHHopening binders _ (PECons expression tracked)
-      (TVCons tracked_value tracked_values) with "Hworld Hpre") as
+      (TVCons tracked_value tracked_values) with "Hopener Hpre") as
       (values) "[Hbody [Hclose Htoken]]".
     iModIntro. iExists values. iFrame "Hclose Htoken".
     rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
-      valuation (IR.pexpr_list_append tracked program_arguments)
-      (Translation.tval_list_append tracked_values values) expression body_pre
+      valuation (IR.pexpr_list_append (IR.pexpr_list_append tracked anchor)
+        program_arguments)
+      (Translation.tval_list_append (Translation.tval_list_append tracked_values anchor_values)
+        values) expression body_pre
       binders value tracked_value Htracked_value).
     iExact "Hbody".
 Qed.
@@ -3500,16 +3887,16 @@ Lemma term_access_closing_arguments_valid {Γ F Δ} invariant
     {tracked_types} (tracked : gexpr_list Γ tracked_types)
     (tracked_values : tval_list tracked_types)
     (invariant_values : tval_list (Assertion.invariant_args invariant))
-    (inner_mask outer_mask : coPset) :
+    (inner_mask outer_mask : coPset) (result : iProp) :
   term_interp_resource_prenex_at_arguments runtime formals binders valuation
       (IR.pexpr_list_append tracked program_arguments)
       (Translation.tval_list_append tracked_values invariant_values)
       body_post -∗
   (world_body_interp valuation invariant invariant_values
-    ={inner_mask, outer_mask}=∗ True) -∗
+    ={inner_mask, outer_mask}=∗ result) -∗
   @RegionExecution.Primitives.Model.core_invariant_own _ _ Σ RG invariant
     invariant_values -∗
-  |={inner_mask, outer_mask}=>
+  |={inner_mask, outer_mask}=> result ∗
     term_interp_resource_prenex_at_arguments runtime formals binders valuation
       tracked tracked_values external_post.
 Proof.
@@ -3528,7 +3915,7 @@ Proof.
     subst actual_values.
     iPoseProof (bi.equiv_entails_1_1 _ _ Hbody_equiv with "Hbody") as
       "Hbody".
-    iMod ("Hclose" with "Hbody"). iModIntro.
+    iMod ("Hclose" with "Hbody") as "$". iModIntro.
     cbn [term_interp_resource_prenex_at_arguments].
     iFrame "Hstack". iSplitL "Htoken".
     + iExists invariant_values. iFrame "Htoken".
@@ -3538,7 +3925,7 @@ Proof.
     iIntros "Hpost Hclose Htoken". iDestruct "Hpost" as (value) "Hpost".
     iPoseProof (IHHclosing (binder_cons value binders) with
       "Hpost Hclose Htoken") as "Hclosed".
-    iMod "Hclosed". iModIntro. iExists value. iExact "Hclosed".
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro. iExists value. iExact "Hclosed".
   - pose (source_binders := fun u (variable : bvar Δ u) =>
       binders u (MThere variable)).
     have Hrenaming : forall u (variable : bvar Δ u),
@@ -3553,7 +3940,7 @@ Proof.
     iIntros "Hpost Hclose Htoken".
     iPoseProof (IHHclosing source_binders with "Hpost Hclose Htoken") as
       "Hclosed".
-    iMod "Hclosed". iModIntro.
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro.
     rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
       valuation tracked tracked_values external_post _
       Assertions.weaken_bound_renaming source_binders binders Hrenaming).
@@ -3562,7 +3949,7 @@ Proof.
     iIntros "Hpost Hclose Htoken". iDestruct "Hpost" as (value) "Hpost".
     iPoseProof (IHHclosing (binder_cons value binders) with
       "Hpost Hclose Htoken") as "Hclosed".
-    iMod "Hclosed". iModIntro.
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_weaken runtime
       formals binders valuation tracked tracked_values value external_post)) in
       "Hclosed".
@@ -3573,7 +3960,7 @@ Proof.
       (Translation.tval_list_append tracked_values invariant_values)
       body_post' body_post H with "Hpost") as "Hpost".
     iPoseProof (IHHclosing binders with "Hpost Hclose Htoken") as "Hclosed".
-    iMod "Hclosed". iModIntro.
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro.
     iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
       binders valuation tracked tracked_values external_post external_post' H0
       with "Hclosed").
@@ -3584,7 +3971,7 @@ Proof.
       body_post frame)) in "Hpost".
     iDestruct "Hpost" as "[Hpost Hframe]".
     iPoseProof (IHHclosing binders with "Hpost Hclose Htoken") as "Hclosed".
-    iMod "Hclosed". iModIntro.
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro.
     iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
       formals binders valuation tracked tracked_values external_post frame)).
     iFrame.
@@ -3611,13 +3998,13 @@ Proof.
     iPoseProof (IHHclosing binders _ (PECons expression tracked)
       (TVCons tracked_value tracked_values) with "Hpost Hclose Htoken") as
       "Hclosed".
-    iMod "Hclosed". iModIntro.
+    iMod "Hclosed" as "[$ Hclosed]". iModIntro.
     rewrite (term_interp_resource_prenex_at_arguments_track runtime formals
       valuation tracked tracked_values expression external_post binders value
       tracked_value Htracked_value).
     iExact "Hclosed".
   - iIntros "Hpost Hclose Htoken".
-    iMod (IHHclosing binders with "Hpost Hclose Htoken") as "Hmiddle".
+    iMod (IHHclosing binders with "Hpost Hclose Htoken") as "[$ Hmiddle]".
     iModIntro.
     iApply (term_done_triple_arguments_valid _ _ H with "Hmiddle").
   - cbn [term_interp_resource_prenex_at_arguments].
@@ -3708,9 +4095,16 @@ Proof.
       body) _ Hatomic).
   iMod (term_access_opening_arguments_valid invariant
     program_arguments focus_open external_pre body_pre Hopening runtime
-    formals binders valuation tracked tracked_values outer_mask Hnamespace
-    with "Hworld Hpre") as (invariant_values)
-    "[Hpre [Hclose Htoken]]".
+    formals binders valuation tracked tracked_values
+    (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask
+    (fun values => held_access valuation invariant values outer_mask)
+    (@PENil _ keep_all Γ) Translation.TVNil
+    with "[] Hpre") as (invariant_values) "[Hpre [Hclose Htoken]]".
+  { iIntros (values _) "Htoken".
+    iMod (term_world_open_held valuation invariant values outer_mask Hnamespace
+      with "Hworld Htoken") as "(Hbody & Hheld & Hclose)".
+    iModIntro. iFrame. }
+  cbn [IR.pexpr_list_append Translation.tval_list_append] in *.
   iModIntro. iDestruct "Hclose" as "[Hheld Hclose]".
   iPoseProof (Hbody invariant_values with
     "[$Hworlds $Hchunks $Hprocedures $Hheld $Hframe $Hpre]") as "Hwp".
@@ -3719,11 +4113,110 @@ Proof.
   iApply (runtime_masked_wp_mono with "Hwp").
   iIntros "[[#Hglobal [[Hheld Hframe] Hpost]] [Hclose Htoken]]".
   iFrame "Hglobal Hframe". iSpecialize ("Hclose" with "Hheld").
-  iApply (term_access_closing_arguments_valid invariant
+  iMod (term_access_closing_arguments_valid invariant
     program_arguments focus_close body_post external_post Hclosing runtime
     formals binders valuation tracked tracked_values invariant_values
-    (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask
-    with "Hpost Hclose Htoken").
+    (outer_mask ∖ ↑(invariant_namespace invariant)) outer_mask True%I
+    with "Hpost Hclose Htoken") as "[_ $]".
+  done.
+Qed.
+
+(** A nested access of an open declaration: the instance's body is taken
+    from the held world and returned to it, with no mask change. *)
+Lemma term_nested_inv_access_runtime_arguments_valid {Γ F Δ ts} invariant
+    program_arguments
+    (focus_open focus_close :
+      CertifiedNormalization.RavenHoareRules.access_focus
+        invariant program_arguments Δ)
+    (external_pre body_pre body_post external_post :
+      Translation.Resource.resource_prenex Γ F Δ)
+    (Hopening : CertifiedNormalization.RavenHoareRules.access_opening
+      invariant program_arguments focus_open external_pre body_pre)
+    (Hclosing : CertifiedNormalization.RavenHoareRules.access_closing
+      invariant program_arguments focus_close body_post external_post)
+    (body : stmt Γ)
+    (tracked : gexpr_list Γ ts) (tracked_values : tval_list ts)
+    (runtime : RegionExecution.Primitives.Model.stack_context Γ)
+    (formals : formal_env F) (binders : binder_env Δ) (valuation : symbol_valuation)
+    (mask : coPset) (opened : gset (list RuntimeModel.val)) (frame : iProp) :
+  (forall values, anchor_fact formals valuation tracked tracked_values
+      program_arguments values ->
+    @RegionExecution.Primitives.Model.tval_list_to_rich_list _
+      (Assertion.invariant_args invariant) values ∉ opened) ->
+  (forall invariant_values : tval_list (Assertion.invariant_args invariant),
+    (global_world_context valuation ∗
+     (held_world_of valuation invariant
+        ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+          (Assertion.invariant_args invariant) invariant_values]} ∪ opened) ∗
+      frame) ∗
+     term_interp_resource_prenex_at_arguments runtime formals binders valuation
+       (IR.pexpr_list_append tracked program_arguments)
+       (Translation.tval_list_append tracked_values invariant_values)
+       body_pre) ⊢
+    runtime_masked_wp mask mask
+      (@RuntimeErasure.runtime_stmt _ _ Γ
+        (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+        (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
+      (global_world_context valuation ∗
+       (held_world_of valuation invariant
+          ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+            (Assertion.invariant_args invariant) invariant_values]} ∪ opened) ∗
+        frame) ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders valuation
+         (IR.pexpr_list_append tracked program_arguments)
+         (Translation.tval_list_append tracked_values invariant_values)
+         body_post)) ->
+  (global_world_context valuation ∗
+   (held_world_of valuation invariant opened ∗ frame) ∗
+   term_interp_resource_prenex_at_arguments runtime formals binders valuation
+     tracked tracked_values external_pre) ⊢
+  runtime_masked_wp mask mask
+    (@RuntimeErasure.runtime_stmt _ _ Γ
+      (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+      (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
+      (TInvAccess invariant program_arguments body))
+    (global_world_context valuation ∗
+     (held_world_of valuation invariant opened ∗ frame) ∗
+     term_interp_resource_prenex_at_arguments runtime formals binders valuation
+       tracked tracked_values external_post).
+Proof.
+  intros Hfresh Hbody.
+  simpl. iIntros "(#Hglobal & [Hheld Hframe] & Hpre)".
+  iApply runtime_masked_wp_fupd.
+  iMod (term_access_opening_arguments_valid invariant
+    program_arguments focus_open external_pre body_pre Hopening runtime
+    formals binders valuation tracked tracked_values mask mask
+    (fun values =>
+      ⌜@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+        (Assertion.invariant_args invariant) values ∉ opened⌝ ∗
+      held_world_of valuation invariant
+        ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+          (Assertion.invariant_args invariant) values]} ∪ opened))%I
+    (@PENil _ keep_all Γ) Translation.TVNil
+    with "[Hheld] Hpre") as (invariant_values)
+    "[Hpre [[%Hvalues_fresh Hheld] Htoken]]".
+  { iIntros (values Hfact) "Htoken".
+    have Hvalues_fresh := Hfresh values Hfact.
+    iPoseProof (held_world_take valuation invariant opened values
+      Hvalues_fresh with "Hheld Htoken") as "[Hbody Hheld]".
+    iModIntro. iFrame. done. }
+  cbn [IR.pexpr_list_append Translation.tval_list_append] in *.
+  iModIntro.
+  iPoseProof (Hbody invariant_values with "[$Hglobal $Hheld $Hframe $Hpre]")
+    as "Hwp".
+  iCombine "Hwp Htoken" as "Hwp".
+  iPoseProof (runtime_masked_wp_frame with "Hwp") as "Hwp".
+  iApply (runtime_masked_wp_mono with "Hwp").
+  iIntros "[(#Hglobal' & [Hheld Hframe] & Hpost) Htoken]".
+  iMod (term_access_closing_arguments_valid invariant
+    program_arguments focus_close body_post external_post Hclosing runtime
+    formals binders valuation tracked tracked_values invariant_values
+    mask mask (held_world_of valuation invariant opened)
+    with "Hpost [Hheld] Htoken") as "[Hheld Hpost]".
+  { iIntros "Hbody". iModIntro.
+    iApply (held_world_put valuation invariant opened invariant_values
+      Hvalues_fresh with "Hheld Hbody"). }
+  iModIntro. iFrame "Hglobal' Hheld Hframe Hpost".
 Qed.
 
 Lemma held_opened_lookup_none {Γ ts types} (held : held_list Γ ts types)
@@ -3761,16 +4254,16 @@ Qed.
 Lemma held_aligned_open {Γ ts types} (invariant : inv_id)
     (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
     (values : tval_list (Assertion.invariant_args invariant))
-    (held : held_list Γ ts types) entry opened :
-  GenericRegions.Atomicity.open_invariant invariant
-    (RegionSyntax.argument_key arguments) entry = inr opened ->
+    (held : held_list Γ ts types) excluded entry opened :
+  GenericRegions.Atomicity.open_access invariant
+    (RegionSyntax.argument_key arguments) excluded entry = inr opened ->
   held_aligned (GenericRegions.Atomicity.analysis_records entry) held ->
   held_aligned (GenericRegions.Atomicity.analysis_records opened)
     (HeldCons invariant arguments values held).
 Proof.
   intros Hopen Haligned.
-  destruct (GenericRegions.Atomicity.open_invariant_records _ _ _ _ Hopen)
-    as (consumed & _ & ->).
+  destruct (GenericRegions.Atomicity.open_access_records _ _ _ _ _ Hopen)
+    as (consumed & ->).
   unfold held_aligned in *. cbn. rewrite Haligned. reflexivity.
 Qed.
 
@@ -3778,11 +4271,13 @@ Qed.
     already the strengthened induction hypothesis at the concatenated
     vector; this is the exact interface used by the top-level induction. *)
 Lemma term_structured_runtime_independent_inv_access_arguments_valid
-    {Γ F Δ entry invariant program_arguments body opened inner ts}
+    {Γ F Δ entry invariant program_arguments excluded body opened inner ts}
     (Hregistered : invariant ∈ term_registered_invariants )
-    (Hopen : GenericRegions.Atomicity.open_invariant invariant
-      (RegionSyntax.argument_key program_arguments) entry =
+    (Hopen : GenericRegions.Atomicity.open_access invariant
+      (RegionSyntax.argument_key program_arguments)
+      (map RegionSyntax.argument_key excluded) entry =
       inr opened)
+    (Hclosed : invariant ∉ GenericRegions.Atomicity.analysis_open entry)
     (body_certificate : Structured.structured_certificate
       Γ opened body inner)
     (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
@@ -3799,9 +4294,9 @@ Lemma term_structured_runtime_independent_inv_access_arguments_valid
       invariant program_arguments focus_open external_pre body_pre)
     (Hclosing : CertifiedNormalization.RavenHoareRules.access_closing
       invariant program_arguments focus_close body_post external_post)
-    (tracked : gexpr_list Γ ts) :
+    (conditions : list (gexpr Γ TBool)) (tracked : gexpr_list Γ ts) :
   term_structured_runtime_arguments_valid body_certificate
-    tracked body_pre body_post ->
+    [] tracked body_pre body_post ->
   (forall (runtime : RegionExecution.Primitives.Model.stack_context Γ),
     @Atomic RuntimeLang.simp_lang WeaklyAtomic
       (@RuntimeErasure.runtime_stmt _ _ Γ
@@ -3809,11 +4304,11 @@ Lemma term_structured_runtime_independent_inv_access_arguments_valid
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)) ->
   term_structured_runtime_arguments_valid
     (Structured.StructuredInvAccess Γ entry invariant program_arguments
-      body opened inner Hopen body_certificate Hpreserved)
-    tracked external_pre external_post.
+      excluded body opened inner Hopen body_certificate Hpreserved)
+    conditions tracked external_pre external_post.
 Proof.
   intros Hbody Hatomic types held Haligned Htracked_stable tracked_values
-    runtime formals binders valuation ambient Henvelope.
+    runtime formals binders valuation ambient Henvelope _.
   cbn [Hoare.ResourceHoare.statement_writes] in Htracked_stable.
   have Hcombined_stable :
       Hoare.ResourceHoare.pexpr_list_dependencies
@@ -3821,19 +4316,20 @@ Proof.
         Hoare.ResourceHoare.statement_writes body.
   { rewrite Hoare.ResourceHoare.pexpr_list_dependencies_append.
     apply disjoint_union_l. split; assumption. }
-  have Hopen_facts := Hopen.
+  have Hopen_facts := GenericRegions.Atomicity.open_access_fresh _ _ _ _ _
+    Hclosed Hopen.
   apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
     (Hfresh & Hmember & _ & Hopened).
   have Hheld_fresh := held_opened_lookup_none held _ invariant Haligned Hfresh.
   have Hfootprint_envelope : RegionExecution.Primitives.Model.runtime_mask
       (Structured.structured_certificate_footprint
         (Structured.StructuredInvAccess Γ entry invariant program_arguments
-          body opened inner Hopen body_certificate Hpreserved)) ⊆ ambient.
+          excluded body opened inner Hopen body_certificate Hpreserved)) ⊆ ambient.
   { etrans; last exact Henvelope. apply RegionExecution.Primitives.Model.runtime_mask_mono.
     simpl. intros candidate Hcandidate. apply elem_of_union_l. exact Hcandidate. }
   have Hnamespace := term_structured_invariant_namespace_active_from_footprint
     (Structured.StructuredInvAccess Γ entry invariant program_arguments
-      body opened inner Hopen body_certificate Hpreserved)
+      excluded body opened inner Hopen body_certificate Hpreserved)
     ambient invariant Hmember Hfresh Hfootprint_envelope.
   have Hinner_mask : RegionExecution.Primitives.Model.active_runtime_mask
       ambient inner =
@@ -3848,7 +4344,7 @@ Proof.
   { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
     exact (term_structured_certificate_preserves_open
       (Structured.StructuredInvAccess Γ entry invariant program_arguments
-        body opened inner Hopen body_certificate Hpreserved)). }
+        excluded body opened inner Hopen body_certificate Hpreserved)). }
   unfold term_structured_runtime_wp.
   rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
   eapply (term_independent_inv_access_runtime_arguments_valid
@@ -3872,9 +4368,9 @@ Proof.
     have Hbody_wp := Hbody _ (HeldCons invariant program_arguments
       invariant_values held)
       (held_aligned_open invariant program_arguments invariant_values held
-        entry opened Hopen Haligned)
+        _ entry opened Hopen Haligned)
       Hcombined_stable tracked_values runtime formals binders valuation ambient
-      Hbody_envelope.
+      Hbody_envelope (conditions_hold_nil _ _).
     unfold term_structured_runtime_wp in Hbody_wp.
     rewrite translated_runtime_wp_as_masked in Hbody_wp.
     have Hopened_inner : RegionExecution.Primitives.Model.active_runtime_mask
@@ -3894,6 +4390,275 @@ Proof.
     iApply (held_world_cons_fresh valuation invariant program_arguments
       invariant_values held Hheld_fresh with "Hheld").
   - apply Hatomic.
+Qed.
+
+Lemma held_opened_lookup_some {Γ ts types} (held : held_list Γ ts types)
+    records (invariant : inv_id) :
+  held_aligned records held ->
+  invariant ∈ (list_to_set (map GenericRegions.Atomicity.record_invariant
+    records) : gset inv_id) ->
+  is_Some (held_opened held !! invariant).
+Proof.
+  unfold held_aligned. revert records.
+  induction held as [|types' invariant' arguments opened rest IH];
+    intros records Haligned Hin.
+  - destruct records; [set_solver|discriminate].
+  - destruct records as [|record records]; [discriminate|].
+    cbn in Haligned. injection Haligned as Hinvariant _ Hrest.
+    cbn. destruct (decide (invariant = invariant')) as [->|Hne].
+    + rewrite lookup_insert. eauto.
+    + rewrite lookup_insert_ne; [|congruence].
+      apply (IH records Hrest). cbn in Hin. set_solver.
+Qed.
+
+Lemma held_world_split {Γ ts types} valuation (invariant : inv_id)
+    (held : held_list Γ ts types) opened :
+  held_opened held !! invariant = Some opened ->
+  held_world valuation held ⊣⊢
+    held_world_of valuation invariant opened ∗
+    [∗ map] other ↦ others ∈ delete invariant (held_opened held),
+      held_world_of valuation other others.
+Proof. intros Hlookup. unfold held_world. by rewrite big_sepM_delete. Qed.
+
+Lemma held_world_cons_open {Γ ts types} valuation (invariant : inv_id)
+    (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (values : tval_list (Assertion.invariant_args invariant))
+    (held : held_list Γ ts types) opened :
+  held_opened held !! invariant = Some opened ->
+  held_world valuation (HeldCons invariant arguments values held) ⊣⊢
+    held_world_of valuation invariant
+      ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+        (Assertion.invariant_args invariant) values]} ∪ opened) ∗
+    [∗ map] other ↦ others ∈ delete invariant (held_opened held),
+      held_world_of valuation other others.
+Proof.
+  intros Hlookup. unfold held_world. cbn [held_opened]. rewrite Hlookup.
+  cbn. by rewrite big_sepM_insert_delete.
+Qed.
+
+(** The values an invariant is held open at are those of held arguments
+    with the keys of its records. *)
+Lemma held_opened_evaluated {Γ ts types} (tracked : gexpr_list Γ ts)
+    (values : tval_list ts) (held : held_list Γ ts types)
+    {F Δ} (store : symbolic_store Γ F Δ) (formals : formal_env F)
+    (binders : binder_env Δ) (valuation : symbol_valuation)
+    (invariant : inv_id) raw :
+  interp_expr_list formals binders valuation
+    (IR.symbolize_expr_list store (held_pinned tracked held)) =
+    Some (held_pinned_values values held) ->
+  raw ∈ default ∅ (held_opened held !! invariant) ->
+  exists (arguments : gexpr_list Γ (Assertion.invariant_args invariant))
+    (opened : tval_list (Assertion.invariant_args invariant)),
+    List.In (invariant, RegionSyntax.argument_key arguments)
+      (held_records held) /\
+    interp_expr_list formals binders valuation
+      (IR.symbolize_expr_list store arguments) = Some opened /\
+    raw = @RegionExecution.Primitives.Model.tval_list_to_rich_list _
+      (Assertion.invariant_args invariant) opened.
+Proof.
+  induction held as [|types' invariant' arguments opened rest IH];
+    intros Heval Hraw.
+  - cbn in Hraw. rewrite lookup_empty in Hraw. cbn in Hraw. set_solver.
+  - cbn [held_pinned held_pinned_values] in Heval.
+    rewrite IR.symbolize_expr_list_append in Heval.
+    apply Translation.interp_expr_list_append_some_inv in Heval as
+      [Hrest Harguments].
+    cbn [held_opened] in Hraw.
+    destruct (decide (invariant = invariant')) as [<-|Hne].
+    + rewrite lookup_insert in Hraw. cbn in Hraw.
+      apply elem_of_union in Hraw as [Hraw|Hraw].
+      * apply elem_of_singleton in Hraw as ->.
+        exists arguments, opened. split; [left; reflexivity|]. split; auto.
+      * destruct (IH Hrest Hraw) as (arguments' & opened' & Hin & ? & ?).
+        exists arguments', opened'. split; [right; exact Hin|]. auto.
+    + rewrite lookup_insert_ne in Hraw; [|congruence].
+      destruct (IH Hrest Hraw) as (arguments' & opened' & Hin & ? & ?).
+      exists arguments', opened'. split; [right; exact Hin|]. auto.
+Qed.
+
+(** Structured form of the nested access seam: the access's own condition,
+    known to hold where the pinned vector has its values, rules out the
+    instances held open. *)
+Lemma term_structured_runtime_nested_inv_access_arguments_valid
+    {Γ F Δ entry invariant program_arguments excluded body opened inner ts}
+    (Hopen : GenericRegions.Atomicity.open_access invariant
+      (RegionSyntax.argument_key program_arguments)
+      (map RegionSyntax.argument_key excluded) entry =
+      inr opened)
+    (Hnested : invariant ∈ GenericRegions.Atomicity.analysis_open entry)
+    (body_certificate : Structured.structured_certificate
+      Γ opened body inner)
+    (Hpreserved : GenericRegions.Atomicity.analysis_records inner =
+      GenericRegions.Atomicity.analysis_records opened)
+    (focus_open focus_close :
+      CertifiedNormalization.RavenHoareRules.access_focus
+        invariant program_arguments Δ)
+    (external_pre body_pre body_post external_post :
+      Translation.Resource.resource_prenex Γ F Δ)
+    (Hprogram_stable :
+      Hoare.ResourceHoare.pexpr_list_dependencies program_arguments ##
+        Hoare.ResourceHoare.statement_writes body)
+    (Hopening : CertifiedNormalization.RavenHoareRules.access_opening
+      invariant program_arguments focus_open external_pre body_pre)
+    (Hclosing : CertifiedNormalization.RavenHoareRules.access_closing
+      invariant program_arguments focus_close body_post external_post)
+    (conditions : list (gexpr Γ TBool)) (tracked : gexpr_list Γ ts) :
+  List.In (IR.arguments_distinct program_arguments excluded) conditions ->
+  term_structured_runtime_arguments_valid body_certificate
+    [] tracked body_pre body_post ->
+  term_structured_runtime_arguments_valid
+    (Structured.StructuredInvAccess Γ entry invariant program_arguments
+      excluded body opened inner Hopen body_certificate Hpreserved)
+    conditions tracked external_pre external_post.
+Proof.
+  intros Hcondition Hbody types held Haligned Htracked_stable tracked_values
+    runtime formals binders valuation ambient Henvelope Hconditions.
+  cbn [Hoare.ResourceHoare.statement_writes] in Htracked_stable.
+  have Hcombined_stable :
+      Hoare.ResourceHoare.pexpr_list_dependencies
+          (IR.pexpr_list_append (held_pinned tracked held) program_arguments) ##
+        Hoare.ResourceHoare.statement_writes body.
+  { rewrite Hoare.ResourceHoare.pexpr_list_dependencies_append.
+    apply disjoint_union_l. split; assumption. }
+  destruct (GenericRegions.Atomicity.open_access_nested _ _ _ _ _ Hnested Hopen)
+    as (_ & Hcovered & Hopened_open & _).
+  destruct (held_opened_lookup_some held _ invariant Haligned Hnested)
+    as [held_values Hlookup].
+  have Hinner_mask : RegionExecution.Primitives.Model.active_runtime_mask
+      ambient inner =
+      RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
+  { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+    rewrite (GenericRegions.Atomicity.analysis_open_records _ _ Hpreserved).
+    exact Hopened_open. }
+  have Hopened_mask : RegionExecution.Primitives.Model.active_runtime_mask
+      ambient opened =
+      RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
+  { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+    exact Hopened_open. }
+  have Hexit_mask : RegionExecution.Primitives.Model.active_runtime_mask ambient
+      (GenericRegions.Atomicity.fold_invariant invariant
+        (RegionSyntax.argument_key program_arguments) inner) =
+      RegionExecution.Primitives.Model.active_runtime_mask ambient entry.
+  { apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
+    exact (term_structured_certificate_preserves_open
+      (Structured.StructuredInvAccess Γ entry invariant program_arguments
+        excluded body opened inner Hopen body_certificate
+        Hpreserved)). }
+  (* The opened values are none of the held ones. *)
+  have Hfresh : forall values,
+      anchor_fact formals valuation (held_pinned tracked held)
+        (held_pinned_values tracked_values held) program_arguments values ->
+      @RegionExecution.Primitives.Model.tval_list_to_rich_list _
+        (Assertion.invariant_args invariant) values ∉ held_values.
+  { intros values (Δ' & store & binders' & Hpinned & Hvalues) Hraw.
+    have Htrue := Hconditions _ _ store formals binders' valuation Hpinned.
+    rewrite Forall_forall in Htrue.
+    specialize (Htrue _ (proj2 (elem_of_list_In _ _) Hcondition)).
+    have Hraw' : @RegionExecution.Primitives.Model.tval_list_to_rich_list _
+        (Assertion.invariant_args invariant) values ∈
+        default ∅ (held_opened held !! invariant).
+    { rewrite Hlookup. exact Hraw. }
+    destruct (held_opened_evaluated tracked tracked_values held store formals
+      binders' valuation invariant _ Hpinned Hraw')
+      as (held_arguments & opened_values & Hin & Hheld_eval & Hrich).
+    apply RegionExecution.Primitives.Model.tval_list_to_rich_list_injective
+      in Hrich. subst opened_values.
+    unfold held_aligned in Haligned. rewrite <- Haligned in Hin.
+    apply in_map_iff in Hin as (record & Hrecord & Hrecord_in).
+    injection Hrecord as Hrecord_invariant Hrecord_key.
+    pose proof Hcovered as Hcover.
+    unfold GenericRegions.Atomicity.records_covered in Hcover.
+    rewrite forallb_forall in Hcover.
+    specialize (Hcover record Hrecord_in).
+    rewrite decide_True in Hcover; [|exact Hrecord_invariant].
+    apply bool_decide_eq_true in Hcover as [Hsome Hexcluded].
+    rewrite Hrecord_key in Hsome Hexcluded.
+    apply elem_of_list_In, in_map_iff in Hexcluded
+      as (other & Hother_key & Hother_in).
+    destruct (RegionSyntax.argument_key held_arguments) as [key|] eqn:Hkey;
+      [|contradiction].
+    have Hsame := RegionSyntax.argument_key_injective other held_arguments key
+      Hother_key Hkey.
+    subst other.
+    exact (arguments_distinct_excludes formals binders' valuation store
+      program_arguments excluded values Htrue Hvalues held_arguments
+      Hother_in Hheld_eval). }
+  set frame := ([∗ map] other ↦ others ∈ delete invariant (held_opened held),
+    held_world_of valuation other others)%I.
+  have Hbody_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint body_certificate ∪
+        term_registered_invariants) ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros candidate Hcandidate.
+    apply elem_of_union in Hcandidate as [Hcandidate | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
+  have Hbody_premise : forall invariant_values,
+      (global_world_context valuation ∗
+       (held_world_of valuation invariant
+          ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+            (Assertion.invariant_args invariant) invariant_values]} ∪
+            held_values) ∗ frame) ∗
+       term_interp_resource_prenex_at_arguments runtime formals binders
+         valuation
+         (IR.pexpr_list_append (held_pinned tracked held) program_arguments)
+         (Translation.tval_list_append (held_pinned_values tracked_values held)
+           invariant_values)
+         body_pre) ⊢
+      runtime_masked_wp
+        (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
+        (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
+        (@RuntimeErasure.runtime_stmt _ _ Γ
+          (RegionExecution.Primitives.Model.runtime_names Γ runtime)
+          (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime) body)
+        (global_world_context valuation ∗
+         (held_world_of valuation invariant
+            ({[@RegionExecution.Primitives.Model.tval_list_to_rich_list _
+              (Assertion.invariant_args invariant) invariant_values]} ∪
+              held_values) ∗ frame) ∗
+         term_interp_resource_prenex_at_arguments runtime formals binders
+           valuation
+           (IR.pexpr_list_append (held_pinned tracked held) program_arguments)
+           (Translation.tval_list_append
+             (held_pinned_values tracked_values held) invariant_values)
+           body_post).
+  { intros invariant_values.
+    have Hbody_wp := Hbody _ (HeldCons invariant program_arguments
+      invariant_values held)
+      (held_aligned_open invariant program_arguments invariant_values held
+        _ entry opened Hopen Haligned)
+      Hcombined_stable tracked_values runtime formals binders valuation ambient
+      Hbody_envelope (conditions_hold_nil _ _).
+    unfold term_structured_runtime_wp in Hbody_wp.
+    rewrite translated_runtime_wp_as_masked Hopened_mask Hinner_mask
+      in Hbody_wp.
+    iIntros "(#Hglobal & [Hheld_invariant Hheld_rest] & Hpre)".
+    iPoseProof (Hbody_wp with "[Hheld_invariant Hheld_rest Hpre]") as "Hwp".
+    { iFrame "Hglobal Hpre".
+      iApply (held_world_cons_open valuation invariant program_arguments
+        invariant_values held held_values Hlookup). iFrame. }
+    iApply (runtime_masked_wp_mono with "Hwp").
+    iIntros "(#Hglobal' & Hheld & Hpost)". iFrame "Hglobal' Hpost".
+    iApply (held_world_cons_open valuation invariant program_arguments
+      invariant_values held held_values Hlookup with "Hheld"). }
+  unfold term_structured_runtime_wp.
+  rewrite translated_runtime_wp_as_masked Hexit_mask. simpl.
+  iIntros "(#Hglobal & Hheld & Hpre)".
+  iPoseProof (held_world_split valuation invariant held held_values Hlookup
+    with "Hheld") as "[Hheld_invariant Hheld_rest]".
+  iPoseProof (term_nested_inv_access_runtime_arguments_valid invariant
+    program_arguments focus_open focus_close external_pre body_pre body_post
+    external_post Hopening Hclosing body (held_pinned tracked held)
+    (held_pinned_values tracked_values held) runtime formals binders valuation
+    (RegionExecution.Primitives.Model.active_runtime_mask ambient entry)
+    held_values frame Hfresh Hbody_premise
+    with "[$Hglobal $Hheld_invariant $Hheld_rest $Hpre]") as "Hwp".
+  iApply (runtime_masked_wp_mono with "Hwp").
+  iIntros "(#Hglobal' & [Hheld_invariant Hheld_rest] & Hpost)".
+  iFrame "Hglobal' Hpost".
+  iApply (held_world_split valuation invariant held held_values Hlookup).
+  iFrame.
 Qed.
 
 (** The atomic-block representative of the structured runtime validity
@@ -3943,16 +4708,17 @@ Lemma term_structured_runtime_arguments_atomic_valid
       body inner)
     (records_equal : GenericRegions.Atomicity.analysis_records inner =
       GenericRegions.Atomicity.analysis_records outer)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid body_certificate
-    tracked pre post ->
+    [] tracked pre post ->
   term_structured_runtime_arguments_valid
     (Structured.StructuredAtomic Γ state body outer inner step
-      body_certificate records_equal) tracked pre post.
+      body_certificate records_equal) conditions tracked pre post.
 Proof.
   intros Hbody types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope _.
   have Hbody_aligned : held_aligned
       (GenericRegions.Atomicity.analysis_records
         (GenericRegions.Atomicity.atomic_entry outer)) held.
@@ -3970,7 +4736,7 @@ Proof.
     - apply elem_of_union_r. exact Hregistered'. }
   iIntros "Hpre".
   iPoseProof (Hbody types held Hbody_aligned Hdisjoint values runtime formals
-    binders valuation ambient Hbody_envelope with "Hpre") as "Hwp".
+    binders valuation ambient Hbody_envelope (conditions_hold_nil _ _) with "Hpre") as "Hwp".
   unfold term_structured_runtime_wp.
   iApply (term_trusted_atomic_runtime_refinement body_certificate
     runtime ambient _ step records_equal).
@@ -4056,12 +4822,13 @@ Lemma term_structured_runtime_arguments_ghost_val_valid
         (RegionSyntax.argument_atom initializer) entry) body exit)
     (admissible : GenericRegions.Atomicity.leave_scope_admissible
       (length Γ) exit = true)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
     (post : Translation.Resource.resource_prenex (ghost_val t :: Γ) F (t :: Δ)) :
   term_structured_runtime_arguments_valid body_certificate
-    (pexpr_list_shift tracked)
+    [] (pexpr_list_shift tracked)
     (Translation.Resource.RState
       (StoreCons (d := ghost_val t) (RefBound MHere)
         (Translation.Assertions.weaken_store store))
@@ -4074,12 +4841,12 @@ Lemma term_structured_runtime_arguments_ghost_val_valid
   term_structured_runtime_arguments_valid
     (Structured.StructuredGhostVal Γ entry name t initializer body exit
       body_certificate admissible)
-    tracked (Translation.Resource.RState store frame)
+    conditions tracked (Translation.Resource.RState store frame)
     (Translation.Resource.ResourceExists t
       (Translation.Resource.drop_head_prenex post)).
 Proof.
   intros Hbody types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope _.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hbody_aligned : held_aligned
       (GenericRegions.Atomicity.analysis_records
@@ -4107,7 +4874,7 @@ Proof.
     (IR.symbolize_expr store initializer)) as [value Hvalue].
   specialize (Hbody values
     (RegionExecution.Primitives.Model.ghost_stack_context name t runtime)
-    formals (binder_cons value binders) valuation ambient Hbody_envelope).
+    formals (binder_cons value binders) valuation ambient Hbody_envelope (conditions_hold_nil _ _)).
   rewrite (held_shift_pinned (d := ghost_val t) tracked held)
     (held_shift_pinned_values (d := ghost_val t) values held)
     (held_shift_world (d := ghost_val t) valuation held) in Hbody.
@@ -4175,18 +4942,19 @@ Lemma term_structured_runtime_arguments_sequence_valid
       Γ entry first middle)
     (second_certificate : Structured.structured_certificate
       Γ middle second exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre middle_prenex post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid first_certificate
-    arguments pre middle_prenex ->
+    [] arguments pre middle_prenex ->
   term_structured_runtime_arguments_valid second_certificate
-    arguments middle_prenex post ->
+    [] arguments middle_prenex post ->
   term_structured_runtime_arguments_valid
     (Structured.StructuredSequence Γ entry first middle second exit
-      first_certificate second_certificate) arguments pre post.
+      first_certificate second_certificate) conditions arguments pre post.
 Proof.
   intros Hfirst Hsecond types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope _.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hsecond_aligned : held_aligned
       (GenericRegions.Atomicity.analysis_records middle) held.
@@ -4223,12 +4991,140 @@ Proof.
   - exact (eq_sym
       (term_structured_certificate_preserves_open first_certificate)).
   - iPoseProof (Hfirst types held Haligned Hfirst_disjoint values runtime
-      formals binders valuation ambient Hfirst_envelope with "Hpre")
+      formals binders valuation ambient Hfirst_envelope (conditions_hold_nil _ _) with "Hpre")
       as "Hfirst".
     iApply (translated_runtime_wp_mono with "Hfirst").
     iIntros "Hmiddle".
     iApply (Hsecond types held Hsecond_aligned Hsecond_disjoint values runtime
-      formals binders valuation ambient Hsecond_envelope with "Hmiddle").
+      formals binders valuation ambient Hsecond_envelope (conditions_hold_nil _ _) with "Hmiddle").
+Qed.
+
+Lemma conditions_hold_pinned_true {Γ ts} (condition : gexpr Γ TBool)
+    (pinned : gexpr_list Γ ts) (values : tval_list ts) :
+  conditions_hold [condition] (PECons condition pinned)
+    (TVCons (VBool true) values).
+Proof.
+  intros F Δ store formals binders valuation Heval.
+  cbn [IR.symbolize_expr_list] in Heval.
+  apply interp_expr_list_cons_inv in Heval as (head & rest & Heq & Hhead & _).
+  have Hvalue := f_equal tval_list_head Heq. cbn in Hvalue. subst head.
+  constructor; [exact Hhead | constructor].
+Qed.
+
+(** A sequence whose first statement asserts a condition: the condition,
+    pinned through the assertion, is known to the second statement. *)
+Lemma term_structured_runtime_arguments_asserted_sequence_valid
+    {Γ F Δ entry middle second exit ts} (condition : gexpr Γ TBool)
+    (first_certificate : Structured.structured_certificate
+      Γ entry (TAssert condition) middle)
+    (second_certificate : Structured.structured_certificate
+      Γ middle second exit)
+    (conditions : list (gexpr Γ TBool))
+    (arguments : gexpr_list Γ ts)
+    (pre middle_prenex post : Translation.Resource.resource_prenex Γ F Δ) :
+  CertifiedNormalization.RavenHoareRules.RavenHoareTriple pre
+    (TAssert condition) middle_prenex ->
+  Hoare.ResourceHoare.pexpr_dependencies condition ##
+    Hoare.ResourceHoare.statement_writes second ->
+  term_structured_runtime_arguments_valid first_certificate
+    [] (PECons condition arguments) pre middle_prenex ->
+  term_structured_runtime_arguments_valid second_certificate
+    [condition] (PECons condition arguments) middle_prenex post ->
+  term_structured_runtime_arguments_valid
+    (Structured.StructuredSequence Γ entry (TAssert condition) middle second
+      exit first_certificate second_certificate) conditions arguments pre post.
+Proof.
+  intros Hassert Hstable Hfirst Hsecond types held Haligned Hdisjoint values
+    runtime formals binders valuation ambient Henvelope _.
+  cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
+  have Hfirst_aligned : held_aligned
+      (GenericRegions.Atomicity.analysis_records entry)
+      (held_track TBool held).
+  { unfold held_aligned. rewrite held_track_records. exact Haligned. }
+  have Hsecond_aligned : held_aligned
+      (GenericRegions.Atomicity.analysis_records middle)
+      (held_track TBool held).
+  { unfold held_aligned. rewrite held_track_records.
+    rewrite (term_structured_certificate_preserves_records first_certificate).
+    exact Haligned. }
+  have Hfirst_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies
+      (held_pinned (PECons condition arguments) (held_track TBool held)) ##
+      Hoare.ResourceHoare.statement_writes (TAssert condition).
+  { cbn [Hoare.ResourceHoare.statement_writes]. apply disjoint_empty_r. }
+  have Hsecond_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies
+      (held_pinned (PECons condition arguments) (held_track TBool held)) ##
+      Hoare.ResourceHoare.statement_writes second.
+  { rewrite held_track_pinned.
+    cbn [Hoare.ResourceHoare.pexpr_list_dependencies].
+    apply disjoint_union_l. split; [exact Hstable|].
+    intros slot Harg Hwrite. apply (Hdisjoint slot Harg).
+    apply elem_of_union_r. exact Hwrite. }
+  have Hfirst_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint first_certificate ∪
+        term_registered_invariants) ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
+  have Hsecond_envelope : RegionExecution.Primitives.Model.runtime_mask
+      (Structured.structured_certificate_footprint second_certificate ∪
+        term_registered_invariants) ⊆ ambient.
+  { etrans; last exact Henvelope.
+    apply RegionExecution.Primitives.Model.runtime_mask_mono.
+    intros invariant Hin. apply elem_of_union in Hin as [Hin | Hregistered'].
+    - apply elem_of_union_l. simpl. repeat rewrite elem_of_union. tauto.
+    - apply elem_of_union_r. exact Hregistered'. }
+  have Hfirst_wp := Hfirst _ (held_track TBool held) Hfirst_aligned
+    Hfirst_disjoint (TVCons (VBool true) values) runtime formals binders
+    valuation ambient Hfirst_envelope (conditions_hold_nil _ _).
+  have Hsecond_wp := Hsecond _ (held_track TBool held) Hsecond_aligned
+    Hsecond_disjoint (TVCons (VBool true) values) runtime formals binders
+    valuation ambient Hsecond_envelope.
+  rewrite held_track_pinned held_track_pinned_values held_track_world
+    in Hfirst_wp.
+  rewrite held_track_pinned held_track_pinned_values held_track_world
+    in Hsecond_wp.
+  specialize (Hsecond_wp (conditions_hold_pinned_true condition
+    (held_pinned arguments held) (held_pinned_values values held))).
+  have Htrue : term_interp_resource_prenex_at_arguments runtime formals
+      binders valuation (held_pinned arguments held)
+      (held_pinned_values values held) pre ⊢
+    term_interp_resource_prenex_at_arguments runtime formals binders valuation
+      (PECons condition (held_pinned arguments held))
+      (TVCons (VBool true) (held_pinned_values values held)) pre.
+  { iIntros "Hpre".
+    iDestruct (term_interp_resource_prenex_at_arguments_pin runtime formals
+      valuation _ _ condition pre binders with "Hpre") as (truth) "Hpre".
+    have Hfact : term_interp_resource_prenex_at_arguments runtime formals
+        binders valuation (PECons condition (held_pinned arguments held))
+        (TVCons truth (held_pinned_values values held)) pre ⊢
+      ⌜truth = VBool true⌝ ∧
+      term_interp_resource_prenex_at_arguments runtime formals binders
+        valuation (PECons condition (held_pinned arguments held))
+        (TVCons truth (held_pinned_values values held)) pre.
+    { apply bi.and_intro; [|done].
+      apply (term_assert_derivation_true pre middle_prenex (TAssert condition)
+        Hassert condition eq_refl).
+      intros Δ' store binders' Heval.
+      cbn [IR.symbolize_expr_list] in Heval.
+      apply interp_expr_list_cons_inv in Heval
+        as (head & rest & Heq & Hhead & _).
+      have Hvalue := f_equal tval_list_head Heq. cbn in Hvalue.
+      subst head. exact Hhead. }
+    iDestruct (Hfact with "Hpre") as "[%Htruth Hpre]". subst truth.
+    iExact "Hpre". }
+  iIntros "(#Hglobal & Hheld & Hpre)". iPoseProof (Htrue with "Hpre") as "Hpre".
+  iApply term_translated_runtime_wp_sequence.
+  - exact (eq_sym
+      (term_structured_certificate_preserves_open first_certificate)).
+  - iPoseProof (Hfirst_wp with "[$Hglobal $Hheld $Hpre]") as "Hfirst".
+    iApply (translated_runtime_wp_mono with "Hfirst").
+    iIntros "Hmiddle".
+    iPoseProof (Hsecond_wp with "Hmiddle") as "Hsecond".
+    iApply (translated_runtime_wp_mono with "Hsecond").
+    iIntros "($ & $ & Hpost)".
+    iApply (term_interp_resource_prenex_at_arguments_unpin with "Hpost").
 Qed.
 
 (** *** The remaining structural cases of the resource driver
@@ -4245,24 +5141,25 @@ Lemma term_structured_runtime_arguments_frame_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (pre_body frame : Translation.Resource.core_assertion F Δ)
     (post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    tracked (Translation.Resource.RState store pre_body) post ->
+    conditions tracked (Translation.Resource.RState store pre_body) post ->
   term_structured_runtime_arguments_valid certificate
-    tracked
+    conditions tracked
     (Translation.Resource.RState store
       (Translation.Resource.CAnd pre_body frame))
     (Translation.Resource.prenex_and post frame).
 Proof.
   intros Hvalid types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope Hconditions.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & [Hstack [Hbody Hframe]] & %Harguments)".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals binders valuation ambient
-    Henvelope with "[-Hframe]") as "Hwp".
+    Henvelope Hconditions with "[-Hframe]") as "Hwp".
   { cbn [term_interp_resource_prenex_at_arguments].
     iFrame "Hglobal Hheld Hstack Hbody". iPureIntro. exact Harguments. }
   iCombine "Hwp Hframe" as "Hwp".
@@ -4282,20 +5179,21 @@ Lemma term_structured_runtime_arguments_prenex_preserve_valid
     {Γ F Δ t entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre post : Translation.Resource.resource_prenex Γ F (t :: Δ)) :
   term_structured_runtime_arguments_valid certificate
-    arguments pre post ->
+    conditions arguments pre post ->
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.ResourceExists t pre)
+    conditions arguments (Translation.Resource.ResourceExists t pre)
       (Translation.Resource.ResourceExists t post).
 Proof.
   intros Hvalid types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope Hconditions.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre)". iDestruct "Hpre" as (value) "Hbody".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals
-    (binder_cons value binders) valuation ambient Henvelope
+    (binder_cons value binders) valuation ambient Henvelope Hconditions
     with "[$Hglobal $Hheld $Hbody]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "(Hglobal' & Hheld' & Hpost)". iFrame "Hglobal' Hheld'".
@@ -4306,20 +5204,21 @@ Lemma term_structured_runtime_arguments_prenex_elim_valid
     {Γ F Δ t entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre : Translation.Resource.resource_prenex Γ F (t :: Δ))
     (post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments pre (Translation.Resource.weaken_resource_prenex post) ->
+    conditions arguments pre (Translation.Resource.weaken_resource_prenex post) ->
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.ResourceExists t pre) post.
+    conditions arguments (Translation.Resource.ResourceExists t pre) post.
 Proof.
   intros Hvalid types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope Hconditions.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre)". iDestruct "Hpre" as (value) "Hbody".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals
-    (binder_cons value binders) valuation ambient Henvelope
+    (binder_cons value binders) valuation ambient Henvelope Hconditions
     with "[$Hglobal $Hheld $Hbody]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "(Hglobal' & Hheld' & Hpost)". iFrame "Hglobal' Hheld'".
@@ -4334,17 +5233,19 @@ Lemma term_structured_runtime_arguments_bound_weaken_valid
     {Γ F Δ t entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments pre post ->
+    conditions arguments pre post ->
   term_structured_runtime_arguments_valid
-    (Δ := t :: Δ) certificate arguments
+    (Δ := t :: Δ) certificate
+    conditions arguments
     (Translation.Resource.weaken_resource_prenex pre)
     (Translation.Resource.weaken_resource_prenex post).
 Proof.
   intros Hvalid types held Haligned Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope Hconditions.
   pose (source_binders := fun u (variable : bvar Δ u) =>
     binders u (MThere variable)).
   have Hrenaming : forall u (variable : bvar Δ u),
@@ -4357,7 +5258,7 @@ Proof.
     source_binders binders Hrenaming).
   iIntros "(#Hglobal & Hheld & Hpre)".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals source_binders valuation
-    ambient Henvelope with "[$Hglobal $Hheld $Hpre]") as "Hwp".
+    ambient Henvelope Hconditions with "[$Hglobal $Hheld $Hpre]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "(Hglobal' & Hheld' & Hpost)". iFrame "Hglobal' Hheld'".
   rewrite (term_interp_resource_prenex_at_arguments_rename runtime formals
@@ -4375,24 +5276,25 @@ Lemma term_structured_runtime_arguments_prenex_consequence_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre pre' post post' : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments pre post ->
+    conditions arguments pre post ->
   Hoare.ResourceHoare.resource_prenex_entails pre' pre ->
   Hoare.ResourceHoare.resource_prenex_entails post post' ->
   term_structured_runtime_arguments_valid certificate
-    arguments pre' post'.
+    conditions arguments pre' post'.
 Proof.
   intros Hvalid Hpre Hpost types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope Hconditions.
   iIntros "(#Hglobal & Hheld & Hpre)".
   iPoseProof (term_interp_resource_prenex_at_arguments_entails runtime
     formals binders valuation (held_pinned arguments held)
     (held_pinned_values values held) pre' pre Hpre with "Hpre")
     as "Hpre".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals binders valuation ambient
-    Henvelope with "[$Hglobal $Hheld $Hpre]") as "Hwp".
+    Henvelope Hconditions with "[$Hglobal $Hheld $Hpre]") as "Hwp".
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "(Hglobal' & Hheld' & Hpost)". iFrame "Hglobal' Hheld'".
   iApply (term_interp_resource_prenex_at_arguments_entails runtime formals
@@ -4404,17 +5306,18 @@ Lemma term_structured_runtime_arguments_frame_pre_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (pre pre' post : Translation.Resource.resource_prenex Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.prenex_and pre frame) post ->
+    conditions arguments (Translation.Resource.prenex_and pre frame) post ->
   Hoare.ResourceHoare.resource_prenex_entails pre' pre ->
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.prenex_and pre' frame) post.
+    conditions arguments (Translation.Resource.prenex_and pre' frame) post.
 Proof.
   intros Hvalid Hpre types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope Hconditions.
   iIntros "(#Hglobal & Hheld & Hframed)".
   iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
     formals binders valuation (held_pinned arguments held)
@@ -4425,7 +5328,7 @@ Proof.
     (held_pinned_values values held) pre' pre Hpre with "Hpre")
     as "Hpre".
   iApply (Hvalid types held Haligned Hdisjoint values runtime formals binders valuation ambient
-    Henvelope).
+    Henvelope Hconditions).
   iEval (rewrite (term_interp_resource_prenex_at_arguments_and runtime
     formals binders valuation (held_pinned arguments held)
     (held_pinned_values values held) pre frame)).
@@ -4436,25 +5339,26 @@ Lemma term_structured_runtime_arguments_core_consequence_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (pre_body pre_body' : Translation.Resource.core_assertion F Δ)
     (post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.RState store pre_body) post ->
+    conditions arguments (Translation.Resource.RState store pre_body) post ->
   Hoare.ResourceHoare.core_entails pre_body' pre_body ->
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.RState store pre_body') post.
+    conditions arguments (Translation.Resource.RState store pre_body') post.
 Proof.
   intros Hvalid Hpre types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope Hconditions.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & [Hstack Hbody] & %Harguments)".
   iPoseProof (Validation.TermSemantics.core_entails_valid semantic_data
     (term_predicates valuation) _ _ Hpre formals binders valuation with "Hbody")
     as "Hbody".
   iPoseProof (Hvalid types held Haligned Hdisjoint values runtime formals binders valuation ambient
-    Henvelope with "[-]") as "Hwp".
+    Henvelope Hconditions with "[-]") as "Hwp".
   { iFrame "Hglobal Hheld Hstack Hbody". iPureIntro. exact Harguments. }
   iApply (translated_runtime_wp_mono with "Hwp").
   iIntros "(Hglobal' & Hheld' & Hpost)". iFrame "Hglobal' Hheld'".
@@ -4465,18 +5369,19 @@ Lemma term_structured_runtime_arguments_stack_rewrite_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (store store' : symbolic_store Γ F Δ)
     (body : Translation.Resource.core_assertion F Δ)
     (post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.RState store body) post ->
+    conditions arguments (Translation.Resource.RState store body) post ->
   Hoare.ResourceHoare.store_equal_under body Γ store' store ->
   term_structured_runtime_arguments_valid certificate
-    arguments (Translation.Resource.RState store' body) post.
+    conditions arguments (Translation.Resource.RState store' body) post.
 Proof.
   intros Hvalid Hstore types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope Hconditions.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & [Hstack Hbody] & %Harguments)".
   iAssert (⌜interp_store formals binders valuation store' =
@@ -4485,7 +5390,7 @@ Proof.
   { iApply (interp_store_equal_under body store store' Hstore). iExact "Hbody". }
   rewrite Hequal.
   iApply (Hvalid types held Haligned Hdisjoint values runtime formals binders valuation ambient
-    Henvelope).
+    Henvelope Hconditions).
   cbn [term_interp_resource_prenex_at_arguments].
   iFrame "Hglobal Hheld Hstack Hbody".
   iPureIntro.
@@ -4506,18 +5411,19 @@ Lemma term_structured_runtime_arguments_conditional_valid
       GenericRegions.Atomicity.analysis_records else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (body : Translation.Resource.core_assertion F Δ)
     (post : Translation.Resource.resource_prenex Γ F Δ) :
   term_structured_runtime_arguments_valid then_certificate
-    arguments
+    [] arguments
     (Translation.Resource.RState store
       (Translation.Resource.CAnd body
         (Translation.Resource.CExpr (IR.symbolize_expr store condition))))
     post ->
   term_structured_runtime_arguments_valid else_certificate
-    arguments
+    [] arguments
     (Translation.Resource.RState store
       (Translation.Resource.CAnd body
         (Translation.Resource.CExpr (EUnOp UNot
@@ -4526,10 +5432,10 @@ Lemma term_structured_runtime_arguments_conditional_valid
     (Structured.StructuredConditional Γ state condition
       then_branch else_branch then_exit else_exit then_certificate
       else_certificate records_equal atomic_equal)
-    arguments (Translation.Resource.RState store body) post.
+    conditions arguments (Translation.Resource.RState store body) post.
 Proof.
   intros Hthen Helse types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope _.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hthen_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies
       (held_pinned arguments held)
@@ -4575,7 +5481,7 @@ Proof.
           Some (held_pinned_values values held)⌝)) records_equal).
     + intros _. iIntros "[Hstack (#Hglobal' & Hheld & Hbody & %Harguments')]".
       iApply (Hthen types held Haligned Hthen_disjoint values runtime formals binders valuation ambient
-        Hthen_envelope).
+        Hthen_envelope (conditions_hold_nil _ _)).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hheld Hstack Hbody". iPureIntro. split;
         [exact Hvalue | exact Harguments'].
@@ -4595,7 +5501,7 @@ Proof.
     + intros Htrue. rewrite Hvalue in Htrue. discriminate.
     + intros _. iIntros "[Hstack (#Hglobal' & Hheld & Hbody & %Harguments')]".
       iApply (Helse types held Haligned Helse_disjoint values runtime formals binders valuation ambient
-        Helse_envelope).
+        Helse_envelope (conditions_hold_nil _ _)).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hheld Hstack Hbody". iPureIntro. split.
       * simpl. rewrite Hvalue. reflexivity.
@@ -4614,6 +5520,7 @@ Lemma term_structured_runtime_arguments_ghost_conditional_valid
       GenericRegions.Atomicity.analysis_records else_exit)
     (atomic_equal : GenericRegions.Atomicity.analysis_in_atomic then_exit =
       GenericRegions.Atomicity.analysis_in_atomic else_exit)
+    (conditions : list (gexpr Γ TBool))
     (arguments : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ)
     (body : Translation.Resource.core_assertion F Δ)
@@ -4621,13 +5528,13 @@ Lemma term_structured_runtime_arguments_ghost_conditional_valid
     (then_proof_only : proof_onlyb then_branch = true)
     (else_proof_only : proof_onlyb else_branch = true) :
   term_structured_runtime_arguments_valid then_certificate
-    arguments
+    [] arguments
     (Translation.Resource.RState store
       (Translation.Resource.CAnd body
         (Translation.Resource.CExpr (IR.symbolize_expr store condition))))
     post ->
   term_structured_runtime_arguments_valid else_certificate
-    arguments
+    [] arguments
     (Translation.Resource.RState store
       (Translation.Resource.CAnd body
         (Translation.Resource.CExpr (EUnOp UNot
@@ -4636,10 +5543,10 @@ Lemma term_structured_runtime_arguments_ghost_conditional_valid
     (Structured.StructuredGhostConditional Γ state condition
       then_branch else_branch then_exit else_exit then_certificate
       else_certificate records_equal atomic_equal)
-    arguments (Translation.Resource.RState store body) post.
+    conditions arguments (Translation.Resource.RState store body) post.
 Proof.
   intros Hthen Helse types held Haligned Hdisjoint values runtime formals
-    binders valuation ambient Henvelope.
+    binders valuation ambient Henvelope _.
   cbn [Hoare.ResourceHoare.statement_writes] in Hdisjoint.
   have Hthen_disjoint : Hoare.ResourceHoare.pexpr_list_dependencies
       (held_pinned arguments held)
@@ -4686,7 +5593,7 @@ Proof.
       then_proof_only else_proof_only).
     + intros _. iIntros "[Hstack (#Hglobal' & Hheld & Hbody & %Harguments')]".
       iApply (Hthen types held Haligned Hthen_disjoint values runtime formals binders valuation ambient
-        Hthen_envelope).
+        Hthen_envelope (conditions_hold_nil _ _)).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hheld Hstack Hbody". iPureIntro. split;
         [exact Hvalue | exact Harguments'].
@@ -4707,7 +5614,7 @@ Proof.
     + intros Htrue. rewrite Hvalue in Htrue. discriminate.
     + intros _. iIntros "[Hstack (#Hglobal' & Hheld & Hbody & %Harguments')]".
       iApply (Helse types held Haligned Helse_disjoint values runtime formals binders valuation ambient
-        Helse_envelope).
+        Helse_envelope (conditions_hold_nil _ _)).
       cbn [term_interp_resource_prenex_at_arguments].
       iFrame "Hglobal' Hheld Hstack Hbody". iPureIntro. split.
       * simpl. rewrite Hvalue. reflexivity.
@@ -5045,16 +5952,17 @@ Lemma term_structured_runtime_arguments_same_store_valid
     {Γ F Δ entry statement exit ts}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts) (store : symbolic_store Γ F Δ)
     (pre_body post_body : Translation.Resource.core_assertion F Δ) :
   term_structured_runtime_valid certificate
     (Translation.Resource.RState store pre_body)
     (Translation.Resource.RState store post_body) ->
   term_structured_runtime_arguments_valid certificate
-    tracked (Translation.Resource.RState store pre_body)
+    conditions tracked (Translation.Resource.RState store pre_body)
       (Translation.Resource.RState store post_body).
 Proof.
-  intros Hvalid types held _ _ values runtime formals binders valuation ambient Henvelope.
+  intros Hvalid types held _ _ values runtime formals binders valuation ambient Henvelope _.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre & %Harguments)".
   iPoseProof (Hvalid runtime formals binders valuation ambient Henvelope
@@ -5075,6 +5983,7 @@ Lemma term_structured_runtime_arguments_updated_store_valid
     {Γ F Δ entry statement exit ts u}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts) (store : symbolic_store Γ F Δ)
     {init} (target : write_target init Γ u)
     (pre_body : Translation.Resource.core_assertion F Δ)
@@ -5087,13 +5996,13 @@ Lemma term_structured_runtime_arguments_updated_store_valid
       (Translation.Resource.RState
         (IR.update_store_with_bound store target) post_body)) ->
   term_structured_runtime_arguments_valid certificate
-    tracked (Translation.Resource.RState store pre_body)
+    conditions tracked (Translation.Resource.RState store pre_body)
       (Translation.Resource.ResourceExists u
         (Translation.Resource.RState
           (IR.update_store_with_bound store target) post_body)).
 Proof.
   intros Hwrites Hvalid types held _ Hdisjoint values runtime formals binders
-    valuation ambient Henvelope.
+    valuation ambient Henvelope _.
   rewrite Hwrites in Hdisjoint.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre & %Harguments)".
@@ -5122,6 +6031,7 @@ Lemma term_structured_runtime_arguments_weakened_store_valid
     {Γ F Δ entry statement exit ts u}
     (certificate : Structured.structured_certificate
       Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts) (store : symbolic_store Γ F Δ)
     (pre_body : Translation.Resource.core_assertion F Δ)
     (post_body : Translation.Resource.core_assertion F (u :: Δ)) :
@@ -5130,11 +6040,11 @@ Lemma term_structured_runtime_arguments_weakened_store_valid
     (Translation.Resource.ResourceExists u
       (Translation.Resource.RState (weaken_store store) post_body)) ->
   term_structured_runtime_arguments_valid certificate
-    tracked (Translation.Resource.RState store pre_body)
+    conditions tracked (Translation.Resource.RState store pre_body)
       (Translation.Resource.ResourceExists u
         (Translation.Resource.RState (weaken_store store) post_body)).
 Proof.
-  intros Hvalid types held _ _ values runtime formals binders valuation ambient Henvelope.
+  intros Hvalid types held _ _ values runtime formals binders valuation ambient Henvelope _.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre & %Harguments)".
   iPoseProof (Hvalid runtime formals binders valuation ambient Henvelope
@@ -5160,11 +6070,12 @@ Lemma term_structured_runtime_arguments_fresh_fold_valid
     {Γ F Δ entry invariant arguments ts}
     (Hfresh : invariant ∉ GenericRegions.Atomicity.analysis_open entry)
     (Hregistered : invariant ∈ term_registered_invariants )
+    (conditions : list (gexpr Γ TBool))
     (tracked : gexpr_list Γ ts)
     (store : symbolic_store Γ F Δ) :
   term_structured_runtime_arguments_valid
     (Structured.StructuredFreshFold Γ entry invariant arguments
-      Hfresh) tracked
+      Hfresh) conditions tracked
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_invariant invariant
         (IR.symbolize_expr_list store arguments)))
@@ -5172,7 +6083,7 @@ Lemma term_structured_runtime_arguments_fresh_fold_valid
       (Translation.Resource.CInvariant invariant
         (IR.symbolize_expr_list store arguments))).
 Proof.
-  intros types held _ _ values runtime formals binders valuation ambient Henvelope.
+  intros types held _ _ values runtime formals binders valuation ambient Henvelope _.
   cbn [term_interp_resource_prenex_at_arguments].
   iIntros "(#Hglobal & Hheld & Hpre & %Harguments)".
   have Hvalid := @term_structured_runtime_fresh_fold_valid
@@ -5353,7 +6264,7 @@ Fixpoint term_structured_certificate_trusted_runtime_atomicity
         term_structured_certificate_trusted_runtime_atomicity else_branch runtime
   | Structured.StructuredAtomic _ _ _ _ _ _ _ _ =>
       fun _ => True
-  | Structured.StructuredInvAccess _ _ _ _ _ _ _ _ body_certificate _ =>
+  | Structured.StructuredInvAccess _ _ _ _ _ _ _ _ _ body_certificate _ =>
       fun runtime =>
         term_structured_certificate_trusted_runtime_atomicity body_certificate runtime
   | Structured.StructuredGhostVal _ _ name t _ _ _ body_certificate _ =>
@@ -5385,7 +6296,7 @@ Proof.
     { eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto. }
     exact (IHcertificate Houter_wf).
   - have Hopened_wf : GenericRegions.Atomicity.state_wf opened.
-    { eapply GenericRegions.Atomicity.open_invariant_preserves_wf; eauto. }
+    { eapply GenericRegions.Atomicity.open_access_preserves_wf; eauto. }
     apply GenericRegions.Atomicity.fold_invariant_preserves_wf.
     exact (IHcertificate Hopened_wf).
   - exact (IHcertificate Hwf).
@@ -5411,8 +6322,8 @@ Proof.
       _ _ _ e). exact Hin_atomic.
   - rewrite GenericRegions.Atomicity.fold_invariant_preserves_in_atomic.
     apply IHcertificate.
-    rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-      _ _ _ _ e). exact Hin_atomic.
+    rewrite (GenericRegions.Atomicity.open_access_preserves_in_atomic
+      _ _ _ _ _ e). exact Hin_atomic.
   - exact (IHcertificate Hin_atomic).
   - apply IHcertificate1. exact Hin_atomic.
 Qed.
@@ -5573,13 +6484,15 @@ Proof.
       simpl in *; first discriminate; lia.
 Qed.
 
-Lemma term_open_invariant_preserves_step_bit invariant key entry exit :
-  GenericRegions.Atomicity.open_invariant invariant key entry = inr exit ->
+Lemma term_open_invariant_preserves_step_bit invariant key excluded entry
+    exit :
+  GenericRegions.Atomicity.open_access invariant key excluded entry =
+    inr exit ->
   term_analysis_step_bit exit = term_analysis_step_bit entry.
 Proof.
   intros Hopen.
-  destruct (GenericRegions.Atomicity.open_invariant_records _ _ _ _ Hopen)
-    as (consumed & _ & ->).
+  destruct (GenericRegions.Atomicity.open_access_records _ _ _ _ _ Hopen)
+    as (consumed & ->).
   reflexivity.
 Qed.
 
@@ -5625,8 +6538,8 @@ Proof.
       | Γ state condition then_branch else_branch then_exit else_exit
         then_certificate IHthen else_certificate IHelse records_equal atomic_equal
       | Γ state body outer inner step body_certificate IHbody records_equal
-      | Γ state invariant arguments body opened inner step body_certificate
-        IHbody records_equal
+      | Γ state invariant arguments excluded body opened inner step
+        body_certificate IHbody records_equal
       | Γ state name t initializer body exit body_certificate IHbody
         admissible
       | Γ state condition then_branch else_branch then_exit else_exit
@@ -5673,6 +6586,7 @@ Proof.
   - (* done erases to the terminal statement, which takes no step, and
        leaves the state unchanged *)
     destruct statement; cbn in view; try discriminate.
+    all: try (exfalso; guarded_view_cases; fail).
     cbn. lia.
   - have Hfold_open : GenericRegions.Atomicity.analysis_open
         (GenericRegions.Atomicity.fold_invariant invariant
@@ -5759,25 +6673,25 @@ Proof.
     unfold term_analysis_step_bit, term_runtime_step_count.
     rewrite Htaken; simpl; lia.
   - have Hopen_transition := step.
-    apply GenericRegions.Atomicity.open_invariant_success in step as
-      (Hfresh_open & Havailable & Hopened_mask & Hopened_open).
+    apply GenericRegions.Atomicity.open_access_success in step as
+      (Hopened_mask & Hopened_open).
     have Hopened_nonempty :
         GenericRegions.Atomicity.analysis_open opened ≠ ∅.
     { rewrite Hopened_open. intro Hempty. apply Hopen. set_solver. }
     have Hopened_atomic :
         GenericRegions.Atomicity.analysis_in_atomic opened = false.
-    { rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-        _ _ _ _ Hopen_transition). exact Hin_atomic. }
+    { rewrite (GenericRegions.Atomicity.open_access_preserves_in_atomic
+        _ _ _ _ _ Hopen_transition). exact Hin_atomic. }
     specialize (IHbody runtime Hopened_nonempty Hopened_atomic).
     have Hexit_open : GenericRegions.Atomicity.analysis_open
         (GenericRegions.Atomicity.fold_invariant invariant
           (RegionSyntax.argument_key arguments) inner) ≠ ∅.
     { rewrite (GenericRegions.Atomicity.analysis_open_records _ _
-        (GenericRegions.Atomicity.fold_after_open_records _ _ _ _ _ _
+        (fold_after_open_access_records _ _ _ _ _ _ _
           Hopen_transition records_equal)).
       exact Hopen. }
     have Hopen_bit := term_open_invariant_preserves_step_bit
-      invariant _ state opened Hopen_transition.
+      invariant _ _ state opened Hopen_transition.
     have Hfold_bit := term_fold_invariant_preserves_step_bit_if_open
       invariant _ inner Hexit_open.
     unfold RuntimeErasure.runtime_stmt. simpl.
@@ -5821,8 +6735,8 @@ Proof.
       | Γ state condition then_branch else_branch then_exit else_exit
         then_certificate IHthen else_certificate IHelse records_equal atomic_equal
       | Γ state body outer inner step body_certificate IHbody records_equal
-      | Γ state invariant arguments body opened inner step body_certificate
-        IHbody records_equal
+      | Γ state invariant arguments excluded body opened inner step
+        body_certificate IHbody records_equal
       | Γ state name t initializer body exit body_certificate IHbody
         admissible
       | Γ state condition then_branch else_branch then_exit else_exit
@@ -5833,6 +6747,7 @@ Proof.
     eapply term_open_leaf_runtime_atomic; eauto.
   - (* done erases to the terminal statement, which takes no step *)
     destruct statement; cbn in view; try discriminate.
+    all: try (exfalso; guarded_view_cases; fail).
     exact runtime_noop_atomic.
   - exact runtime_noop_atomic.
   - destruct Htrusted as [Hfirst_trusted Hsecond_trusted].
@@ -5893,8 +6808,8 @@ Proof.
     + eapply IHelse; eauto.
   - apply RuntimeLang.atomic_trusted_atomic.
   - have Hopen_transition := step.
-    apply GenericRegions.Atomicity.open_invariant_success in step as
-      (_ & _ & _ & Hopened_open).
+    apply GenericRegions.Atomicity.open_access_success in step as
+      (_ & Hopened_open).
     have Hopened_nonempty :
         GenericRegions.Atomicity.analysis_open opened ≠ ∅.
     { rewrite Hopened_open. intros Hempty.
@@ -5904,8 +6819,8 @@ Proof.
       rewrite Hempty elem_of_empty in Hmember. contradiction. }
     have Hopened_atomic :
         GenericRegions.Atomicity.analysis_in_atomic opened = false.
-    { rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-        _ _ _ _ Hopen_transition). exact Hin_atomic. }
+    { rewrite (GenericRegions.Atomicity.open_access_preserves_in_atomic
+        _ _ _ _ _ Hopen_transition). exact Hin_atomic. }
     eapply IHbody; eauto.
   - exact (IHbody (RegionExecution.Primitives.Model.ghost_stack_context
       name t runtime) Hopen Hin_atomic Htrusted).
@@ -5931,6 +6846,94 @@ Definition term_structured_invariants_registered
   Structured.structured_certificate_footprint certificate ⊆
     term_registered_invariants .
 
+(** An access at the top of a certificate opens a closed declaration, or its
+    own distinctness condition is among the known [conditions]. *)
+Definition term_access_conditions_ok {Γ entry statement exit}
+    (certificate : Structured.structured_certificate
+      Γ entry statement exit)
+    (conditions : list (gexpr Γ TBool)) : Prop :=
+  (match certificate in Structured.structured_certificate Γ0 _ _ _
+    return list (gexpr Γ0 TBool) -> Prop with
+  | Structured.StructuredInvAccess _ access_entry invariant arguments excluded
+      _ _ _ _ _ _ => fun conditions0 =>
+      invariant ∉ GenericRegions.Atomicity.analysis_open access_entry \/
+      List.In (IR.arguments_distinct arguments excluded) conditions0
+  | _ => fun _ => True
+  end) conditions.
+
+(** [term_structured_accesses_outside_atomic], except that an access at the
+    top of the certificate may open an open declaration. *)
+Definition term_access_safe {Γ entry statement exit}
+    (certificate : Structured.structured_certificate
+      Γ entry statement exit) : Prop :=
+  match certificate with
+  | Structured.StructuredInvAccess _ access_entry _ _ _ _ _ _ _ body _ =>
+      GenericRegions.Atomicity.analysis_in_atomic access_entry = false /\
+      NormalizationBase.structured_accesses_outside_atomic body
+  | other => NormalizationBase.structured_accesses_outside_atomic other
+  end.
+
+Lemma term_access_safe_strict {Γ entry statement exit}
+    (certificate : Structured.structured_certificate
+      Γ entry statement exit) :
+  NormalizationBase.structured_accesses_outside_atomic certificate ->
+  term_access_safe certificate.
+Proof.
+  destruct certificate; try (intros H; exact H).
+  intros (Hatomic & _ & Hbody). split; assumption.
+Qed.
+
+Lemma term_access_conditions_ok_strict {Γ entry statement exit}
+    (certificate : Structured.structured_certificate
+      Γ entry statement exit) :
+  NormalizationBase.structured_accesses_outside_atomic certificate ->
+  term_access_conditions_ok certificate [].
+Proof.
+  destruct certificate; try (intros _; exact I).
+  intros (_ & Hclosed & _). left. exact Hclosed.
+Qed.
+
+(** The second statement of a safe sequence is safe; if it opens an open
+    declaration, the first statement asserts its condition. *)
+Lemma term_access_safe_sequence {Γ entry first middle second exit}
+    (first_certificate : Structured.structured_certificate
+      Γ entry first middle)
+    (second_certificate : Structured.structured_certificate
+      Γ middle second exit) :
+  NormalizationBase.structured_accesses_outside_atomic
+    (Structured.StructuredSequence Γ entry first middle second exit
+      first_certificate second_certificate) ->
+  NormalizationBase.structured_accesses_outside_atomic first_certificate /\
+  ((term_access_safe second_certificate /\
+    term_access_conditions_ok second_certificate []) \/
+   (exists condition, first = TAssert condition /\
+    Hoare.ResourceHoare.pexpr_dependencies condition ##
+      Hoare.ResourceHoare.statement_writes second /\
+    term_access_safe second_certificate /\
+    term_access_conditions_ok second_certificate [condition])).
+Proof.
+  intros [Hfirst Hsecond]. split; [exact Hfirst|].
+  destruct second_certificate; try (left; split; [exact Hsecond | exact I]).
+  destruct Hsecond as (Hatomic & [Hclosed | [Hassert Hstable]] & Hbody).
+  - left. split; [split; assumption|]. left. exact Hclosed.
+  - right. exists (IR.arguments_distinct arguments excluded).
+    split; [exact Hassert|]. split; [exact Hstable|].
+    split; [split; assumption|]. right. left. reflexivity.
+Qed.
+
+Lemma conditions_hold_cons {Γ ts t} (conditions : list (gexpr Γ TBool))
+    (expression : gexpr Γ t) (pinned : gexpr_list Γ ts)
+    (value : tval t) (values : tval_list ts) :
+  conditions_hold conditions pinned values ->
+  conditions_hold conditions (PECons expression pinned) (TVCons value values).
+Proof.
+  intros Hconditions F Δ store formals binders valuation Heval.
+  cbn [IR.symbolize_expr_list] in Heval.
+  apply interp_expr_list_cons_inv in Heval as (head & rest & Heq & _ & Hrest).
+  have Htail := f_equal tval_list_tail Heq. cbn in Htail. subst rest.
+  exact (Hconditions F Δ store formals binders valuation Hrest).
+Qed.
+
 (** *** The generic driver over resource telescopes
 
     The generic driver theorem, with the derivation in [RavenHoareRules]
@@ -5954,10 +6957,11 @@ Theorem term_structured_certificate_resource_prenex_arguments_valid
   RegionExecution.Primitives.Model.runtime_cost_model_sound ->
   Certified.procedure_cost_model_sound ->
   term_structured_invariants_registered certificate ->
-  term_structured_accesses_outside_atomic certificate ->
-  (forall ts (tracked : gexpr_list Γ ts),
+  term_access_safe certificate ->
+  (forall conditions ts (tracked : gexpr_list Γ ts),
+    term_access_conditions_ok certificate conditions ->
     term_structured_runtime_arguments_valid certificate
-      tracked pre post) /\
+      conditions tracked pre post) /\
   (forall runtime,
     term_structured_certificate_trusted_runtime_atomicity certificate runtime).
 Proof.
@@ -5966,44 +6970,49 @@ Proof.
     Hprocedure_cost Hregistered Hsafe.
   all: tryif is_var statement then idtac else dependent destruction certificate.
   all: try discriminate.
+  all: try (exfalso; guarded_view_cases; fail).
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked. apply term_structured_runtime_arguments_prenex_preserve_valid.
-      apply Hvalid.
+    + intros conditions ts tracked Hok.
+      apply term_structured_runtime_arguments_prenex_preserve_valid.
+      exact (Hvalid _ _ _ Hok).
     + exact Htrusted.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked. apply term_structured_runtime_arguments_bound_weaken_valid.
-      apply Hvalid.
+    + intros conditions ts tracked Hok.
+      apply term_structured_runtime_arguments_bound_weaken_valid.
+      exact (Hvalid _ _ _ Hok).
     + exact Htrusted.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked. apply term_structured_runtime_arguments_prenex_elim_valid.
-      apply Hvalid.
+    + intros conditions ts tracked Hok.
+      apply term_structured_runtime_arguments_prenex_elim_valid.
+      exact (Hvalid _ _ _ Hok).
     + exact Htrusted.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       eapply term_structured_runtime_arguments_prenex_consequence_valid;
-        [apply Hvalid | exact H | exact H0].
+        [exact (Hvalid _ _ _ Hok) | exact H | exact H0].
     + exact Htrusted.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked. apply term_structured_runtime_arguments_frame_valid.
-      apply Hvalid.
+    + intros conditions ts tracked Hok.
+      apply term_structured_runtime_arguments_frame_valid.
+      exact (Hvalid _ _ _ Hok).
     + exact Htrusted.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       eapply term_structured_runtime_arguments_prenex_consequence_valid.
       * eapply term_structured_runtime_arguments_core_consequence_valid.
-        -- apply Hvalid.
+        -- exact (Hvalid _ _ _ Hok).
         -- exact H.
       * apply Hoare.ResourceHoare.resource_prenex_entails_refl.
       * exact H0.
@@ -6011,22 +7020,22 @@ Proof.
   - destruct (IHderivation entry exit certificate Hwf Hcost
       Hprocedure_cost Hregistered Hsafe) as [Hvalid Htrusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       eapply term_structured_runtime_arguments_stack_rewrite_valid;
-        [apply Hvalid | exact H].
+        [exact (Hvalid _ _ _ Hok) | exact H].
     + exact Htrusted.
   - (* done: it erases to the terminal statement and leaves the analysis
        state unchanged, so its runtime meaning is the identity update
        [|={E,E}=> post] — no leaf machinery, and no dependence on the shape
        of the pre- and postcondition. *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     intros types held _ _ values runtime formals binders valuation ambient
-      Henvelope.
+      Henvelope _.
     unfold term_structured_runtime_wp.
     rewrite translated_runtime_wp_erased; [|reflexivity].
     iIntros "H". iModIntro. iExact "H".
   - (* assert *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6035,7 +7044,7 @@ Proof.
           Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
     end.
   - (* assignment *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_updated_store_valid.
     + reflexivity.
     + match goal with
@@ -6045,7 +7054,7 @@ Proof.
             Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
       end.
   - (* field read *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_updated_store_valid.
     + reflexivity.
     + match goal with
@@ -6055,7 +7064,7 @@ Proof.
             Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
       end.
   - (* field write *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6064,7 +7073,7 @@ Proof.
           Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
     end.
   - (* allocation *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_updated_store_valid.
     + reflexivity.
     + match goal with
@@ -6075,7 +7084,7 @@ Proof.
               exact Hprocedure_cost]
       end.
   - (* ghost update *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6083,40 +7092,54 @@ Proof.
         eapply (term_structured_runtime_resource_prenex_leaf_valid
           Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
     end.
-  - destruct (IHderivation1 entry middle0 certificate1 Hwf Hcost
+  - destruct (term_access_safe_sequence certificate1 certificate2 Hsafe)
+      as [Hfirst_safe Hsecond_cases].
+    have Hsecond_safe : term_access_safe certificate2
+      by (destruct Hsecond_cases as [[? _] | (? & _ & _ & ? & _)]; assumption).
+    destruct (IHderivation1 entry middle0 certificate1 Hwf Hcost
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj1 Hsafe)) as [Hfirst Hfirst_trusted].
+      (term_access_safe_strict _ Hfirst_safe)) as [Hfirst Hfirst_trusted].
     have Hmiddle_wf := term_structured_certificate_preserves_wf certificate1 Hwf.
     destruct (IHderivation2 middle0 exit certificate2 Hmiddle_wf Hcost
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj2 Hsafe)) as [Hsecond Hsecond_trusted].
+      Hsecond_safe) as [Hsecond Hsecond_trusted].
     split.
-    + intros ts tracked. eapply term_structured_runtime_arguments_sequence_valid;
-        [apply Hfirst | apply Hsecond].
+    + intros conditions ts tracked _.
+      have Hfirst_ok := term_access_conditions_ok_strict _ Hfirst_safe.
+      destruct Hsecond_cases as [[_ Hsecond_ok] |
+        (condition & -> & Hstable & _ & Hsecond_ok)].
+      * eapply term_structured_runtime_arguments_sequence_valid;
+          [exact (Hfirst _ _ _ Hfirst_ok) | exact (Hsecond _ _ _ Hsecond_ok)].
+      * eapply term_structured_runtime_arguments_asserted_sequence_valid;
+          [exact derivation1 | exact Hstable
+          | exact (Hfirst _ _ _ Hfirst_ok) | exact (Hsecond _ _ _ Hsecond_ok)].
     + intros runtime. simpl. split;
         [apply Hfirst_trusted | apply Hsecond_trusted].
   - destruct (IHderivation1 entry then_exit certificate1 Hwf Hcost
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj1 Hsafe)) as [Hthen Hthen_trusted].
+      (term_access_safe_strict _ (proj1 Hsafe))) as [Hthen Hthen_trusted].
     destruct (IHderivation2 entry else_exit certificate2 Hwf Hcost
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj2 Hsafe)) as [Helse Helse_trusted].
+      (term_access_safe_strict _ (proj2 Hsafe))) as [Helse Helse_trusted].
     split.
-    + intros ts tracked. eapply term_structured_runtime_arguments_conditional_valid;
-        [apply Hthen | apply Helse].
+    + intros conditions ts tracked Hok.
+      eapply term_structured_runtime_arguments_conditional_valid;
+        [exact (Hthen _ _ _ (term_access_conditions_ok_strict _ (proj1 Hsafe)))
+        | exact (Helse _ _ _
+            (term_access_conditions_ok_strict _ (proj2 Hsafe)))].
     + intros runtime. simpl. split;
         [apply Hthen_trusted | apply Helse_trusted].
   - (* unmatched fold allocates the invariant *)
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       have Hregistered_invariant :
           invariant ∈ term_registered_invariants .
       { apply Hregistered.
@@ -6126,10 +7149,10 @@ Proof.
         rewrite Certified.fold_analysis_mask; [|exact n].
         apply elem_of_union_r. apply elem_of_singleton_2. reflexivity. }
       exact (term_structured_runtime_arguments_fresh_fold_valid
-         n Hregistered_invariant tracked store).
+         n Hregistered_invariant conditions tracked store).
     + intros runtime. exact I.
   - (* predicate unfold *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6138,7 +7161,7 @@ Proof.
           Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
     end.
   - (* predicate fold *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6146,49 +7169,56 @@ Proof.
         eapply (term_structured_runtime_resource_prenex_leaf_valid
           Hview Hstep); [constructor | exact Hwf | exact Hprocedure_cost]
     end.
-  - (* independent invariant access *)
+  - (* invariant access *)
     simpl in Hsafe. destruct Hsafe as [Hentry_nonatomic Hbody_safe].
     have Hopen_facts := e.
-    apply GenericRegions.Atomicity.open_invariant_success in Hopen_facts as
-      (Hfresh & Havailable & Hopened_mask & Hopened_open).
+    apply GenericRegions.Atomicity.open_access_success in Hopen_facts as
+      (Hopened_mask & Hopened_open).
     have Hopened_wf : GenericRegions.Atomicity.state_wf opened.
-    { eapply GenericRegions.Atomicity.open_invariant_preserves_wf; eauto. }
+    { eapply GenericRegions.Atomicity.open_access_preserves_wf; eauto. }
     destruct (IHderivation opened inner certificate Hopened_wf Hcost
       Hprocedure_cost
       (fun candidate Hin => Hregistered candidate
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      Hbody_safe) as [Hbody_valid Hbody_trusted].
-    split.
-    + intros ts tracked.
+      (term_access_safe_strict _ Hbody_safe)) as [Hbody_valid Hbody_trusted].
+    have Hbody_ok := term_access_conditions_ok_strict _ Hbody_safe.
+    split; [|exact Hbody_trusted].
+    intros conditions ts tracked Hok.
+    destruct (decide (invariant ∈
+      GenericRegions.Atomicity.analysis_open entry)) as [Hnested|Hclosed].
+    + destruct Hok as [Hclosed | Hcondition]; [contradiction|].
+      exact (term_structured_runtime_nested_inv_access_arguments_valid
+        e Hnested certificate e0 opening_focus closing_focus
+        external_pre body_pre body_post external_post H H0 H1
+        conditions tracked Hcondition (Hbody_valid _ _ _ Hbody_ok)).
+    + { have Hopen_fresh := GenericRegions.Atomicity.open_access_fresh _ _ _ _ _
+        Hclosed e.
+      have Havailable := proj1 (proj2
+        (GenericRegions.Atomicity.open_invariant_success _ _ _ _ Hopen_fresh)).
       have Hregistered_invariant :
           invariant ∈ term_registered_invariants .
       { apply Hregistered.
         apply (Structured.structured_certificate_entry_subset_footprint
           (Structured.StructuredInvAccess Γ entry invariant arguments
-            body opened inner e certificate e0)).
+            excluded body opened inner e certificate e0)).
         exact Havailable. }
       eapply (term_structured_runtime_independent_inv_access_arguments_valid
-         Hregistered_invariant e certificate e0 opening_focus
+        Hregistered_invariant e Hclosed certificate e0 opening_focus
         closing_focus external_pre body_pre body_post external_post H H0 H1
-        tracked).
-      * apply Hbody_valid.
-      * intros runtime.
+        conditions tracked).
+      - exact (Hbody_valid _ _ _ Hbody_ok).
+      - intros runtime.
         eapply (term_open_structured_certificate_runtime_atomic certificate
           runtime Hcost).
-        -- simpl. intros Hempty.
-           have Hin : invariant ∈ {[invariant]} ∪
-               GenericRegions.Atomicity.analysis_open entry.
-           { apply elem_of_union_l. apply elem_of_singleton_2. reflexivity. }
-           have Hin_opened : invariant ∈
-               GenericRegions.Atomicity.analysis_open opened.
-           { rewrite Hopened_open. exact Hin. }
-           have Habsurd : invariant ∈ (∅ : gset inv_id).
-           { rewrite <- Hempty. exact Hin_opened. }
-           rewrite elem_of_empty in Habsurd. contradiction.
-        -- rewrite (GenericRegions.Atomicity.open_invariant_preserves_in_atomic
-             _ _ entry opened e). exact Hentry_nonatomic.
-        -- apply Hbody_trusted.
-    + exact Hbody_trusted.
+        + simpl. intros Hempty.
+          have Hin_opened : invariant ∈
+              GenericRegions.Atomicity.analysis_open opened.
+          { rewrite Hopened_open. set_solver. }
+          rewrite Hempty in Hin_opened. set_solver.
+        + rewrite (GenericRegions.Atomicity.open_access_preserves_in_atomic
+                _ _ _ entry opened e). exact Hentry_nonatomic.
+        + apply Hbody_trusted.
+      }
   - (* trusted atomic block *)
     simpl in Hsafe.
     have Houter_wf : GenericRegions.Atomicity.state_wf outer.
@@ -6200,25 +7230,25 @@ Proof.
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      Hsafe) as [Hbody_valid Hbody_trusted].
+      (term_access_safe_strict _ Hsafe)) as [Hbody_valid Hbody_trusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       eapply term_structured_runtime_arguments_atomic_valid.
-      apply Hbody_valid.
+      exact (Hbody_valid _ _ _ (term_access_conditions_ok_strict _ Hsafe)).
     + intros runtime. exact I.
   - (* ghost value *)
     simpl in Hsafe.
     destruct (IHderivation _ _ certificate Hwf Hcost Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      Hsafe) as [Hbody_valid Hbody_trusted].
+      (term_access_safe_strict _ Hsafe)) as [Hbody_valid Hbody_trusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       apply term_structured_runtime_arguments_ghost_val_valid.
-      apply Hbody_valid.
+      exact (Hbody_valid _ _ _ (term_access_conditions_ok_strict _ Hsafe)).
     + intros runtime. apply Hbody_trusted.
   - (* call, result discarded *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_weakened_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6228,7 +7258,7 @@ Proof.
             exact Hprocedure_cost]
     end.
   - (* call, result stored *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_updated_store_valid.
     + reflexivity.
     + match goal with
@@ -6239,7 +7269,7 @@ Proof.
               exact Hprocedure_cost]
       end.
   - (* spawn *)
-    split; [|intros runtime; exact I]. intros ts tracked.
+    split; [|intros runtime; exact I]. intros conditions ts tracked Hok.
     eapply term_structured_runtime_arguments_same_store_valid.
     match goal with
     | Hview : _ = AnalysisView.ViewLeaf,
@@ -6253,20 +7283,22 @@ Proof.
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj1 Hsafe)) as [Hthen Hthen_trusted].
+      (term_access_safe_strict _ (proj1 Hsafe))) as [Hthen Hthen_trusted].
     destruct (IHderivation2 entry else_exit certificate2 Hwf Hcost
       Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
-      (proj2 Hsafe)) as [Helse Helse_trusted].
+      (term_access_safe_strict _ (proj2 Hsafe))) as [Helse Helse_trusted].
     split.
-    + intros ts tracked.
+    + intros conditions ts tracked Hok.
       match goal with
       | Hthen_proof : proof_onlyb then_branch = true,
         Helse_proof : proof_onlyb else_branch = true |- _ =>
           exact (term_structured_runtime_arguments_ghost_conditional_valid
-            certificate1 certificate2 _ _ tracked _ _ _ Hthen_proof Helse_proof
-            (Hthen ts tracked) (Helse ts tracked))
+            certificate1 certificate2 _ _ conditions tracked _ _ _ Hthen_proof
+            Helse_proof
+            (Hthen _ _ _ (term_access_conditions_ok_strict _ (proj1 Hsafe)))
+            (Helse _ _ _ (term_access_conditions_ok_strict _ (proj2 Hsafe))))
       end.
     + intros runtime. simpl. split;
         [apply Hthen_trusted | apply Helse_trusted].
@@ -6274,8 +7306,8 @@ Proof.
     destruct (IHderivation entry _ certificate Hwf Hcost Hprocedure_cost
       Hregistered Hsafe) as [Hvalid Htrusted].
     split; [|exact Htrusted].
-    intros ts tracked types held Haligned Hdisjoint values runtime formals
-      binders valuation ambient Henvelope.
+    intros conditions ts tracked Hok types held Haligned Hdisjoint values
+      runtime formals binders valuation ambient Henvelope Hconditions.
     have Haligned' : held_aligned
         (GenericRegions.Atomicity.analysis_records entry)
         (held_track (ltac:(match type of expression with
@@ -6292,11 +7324,12 @@ Proof.
     end.
     destruct (interp_expr_total formals binders valuation value)
       as [tracked_value Htracked_value].
-    specialize (Hvalid _ (PECons expression tracked) _ (held_track _ held)
-      Haligned' Hdisjoint' (TVCons tracked_value values) runtime formals
-      binders valuation ambient Henvelope).
+    specialize (Hvalid conditions _ (PECons expression tracked) Hok _
+      (held_track _ held) Haligned' Hdisjoint' (TVCons tracked_value values)
+      runtime formals binders valuation ambient Henvelope).
     rewrite held_track_pinned held_track_pinned_values held_track_world
       in Hvalid.
+    specialize (Hvalid (conditions_hold_cons _ _ _ _ _ Hconditions)).
     iIntros "(#Hglobal & Hheld & Hpre)".
     iEval (rewrite (term_interp_resource_prenex_at_arguments_track runtime
       formals valuation (held_pinned tracked held)
@@ -6331,18 +7364,21 @@ Theorem term_structured_certificate_resource_prenex_valid
 Proof.
   intros Hrecords Hwf Hcost Hprocedure_cost Hregistered Hsafe.
   destruct (term_structured_certificate_resource_prenex_arguments_valid
-     certificate derivation Hwf Hcost Hprocedure_cost Hregistered Hsafe)
+     certificate derivation Hwf Hcost Hprocedure_cost Hregistered
+     (term_access_safe_strict _ Hsafe))
     as [Harguments Htrusted].
   split; [|exact Htrusted].
   intros runtime formals binders valuation ambient Henvelope.
-  have Hempty := Harguments [] (@PENil _ keep_all Γ).
+  have Hempty := Harguments [] [] (@PENil _ keep_all Γ)
+    (term_access_conditions_ok_strict _ Hsafe).
   unfold term_structured_runtime_arguments_valid in Hempty.
   have Haligned : held_aligned
       (GenericRegions.Atomicity.analysis_records entry)
       (HeldNil (Γ := Γ) (ts := [])).
   { unfold held_aligned. rewrite Hrecords. reflexivity. }
   specialize (Hempty [] HeldNil Haligned ltac:(simpl; apply disjoint_empty_l)
-    Translation.TVNil runtime formals binders valuation ambient Henvelope).
+    Translation.TVNil runtime formals binders valuation ambient Henvelope
+    (conditions_hold_nil _ _)).
   cbn [held_pinned held_pinned_values] in Hempty.
   rewrite term_interp_resource_prenex_at_arguments_empty in Hempty.
   iIntros "[Hglobal Hpre]".
