@@ -106,6 +106,12 @@ Lemma procedure_entry_state_closed {Γ identity}
   GenericRegions.Atomicity.analysis_open (procedure_entry_state procedure) = ∅.
 Proof. reflexivity. Qed.
 
+Lemma procedure_entry_state_records {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+  GenericRegions.Atomicity.analysis_records (procedure_entry_state procedure) =
+    [].
+Proof. reflexivity. Qed.
+
 Lemma procedure_entry_state_outside_atomic {Γ identity}
     (procedure : typed_procedure Γ identity) :
   GenericRegions.Atomicity.analysis_in_atomic
@@ -222,6 +228,7 @@ Proof.
       (CertifiedNormalization.normalization_target_derivation
         (CertifiedNormalization.footprinted_normalization
           normalization))
+      (procedure_entry_state_records procedure)
       (procedure_entry_state_wf procedure)
       contract_cost_model_runtime_sound
       Certified.contract_cost_model_procedure_sound

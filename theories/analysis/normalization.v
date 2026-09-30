@@ -1058,7 +1058,7 @@ Inductive certificate_aligned :
     analysis, and the alignment follows rather than being reconstructed by
     hand.
 
-    The [RTInvAccess] case is vacuous.  [RegionSyntax.view] sends
+    The [RTInvAccessIndependent] case is vacuous.  [RegionSyntax.view] sends
     [TInvAccess] to [ViewStructuredAccess], and no
     [analysis_certificate] constructor accepts that view, so there is no
     certificate to align with -- the analyzer never sees a structured

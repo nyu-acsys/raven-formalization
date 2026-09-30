@@ -40,6 +40,18 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
         | _, _ => None
         end
     end.
+  (** Levels, hence atoms and keys, are stable under further declarations. *)
+  Lemma argument_atom_shift {keep d Γ t} (argument : pexpr keep Γ t) :
+    argument_atom (pexpr_shift (d := d) argument) = argument_atom argument.
+  Proof.
+    destruct argument; reflexivity.
+  Qed.
+  Lemma argument_key_shift {keep d Γ ts} (arguments : pexpr_list keep Γ ts) :
+    argument_key (pexpr_list_shift (d := d) arguments) = argument_key arguments.
+  Proof.
+    induction arguments as [|t ts argument rest IH]; cbn; [reflexivity|].
+    rewrite argument_atom_shift, IH. reflexivity.
+  Qed.
   (** The atoms of a call's arguments. *)
   Fixpoint argument_atoms {keep Γ ts} (arguments : pexpr_list keep Γ ts) :
       list (option AnalysisView.key_atom) :=
