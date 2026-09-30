@@ -49,8 +49,7 @@ Definition allocate_else : stmt Γ := TIf b TDone allocate.
 Definition allocate_both : stmt Γ := TIf b allocate allocate.
 
 Definition closed (available : gset inv_id) : Atomicity.analysis_state :=
-  Atomicity.AnalysisState (Atomicity.declaration_entries available) [] false
-    false.
+  Atomicity.closed_state (Atomicity.declaration_entries available).
 
 (** Allocating [counter(x)] makes the instance named by the level of [x]
     available. *)
@@ -59,7 +58,7 @@ Definition x_instance : Atomicity.mask_entry :=
 
 Definition allocated (entries : gset Atomicity.mask_entry) :
     Atomicity.analysis_state :=
-  Atomicity.AnalysisState ({[x_instance]} ∪ entries) [] false false.
+  Atomicity.closed_state ({[x_instance]} ∪ entries).
 
 (** Allocation in one branch is accepted; its credit is absent after the
     join. *)

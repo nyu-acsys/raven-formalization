@@ -7,7 +7,8 @@ From iris.base_logic Require Import fancy_updates.
 From iris.base_logic.lib Require Import own invariants ghost_map.
 
 From raven Require Import runtime.lang runtime.ghost_state runtime.invariant_tokens runtime.erasure.
-From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.structured_certificates.
+From raven Require Import verification.expressions analysis.atomicity verification.assertions verification.ir soundness.interpretation soundness.entailment_validity analysis.structured_certificates
+  verification.masks.
 
 Import ListNotations.
 Import weakestpre.
@@ -73,18 +74,95 @@ Module Atomicity := GenericRegions.Atomicity.
 Section WithContracts.
 Context {RAs : RAConfig} {Logic : Assertion.LogicSignature}
   {Contracts : Hoare.ResourceHoare.ResourceContractEnv}.
-(** Procedure masks, inferred from the contracts as in Raven: a procedure
-    requires the invariants its precondition depends on and grants those its
-    postcondition depends on in addition.  This is the only definition of
-    the masks; everything else refers to it. *)
+(** Procedure masks, inferred from the contracts as in Raven ([Masks]): a
+    procedure requires the instances its precondition's applications
+    require, and grants the instances its postcondition names.  This is the
+    only definition of the masks; everything else refers to it. *)
+Definition required_template (procedure : proc_id) : Masks.template_mask :=
+  Masks.procedure_requirements Hoare.ResourceHoare.contract_declarations
+    (Hoare.ResourceHoare.contract_pre procedure).
+
+Definition granted_template (procedure : proc_id) : Masks.template_mask :=
+  Masks.procedure_grants (Hoare.ResourceHoare.contract_post procedure).
+
+(** The declarations of the masks. *)
 Definition required_mask (procedure : proc_id) : gset inv_id :=
-  Hoare.ResourceHoare.contract_invariants Hoare.ResourceHoare.predicate_body
-    Hoare.ResourceHoare.declared_predicates (Hoare.ResourceHoare.contract_pre procedure).
+  Masks.template_declarations (required_template procedure).
 
 Definition granted_mask (procedure : proc_id) : gset inv_id :=
-  Hoare.ResourceHoare.contract_invariants Hoare.ResourceHoare.predicate_body
-    Hoare.ResourceHoare.declared_predicates (Hoare.ResourceHoare.contract_post procedure) ∖
-  required_mask procedure.
+  Masks.template_declarations (granted_template procedure).
+
+(** A template atom at a call site or in a callee body: a formal is the atom
+    of its argument or slot, and the return value the atom of the result's
+    target. *)
+Definition instantiate_atom (formals : list (option Atomicity.key_atom))
+    (result : option Atomicity.key_atom) (atom : Masks.template_atom) :
+    option Atomicity.key_atom :=
+  match atom with
+  | Masks.TemplateFormal index => mjoin (formals !! index)
+  | Masks.TemplateReturn => result
+  | Masks.TemplateBool value => Some (Atomicity.AtomBool value)
+  | Masks.TemplateInt value => Some (Atomicity.AtomInt value)
+  | Masks.TemplateUnit => Some Atomicity.AtomUnit
+  end.
+
+(** A required instance whose arguments are not atoms widens to every
+    instance of its invariant. *)
+Definition instantiate_requirement (formals : list (option Atomicity.key_atom))
+    (entry : Masks.template_entry) : Atomicity.mask_entry :=
+  (entry.1, entry.2 ≫= mapM (instantiate_atom formals None)).
+
+(** A granted instance whose arguments are not atoms is dropped. *)
+Definition instantiate_grant (formals : list (option Atomicity.key_atom))
+    (result : option Atomicity.key_atom) (entry : Masks.template_entry) :
+    option Atomicity.mask_entry :=
+  match entry.2 with
+  | Some atoms =>
+      (fun key => (entry.1, Some key)) <$>
+        mapM (instantiate_atom formals result) atoms
+  | None => Some (entry.1, None)
+  end.
+
+Definition required_entries (formals : list (option Atomicity.key_atom))
+    (procedure : proc_id) : gset Atomicity.mask_entry :=
+  set_map (instantiate_requirement formals) (required_template procedure).
+
+Definition granted_entries (formals : list (option Atomicity.key_atom))
+    (result : option Atomicity.key_atom) (procedure : proc_id) :
+    gset Atomicity.mask_entry :=
+  list_to_set (omap (instantiate_grant formals result)
+    (elements (granted_template procedure))).
+
+Lemma required_entries_declarations formals procedure :
+  Atomicity.entry_declarations (required_entries formals procedure) =
+    required_mask procedure.
+Proof.
+  unfold Atomicity.entry_declarations, required_entries, required_mask,
+    Masks.template_declarations.
+  apply set_eq. intros invariant. rewrite !elem_of_map. split.
+  - intros (entry & -> & Hentry). apply elem_of_map in Hentry as
+      (source & -> & Hsource). exists source. auto.
+  - intros (source & -> & Hsource). exists (instantiate_requirement formals source).
+    split; [reflexivity|]. apply elem_of_map. eauto.
+Qed.
+
+Lemma granted_entries_declarations formals result procedure :
+  Atomicity.entry_declarations (granted_entries formals result procedure) ⊆
+    granted_mask procedure.
+Proof.
+  unfold Atomicity.entry_declarations, granted_entries, granted_mask,
+    Masks.template_declarations.
+  intros invariant Hin. apply elem_of_map in Hin as (entry & -> & Hentry).
+  apply elem_of_list_to_set, elem_of_list_omap in Hentry as
+    (source & Hsource & Hinstance).
+  apply elem_of_map. exists source. split.
+  - unfold instantiate_grant in Hinstance.
+    destruct source as [invariant' [atoms|]]; cbn in *.
+    + destruct (mapM _ atoms); cbn in Hinstance; [|discriminate].
+      injection Hinstance as <-. reflexivity.
+    + injection Hinstance as <-. reflexivity.
+  - apply elem_of_elements. exact Hsource.
+Qed.
 
 (** The cost of every leaf is determined by the language and the contract
     environment, so each module uses the same derived cost model.
@@ -98,11 +176,14 @@ Definition contract_cost_model : forall Γ, stmt Γ -> Atomicity.step_cost :=
     match statement with
     | TAssign _ _ _ | TFieldRead _ _ _ _ | TFieldWrite _ _ _ | TAlloc _ _ _ =>
         Atomicity.AtomicStep
-    | TCall procedure _ _ =>
-        Atomicity.ProcedureCallStep (required_mask procedure)
-          (granted_mask procedure)
-    | TSpawn procedure _ =>
-        Atomicity.ProcedureSpawnStep (required_mask procedure)
+    | TCall procedure arguments target =>
+        Atomicity.ProcedureCallStep
+          (required_entries (RegionSyntax.argument_atoms arguments) procedure)
+          (granted_entries (RegionSyntax.argument_atoms arguments)
+            (RegionSyntax.target_atom target) procedure)
+    | TSpawn procedure arguments =>
+        Atomicity.ProcedureSpawnStep
+          (required_entries (RegionSyntax.argument_atoms arguments) procedure)
     | _ => Atomicity.NoStep
     end.
 
@@ -114,13 +195,15 @@ Definition contract_cost_model : forall Γ, stmt Γ -> Atomicity.step_cost :=
 Definition procedure_cost_model_sound : Prop :=
   forall Γ (statement : stmt Γ),
   match statement with
-  | TCall procedure _ _ =>
+  | TCall procedure arguments target =>
       AnalysisView.leaf_cost Γ statement = Atomicity.ProcedureCallStep
-        (required_mask procedure)
-        (granted_mask procedure)
-  | TSpawn procedure _ =>
+        (required_entries (RegionSyntax.argument_atoms arguments) procedure)
+        (granted_entries (RegionSyntax.argument_atoms arguments)
+          (RegionSyntax.target_atom target) procedure)
+  | TSpawn procedure arguments =>
       AnalysisView.leaf_cost Γ statement =
-        Atomicity.ProcedureSpawnStep (required_mask procedure)
+        Atomicity.ProcedureSpawnStep
+          (required_entries (RegionSyntax.argument_atoms arguments) procedure)
   | _ =>
       match AnalysisView.leaf_cost Γ statement with
       | Atomicity.ProcedureCallStep _ _
@@ -139,34 +222,66 @@ Lemma proof_only_leaf_cost Γ (statement : stmt Γ) :
   AnalysisView.leaf_cost Γ statement = Atomicity.NoStep.
 Proof. destruct statement; cbn; congruence. Qed.
 
+(** Proof-only leaves write no local. *)
+Lemma proof_only_leaf_write Γ (statement : stmt Γ) :
+  proof_onlyb statement = true -> RegionSyntax.write statement = None.
+Proof. destruct statement; cbn; congruence. Qed.
+
 Lemma certified_call_step_effect
     (Hcost : procedure_cost_model_sound)
     Γ procedure
     (arguments : rexpr_list Γ (Assertion.procedure_args procedure))
     (target : call_target Γ (Assertion.procedure_return procedure)) entry exit :
-  Atomicity.take_step
+  Atomicity.take_leaf
       (AnalysisView.leaf_cost Γ (@TCall _ _ Γ procedure arguments target))
+      (RegionSyntax.write (@TCall _ _ Γ procedure arguments target))
       entry = inr exit ->
   required_mask procedure ⊆ Atomicity.analysis_mask entry /\
-  granted_mask procedure ## Atomicity.analysis_open entry /\
-  Atomicity.analysis_mask exit = Atomicity.analysis_mask entry ∪
+  Atomicity.analysis_open entry = ∅ /\
+  Atomicity.analysis_mask exit ⊆ Atomicity.analysis_mask entry ∪
     granted_mask procedure /\
   Atomicity.analysis_open exit = Atomicity.analysis_open entry.
 Proof.
-  intros Hstep. exact (Atomicity.procedure_call_step_success _ _ _ _ Hstep).
+  intros Hleaf.
+  pose proof (Atomicity.take_leaf_mask _ _ _ _ Hleaf) as Hmask.
+  pose proof (Atomicity.take_leaf_preserves_open _ _ _ _ Hleaf) as Hopen.
+  pose proof (Hcost Γ (@TCall _ _ Γ procedure arguments target)) as Hselected.
+  cbn beta iota in Hselected. rewrite Hselected in Hleaf, Hmask.
+  destruct (Atomicity.take_leaf_step _ _ _ _ Hleaf) as (stepped & Hstep & _).
+  apply Atomicity.procedure_call_step_success in Hstep as
+    (Havailable & Hclosed & _).
+  pose proof (Atomicity.entries_available_mask _ _ Havailable Hclosed)
+    as Hrequired.
+  cbn [Atomicity.cost_granted] in Hmask.
+  rewrite required_entries_declarations in Hrequired.
+  split; [exact Hrequired|]. split; [exact Hclosed|]. split; [|exact Hopen].
+  etrans; [exact Hmask|].
+  pose proof (granted_entries_declarations (RegionSyntax.argument_atoms arguments)
+    (RegionSyntax.target_atom target) procedure). set_solver.
 Qed.
 
 Lemma certified_spawn_step_effect
     (Hcost : procedure_cost_model_sound)
     Γ procedure
     (arguments : rexpr_list Γ (Assertion.procedure_args procedure)) entry exit :
-  Atomicity.take_step
-      (AnalysisView.leaf_cost Γ (@TSpawn _ _ Γ procedure arguments)) entry = inr exit ->
+  Atomicity.take_leaf
+      (AnalysisView.leaf_cost Γ (@TSpawn _ _ Γ procedure arguments))
+      (RegionSyntax.write (@TSpawn _ _ Γ procedure arguments)) entry =
+    inr exit ->
   required_mask procedure ⊆ Atomicity.analysis_mask entry /\
-  Atomicity.analysis_mask exit = Atomicity.analysis_mask entry /\
-  Atomicity.analysis_open exit = Atomicity.analysis_open entry.
+  Atomicity.analysis_open entry = ∅ /\
+  exit = entry.
 Proof.
-  intros Hstep. exact (Atomicity.procedure_spawn_step_success _ _ _ Hstep).
+  intros Hleaf.
+  pose proof (Hcost Γ (@TSpawn _ _ Γ procedure arguments)) as Hselected.
+  cbn beta iota in Hselected. rewrite Hselected in Hleaf.
+  destruct (Atomicity.take_leaf_step _ _ _ _ Hleaf) as (stepped & Hstep & ->).
+  apply Atomicity.procedure_spawn_step_success in Hstep as
+    (Havailable & Hclosed & ->).
+  pose proof (Atomicity.entries_available_mask _ _ Havailable Hclosed)
+    as Hrequired.
+  rewrite required_entries_declarations in Hrequired.
+  auto.
 Qed.
 
 Lemma unfold_analysis_mask {Γ : decl_context} {entry : Atomicity.analysis_state}

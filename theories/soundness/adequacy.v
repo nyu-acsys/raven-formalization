@@ -165,11 +165,9 @@ Proof.
     set (body := module_analysis_bodies M certificates
       (pack_typed_procedure procedure) Hin).
     etrans; [apply GenericRegions.Atomicity.certificate_footprint_allocations|].
-    { rewrite (proj1 (GenericRegions.Atomicity.analysis_open_empty _)
-        (analyzed_body_entry_closed _ _ body)).
-      constructor. }
-    rewrite (analyzed_body_entry_mask _ _ body).
-    rewrite (analyzed_body_entry_closed _ _ body).
+    { constructor. }
+    rewrite (procedure_entry_state_mask procedure).
+    rewrite (procedure_entry_state_closed procedure).
     etrans; [|exact Hdeclared]. set_solver.
 Defined.
 

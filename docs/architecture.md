@@ -149,6 +149,8 @@ executable, certificate-producing analysis. Its state records:
   argument is a local (by its de Bruijn level) or a literal;
 - the open accesses, innermost first, each with its instance and the entry
   it consumed;
+- the aliases of the ghost values in scope: a ghost value initialized with a
+  local or literal stands for it while that local is not written;
 - whether a physical atomic step has been taken while an invariant is open;
   and
 - whether traversal is inside a trusted atomic block.
@@ -164,6 +166,9 @@ The essential policy is:
   declaration-wide entry; a fold closes the innermost open access, which
   must be the same instance, and restores the consumed entry, or allocates
   an instance of an invariant that is not open;
+- a write to a local forgets the entries and aliases naming it; an access
+  whose instance was resolved through a written local restores its entry
+  under its own snapshot key;
 - leaving the scope of a local forgets the entries it made available that
   name the local, and no open access may name it;
 - branch entries are joined by keeping each entry of either branch that is
@@ -172,7 +177,19 @@ The essential policy is:
 - branch step flags are joined by disjunction; and
 - procedures must return with no invariant left open.
 
-Calls and spawn receive effects derived from the callee contracts. Trusted
+Calls and spawns check the callee's required instances against the
+available entries and receive its granted instances, both instantiated with
+the atoms of the call's arguments and result target: a required instance
+with an argument that is not an atom widens to every instance of its
+invariant, and such a granted instance is dropped. The requirements and
+grants are inferred from the contracts
+([`verification/masks.v`](../theories/verification/masks.v)), as in Raven: a
+procedure requires the instances named by its precondition's invariant
+applications, together with what the predicates and invariants it mentions
+require, substituted through the mention's arguments; these declaration
+requirements are the least fixed point of the bodies' dependencies, reached
+within an explicit bound. A procedure grants the instances its postcondition
+names with arguments over its formals, its return value and literals. Trusted
 atomic blocks count as one physical atomic step to the surrounding context;
 step counting inside the block is suspended, while invariant-opening state is
 still tracked.
@@ -381,7 +398,10 @@ analysis:
 
 - invariant accesses must be LIFO;
 - instance keys are exact only for arguments that are locals or literals,
-  and the Iris interpretation uses one namespace per declaration;
+  mask keys are either full or declaration-wide (no argument prefixes), and
+  an instance is available only if it is named syntactically or through an
+  alias (no generated membership assertions);
+- the Iris interpretation uses one namespace per declaration;
 - only one instance of a declaration can be open at once;
 - the normalizer does not yet cover every branch-local fold/unfold placement
   accepted by Raven: after the common prefix has consumed an access's

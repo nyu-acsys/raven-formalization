@@ -2,7 +2,8 @@ From Coq Require Import List String Program.Equality ZArith Lia
   Logic.ProofIrrelevance Logic.FunctionalExtensionality.
 From stdpp Require Import gmap sets.
 
-From raven Require Import verification.expressions verification.assertions verification.ir verification.hoare_rules.
+From raven Require Import verification.expressions verification.assertions verification.ir verification.hoare_rules
+  verification.masks.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -1029,23 +1030,22 @@ Definition procedure_table (procedures : list packed_typed_procedure) :
     invariants and their bodies.  Its contract environment and the coherence
     of that environment with the table are derived: a procedure's contract
     is the one its table entry declares. *)
-Definition procedure_contract_invariants_declared
-    (predicates : list pred_id)
-    (predicate_body : forall predicate,
-      Resource.core_assertion (predicate_args predicate) [])
-    (invariants : list inv_id) (packed : packed_typed_procedure) : Prop :=
+(** A procedure's masks name only declared invariants; module elaboration
+    checks it. *)
+Definition procedure_masks_declared (declarations : Masks.declarations)
+    (packed : packed_typed_procedure) : Prop :=
   match packed with
   | existT _ (existT _ procedure) =>
-      ResourceHoare.contract_invariants predicate_body predicates
-        (procedure_precondition _ _ procedure) ⊆ list_to_set invariants /\
-      ResourceHoare.contract_invariants predicate_body predicates
-        (procedure_postcondition _ _ procedure) ⊆ list_to_set invariants
+      Masks.template_declarations (Masks.procedure_requirements declarations
+        (procedure_precondition _ _ procedure)) ⊆
+        list_to_set (Masks.declared_invariants declarations) /\
+      Masks.template_declarations
+        (Masks.procedure_grants (procedure_postcondition _ _ procedure)) ⊆
+        list_to_set (Masks.declared_invariants declarations)
   end.
 
-#[global] Instance procedure_contract_invariants_declared_decision
-    predicates predicate_body invariants packed :
-    Decision (procedure_contract_invariants_declared
-      predicates predicate_body invariants packed).
+#[global] Instance procedure_masks_declared_decision declarations packed :
+    Decision (procedure_masks_declared declarations packed).
 Proof. destruct packed as [Γ [identity procedure]]. apply _. Defined.
 
 Record module := ModuleData {
@@ -1060,10 +1060,6 @@ Record module := ModuleData {
     Resource.core_assertion (invariant_args invariant) [];
   module_invariant_body_entry_free : forall invariant,
     Resource.core_entry_free (module_invariant_body invariant);
-  module_contract_invariants_declared :
-    Forall (procedure_contract_invariants_declared module_predicates
-      module_predicate_body module_invariants)
-      (procedure_entries module_procedures);
 }.
 
 Section WithModule.
@@ -1093,6 +1089,7 @@ Definition module_procedure_verified (procedure : proc_id) : Prop :=
 
 Definition module_contracts : ResourceHoare.ResourceContractEnv :=
   ResourceHoare.ResourceContractEnvData (module_predicates M)
+    (module_invariants M)
     (module_predicate_body M) (module_predicate_body_entry_free M)
     (module_invariant_body M) (module_invariant_body_entry_free M)
     module_contract_pre module_contract_post module_procedure_verified.
@@ -1228,16 +1225,13 @@ Definition make_module (procedures : typed_procedure_environment)
     (predicates : list { predicate : pred_id &
       Resource.core_assertion (predicate_args predicate) [] })
     (invariants : list { invariant : inv_id &
-      Resource.core_assertion (invariant_args invariant) [] })
-    (Hdeclared : Forall (procedure_contract_invariants_declared
-      (map (@projT1 _ _) predicates) (lookup_predicate_body predicates)
-      (map (@projT1 _ _) invariants)) (procedure_entries procedures)) : module :=
+      Resource.core_assertion (invariant_args invariant) [] }) : module :=
   ModuleData procedures (map (@projT1 _ _) predicates)
     (lookup_predicate_body predicates)
     (lookup_predicate_body_entry_free predicates)
     (map (@projT1 _ _) invariants)
     (lookup_invariant_body invariants)
-    (lookup_invariant_body_entry_free invariants) Hdeclared.
+    (lookup_invariant_body_entry_free invariants).
 
 (** The typed procedure a module declares under an identifier. *)
 Definition module_procedure (M : module) (identity : proc_id) :

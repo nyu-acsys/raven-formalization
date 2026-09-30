@@ -2,7 +2,8 @@ From Coq Require Import List String ZArith PArith Program.Equality
   ProofIrrelevance Lia.
 From stdpp Require Import sets.
 
-From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir verification.procedures verification.snapshots verification.access_layout.
+From raven Require Import surface.syntax verification.expressions verification.assertions verification.resources verification.ir verification.procedures verification.snapshots verification.access_layout
+  verification.masks.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -1053,14 +1054,14 @@ Definition elaborate_module_in (environment : elaboration_environment)
       match Hoare.procedure_table procedures with
       | None => inl EEIllFormedModule
       | Some table =>
-          match decide (Forall (Hoare.procedure_contract_invariants_declared
-            (map (@projT1 _ _) predicates)
-            (Hoare.lookup_predicate_body predicates)
-            (map (@projT1 _ _) invariants)) (procedure_entries table)) with
-          | left Hdeclared =>
-              inr (Hoare.make_module table predicates invariants Hdeclared)
-          | right _ => inl EEIllFormedModule
-          end
+          if bool_decide (Forall (Hoare.procedure_masks_declared
+              (Masks.Declarations (map (@projT1 _ _) predicates)
+                (Hoare.lookup_predicate_body predicates)
+                (map (@projT1 _ _) invariants)
+                (Hoare.lookup_invariant_body invariants)))
+              (procedure_entries table))
+          then inr (Hoare.make_module table predicates invariants)
+          else inl EEIllFormedModule
       end
   end.
 

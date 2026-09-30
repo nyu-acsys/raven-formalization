@@ -41,8 +41,7 @@ Definition reassigned_argument : stmt Γ :=
       (TFold counter_invariant arguments)).
 
 Definition closed (available : gset Core.inv_id) : Atomicity.analysis_state :=
-  Atomicity.AnalysisState (Atomicity.declaration_entries available) [] false
-    false.
+  Atomicity.closed_state (Atomicity.declaration_entries available).
 
 Lemma reassigned_argument_unstable :
   NormalizationBase.restricted_fragment_check reassigned_argument = false.

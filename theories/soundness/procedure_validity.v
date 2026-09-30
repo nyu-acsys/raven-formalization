@@ -86,10 +86,49 @@ Proof.
     | apply RuntimeLang.atomic_alloc ].
 Qed.
 
+(** A procedure body's canonical entry state: its required instances at its
+    formal slots, with nothing open. *)
+Definition procedure_entry_state {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+    GenericRegions.Atomicity.analysis_state :=
+  GenericRegions.Atomicity.closed_state
+    (Certified.required_entries
+      (RegionSyntax.variable_atoms (procedure_formal_variables _ _ procedure))
+      identity).
+
+Lemma procedure_entry_state_wf {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+  GenericRegions.Atomicity.state_wf (procedure_entry_state procedure).
+Proof. constructor. Qed.
+
+Lemma procedure_entry_state_closed {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+  GenericRegions.Atomicity.analysis_open (procedure_entry_state procedure) = ∅.
+Proof. reflexivity. Qed.
+
+Lemma procedure_entry_state_outside_atomic {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+  GenericRegions.Atomicity.analysis_in_atomic
+    (procedure_entry_state procedure) = false.
+Proof. reflexivity. Qed.
+
+(** The declarations available on entry are those the procedure
+    requires. *)
+Lemma procedure_entry_state_mask {Γ identity}
+    (procedure : typed_procedure Γ identity) :
+  GenericRegions.Atomicity.analysis_mask (procedure_entry_state procedure) =
+    Certified.required_mask identity.
+Proof.
+  unfold GenericRegions.Atomicity.analysis_mask.
+  rewrite procedure_entry_state_closed difference_empty_L.
+  apply Certified.required_entries_declarations.
+Qed.
+
+(** An analyzed procedure body: its analysis starts from
+    [procedure_entry_state]. *)
 Record analyzed_body_certificate {Γ identity}
-    (procedure : typed_procedure Γ identity) (current_mask : Hoare.mask)
+    (procedure : typed_procedure Γ identity)
     : Type := AnalyzedBodyCertificate {
-  analyzed_body_entry : GenericRegions.Atomicity.analysis_state;
   analyzed_body_exit : GenericRegions.Atomicity.analysis_state;
   analyzed_body_exit_context : context;
   analyzed_body_exit_store :
@@ -103,53 +142,36 @@ Record analyzed_body_certificate {Γ identity}
     lookup_store analyzed_body_exit_store _
       (procedure_return_variable _ _ procedure) =
         analyzed_body_return_reference;
-  analyzed_body_entry_wf :
-    GenericRegions.Atomicity.state_wf analyzed_body_entry;
-  analyzed_body_entry_closed :
-    GenericRegions.Atomicity.analysis_open analyzed_body_entry = ∅;
-  analyzed_body_entry_outside_atomic :
-    GenericRegions.Atomicity.analysis_in_atomic
-      analyzed_body_entry = false;
   analyzed_body_exit_closed :
     GenericRegions.Atomicity.analysis_open analyzed_body_exit = ∅;
-  analyzed_body_entry_mask :
-    GenericRegions.Atomicity.analysis_mask analyzed_body_entry =
-      current_mask;
-  analyzed_body_exit_mask :
-    Certified.granted_mask (procedure_identity _ _ procedure) ⊆
-      GenericRegions.Atomicity.analysis_mask analyzed_body_exit;
   analyzed_body_triple :
     @CertifiedNormalization.analyzed_triple _ _ _
  Γ (Assertion.procedure_args identity)
       (@nil typ)
       (Hoare.procedure_body_pre procedure)
       (procedure_body _ _ procedure)
-      analyzed_body_entry analyzed_body_exit
+      (procedure_entry_state procedure) analyzed_body_exit
       (Hoare.procedure_body_post procedure
         analyzed_body_exit_store
         analyzed_body_return_reference);
 }.
 
-Arguments analyzed_body_triple {_ _} _ _ _.
-Arguments analyzed_body_entry {_ _} _ _ _.
-Arguments analyzed_body_exit {_ _} _ _ _.
-Arguments analyzed_body_exit_store {_ _} _ _ _.
-Arguments analyzed_body_return_reference {_ _} _ _ _.
-Arguments analyzed_body_entry_wf {_ _} _ _ _.
-Arguments analyzed_body_entry_outside_atomic {_ _} _ _ _.
-Arguments analyzed_body_exit_return {_ _} _ _ _.
-Arguments analyzed_body_entry_closed {_ _} _ _ _.
-Arguments analyzed_body_exit_closed {_ _} _ _ _.
-Arguments analyzed_body_exit_mask {_ _} _ _ _.
+Arguments analyzed_body_triple {_ _} _ _.
+Arguments analyzed_body_exit {_ _} _ _.
+Arguments analyzed_body_exit_context {_ _} _ _.
+Arguments analyzed_body_exit_store {_ _} _ _.
+Arguments analyzed_body_return_reference {_ _} _ _.
+Arguments analyzed_body_exit_return {_ _} _ _.
+Arguments analyzed_body_exit_closed {_ _} _ _.
 
 Definition analyzed_body_normalization_exists {Γ identity}
-    (procedure : typed_procedure Γ identity) (current_mask : Hoare.mask)
-    (body : analyzed_body_certificate procedure current_mask) : Prop :=
+    (procedure : typed_procedure Γ identity)
+    (body : analyzed_body_certificate procedure) : Prop :=
   CertifiedNormalization.restricted_footprinted_normalization_exists
     (CertifiedNormalization.analyzed_hoare
-      (analyzed_body_triple _ _ body))
+      (analyzed_body_triple _ body))
     (CertifiedNormalization.analyzed_certificate
-      (analyzed_body_triple _ _ body)).
+      (analyzed_body_triple _ body)).
 
 (** Proof-level procedure bridge for the syntax-only analyzer.  The
     normalization witness stays existential: this theorem destructs it only
@@ -157,13 +179,11 @@ Definition analyzed_body_normalization_exists {Γ identity}
     analysis packages carry proof-relevant normalization data. *)
 Theorem term_analyzed_body_source_valid
     {Γ identity} (procedure : typed_procedure Γ identity)
-    (current_mask : Hoare.mask)
-    (body : analyzed_body_certificate procedure current_mask)
-    (Hnormalizes : analyzed_body_normalization_exists procedure
-      current_mask body)
+    (body : analyzed_body_certificate procedure)
+    (Hnormalizes : analyzed_body_normalization_exists procedure body)
     (Hregistered : GenericRegions.Atomicity.certificate_footprint
       (CertifiedNormalization.analyzed_certificate
-        (analyzed_body_triple _ _ body)) ⊆
+        (analyzed_body_triple _ body)) ⊆
       term_registered_invariants ) :
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
     (formals : formal_env (Assertion.procedure_args identity))
@@ -171,20 +191,20 @@ Theorem term_analyzed_body_source_valid
     RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.certificate_footprint
         (CertifiedNormalization.analyzed_certificate
-          (analyzed_body_triple _ _ body)) ∪ term_registered_invariants) ⊆
+          (analyzed_body_triple _ body)) ∪ term_registered_invariants) ⊆
       ambient ->
     (global_world_context valuation ∗
      term_interp_resource_prenex runtime formals empty_binder_env valuation
        (Hoare.procedure_body_pre procedure)) ⊢
     translated_runtime_wp runtime ambient
-      (analyzed_body_entry _ _ body)
-      (analyzed_body_exit _ _ body)
+      (procedure_entry_state procedure)
+      (analyzed_body_exit _ body)
       (procedure_body _ _ procedure)
       (global_world_context valuation ∗
        term_interp_resource_prenex runtime formals empty_binder_env valuation
          (Hoare.procedure_body_post procedure
-           (analyzed_body_exit_store _ _ body)
-           (analyzed_body_return_reference _ _ body))).
+           (analyzed_body_exit_store _ body)
+           (analyzed_body_return_reference _ body))).
 Proof.
   destruct Hnormalizes as [normalization Hworker].
   have Hvalid : term_structured_runtime_valid
@@ -193,8 +213,8 @@ Proof.
           normalization))
       (Hoare.procedure_body_pre procedure)
       (Hoare.procedure_body_post procedure
-        (analyzed_body_exit_store _ _ body)
-        (analyzed_body_return_reference _ _ body)).
+        (analyzed_body_exit_store _ body)
+        (analyzed_body_return_reference _ body)).
   { exact (proj1 (term_structured_certificate_resource_prenex_valid
       (CertifiedNormalization.normalization_target_certificate
         (CertifiedNormalization.footprinted_normalization
@@ -202,7 +222,7 @@ Proof.
       (CertifiedNormalization.normalization_target_derivation
         (CertifiedNormalization.footprinted_normalization
           normalization))
-      (analyzed_body_entry_wf _ _ body)
+      (procedure_entry_state_wf procedure)
       contract_cost_model_runtime_sound
       Certified.contract_cost_model_procedure_sound
       (fun invariant Hin => Hregistered invariant
@@ -210,23 +230,22 @@ Proof.
           normalization invariant Hin))
       ((CertifiedNormalization.footprinted_normalization_safe
         normalization)
-        (analyzed_body_entry_outside_atomic _ _ body)))). }
+        (procedure_entry_state_outside_atomic procedure)))). }
   exact (term_procedure_body_source_valid_footprinted
     procedure
-    (analyzed_body_exit_store _ _ body)
-    (analyzed_body_return_reference _ _ body)
+    (analyzed_body_exit_store _ body)
+    (analyzed_body_return_reference _ body)
     eq_refl eq_refl
     (CertifiedNormalization.analyzed_hoare
-      (analyzed_body_triple _ _ body))
+      (analyzed_body_triple _ body))
     (CertifiedNormalization.analyzed_certificate
-      (analyzed_body_triple _ _ body))
+      (analyzed_body_triple _ body))
     normalization eq_refl Hvalid).
 Qed.
 
 Definition analyzed_body_valid {Γ identity}
     (procedure : typed_procedure Γ identity) : Type :=
-  analyzed_body_certificate procedure
-    (Certified.required_mask (procedure_identity _ _ procedure)).
+  analyzed_body_certificate procedure.
 
 Definition packed_analyzed_body
     (packed : packed_typed_procedure) : Type :=
@@ -247,7 +266,7 @@ Record analyzed_module : Type := {
         (procedure_entries Hoare.coherent_procedures)),
     GenericRegions.Atomicity.certificate_footprint
       (CertifiedNormalization.analyzed_certificate
-        (analyzed_body_triple _ _
+        (analyzed_body_triple _
           (analyzed_module_bodies
             (pack_typed_procedure procedure) Hin))) ⊆
       term_registered_invariants ;
@@ -261,8 +280,7 @@ Arguments analyzed_module_registered _ {_ _} _ _.
 Definition analyzed_normalization_complete : Prop :=
   forall Γ identity (procedure : typed_procedure Γ identity)
     (body : analyzed_body_valid procedure),
-    analyzed_body_normalization_exists procedure
-      (Certified.required_mask (procedure_identity _ _ procedure)) body.
+    analyzed_body_normalization_exists procedure body.
 
 (** This assembly is closed once the proof-theoretic raw-access cut in the
     normalization layer is discharged.  Its assumptions are intentionally
@@ -272,7 +290,7 @@ Theorem analyzed_normalization_complete_from_raw_access_cut :
 Proof.
   intros Γ identity procedure body.
   apply CertifiedNormalization.analyzed_normalization_exists.
-  exact (analyzed_body_entry_closed _ _ body).
+  exact (procedure_entry_state_closed procedure).
 Qed.
 
 (** Feeding the produced normalization to the procedure-level theorem.
@@ -343,18 +361,17 @@ Proof.
   intros Γ F procedure Hin.
   set (body := analyzed_module_bodies certificates
     (pack_typed_procedure procedure) Hin).
-  refine {| term_semantic_body_entry :=
-      analyzed_body_entry _ _ body;
-    term_semantic_body_exit := analyzed_body_exit _ _ body;
+  refine {| term_semantic_body_entry := procedure_entry_state procedure;
+    term_semantic_body_exit := analyzed_body_exit _ body;
     term_semantic_body_exit_context :=
-      analyzed_body_exit_context _ _ body;
+      analyzed_body_exit_context _ body;
     term_semantic_body_exit_store :=
-      analyzed_body_exit_store _ _ body;
+      analyzed_body_exit_store _ body;
     term_semantic_body_return_reference :=
-      analyzed_body_return_reference _ _ body |}.
-  - exact (analyzed_body_exit_return _ _ body).
-  - exact (analyzed_body_entry_closed _ _ body).
-  - exact (analyzed_body_exit_closed _ _ body).
+      analyzed_body_return_reference _ body |}.
+  - exact (analyzed_body_exit_return _ body).
+  - exact (procedure_entry_state_closed procedure).
+  - exact (analyzed_body_exit_closed _ body).
   - intros runtime formals valuation ambient Henvelope.
     eapply term_analyzed_body_source_valid.
     + exact (Hcomplete Γ F procedure body).

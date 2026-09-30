@@ -488,14 +488,7 @@ Definition normalization_conditional
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
       AnalysisView.ViewConditional then_branch else_branch) :
   let source := TIf condition then_branch else_branch in
-  let joined := GenericRegions.Atomicity.AnalysisState
-    (GenericRegions.Atomicity.entries_meet
-      (GenericRegions.Atomicity.analysis_entries then_exit)
-      (GenericRegions.Atomicity.analysis_entries else_exit))
-    (GenericRegions.Atomicity.analysis_records then_exit)
-    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-      GenericRegions.Atomicity.analysis_step_taken else_exit)
-    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let joined := GenericRegions.Atomicity.join_state then_exit else_exit in
   let source_derivation := RavenHoareRules.RTIf store body condition
     then_branch else_branch post then_derivation else_derivation in
   let source_certificate := GenericRegions.Atomicity.CertConditional Γ
@@ -541,11 +534,13 @@ Definition normalization_ghost_val
             (Assertions.weaken_expr (IR.symbolize_expr store initializer))))))
       body post)
     (body_certificate : GenericRegions.Atomicity.analysis_certificate
-      (ghost_val t :: Γ) entry body exit)
+      (ghost_val t :: Γ) (GenericRegions.Atomicity.enter_scope (length Γ)
+        (RegionSyntax.argument_atom initializer) entry) body exit)
     (body_normalization : @normalization_result (ghost_val t :: Γ) F (t :: Δ)
-      entry exit _ post body body_derivation body_certificate)
+      _ exit _ post body body_derivation body_certificate)
     (view : RegionSyntax.view (TGhostVal name t initializer body) =
-      AnalysisView.ViewScope (ghost_val t) body)
+      AnalysisView.ViewScope (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body)
     (admissible : GenericRegions.Atomicity.leave_scope_admissible
       (length Γ) exit = true) :
   @normalization_result Γ F Δ entry
@@ -556,7 +551,8 @@ Definition normalization_ghost_val
     (RavenHoareRules.RTGhostVal name t initializer body store frame post
       body_derivation)
     (GenericRegions.Atomicity.CertScope Γ entry
-      (TGhostVal name t initializer body) (ghost_val t) body exit view
+      (TGhostVal name t initializer body) (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body exit view
       body_certificate admissible).
 Proof.
   refine {| normalized_statement := TGhostVal name t initializer
@@ -896,10 +892,7 @@ Inductive certificate_aligned :
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep state = inr outer)
     (body_certificate : GenericRegions.Atomicity.analysis_certificate Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_entries outer)
-        (GenericRegions.Atomicity.analysis_records outer)
-        (GenericRegions.Atomicity.analysis_step_taken outer) true)
+      (GenericRegions.Atomicity.atomic_entry outer)
       body inner)
     (records_equal : GenericRegions.Atomicity.analysis_records inner =
       GenericRegions.Atomicity.analysis_records outer)
@@ -914,16 +907,19 @@ Inductive certificate_aligned :
     (store : symbolic_store Γ F Δ) (frame : Resource.core_assertion F Δ)
     (post : Resource.resource_prenex (ghost_val t :: Γ) F (t :: Δ))
     (view : RegionSyntax.view (TGhostVal name t initializer body) =
-      AnalysisView.ViewScope (ghost_val t) body)
+      AnalysisView.ViewScope (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body)
     (body_certificate : GenericRegions.Atomicity.analysis_certificate
-      (ghost_val t :: Γ) state body exit)
+      (ghost_val t :: Γ) (GenericRegions.Atomicity.enter_scope (length Γ)
+        (RegionSyntax.argument_atom initializer) state) body exit)
     (admissible : GenericRegions.Atomicity.leave_scope_admissible
       (length Γ) exit = true)
     body_derivation,
     certificate_aligned body_certificate body_derivation ->
     certificate_aligned
       (GenericRegions.Atomicity.CertScope Γ state
-        (TGhostVal name t initializer body) (ghost_val t) body exit view
+        (TGhostVal name t initializer body) (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body exit view
         body_certificate admissible)
       (RavenHoareRules.RTGhostVal name t initializer body store frame post
         body_derivation)
@@ -1146,7 +1142,7 @@ Proof.
            unshelve eexists;
              [eapply AlignedAtomic; eassumption | exact I]
        | [ |- context [RavenHoareRules.RTGhostVal _ _ _ _ _ _ _ ?d] ] =>
-           cbn in e; injection e as Hd Hscope_body; subst;
+           cbn in e; injection e as Hd Halias Hscope_body; subst;
            apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body; subst;
            destruct (certificate_aligned_complete_exists _ F
              _ _ _ _ d _ _ certificate) as [Abody _];
@@ -1339,14 +1335,7 @@ Definition footprinted_normalization_conditional
     (view : RegionSyntax.view (TIf condition then_branch else_branch) =
       AnalysisView.ViewConditional then_branch else_branch) :
   let source := TIf condition then_branch else_branch in
-  let joined := GenericRegions.Atomicity.AnalysisState
-    (GenericRegions.Atomicity.entries_meet
-      (GenericRegions.Atomicity.analysis_entries then_exit)
-      (GenericRegions.Atomicity.analysis_entries else_exit))
-    (GenericRegions.Atomicity.analysis_records then_exit)
-    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-      GenericRegions.Atomicity.analysis_step_taken else_exit)
-    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let joined := GenericRegions.Atomicity.join_state then_exit else_exit in
   let source_derivation := RavenHoareRules.RTIf store body condition
     then_branch else_branch post then_derivation else_derivation in
   let source_certificate := GenericRegions.Atomicity.CertConditional Γ
@@ -1474,14 +1463,7 @@ Definition normalization_ghost_conditional
     (normalized_else_proof_only :
       proof_onlyb else_normalization.(normalized_statement) = true) :
   let source := TGhostIf condition then_branch else_branch in
-  let joined := GenericRegions.Atomicity.AnalysisState
-    (GenericRegions.Atomicity.entries_meet
-      (GenericRegions.Atomicity.analysis_entries then_exit)
-      (GenericRegions.Atomicity.analysis_entries else_exit))
-    (GenericRegions.Atomicity.analysis_records then_exit)
-    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-      GenericRegions.Atomicity.analysis_step_taken else_exit)
-    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let joined := GenericRegions.Atomicity.join_state then_exit else_exit in
   let source_derivation := RavenHoareRules.RTGhostIf store body condition
     then_branch else_branch post then_proof_only else_proof_only
     then_derivation else_derivation in
@@ -1546,14 +1528,7 @@ Definition footprinted_normalization_ghost_conditional
     (normalized_else_proof_only : proof_onlyb
       else_result.(footprinted_normalization).(normalized_statement) = true) :
   let source := TGhostIf condition then_branch else_branch in
-  let joined := GenericRegions.Atomicity.AnalysisState
-    (GenericRegions.Atomicity.entries_meet
-      (GenericRegions.Atomicity.analysis_entries then_exit)
-      (GenericRegions.Atomicity.analysis_entries else_exit))
-    (GenericRegions.Atomicity.analysis_records then_exit)
-    (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-      GenericRegions.Atomicity.analysis_step_taken else_exit)
-    (GenericRegions.Atomicity.analysis_in_atomic then_exit) in
+  let joined := GenericRegions.Atomicity.join_state then_exit else_exit in
   let source_derivation := RavenHoareRules.RTGhostIf store body condition
     then_branch else_branch post then_proof_only else_proof_only
     then_derivation else_derivation in
@@ -1668,11 +1643,13 @@ Definition footprinted_normalization_ghost_val
             (Assertions.weaken_expr (IR.symbolize_expr store initializer))))))
       body post)
     (body_certificate : GenericRegions.Atomicity.analysis_certificate
-      (ghost_val t :: Γ) entry body exit)
+      (ghost_val t :: Γ) (GenericRegions.Atomicity.enter_scope (length Γ)
+        (RegionSyntax.argument_atom initializer) entry) body exit)
     (body_result : @footprinted_normalization_result (ghost_val t :: Γ) F
-      (t :: Δ) entry exit _ post body body_derivation body_certificate)
+      (t :: Δ) _ exit _ post body body_derivation body_certificate)
     (view : RegionSyntax.view (TGhostVal name t initializer body) =
-      AnalysisView.ViewScope (ghost_val t) body)
+      AnalysisView.ViewScope (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body)
     (admissible : GenericRegions.Atomicity.leave_scope_admissible
       (length Γ) exit = true) :
   @footprinted_normalization_result Γ F Δ entry
@@ -1683,7 +1660,8 @@ Definition footprinted_normalization_ghost_val
     (RavenHoareRules.RTGhostVal name t initializer body store frame post
       body_derivation)
     (GenericRegions.Atomicity.CertScope Γ entry
-      (TGhostVal name t initializer body) (ghost_val t) body exit view
+      (TGhostVal name t initializer body) (ghost_val t)
+        (RegionSyntax.argument_atom initializer) body exit view
       body_certificate admissible).
 Proof.
   refine {| footprinted_normalization :=
@@ -2092,13 +2070,14 @@ Lemma ghost_val_normalization_complete_from_worker
       (body_derivation : RavenHoareRules.RavenHoareTriple body_pre
         body body_post)
       (body_certificate : GenericRegions.Atomicity.analysis_certificate
-        (ghost_val t :: Γ) entry body body_exit),
+        (ghost_val t :: Γ) (GenericRegions.Atomicity.enter_scope (length Γ)
+          (RegionSyntax.argument_atom initializer) entry) body body_exit),
       GenericRegions.Atomicity.analysis_records body_exit =
         GenericRegions.Atomicity.analysis_records entry ->
       forall fuel normalized,
       restricted_normalize_statement_fuel fuel body = Some normalized ->
       exists result : @footprinted_normalization_result (ghost_val t :: Γ)
-          F0 Δ0 entry body_exit body_pre body_post body body_derivation
+          F0 Δ0 _ body_exit body_pre body_post body body_derivation
           body_certificate,
         normalized_statement
           result.(footprinted_normalization) = normalized) :
@@ -2218,12 +2197,7 @@ Definition structured_guard_if {Γ entry} (guard : access_guard Γ)
     (Hatomic : Atom.analysis_in_atomic then_exit =
       Atom.analysis_in_atomic else_exit) :
     structured_certificate Γ entry (guard_if guard then_branch else_branch)
-      (Atom.AnalysisState
-        (Atom.entries_meet (Atom.analysis_entries then_exit)
-          (Atom.analysis_entries else_exit))
-        (Atom.analysis_records then_exit)
-        (Atom.analysis_step_taken then_exit || Atom.analysis_step_taken else_exit)
-        (Atom.analysis_in_atomic then_exit)) :=
+      (Atom.join_state then_exit else_exit) :=
   match guard as guard0 return structured_certificate Γ entry
     (guard_if guard0 then_branch else_branch) _ with
   | GuardRuntime condition =>
@@ -2242,12 +2216,7 @@ Lemma structured_guard_if_footprint {Γ entry} (guard : access_guard Γ)
   structured_certificate_footprint
     (structured_guard_if guard then_certificate else_certificate Hopen Hatomic) =
   Atom.analysis_mask entry ∪ Atom.analysis_open entry ∪
-    Atom.analysis_mask (Atom.AnalysisState
-      (Atom.entries_meet (Atom.analysis_entries then_exit)
-        (Atom.analysis_entries else_exit))
-      (Atom.analysis_records then_exit)
-      (Atom.analysis_step_taken then_exit || Atom.analysis_step_taken else_exit)
-      (Atom.analysis_in_atomic then_exit)) ∪
+    Atom.analysis_mask (Atom.join_state then_exit else_exit) ∪
     Atom.analysis_open then_exit ∪
     (structured_certificate_footprint then_certificate ∪
       structured_certificate_footprint else_certificate).
@@ -2289,16 +2258,20 @@ Proof.
   rewrite elem_of_filter, elem_of_union. tauto.
 Qed.
 
-Lemma analysis_state_join_self (state : Atom.analysis_state) :
-  Atom.AnalysisState
-    (Atom.entries_meet (Atom.analysis_entries state)
-      (Atom.analysis_entries state))
-    (Atom.analysis_records state)
-    (Atom.analysis_step_taken state || Atom.analysis_step_taken state)
-    (Atom.analysis_in_atomic state) = state.
+Lemma aliases_meet_self (aliases : gmap nat Atom.key_atom) :
+  Atom.aliases_meet aliases aliases = aliases.
 Proof.
-  destruct state as [entries records step atomic]. cbn.
-  rewrite Bool.orb_diag, entries_meet_self. reflexivity.
+  unfold Atom.aliases_meet. apply map_eq. intros level.
+  rewrite map_lookup_filter.
+  destruct (aliases !! level) eqn:Hlookup; cbn; [|reflexivity].
+  rewrite option_guard_True; [reflexivity|exact Hlookup].
+Qed.
+
+Lemma analysis_state_join_self (state : Atom.analysis_state) :
+  Atom.join_state state state = state.
+Proof.
+  destruct state as [entries records aliases step atomic]. cbn.
+  rewrite Bool.orb_diag, entries_meet_self, aliases_meet_self. reflexivity.
 Qed.
 
 Lemma fold_invariant_in_atomic invariant key state :
@@ -2312,8 +2285,9 @@ Lemma proof_only_neutral_state {Γ entry statement exit}
   proof_onlyb statement = true -> access_neutral statement -> exit = entry.
 Proof.
   induction certificate; intros Hproof Hneutral.
-  - rewrite (Certified.proof_only_leaf_cost Γ statement Hproof) in e0.
-    unfold Atom.take_step, Atom.take_plain_step in e0.
+  - rewrite (Certified.proof_only_leaf_cost Γ statement Hproof),
+      (Certified.proof_only_leaf_write Γ statement Hproof) in e0.
+    unfold Atom.take_leaf, Atom.take_step, Atom.take_plain_step in e0.
     destruct (_ || _); injection e0 as <-; reflexivity.
   - reflexivity.
   - destruct statement; cbn in e; try discriminate. contradiction.
@@ -2329,12 +2303,18 @@ Proof.
       apply analysis_state_join_self.
   - destruct statement; cbn in e; try discriminate.
   - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hbody. subst.
+    injection e as Hd Halias Hbody. subst.
     apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst.
     rewrite (IHcertificate Hproof Hneutral).
-    destruct state as [entries records step atomic].
-    unfold Atom.leave_scope. cbn. f_equal.
-    apply set_eq. intros entry. rewrite elem_of_filter. tauto.
+    destruct state as [entries records aliases step atomic].
+    unfold Atom.leave_scope, Atom.enter_scope. cbn. f_equal.
+    + apply set_eq. intros entry. rewrite elem_of_filter. tauto.
+    + apply map_eq. intros level.
+      destruct (decide (level = length Γ)) as [->|Hne].
+      * rewrite lookup_partial_alter. reflexivity.
+      * rewrite lookup_partial_alter_ne by congruence.
+        destruct (RegionSyntax.argument_atom initializer);
+          [rewrite lookup_insert_ne | rewrite lookup_delete_ne]; congruence.
 Qed.
 
 (** Completeness of the worker for [statement], in any state that a

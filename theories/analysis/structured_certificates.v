@@ -13,13 +13,14 @@ Module RegionSyntax.
 Section WithSignature.
 Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
   Definition statement := IR.stmt.
-  (** The atom naming an argument: a local by its de Bruijn level, or a
-      literal. *)
+  (** The de Bruijn level of a local. *)
+  Definition local_level {keep Γ t} (variable : lvar keep Γ t) : nat :=
+    length Γ - S (lvar_index variable).
+  (** The atom naming an argument: a local by its level, or a literal. *)
   Definition argument_atom {keep Γ t} (argument : pexpr keep Γ t) :
       option AnalysisView.key_atom :=
     match argument with
-    | PEVar variable =>
-        Some (AnalysisView.AtomLevel (length Γ - S (lvar_index variable)))
+    | PEVar variable => Some (AnalysisView.AtomLevel (local_level variable))
     | PEVal value =>
         match value with
         | VBool value => Some (AnalysisView.AtomBool value)
@@ -39,6 +40,29 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
         | _, _ => None
         end
     end.
+  (** The atoms of a call's arguments. *)
+  Fixpoint argument_atoms {keep Γ ts} (arguments : pexpr_list keep Γ ts) :
+      list (option AnalysisView.key_atom) :=
+    match arguments with
+    | PENil => []
+    | PECons argument rest => argument_atom argument :: argument_atoms rest
+    end.
+  (** The atom of the local a call's result is stored in. *)
+  Definition target_atom {Γ t} (target : call_target Γ t) :
+      option AnalysisView.key_atom :=
+    match target with
+    | CTDiscard => None
+    | CTStore _ target => Some (AnalysisView.AtomLevel (local_level target))
+    end.
+  (** The atoms of a procedure's formal slots. *)
+  Fixpoint variable_atoms {Γ ts} (variables : pvar_list Γ ts) :
+      list (option AnalysisView.key_atom) :=
+    match variables with
+    | PVNil => []
+    | PVCons variable rest =>
+        Some (AnalysisView.AtomLevel (local_level variable)) ::
+          variable_atoms rest
+    end.
   Definition region_view {Γ} (statement : statement Γ) :=
     match statement with
     | TUnfold invariant arguments =>
@@ -51,7 +75,8 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
     | TInvAccess invariant _ body =>
         AnalysisView.ViewStructuredAccess invariant body
     | TAtomic body => AnalysisView.ViewAtomic body
-    | TGhostVal _ t _ body => AnalysisView.ViewScope (ghost_val t) body
+    | TGhostVal _ t initializer body =>
+        AnalysisView.ViewScope (ghost_val t) (argument_atom initializer) body
     | TDone => AnalysisView.ViewDone
     | _ => AnalysisView.ViewLeaf
     end.
@@ -83,23 +108,33 @@ Context {RAs : RAValueConfig} {Logic : Assertion.LogicSignature}.
   Proof. destruct statement; cbn; intros Hview; try discriminate.
     inversion Hview; subst. lia. Qed.
   Lemma scope_body_smaller (Γ : decl_context) (statement : statement Γ) d
-      (body : IR.stmt (d :: Γ)) :
-    region_view statement = AnalysisView.ViewScope d body ->
+      alias (body : IR.stmt (d :: Γ)) :
+    region_view statement = AnalysisView.ViewScope d alias body ->
     size body < size statement.
   Proof.
     destruct statement; cbn; intros Hview; try discriminate.
-    injection Hview as <- Hbody.
+    injection Hview as <- _ Hbody.
     apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst body. lia.
   Qed.
+  (** The level of the local a leaf writes, if any. *)
+  Definition leaf_write {Γ} (statement : statement Γ) : option nat :=
+    match statement with
+    | TAssign _ target _ | TFieldRead _ _ target _ | TAlloc _ target _ =>
+        Some (local_level target)
+    | TCall _ _ (CTStore _ target) => Some (local_level target)
+    | _ => None
+    end.
   Definition syntax : AnalysisView.AnalysisSyntax :=
     AnalysisView.AnalysisSyntaxData statement (@region_view) (@size) size_positive
       sequence_children_smaller conditional_children_smaller
-      atomic_body_smaller scope_body_smaller.
+      atomic_body_smaller scope_body_smaller (@leaf_write).
 End WithSignature.
 (** The control view, as the analyzer sees it. *)
 Notation view := (@AnalysisView.syntax_view syntax _).
 (** The cost of a leaf, as the analyzer sees it. *)
 Notation cost := (@AnalysisView.leaf_cost syntax _).
+(** The local a leaf writes, as the analyzer sees it. *)
+Notation write := (@AnalysisView.syntax_leaf_write syntax _).
 End RegionSyntax.
 #[global] Existing Instance RegionSyntax.syntax.
 
@@ -118,7 +153,8 @@ Inductive structured_certificate :
       AnalysisView.analysis_state -> Type :=
 | StructuredLeaf Γ entry statement exit :
     RegionSyntax.view statement = AnalysisView.ViewLeaf ->
-    AnalysisView.take_step (AnalysisView.leaf_cost Γ statement) entry = inr exit ->
+    AnalysisView.take_leaf (AnalysisView.leaf_cost Γ statement)
+      (RegionSyntax.write statement) entry = inr exit ->
     structured_certificate Γ entry statement exit
 | StructuredDone Γ entry statement :
     RegionSyntax.view statement = AnalysisView.ViewDone ->
@@ -142,31 +178,17 @@ Inductive structured_certificate :
       AnalysisView.analysis_in_atomic else_exit ->
     structured_certificate Γ entry
       (TIf condition then_branch else_branch)
-      (AnalysisView.AnalysisState
-        (AnalysisView.entries_meet (AnalysisView.analysis_entries then_exit)
-          (AnalysisView.analysis_entries else_exit))
-        (AnalysisView.analysis_records then_exit)
-        (AnalysisView.analysis_step_taken then_exit ||
-          AnalysisView.analysis_step_taken else_exit)
-        (AnalysisView.analysis_in_atomic then_exit))
+      (AnalysisView.join_state then_exit else_exit)
 | StructuredAtomic Γ entry body outer inner :
     AnalysisView.take_step AnalysisView.AtomicStep entry =
       inr outer ->
     structured_certificate Γ
-      (AnalysisView.AnalysisState
-        (AnalysisView.analysis_entries outer)
-        (AnalysisView.analysis_records outer)
-        (AnalysisView.analysis_step_taken outer) true)
+      (AnalysisView.atomic_entry outer)
       body inner ->
     AnalysisView.analysis_records inner =
       AnalysisView.analysis_records outer ->
     structured_certificate Γ entry (TAtomic body)
-      (AnalysisView.AnalysisState
-        (AnalysisView.analysis_entries inner)
-        (AnalysisView.analysis_records inner)
-        (AnalysisView.analysis_step_taken outer ||
-          AnalysisView.analysis_step_taken inner)
-        (AnalysisView.analysis_in_atomic outer))
+      (AnalysisView.atomic_exit outer inner)
 | StructuredInvAccess Γ entry invariant arguments body opened inner :
     AnalysisView.open_invariant invariant
       (RegionSyntax.argument_key arguments) entry = inr opened ->
@@ -177,7 +199,9 @@ Inductive structured_certificate :
       (AnalysisView.fold_invariant invariant
         (RegionSyntax.argument_key arguments) inner)
 | StructuredGhostVal Γ entry name t initializer body inner :
-    structured_certificate (ghost_val t :: Γ) entry body inner ->
+    structured_certificate (ghost_val t :: Γ)
+      (AnalysisView.enter_scope (length Γ)
+        (RegionSyntax.argument_atom initializer) entry) body inner ->
     AnalysisView.leave_scope_admissible (length Γ) inner = true ->
     structured_certificate Γ entry (TGhostVal name t initializer body)
       (AnalysisView.leave_scope (length Γ) entry inner)
@@ -191,13 +215,7 @@ Inductive structured_certificate :
       AnalysisView.analysis_in_atomic else_exit ->
     structured_certificate Γ entry
       (TGhostIf condition then_branch else_branch)
-      (AnalysisView.AnalysisState
-        (AnalysisView.entries_meet (AnalysisView.analysis_entries then_exit)
-          (AnalysisView.analysis_entries else_exit))
-        (AnalysisView.analysis_records then_exit)
-        (AnalysisView.analysis_step_taken then_exit ||
-          AnalysisView.analysis_step_taken else_exit)
-        (AnalysisView.analysis_in_atomic then_exit)).
+      (AnalysisView.join_state then_exit else_exit).
 
 (** Logical Raven masks that may be needed while interpreting a structured
     certificate.  The footprint keeps both the masks and open sets at the

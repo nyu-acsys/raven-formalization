@@ -46,7 +46,7 @@ Definition other_arguments :
 
 Definition state (entries : gset Atomicity.mask_entry) :
     Atomicity.analysis_state :=
-  Atomicity.AnalysisState entries [] false false.
+  Atomicity.closed_state entries.
 
 Definition closed (available : gset Core.inv_id) : Atomicity.analysis_state :=
   state (Atomicity.declaration_entries available).
@@ -131,12 +131,11 @@ Definition g_arguments :
 Definition in_scope (body : stmt (ghost_val TRef :: Γ)) : stmt Γ :=
   TGhostVal Snapshots.snapshot_name TRef (PEVar (LHere eq_refl)) body.
 
-(** An instance allocated under the name of a ghost value is forgotten when
-    its scope ends. *)
-Lemma scoped_allocation_forgotten :
+(** [g] is an alias of [x]: an instance allocated under [g] is [x]'s. *)
+Lemma aliased_allocation :
   Atomicity.analyze (closed ∅)
       (in_scope (TFold counter_invariant g_arguments)) =
-    inr (closed ∅).
+    inr (state {[x_instance]}).
 Proof. vm_compute. reflexivity. Qed.
 
 (** An access may not remain open past the scope of its argument. *)
@@ -144,6 +143,63 @@ Lemma scoped_access_leak_rejected :
   Atomicity.analyze (closed {[counter_invariant]})
       (in_scope (TUnfold counter_invariant g_arguments)) =
     inl Atomicity.ScopeLeaksAccess.
+Proof. vm_compute. reflexivity. Qed.
+
+(** ** Writes
+
+    [x] is a [var] at level 1 and [y] a [val] at level 0. *)
+Notation Γw := [runtime_var TRef; runtime_val TRef].
+
+Definition xw_arguments :
+    gexpr_list Γw (Assertion.invariant_args counter_invariant) :=
+  ltac:(vm_compute; exact (PECons (PEVar (LHere eq_refl)) PENil)).
+
+(** [x := y] *)
+Definition overwrite_x {Γ'} (x : write_target false Γ' TRef)
+    (y : rexpr Γ' TRef) : stmt Γ' :=
+  TAssign false x y.
+
+Definition write_x : stmt Γw :=
+  overwrite_x (LHere (d := runtime_var TRef) eq_refl)
+    (PEVar (LThere (LHere (d := runtime_val TRef) eq_refl))).
+
+(** A write forgets the instances named by the written local. *)
+Definition stale_instance : stmt Γw :=
+  TSeq (TFold counter_invariant xw_arguments)
+    (TSeq write_x (TUnfold counter_invariant xw_arguments)).
+
+Lemma stale_instance_rejected :
+  Atomicity.analyze (closed ∅) stale_instance =
+    inl (Atomicity.MissingInvariant counter_invariant).
+Proof. vm_compute. reflexivity. Qed.
+
+(** [ghost val g := x; unfold I(g); body; fold I(g)] *)
+Definition gw_arguments :
+    gexpr_list (ghost_val TRef :: Γw)
+      (Assertion.invariant_args counter_invariant) :=
+  ltac:(vm_compute; exact (PECons (PEVar (LHere eq_refl)) PENil)).
+
+Definition snapshot_access (body : stmt (ghost_val TRef :: Γw)) : stmt Γw :=
+  TSeq (TFold counter_invariant xw_arguments)
+    (TGhostVal Snapshots.snapshot_name TRef (PEVar (LHere eq_refl))
+      (TSeq (TUnfold counter_invariant gw_arguments)
+        (TSeq body (TFold counter_invariant gw_arguments)))).
+
+(** Through its snapshot, an access to [x]'s instance consumes and restores
+    [x]'s entry. *)
+Lemma snapshot_access_restores :
+  Atomicity.analyze (closed ∅) (snapshot_access TDone) =
+    inr (state {[(counter_invariant, Some [Atomicity.AtomLevel 1])]}).
+Proof. vm_compute. reflexivity. Qed.
+
+(** When [x] is written inside the access, the instance is restored under
+    the snapshot, and forgotten with it. *)
+Lemma snapshot_access_written :
+  Atomicity.analyze (closed ∅)
+      (snapshot_access (overwrite_x
+        (LThere (LHere (d := runtime_var TRef) eq_refl))
+        (PEVar (LThere (LThere (LHere (d := runtime_val TRef) eq_refl)))))) =
+    inr (state ∅).
 Proof. vm_compute. reflexivity. Qed.
 
 End InstanceKeys.

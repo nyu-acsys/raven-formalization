@@ -1205,10 +1205,7 @@ Context (Registration : certified_module_registration).
 Axiom term_trusted_atomic_runtime_refinement : forall
       {Γ state body outer inner}
       (body_certificate : Structured.structured_certificate Γ
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_entries outer)
-          (GenericRegions.Atomicity.analysis_records outer)
-          (GenericRegions.Atomicity.analysis_step_taken outer) true)
+        (GenericRegions.Atomicity.atomic_entry outer)
         body inner)
       (runtime : RegionExecution.Primitives.Model.stack_context Γ) ambient post,
     GenericRegions.Atomicity.take_step GenericRegions.Atomicity.AtomicStep state =
@@ -1216,18 +1213,10 @@ Axiom term_trusted_atomic_runtime_refinement : forall
     GenericRegions.Atomicity.analysis_records inner =
       GenericRegions.Atomicity.analysis_records outer ->
     translated_runtime_wp runtime ambient
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_entries outer)
-        (GenericRegions.Atomicity.analysis_records outer)
-        (GenericRegions.Atomicity.analysis_step_taken outer) true)
+      (GenericRegions.Atomicity.atomic_entry outer)
       inner body post ⊢
       translated_runtime_wp runtime ambient state
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_entries inner)
-          (GenericRegions.Atomicity.analysis_records inner)
-          (GenericRegions.Atomicity.analysis_step_taken outer ||
-            GenericRegions.Atomicity.analysis_step_taken inner)
-          (GenericRegions.Atomicity.analysis_in_atomic outer))
+        (GenericRegions.Atomicity.atomic_exit outer inner)
         (TAtomic body) post.
 
 (** Registration projections used throughout the dynamic theorem ladder. *)
@@ -1578,7 +1567,7 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
     stmt Γ -> Translation.Resource.resource_prenex Γ F Δ -> Prop :=
 | ProcedureDiscardObligation procedure arguments store contract_pre
     (contract_post : Translation.Resource.core_assertion F
-      (Assertion.procedure_return procedure :: Δ)) current_mask :
+      (Assertion.procedure_return procedure :: Δ)) current_mask mask_post :
     resource_instantiated_pre F Δ procedure
       (IR.symbolize_expr_list store arguments) contract_pre ->
     resource_instantiated_post_value F Δ procedure
@@ -1586,8 +1575,8 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
         (IR.symbolize_expr_list store arguments))
       (ERef (RefBound MHere)) contract_post ->
     Certified.required_mask procedure ⊆ current_mask ->
-    procedure_leaf_obligation current_mask
-      (current_mask ∪ Certified.granted_mask procedure)
+    mask_post ⊆ current_mask ∪ Certified.granted_mask procedure ->
+    procedure_leaf_obligation current_mask mask_post
       (Translation.Resource.RState store contract_pre)
       (TCall procedure arguments (@CTDiscard Γ (Assertion.procedure_return procedure)))
       (Translation.Resource.ResourceExists (Assertion.procedure_return procedure)
@@ -1597,7 +1586,7 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
     (target : IR.write_target init Γ (Assertion.procedure_return procedure))
     contract_pre (contract_post : Translation.Resource.core_assertion F
       (Assertion.procedure_return procedure :: Δ))
-    current_mask :
+    current_mask mask_post :
     resource_instantiated_pre F Δ procedure
       (IR.symbolize_expr_list store arguments) contract_pre ->
     resource_instantiated_post_value F Δ procedure
@@ -1605,19 +1594,20 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
         (IR.symbolize_expr_list store arguments))
       (ERef (RefBound MHere)) contract_post ->
     Certified.required_mask procedure ⊆ current_mask ->
-    procedure_leaf_obligation current_mask
-      (current_mask ∪ Certified.granted_mask procedure)
+    mask_post ⊆ current_mask ∪ Certified.granted_mask procedure ->
+    procedure_leaf_obligation current_mask mask_post
       (Translation.Resource.RState store contract_pre)
       (TCall procedure arguments (CTStore init target))
       (Translation.Resource.ResourceExists (Assertion.procedure_return procedure)
         (Translation.Resource.RState
           (IR.update_store_with_bound store target) contract_post))
 | ProcedureSpawnObligation procedure arguments store contract_pre
-    current_mask :
+    current_mask mask_post :
     resource_instantiated_pre F Δ procedure
       (IR.symbolize_expr_list store arguments) contract_pre ->
     Certified.required_mask procedure ⊆ current_mask ->
-    procedure_leaf_obligation current_mask current_mask
+    mask_post ⊆ current_mask ->
+    procedure_leaf_obligation current_mask mask_post
       (Translation.Resource.RState store contract_pre)
       (TSpawn procedure arguments)
       (Translation.Resource.RState store
@@ -1636,11 +1626,11 @@ Inductive procedure_leaf_obligation {Γ F Δ} :
 Lemma call_discard_obligation {Γ F Δ} procedure
     (store : symbolic_store Γ F Δ)
     (typed_arguments : rexpr_list Γ (Assertion.procedure_args procedure))
-    (current_mask : Hoare.mask) :
+    (current_mask mask_post : Hoare.mask) :
   Hoare.ResourceHoare.procedure_verified procedure ->
   Certified.required_mask procedure ⊆ current_mask ->
-  procedure_leaf_obligation current_mask
-    (current_mask ∪ Certified.granted_mask procedure)
+  mask_post ⊆ current_mask ∪ Certified.granted_mask procedure ->
+  procedure_leaf_obligation current_mask mask_post
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
         (IR.symbolize_expr_list store typed_arguments)))
@@ -1653,22 +1643,22 @@ Lemma call_discard_obligation {Γ F Δ} procedure
           (Translation.Assertions.weaken_expr_list
             (IR.symbolize_expr_list store typed_arguments))))).
 Proof.
-  intros Hverified Hmask.
+  intros Hverified Hmask Hpost.
   apply ProcedureDiscardObligation;
     [split; [exact Hverified | reflexivity]
     | split; [exact Hverified | reflexivity]
-    | exact Hmask].
+    | exact Hmask | exact Hpost].
 Qed.
 
 Lemma call_store_obligation {Γ F Δ} procedure
     (store : symbolic_store Γ F Δ)
     {init} (target : write_target init Γ (Assertion.procedure_return procedure))
     (typed_arguments : rexpr_list Γ (Assertion.procedure_args procedure))
-    (current_mask : Hoare.mask) :
+    (current_mask mask_post : Hoare.mask) :
   Hoare.ResourceHoare.procedure_verified procedure ->
   Certified.required_mask procedure ⊆ current_mask ->
-  procedure_leaf_obligation current_mask
-    (current_mask ∪ Certified.granted_mask procedure)
+  mask_post ⊆ current_mask ∪ Certified.granted_mask procedure ->
+  procedure_leaf_obligation current_mask mask_post
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
         (IR.symbolize_expr_list store typed_arguments)))
@@ -1680,20 +1670,21 @@ Lemma call_store_obligation {Γ F Δ} procedure
           (Translation.Assertions.weaken_expr_list
             (IR.symbolize_expr_list store typed_arguments))))).
 Proof.
-  intros Hverified Hmask.
+  intros Hverified Hmask Hpost.
   apply ProcedureStoreObligation;
     [split; [exact Hverified | reflexivity]
     | split; [exact Hverified | reflexivity]
-    | exact Hmask].
+    | exact Hmask | exact Hpost].
 Qed.
 
 Lemma spawn_obligation {Γ F Δ} procedure
     (store : symbolic_store Γ F Δ)
     (typed_arguments : rexpr_list Γ (Assertion.procedure_args procedure))
-    (current_mask : Hoare.mask) :
+    (current_mask mask_post : Hoare.mask) :
   Hoare.ResourceHoare.procedure_verified procedure ->
   Certified.required_mask procedure ⊆ current_mask ->
-  procedure_leaf_obligation current_mask current_mask
+  mask_post ⊆ current_mask ->
+  procedure_leaf_obligation current_mask mask_post
     (Translation.Resource.RState store
       (ResourceInstances.instantiated_pre procedure
         (IR.symbolize_expr_list store typed_arguments)))
@@ -1701,9 +1692,9 @@ Lemma spawn_obligation {Γ F Δ} procedure
     (Translation.Resource.RState store
       (Translation.Resource.CPure True)).
 Proof.
-  intros Hverified Hmask.
+  intros Hverified Hmask Hpost.
   apply ProcedureSpawnObligation;
-    [split; [exact Hverified | reflexivity] | exact Hmask].
+    [split; [exact Hverified | reflexivity] | exact Hmask | exact Hpost].
 Qed.
 
 Definition verified_procedure_specs : iProp :=
@@ -2446,7 +2437,7 @@ Lemma term_structured_certificate_preserves_records
     GenericRegions.Atomicity.analysis_records entry.
 Proof.
   induction certificate; simpl.
-  - eapply GenericRegions.Atomicity.take_step_preserves_records; eauto.
+  - eapply GenericRegions.Atomicity.take_leaf_preserves_records; eauto.
   - reflexivity.
   - apply GenericRegions.Atomicity.fold_fresh_records. exact n.
   - etrans; eauto.
@@ -2695,14 +2686,7 @@ Qed.
 Lemma conditional_then_active_mask_join ambient then_exit else_exit :
   RegionExecution.Primitives.Model.active_runtime_mask ambient then_exit =
     RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit)).
+      (GenericRegions.Atomicity.join_state then_exit else_exit).
 Proof. apply RegionExecution.Primitives.Model.active_runtime_mask_same_open. reflexivity. Qed.
 
 Lemma conditional_else_active_mask_join ambient then_exit else_exit :
@@ -2710,14 +2694,7 @@ Lemma conditional_else_active_mask_join ambient then_exit else_exit :
     GenericRegions.Atomicity.analysis_records else_exit ->
   RegionExecution.Primitives.Model.active_runtime_mask ambient else_exit =
     RegionExecution.Primitives.Model.active_runtime_mask ambient
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit)).
+      (GenericRegions.Atomicity.join_state then_exit else_exit).
 Proof.
   intros Hrecords.
   apply RegionExecution.Primitives.Model.active_runtime_mask_same_open.
@@ -2794,14 +2771,7 @@ Lemma translated_runtime_wp_then_join_transport {Γ}
     statement post :
   translated_runtime_wp runtime ambient state then_exit statement post ⊣⊢
     translated_runtime_wp runtime ambient state
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
+      (GenericRegions.Atomicity.join_state then_exit else_exit)
       statement post.
 Proof.
   unfold translated_runtime_wp.
@@ -2816,14 +2786,7 @@ Lemma translated_runtime_wp_else_join_transport {Γ}
     GenericRegions.Atomicity.analysis_records else_exit ->
   translated_runtime_wp runtime ambient state else_exit statement post ⊣⊢
     translated_runtime_wp runtime ambient state
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
+      (GenericRegions.Atomicity.join_state then_exit else_exit)
       statement post.
 Proof.
   intros Hopen. unfold translated_runtime_wp.
@@ -2850,14 +2813,7 @@ Lemma translated_runtime_wp_if_total_join {Γ F Δ}
         else_branch post) ->
   @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient state
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
+      (GenericRegions.Atomicity.join_state then_exit else_exit)
       (TIf condition then_branch else_branch) post.
 Proof.
   intros Hthen Helse. eapply translated_runtime_wp_if_total.
@@ -2894,14 +2850,7 @@ Lemma translated_runtime_wp_ghost_if_total_join {Γ F Δ}
         else_branch post) ->
   @RegionExecution.Primitives.Model.core_stack_own _ _ Σ RG Γ runtime (interp_store formals binders valuation store) ∗ P ⊢
     translated_runtime_wp runtime ambient state
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.entries_meet
-          (GenericRegions.Atomicity.analysis_entries then_exit)
-          (GenericRegions.Atomicity.analysis_entries else_exit))
-        (GenericRegions.Atomicity.analysis_records then_exit)
-        (GenericRegions.Atomicity.analysis_step_taken then_exit ||
-          GenericRegions.Atomicity.analysis_step_taken else_exit)
-        (GenericRegions.Atomicity.analysis_in_atomic then_exit))
+      (GenericRegions.Atomicity.join_state then_exit else_exit)
       (TGhostIf condition then_branch else_branch) post.
 Proof.
   intros Hthen_proof Helse_proof Hthen Helse.
@@ -4292,10 +4241,7 @@ Lemma term_structured_runtime_atomic_valid
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep state = inr outer)
     (body_certificate : Structured.structured_certificate Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_entries outer)
-        (GenericRegions.Atomicity.analysis_records outer)
-        (GenericRegions.Atomicity.analysis_step_taken outer) true)
+      (GenericRegions.Atomicity.atomic_entry outer)
       body inner)
     (records_equal : GenericRegions.Atomicity.analysis_records inner =
       GenericRegions.Atomicity.analysis_records outer)
@@ -4328,10 +4274,7 @@ Lemma term_structured_runtime_arguments_atomic_valid
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep state = inr outer)
     (body_certificate : Structured.structured_certificate Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_entries outer)
-        (GenericRegions.Atomicity.analysis_records outer)
-        (GenericRegions.Atomicity.analysis_step_taken outer) true)
+      (GenericRegions.Atomicity.atomic_entry outer)
       body inner)
     (records_equal : GenericRegions.Atomicity.analysis_records inner =
       GenericRegions.Atomicity.analysis_records outer)
@@ -4438,7 +4381,8 @@ Lemma term_structured_runtime_arguments_ghost_val_valid
     {Γ F Δ entry exit ts} name t (initializer : gexpr Γ t)
     (body : stmt (ghost_val t :: Γ))
     (body_certificate : Structured.structured_certificate
-      (ghost_val t :: Γ) entry body exit)
+      (ghost_val t :: Γ) (AnalysisView.enter_scope (length Γ)
+        (RegionSyntax.argument_atom initializer) entry) body exit)
     (admissible : GenericRegions.Atomicity.leave_scope_admissible
       (length Γ) exit = true)
     (tracked : gexpr_list Γ ts)
@@ -4512,20 +4456,12 @@ Lemma term_structured_runtime_terminal_access_valid
     (step : GenericRegions.Atomicity.take_step
       GenericRegions.Atomicity.AtomicStep opened = inr atomic_outer)
     (atomic_certificate : Structured.structured_certificate Γ
-      (GenericRegions.Atomicity.AnalysisState
-        (GenericRegions.Atomicity.analysis_entries atomic_outer)
-        (GenericRegions.Atomicity.analysis_records atomic_outer)
-        (GenericRegions.Atomicity.analysis_step_taken atomic_outer) true)
+      (GenericRegions.Atomicity.atomic_entry atomic_outer)
       atomic_body atomic_inner)
     (records_equal : GenericRegions.Atomicity.analysis_records atomic_inner =
       GenericRegions.Atomicity.analysis_records atomic_outer)
     (Hpreserved : GenericRegions.Atomicity.analysis_records
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_entries atomic_inner)
-          (GenericRegions.Atomicity.analysis_records atomic_inner)
-          (GenericRegions.Atomicity.analysis_step_taken atomic_outer ||
-            GenericRegions.Atomicity.analysis_step_taken atomic_inner)
-          (GenericRegions.Atomicity.analysis_in_atomic atomic_outer)) =
+        (GenericRegions.Atomicity.atomic_exit atomic_outer atomic_inner) =
       GenericRegions.Atomicity.analysis_records opened)
     (input_store : symbolic_store Γ F Δ)
     (frame : Translation.Resource.core_assertion F Δ)
@@ -5413,7 +5349,8 @@ Lemma term_resource_prenex_ordinary_leaf_operation_valid : forall {Γ F Δ}
     (pre post : Translation.Resource.resource_prenex Γ F Δ)
     statement entry exit,
   RegionSyntax.view statement = AnalysisView.ViewLeaf ->
-  GenericRegions.Atomicity.take_step (RegionSyntax.cost Γ statement) entry = inr exit ->
+  GenericRegions.Atomicity.take_leaf (RegionSyntax.cost Γ statement)
+    (RegionSyntax.write statement) entry = inr exit ->
   Certified.procedure_cost_model_sound ->
   CertifiedNormalization.RavenHoareRules.leaf_triple pre statement post ->
   forall (runtime : RegionExecution.Primitives.Model.stack_context Γ)
@@ -5471,69 +5408,53 @@ Proof.
       procedure typed_arguments
       (@Hoare.IR.CTDiscard Γ (Assertion.procedure_return procedure))
       entry exit Hstep.
-    destruct Hfacts as (Hrequired & _ & Hmask & _).
+    destruct Hfacts as (Hrequired & Hclosed & Hmask & _).
     iIntros "[#Hglobal Hpre]".
     iApply (procedure_leaf_operation_valid _ _ _
       (GenericRegions.Atomicity.analysis_mask entry)
-      (GenericRegions.Atomicity.analysis_mask entry ∪
-        Certified.granted_mask procedure) entry exit
+      (GenericRegions.Atomicity.analysis_mask exit) entry exit
       (call_discard_obligation procedure store typed_arguments
-        (GenericRegions.Atomicity.analysis_mask entry) H Hrequired)
+        (GenericRegions.Atomicity.analysis_mask entry) _ H Hrequired Hmask)
       with "[$Hglobal $Hpre]").
-    + etrans; last exact Henvelope.
-      apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      rewrite Hmask. reflexivity.
-    + eapply term_registered_mask_active_closed.
-      * eapply GenericRegions.Atomicity.procedure_call_step_success_closed.
-        exact Hstep.
-      * exact Hregistry.
+    + exact Henvelope.
+    + eapply term_registered_mask_active_closed; [exact Hclosed|exact Hregistry].
   - (* call, result stored *)
     have Hfacts := Certified.certified_call_step_effect Hcost Γ
       procedure typed_arguments (Hoare.IR.CTStore init target) entry exit
       Hstep.
-    destruct Hfacts as (Hrequired & _ & Hmask & _).
+    destruct Hfacts as (Hrequired & Hclosed & Hmask & _).
     iIntros "[#Hglobal Hpre]".
     iApply (procedure_leaf_operation_valid _ _ _
       (GenericRegions.Atomicity.analysis_mask entry)
-      (GenericRegions.Atomicity.analysis_mask entry ∪
-        Certified.granted_mask procedure) entry exit
+      (GenericRegions.Atomicity.analysis_mask exit) entry exit
       (call_store_obligation procedure store target
-        typed_arguments (GenericRegions.Atomicity.analysis_mask entry) H
-        Hrequired)
+        typed_arguments (GenericRegions.Atomicity.analysis_mask entry) _ H
+        Hrequired Hmask)
       with "[$Hglobal $Hpre]").
-    + etrans; last exact Henvelope.
-      apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      rewrite Hmask. reflexivity.
-    + eapply term_registered_mask_active_closed.
-      * eapply GenericRegions.Atomicity.procedure_call_step_success_closed.
-        exact Hstep.
-      * exact Hregistry.
+    + exact Henvelope.
+    + eapply term_registered_mask_active_closed; [exact Hclosed|exact Hregistry].
   - (* spawn *)
     have Hfacts := Certified.certified_spawn_step_effect Hcost
       _ _ _ _ _ Hstep.
-    destruct Hfacts as (Hrequired & Hmask & _).
+    destruct Hfacts as (Hrequired & Hclosed & ->).
     iIntros "[#Hglobal Hpre]".
     iApply (procedure_leaf_operation_valid _ _ _
       (GenericRegions.Atomicity.analysis_mask entry)
-      (GenericRegions.Atomicity.analysis_mask entry) entry exit
+      (GenericRegions.Atomicity.analysis_mask entry) entry entry
       (spawn_obligation procedure store typed_arguments
-        (GenericRegions.Atomicity.analysis_mask entry) H Hrequired)
+        (GenericRegions.Atomicity.analysis_mask entry) _ H Hrequired
+        (reflexivity _))
       with "[$Hglobal $Hpre]").
-    + etrans; last exact Henvelope.
-      apply RegionExecution.Primitives.Model.runtime_mask_mono.
-      rewrite Hmask. reflexivity.
-    + eapply term_registered_mask_active_closed.
-      * eapply GenericRegions.Atomicity.procedure_spawn_step_success_closed.
-        exact Hstep.
-      * exact Hregistry.
+    + exact Henvelope.
+    + eapply term_registered_mask_active_closed; [exact Hclosed|exact Hregistry].
   Unshelve. all: eauto.
 Qed.
 
 Lemma term_structured_runtime_resource_prenex_leaf_valid
     {Γ F Δ entry statement exit}
     (view : RegionSyntax.view statement = AnalysisView.ViewLeaf)
-    (step : GenericRegions.Atomicity.take_step (RegionSyntax.cost Γ statement) entry =
-      inr exit)
+    (step : GenericRegions.Atomicity.take_leaf (RegionSyntax.cost Γ statement)
+      (RegionSyntax.write statement) entry = inr exit)
     (pre post : Translation.Resource.resource_prenex Γ F Δ)
     (derivation : CertifiedNormalization.RavenHoareRules.leaf_triple
       pre statement post)
@@ -5543,7 +5464,7 @@ Lemma term_structured_runtime_resource_prenex_leaf_valid
     (Structured.StructuredLeaf Γ entry statement exit view step) pre post.
 Proof.
   intros runtime formals binders valuation ambient Henvelope.
-  have Hopen := GenericRegions.Atomicity.take_step_preserves_open _ _ _ step.
+  have Hopen := GenericRegions.Atomicity.take_leaf_preserves_open _ _ _ _ step.
   have Hexit_envelope : RegionExecution.Primitives.Model.runtime_mask
       (GenericRegions.Atomicity.analysis_mask exit) ⊆ ambient.
   { etrans; last exact Henvelope.
@@ -5919,7 +5840,7 @@ Lemma term_structured_certificate_preserves_wf
   GenericRegions.Atomicity.state_wf exit.
 Proof.
   induction certificate; intros Hwf.
-  - eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto.
+  - eapply GenericRegions.Atomicity.take_leaf_preserves_wf; eauto.
   - exact Hwf.
   - apply GenericRegions.Atomicity.fold_invariant_preserves_wf. exact Hwf.
   - apply IHcertificate2. apply IHcertificate1. exact Hwf.
@@ -5943,8 +5864,8 @@ Lemma term_structured_certificate_preserves_nonatomic
   GenericRegions.Atomicity.analysis_in_atomic exit = false.
 Proof.
   intro Hin_atomic. induction certificate; simpl in *.
-  - rewrite (GenericRegions.Atomicity.take_step_preserves_in_atomic
-      _ _ _ e0). exact Hin_atomic.
+  - rewrite (GenericRegions.Atomicity.take_leaf_preserves_in_atomic
+      _ _ _ _ e0). exact Hin_atomic.
   - exact Hin_atomic.
   - rewrite GenericRegions.Atomicity.fold_invariant_preserves_in_atomic.
     exact Hin_atomic.
@@ -6175,7 +6096,13 @@ Proof.
       | Γ state condition then_branch else_branch then_exit else_exit
         then_certificate IHthen else_certificate IHelse records_equal atomic_equal];
     simpl in *.
-  - destruct (RuntimeErasure.runtime_is_noop
+  - destruct (GenericRegions.Atomicity.take_leaf_step_taken _ _ _ _ step)
+      as (stepped & Hstepped & Hbit).
+    replace (term_analysis_step_bit exit) with (term_analysis_step_bit stepped)
+      by (unfold term_analysis_step_bit; rewrite Hbit; reflexivity).
+    clear step Hbit. clear exit. rename stepped into exit.
+    rename Hstepped into step.
+    destruct (RuntimeErasure.runtime_is_noop
       (@RuntimeErasure.runtime_stmt _ _ Γ
         (RegionExecution.Primitives.Model.runtime_names Γ runtime)
         (RegionExecution.Primitives.Model.runtime_stack_id Γ runtime)
@@ -6365,7 +6292,9 @@ Proof.
       | Γ state condition then_branch else_branch then_exit else_exit
         then_certificate IHthen else_certificate IHelse records_equal atomic_equal];
     simpl in Htrusted |- *.
-  - eapply term_open_leaf_runtime_atomic; eauto.
+  - destruct (GenericRegions.Atomicity.take_leaf_step_taken _ _ _ _ step)
+      as (stepped & Hstepped & _).
+    eapply term_open_leaf_runtime_atomic; eauto.
   - (* done erases to the terminal statement, which takes no step *)
     destruct statement; cbn in view; try discriminate.
     exact runtime_noop_atomic.
@@ -6770,10 +6699,7 @@ Proof.
     have Houter_wf : GenericRegions.Atomicity.state_wf outer.
     { eapply GenericRegions.Atomicity.take_step_preserves_wf; eauto. }
     have Hbody_wf : GenericRegions.Atomicity.state_wf
-        (GenericRegions.Atomicity.AnalysisState
-          (GenericRegions.Atomicity.analysis_entries outer)
-          (GenericRegions.Atomicity.analysis_records outer)
-          (GenericRegions.Atomicity.analysis_step_taken outer) true).
+        (GenericRegions.Atomicity.atomic_entry outer).
     { exact Houter_wf. }
     destruct (IHderivation _ inner certificate Hbody_wf Hcost
       Hprocedure_cost
@@ -6787,7 +6713,7 @@ Proof.
     + intros runtime. exact I.
   - (* ghost value *)
     simpl in Hsafe.
-    destruct (IHderivation entry _ certificate Hwf Hcost Hprocedure_cost
+    destruct (IHderivation _ _ certificate Hwf Hcost Hprocedure_cost
       (fun invariant Hin => Hregistered invariant
         ltac:(simpl; repeat rewrite elem_of_union; tauto))
       Hsafe) as [Hbody_valid Hbody_trusted].

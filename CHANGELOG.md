@@ -7,78 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- The atomicity analysis tracks invariant instances. Mask entries name a
-  declaration or one instance, keyed by arguments that are locals or
-  literals, and the open accesses form a stack of records, each naming the
-  entry it consumed; the separate LIFO witness is retired. A fold must close
-  the innermost access, with the same instance, or allocate an invariant
-  that is not open. Leaving a local's scope forgets the entries it made
-  available that name the local, and an access may not stay open past the
-  scope of its arguments. At most one instance of a declaration is open at
-  once.
-- Conditionals whose branches finish with different available masks are
-  accepted; the joined mask is their intersection. Module analyses now state
-  registry coverage for each procedure's required mask and statically
-  allocated invariants instead of its exit mask.
-- Core entailment duplicates any duplicable assertion (pure facts,
-  invariant knowledge, and their conjunctions, existentials, and
-  conditionals) through `CESDuplicate`, which replaces `CESInvariantDup`.
-- Program locals are indexed by a declaration context recording each
-  local's phase (runtime or ghost) and mutability (`val` or `var`).
-  Runtime statements read only runtime locals; proof-only statements may
-  read every local. Write statements carry an initialization flag, and only
-  an initializing write may target a runtime `val`. Procedure-level locals
-  must be runtime locals (`procedure_wf`).
-- The trusted atomic-block transition depends only on the erasure of the
-  block, so proof-only rewrites of a block cannot change it.
-
 ### Added
 
-- Scoped ghost values: `ghost val x := e; s` (optionally annotated with a
-  type) elaborates to `TGhostVal`, with a Hoare rule, analysis and
-  normalization support, and an Iris soundness proof in which ghost locals
-  have no runtime frame slot.
-- Invariant-argument snapshots: procedure elaboration binds the arguments of
-  every `unfold I(args)` to ghost `val`s, unfolds and folds the instance at
-  the snapshot, and asserts after the matching fold that its written
-  arguments equal the snapshot. An access whose argument variables are
-  reassigned inside it is thereby accepted by the normalizer. The rewrite
-  erases exactly to the source program (`snapshot_accesses_erasure`).
-  Derived rules `RTGhostValVar` and `RTAssertTrue` discharge the generated
-  binders and checks, as in the counter example's `read` and `incr`.
-- Immutable runtime locals: a procedure body may declare
-  `val x : T := e;` or `val x : T := new(...);`, elaborated to a runtime
-  `val` local and its initializing write. The counter example's `make`
-  declares its allocated counter this way.
-- Ghost conditionals: an `if` whose guard reads a ghost local elaborates to
-  `TGhostIf`, whose branches must be proof-only; it erases to nothing, with
-  a Hoare rule, analysis and normalization support, and an Iris soundness
-  proof.
-- The Hoare rule `RTTrack` carries the value of an expression across a
-  statement that writes none of the locals it reads.
-- Conditional invariant accesses: an access may be closed in each branch of
-  a conditional, with a runtime or a ghost guard. Procedure elaboration lays
-  such accesses out canonically (`AccessLayout.layout_accesses`, which only
-  inserts `done`); the normalizer distributes the access into the branches
-  when nothing physical precedes the conditional, and otherwise factors it
-  out, closing through a guarded ghost conditional (`AccessClosingIte`) and
-  re-testing the guard for the branch continuations. The counter example's
-  `incr` closes its second access in each branch.
-- Nested invariant accesses: access bodies, the prefix before a closing
-  conditional, and distributed branch prefixes may contain balanced
-  invariant accesses of their own, normalized recursively. Procedure
-  elaboration groups the statements of an access up to its close into one
-  body, and groups a closing conditional with its unfold when further
-  statements follow, where the runtime erasure is unchanged.
-- Invariant accesses inside trusted atomic blocks: an access spanning the
-  block, possibly followed by proof-only statements, is moved around it by
-  procedure elaboration, with unchanged runtime erasure. The counter
-  example's `read` accesses its invariant inside an atomic block.
-- Analyzer regression tests for asymmetric allocation in conditionals and
-  for snapshotted invariant arguments, and normalization tests for
-  conditional accesses (`dune build @tests`).
+- Runtime and ghost `val` declarations, scoped ghost values, and proof-only
+  conditionals, with phase separation preventing ghost data from flowing
+  into executable program state.
+- Automatic snapshots and stability checks for invariant arguments that may
+  be reassigned while an invariant is open.
+- Normalization of nested and conditional invariant accesses, including
+  accesses that span trusted atomic blocks.
+- Per-instance invariant-mask inference through procedure contracts,
+  predicates, and invariant dependencies.
+- A regression-test suite for mask joins, instance keys, argument snapshots,
+  conditional normalization, trusted atomic accesses, and procedure effects.
+
+### Changed
+
+- The atomicity analysis now tracks invariant instances and local aliases,
+  invalidates stale instance keys after writes, and joins branch masks by
+  retaining only entries available on both paths.
+- Procedure requirements and grants are inferred from contracts and
+  instantiated at call sites; procedure analysis starts from the canonical
+  inferred entry state.
+- Trusted atomic blocks and all proof-only elaboration passes preserve the
+  executable runtime program by construction.
 
 ## [1.0.0] - 2026-09-28
 

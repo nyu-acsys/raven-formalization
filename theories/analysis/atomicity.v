@@ -91,6 +91,28 @@ Definition entry_covered (entry : mask_entry) (entries : gset mask_entry) :
   Decision (entry_covered entry entries).
 Proof. unfold entry_covered. apply _. Defined.
 
+(** Resolution through aliases: a ghost value initialized with an atom stands
+    for that atom while the atom's local is not written. *)
+Definition resolve_atom (aliases : gmap nat key_atom) (atom : key_atom) :
+    key_atom :=
+  match atom with
+  | AtomLevel level => default atom (aliases !! level)
+  | _ => atom
+  end.
+
+Definition resolve_key (aliases : gmap nat key_atom) (key : access_key) :
+    access_key :=
+  fmap (map (resolve_atom aliases)) key.
+
+Definition resolve_entry (aliases : gmap nat key_atom) (entry : mask_entry) :
+    mask_entry :=
+  (entry.1, resolve_key aliases entry.2).
+
+(** The aliases valid on both sides of a join. *)
+Definition aliases_meet (left right : gmap nat key_atom) :
+    gmap nat key_atom :=
+  filter (fun binding => right !! binding.1 = Some binding.2) left.
+
 (** The entries available on both sides of a join, each at the more precise
     of the two coverings. *)
 Definition entries_meet (left right : gset mask_entry) : gset mask_entry :=
@@ -111,8 +133,8 @@ Inductive statement_view (statement : decl_context -> Type) (Γ : decl_context) 
 | ViewConditional (then_branch else_branch : statement Γ)
 | ViewStructuredAccess (invariant : inv_id) (body : statement Γ)
 | ViewAtomic (body : statement Γ)
-(* A scope for a new local; the analysis state is unaffected by it. *)
-| ViewScope (d : decl) (body : statement (d :: Γ)).
+(* A scope for a new local, with the atom it is initialized with, if any. *)
+| ViewScope (d : decl) (alias : option key_atom) (body : statement (d :: Γ)).
 
 Arguments ViewLeaf {_ _}.
 Arguments ViewDone {_ _}.
@@ -122,7 +144,7 @@ Arguments ViewSequence {_ _} _ _.
 Arguments ViewConditional {_ _} _ _.
 Arguments ViewStructuredAccess {_ _} _ _.
 Arguments ViewAtomic {_ _} _.
-Arguments ViewScope {_ _} _ _.
+Arguments ViewScope {_ _} _ _ _.
 
 (** A statement family together with its control view: the analyzer's
     whole interface to a language. *)
@@ -144,9 +166,11 @@ Class AnalysisSyntax := AnalysisSyntaxData {
   syntax_atomic_body_smaller : forall Γ statement body,
     syntax_view Γ statement = ViewAtomic body ->
     syntax_size Γ body < syntax_size Γ statement;
-  syntax_scope_body_smaller : forall Γ statement d body,
-    syntax_view Γ statement = ViewScope d body ->
+  syntax_scope_body_smaller : forall Γ statement d alias body,
+    syntax_view Γ statement = ViewScope d alias body ->
     syntax_size (d :: Γ) body < syntax_size Γ statement;
+  (** The level of the local a leaf writes, if any. *)
+  syntax_leaf_write : forall Γ, syntax_statement Γ -> option nat;
 }.
 
 
@@ -158,8 +182,10 @@ Inductive step_cost :=
 | NoStep
 | AtomicStep
 | NonAtomicStep
-| ProcedureCallStep (required granted : gset inv_id)
-| ProcedureSpawnStep (required : gset inv_id).
+(* The call site's instances of the callee's required and granted
+   entries. *)
+| ProcedureCallStep (required granted : gset mask_entry)
+| ProcedureSpawnStep (required : gset mask_entry).
 
 Inductive analysis_error :=
 | MissingInvariant (invariant : inv_id)
@@ -168,7 +194,6 @@ Inductive analysis_error :=
 | SecondAtomicStep
 | NonAtomicWhileOpen
 | MissingProcedureMask
-| ProcedureGrantAlreadyOpen
 | AtomicBlockLeaksAccess
 | ScopeLeaksAccess
 | StructuredAccessRequiresCertificate
@@ -176,15 +201,35 @@ Inductive analysis_error :=
 | FuelExhausted.
 
 (** The analysis state: the available mask entries, the stack of open
-    invariants (innermost first), whether the open accesses have taken
-    their physical step, and whether the analysis is inside a trusted
-    atomic block. *)
+    invariants (innermost first), the aliases of the ghost values in scope,
+    whether the open accesses have taken their physical step, and whether
+    the analysis is inside a trusted atomic block.  Entries are stored with
+    their keys resolved through the aliases. *)
 Record analysis_state := AnalysisState {
   analysis_entries : gset mask_entry;
   analysis_records : list open_record;
+  analysis_aliases : gmap nat key_atom;
   analysis_step_taken : bool;
   analysis_in_atomic : bool;
 }.
+
+(** The state after a conditional, the state in which a trusted block's
+    body is analyzed, and the state after the block. *)
+Notation join_state then_exit else_exit :=
+  (AnalysisState
+    (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
+    (analysis_records then_exit)
+    (aliases_meet (analysis_aliases then_exit) (analysis_aliases else_exit))
+    (analysis_step_taken then_exit || analysis_step_taken else_exit)
+    (analysis_in_atomic then_exit)).
+Notation atomic_entry outer :=
+  (AnalysisState (analysis_entries outer) (analysis_records outer)
+    (analysis_aliases outer) (analysis_step_taken outer) true).
+Notation atomic_exit outer inner :=
+  (AnalysisState (analysis_entries inner) (analysis_records inner)
+    (analysis_aliases inner)
+    (analysis_step_taken outer || analysis_step_taken inner)
+    (analysis_in_atomic outer)).
 
 (** The open declarations. *)
 Definition analysis_open (state : analysis_state) : gset inv_id :=
@@ -217,33 +262,22 @@ Definition take_plain_step cost state : analysis_error + analysis_state :=
   | AtomicStep =>
       if analysis_step_taken state then inl SecondAtomicStep
       else inr (AnalysisState (analysis_entries state) (analysis_records state)
-        true false)
+        (analysis_aliases state) true false)
   | NonAtomicStep => inl NonAtomicWhileOpen
   | ProcedureCallStep _ _ | ProcedureSpawnStep _ => inl NonAtomicWhileOpen
   end.
 
-Definition grant_state (granted : gset inv_id) state : analysis_state :=
-  AnalysisState (analysis_entries state ∪ declaration_entries granted)
-    (analysis_records state) (analysis_step_taken state)
-    (analysis_in_atomic state).
+(** Every required entry is covered by an available one. *)
+Definition entries_available (required : gset mask_entry) state : Prop :=
+  set_Forall (fun entry =>
+    entry_covered (resolve_entry (analysis_aliases state) entry)
+      (analysis_entries state)) required.
 
 Definition take_step cost state : analysis_error + analysis_state :=
   match cost with
-  | ProcedureCallStep required granted =>
-      if bool_decide (required ⊆ analysis_mask state) then
-        if bool_decide (analysis_open state = ∅) then
-          match take_plain_step NonAtomicStep state with
-          | inl error => inl error
-          | inr stepped =>
-              if bool_decide (granted ## analysis_open stepped)
-              then inr (grant_state granted stepped)
-              else inl ProcedureGrantAlreadyOpen
-          end
-        else inl NonAtomicWhileOpen
-      else inl MissingProcedureMask
-  | ProcedureSpawnStep required =>
-      if bool_decide (required ⊆ analysis_mask state)
-      then if bool_decide (analysis_open state = ∅)
+  | ProcedureCallStep required _ | ProcedureSpawnStep required =>
+      if bool_decide (entries_available required state) then
+        if bool_decide (analysis_open state = ∅)
         then take_plain_step NonAtomicStep state
         else inl NonAtomicWhileOpen
       else inl MissingProcedureMask
@@ -251,6 +285,42 @@ Definition take_step cost state : analysis_error + analysis_state :=
   end.
 
 #[global] Arguments take_step : simpl never.
+
+(** A write to the local at [level] forgets the entries and aliases naming
+    it. *)
+Definition invalidate (level : nat) state : analysis_state :=
+  AnalysisState
+    (filter (fun entry => entry_mentions level entry = false)
+      (analysis_entries state))
+    (analysis_records state)
+    (filter (fun binding => binding.2 <> AtomLevel level)
+      (analysis_aliases state))
+    (analysis_step_taken state) (analysis_in_atomic state).
+
+Definition grant_state (granted : gset mask_entry) state : analysis_state :=
+  AnalysisState
+    (analysis_entries state ∪
+      set_map (resolve_entry (analysis_aliases state)) granted)
+    (analysis_records state) (analysis_aliases state)
+    (analysis_step_taken state) (analysis_in_atomic state).
+
+(** A leaf takes its step, then writes its target, then receives the
+    entries its callee grants. *)
+Definition take_leaf cost (written : option nat) state :
+    analysis_error + analysis_state :=
+  match take_step cost state with
+  | inl error => inl error
+  | inr stepped =>
+      let written_state :=
+        match written with
+        | Some level => invalidate level stepped
+        | None => stepped
+        end in
+      inr match cost with
+        | ProcedureCallStep _ granted => grant_state granted written_state
+        | _ => written_state
+        end
+  end.
 
 (** The entry an opening consumes: the exact instance if available,
     otherwise the declaration-wide entry. *)
@@ -262,14 +332,24 @@ Definition select_entry (invariant : inv_id) (key : access_key)
   then Some (invariant, None)
   else None.
 
+(** The entry a record restores: an exact instance under the opening's own
+    key, which stays valid when the locals it was resolved to are
+    written. *)
+Definition consumed_entry (invariant : inv_id) (key : access_key)
+    (selected : mask_entry) : mask_entry :=
+  (invariant, match selected.2 with Some _ => key | None => None end).
+
 Definition open_invariant (invariant : inv_id) (key : access_key) state :
     analysis_error + analysis_state :=
   if bool_decide (invariant ∈ analysis_open state) then
     inl (ReentrantInvariant invariant)
-  else match select_entry invariant key (analysis_entries state) with
+  else match select_entry invariant
+      (resolve_key (analysis_aliases state) key) (analysis_entries state) with
   | Some entry =>
       inr (AnalysisState (analysis_entries state ∖ {[entry]})
-        ((invariant, key, entry) :: analysis_records state)
+        ((invariant, key, consumed_entry invariant key entry) ::
+          analysis_records state)
+        (analysis_aliases state)
         (analysis_step_taken state) (analysis_in_atomic state))
   | None => inl (MissingInvariant invariant)
   end.
@@ -278,19 +358,22 @@ Definition open_invariant (invariant : inv_id) (key : access_key) state :
     consumed, or allocates a fresh instance. *)
 Definition fold_invariant (invariant : inv_id) (key : access_key) state :
     analysis_state :=
+  let fresh :=
+    AnalysisState
+      ({[resolve_entry (analysis_aliases state) (invariant, key)]} ∪
+        analysis_entries state)
+      (analysis_records state) (analysis_aliases state)
+      (analysis_step_taken state) (analysis_in_atomic state) in
   match analysis_records state with
   | record :: rest =>
       if decide (record_invariant record = invariant) then
-        AnalysisState ({[record_consumed record]} ∪ analysis_entries state) rest
+        AnalysisState
+          ({[resolve_entry (analysis_aliases state) (record_consumed record)]}
+            ∪ analysis_entries state) rest (analysis_aliases state)
           (match rest with [] => false | _ => analysis_step_taken state end)
           (analysis_in_atomic state)
-      else AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
-        (analysis_records state) (analysis_step_taken state)
-        (analysis_in_atomic state)
-  | [] =>
-      AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
-        (analysis_records state) (analysis_step_taken state)
-        (analysis_in_atomic state)
+      else fresh
+  | [] => fresh
   end.
 
 (** A fold names the innermost open instance, or an invariant that is not
@@ -305,17 +388,32 @@ Definition fold_admissible (invariant : inv_id) (key : access_key) state :
   | [] => true
   end.
 
+(** Entering the scope of the local at [level], an alias of [alias] if
+    given. *)
+Definition enter_scope (level : nat) (alias : option key_atom) state :
+    analysis_state :=
+  AnalysisState (analysis_entries state) (analysis_records state)
+    (match alias with
+     | Some atom =>
+         <[level := resolve_atom (analysis_aliases state) atom]>
+           (analysis_aliases state)
+     | None => delete level (analysis_aliases state)
+     end)
+    (analysis_step_taken state) (analysis_in_atomic state).
+
 (** Leaving the scope of the local at [level], entered in [outer], forgets
-    the entries naming it that were not available on entry; no open
-    invariant may name it. *)
+    the entries naming it that were not available on entry and restores
+    the binding of [level] in [outer]; no open invariant may name it. *)
 Definition leave_scope (level : nat) (outer state : analysis_state) :
     analysis_state :=
   AnalysisState
     (filter (fun entry => entry_mentions level entry = false \/
         entry ∈ analysis_entries outer)
       (analysis_entries state))
-    (analysis_records state) (analysis_step_taken state)
-    (analysis_in_atomic state).
+    (analysis_records state)
+    (partial_alter (fun _ => analysis_aliases outer !! level) level
+      (analysis_aliases state))
+    (analysis_step_taken state) (analysis_in_atomic state).
 
 Definition leave_scope_admissible (level : nat) state : bool :=
   forallb (fun record => negb (record_mentions level record))
@@ -345,7 +443,8 @@ Qed.
 Lemma take_plain_step_preserves_state cost state exit :
   take_plain_step cost state = inr exit ->
   analysis_entries exit = analysis_entries state /\
-  analysis_records exit = analysis_records state.
+  analysis_records exit = analysis_records state /\
+  analysis_aliases exit = analysis_aliases state.
 Proof.
   unfold take_plain_step.
   destruct (analysis_in_atomic state ||
@@ -361,28 +460,43 @@ Lemma take_plain_step_preserves_sets cost state exit :
   analysis_open exit = analysis_open state.
 Proof.
   intros Hstep. apply take_plain_step_preserves_state in Hstep as
-    [Hentries Hrecords].
+    (Hentries & Hrecords & _).
   unfold analysis_mask, analysis_open. rewrite Hentries, Hrecords. done.
+Qed.
+
+Lemma take_step_plain cost state exit :
+  take_step cost state = inr exit ->
+  exists plain, take_plain_step plain state = inr exit.
+Proof.
+  unfold take_step. destruct cost; eauto.
+  all: destruct (bool_decide (entries_available _ _)); last discriminate.
+  all: destruct (bool_decide (analysis_open state = ∅)); last discriminate.
+  all: eauto.
+Qed.
+
+Lemma take_step_preserves_state cost state exit :
+  take_step cost state = inr exit ->
+  analysis_entries exit = analysis_entries state /\
+  analysis_records exit = analysis_records state /\
+  analysis_aliases exit = analysis_aliases state.
+Proof.
+  intros Hstep. destruct (take_step_plain _ _ _ Hstep) as [plain Hplain].
+  exact (take_plain_step_preserves_state _ _ _ Hplain).
+Qed.
+
+Lemma take_step_preserves_sets cost state exit :
+  take_step cost state = inr exit ->
+  analysis_mask exit = analysis_mask state /\
+  analysis_open exit = analysis_open state.
+Proof.
+  intros Hstep. destruct (take_step_plain _ _ _ Hstep) as [plain Hplain].
+  exact (take_plain_step_preserves_sets _ _ _ Hplain).
 Qed.
 
 Lemma take_step_preserves_records cost state exit :
   take_step cost state = inr exit ->
   analysis_records exit = analysis_records state.
-Proof.
-  unfold take_step.
-  destruct cost; try (intros Hstep;
-    exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep))).
-  - destruct (bool_decide (_ ⊆ _)); last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
-      eqn:Hstep; first discriminate.
-    destruct (bool_decide (_ ## _)); last discriminate.
-    intros [= <-]. simpl.
-    exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep)).
-  - destruct (bool_decide (_ ⊆ _)); last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    intros Hstep. exact (proj2 (take_plain_step_preserves_state _ _ _ Hstep)).
-Qed.
+Proof. intros Hstep. apply (take_step_preserves_state _ _ _ Hstep). Qed.
 
 Lemma take_step_preserves_open cost state exit :
   take_step cost state = inr exit ->
@@ -410,18 +524,8 @@ Lemma take_step_preserves_in_atomic cost state exit :
   take_step cost state = inr exit ->
   analysis_in_atomic exit = analysis_in_atomic state.
 Proof.
-  unfold take_step. destruct cost;
-    try (apply take_plain_step_preserves_in_atomic; assumption).
-  - destruct (bool_decide (_ ⊆ _)); last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    destruct (take_plain_step NonAtomicStep state) as [error|stepped]
-      eqn:Hplain; first discriminate.
-    destruct (bool_decide (_ ## _)); last discriminate.
-    intros [= <-]. simpl.
-    exact (take_plain_step_preserves_in_atomic _ _ _ Hplain).
-  - destruct (bool_decide (_ ⊆ _)); last discriminate.
-    destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-    apply take_plain_step_preserves_in_atomic.
+  intros Hstep. destruct (take_step_plain _ _ _ Hstep) as [plain Hplain].
+  exact (take_plain_step_preserves_in_atomic _ _ _ Hplain).
 Qed.
 
 Lemma take_step_preserves_wf cost state exit :
@@ -452,99 +556,86 @@ Proof.
     split; [reflexivity|exact Hin].
 Qed.
 
+Lemma entry_declarations_resolve aliases entries :
+  entry_declarations (set_map (resolve_entry aliases) entries) =
+    entry_declarations entries.
+Proof.
+  unfold entry_declarations. apply set_eq. intros invariant.
+  rewrite !elem_of_map. split.
+  - intros (entry & -> & Hentry). apply elem_of_map in Hentry as
+      (original & -> & Horiginal). exists original. auto.
+  - intros (entry & -> & Hentry). exists (resolve_entry aliases entry).
+    split; [reflexivity|]. apply elem_of_map. eauto.
+Qed.
+
+Lemma entry_declarations_filter (P : mask_entry -> Prop)
+    `{forall entry, Decision (P entry)} entries :
+  entry_declarations (filter P entries) ⊆ entry_declarations entries.
+Proof.
+  unfold entry_declarations. intros invariant Hin.
+  apply elem_of_map in Hin as (entry & -> & Hentry).
+  apply elem_of_filter in Hentry as [_ Hentry].
+  apply elem_of_map. eauto.
+Qed.
+
+(** Every required entry is covered: its declaration is available. *)
+Lemma entries_available_mask required state :
+  entries_available required state -> analysis_open state = ∅ ->
+  entry_declarations required ⊆ analysis_mask state.
+Proof.
+  intros Havailable Hclosed invariant Hin.
+  unfold analysis_mask. rewrite Hclosed, difference_empty_L.
+  unfold entry_declarations in *.
+  apply elem_of_map in Hin as (entry & -> & Hentry).
+  destruct (Havailable entry Hentry) as [Hexact|Hwide];
+    apply elem_of_map; eexists; split; [|exact Hexact| |exact Hwide];
+    reflexivity.
+Qed.
+
 Lemma procedure_call_step_success required granted state exit :
   take_step (ProcedureCallStep required granted) state = inr exit ->
-  required ⊆ analysis_mask state /\
-  granted ## analysis_open state /\
-  analysis_mask exit = analysis_mask state ∪ granted /\
-  analysis_open exit = analysis_open state.
+  entries_available required state /\ analysis_open state = ∅ /\
+  exit = state.
 Proof.
   unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)) eqn:Hrequired;
+  destruct (bool_decide (entries_available required state)) eqn:Havailable;
     last discriminate.
-  apply bool_decide_eq_true in Hrequired.
+  apply bool_decide_eq_true in Havailable.
   destruct (bool_decide (analysis_open state = ∅)) eqn:Hclosed;
     last discriminate.
   apply bool_decide_eq_true in Hclosed.
-  destruct (take_plain_step NonAtomicStep state) as [error|stepped]
-    eqn:Hplain; first discriminate.
-  destruct (bool_decide (granted ## analysis_open stepped)) eqn:Hgrant;
-    last discriminate.
-  apply bool_decide_eq_true in Hgrant. intros [= <-].
-  apply take_plain_step_preserves_state in Hplain as [Hentries Hrecords].
-  assert (Hopen : analysis_open stepped = analysis_open state)
-    by (apply analysis_open_records; exact Hrecords).
-  rewrite Hopen in Hgrant. repeat split; try assumption.
-  unfold analysis_mask, grant_state, analysis_open in *. cbn.
-  rewrite Hentries, Hrecords, entry_declarations_union,
-    entry_declarations_declaration_entries, Hclosed.
-  set_solver.
-Qed.
-
-Lemma procedure_call_step_success_closed required granted state exit :
-  take_step (ProcedureCallStep required granted) state = inr exit ->
-  analysis_open state = ∅.
-Proof.
-  unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
-  destruct (bool_decide (analysis_open state = ∅)) eqn:Hclosed;
-    last discriminate.
-  intros _. apply bool_decide_eq_true in Hclosed. exact Hclosed.
+  unfold take_plain_step. rewrite (bool_decide_eq_true_2 _ Hclosed), orb_true_r.
+  intros [= <-]. auto.
 Qed.
 
 Lemma procedure_spawn_step_success required state exit :
   take_step (ProcedureSpawnStep required) state = inr exit ->
-  required ⊆ analysis_mask state /\
-  analysis_mask exit = analysis_mask state /\
-  analysis_open exit = analysis_open state.
+  entries_available required state /\ analysis_open state = ∅ /\
+  exit = state.
 Proof.
   unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)) eqn:Hrequired;
+  destruct (bool_decide (entries_available required state)) eqn:Havailable;
     last discriminate.
-  apply bool_decide_eq_true in Hrequired.
-  destruct (bool_decide (analysis_open state = ∅)); last discriminate.
-  intros Hplain.
-  apply take_plain_step_preserves_sets in Hplain as [Hmask Hopen].
-  tauto.
-Qed.
-
-Lemma procedure_spawn_step_success_closed required state exit :
-  take_step (ProcedureSpawnStep required) state = inr exit ->
-  analysis_open state = ∅.
-Proof.
-  unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
+  apply bool_decide_eq_true in Havailable.
   destruct (bool_decide (analysis_open state = ∅)) eqn:Hclosed;
     last discriminate.
-  intros _. apply bool_decide_eq_true in Hclosed. exact Hclosed.
+  apply bool_decide_eq_true in Hclosed.
+  unfold take_plain_step. rewrite (bool_decide_eq_true_2 _ Hclosed), orb_true_r.
+  intros [= <-]. auto.
 Qed.
 
 Lemma atomic_step_preserves_sets state exit :
   take_step AtomicStep state = inr exit ->
   analysis_mask exit = analysis_mask state /\
   analysis_open exit = analysis_open state.
-Proof. apply take_plain_step_preserves_sets. Qed.
+Proof. apply take_step_preserves_sets. Qed.
 
 Lemma atomic_step_preserves_state state exit :
   take_step AtomicStep state = inr exit ->
   analysis_entries exit = analysis_entries state /\
-  analysis_records exit = analysis_records state.
-Proof. apply take_plain_step_preserves_state. Qed.
-
-Lemma take_step_resources_monotone cost state exit :
-  take_step cost state = inr exit ->
-  analysis_mask state ∪ analysis_open state ⊆
-    analysis_mask exit ∪ analysis_open exit.
-Proof.
-  intros Hstep. destruct cost.
-  1-3: apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen];
-    now rewrite Hmask, Hopen.
-  - apply procedure_call_step_success in Hstep as
-      (_ & _ & Hmask & Hopen).
-    rewrite Hmask, Hopen. set_solver.
-  - apply procedure_spawn_step_success in Hstep as (_ & Hmask & Hopen).
-    now rewrite Hmask, Hopen.
-Qed.
+  analysis_records exit = analysis_records state /\
+  analysis_aliases exit = analysis_aliases state.
+Proof. apply take_step_preserves_state. Qed.
 
 Lemma take_plain_non_atomic_rejected state :
   analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
@@ -558,18 +649,129 @@ Lemma procedure_call_rejected_while_open required granted state exit :
   analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
   take_step (ProcedureCallStep required granted) state <> inr exit.
 Proof.
-  intros Hopen _. unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
-  rewrite bool_decide_false; [discriminate | exact Hopen].
+  intros Hopen _ Hstep.
+  apply procedure_call_step_success in Hstep as (_ & Hclosed & _).
+  contradiction.
 Qed.
 
 Lemma procedure_spawn_rejected_while_open required state exit :
   analysis_open state ≠ ∅ -> analysis_in_atomic state = false ->
   take_step (ProcedureSpawnStep required) state <> inr exit.
 Proof.
-  intros Hopen _. unfold take_step.
-  destruct (bool_decide (required ⊆ analysis_mask state)); last discriminate.
-  rewrite bool_decide_false; [discriminate | exact Hopen].
+  intros Hopen _ Hstep.
+  apply procedure_spawn_step_success in Hstep as (_ & Hclosed & _).
+  contradiction.
+Qed.
+
+(** ** Leaves *)
+
+(** The entries a leaf's callee grants. *)
+Definition cost_granted (cost : step_cost) : gset mask_entry :=
+  match cost with
+  | ProcedureCallStep _ granted => granted
+  | _ => ∅
+  end.
+
+Lemma take_leaf_step cost written state exit :
+  take_leaf cost written state = inr exit ->
+  exists stepped, take_step cost state = inr stepped /\
+    exit = match cost with
+      | ProcedureCallStep _ granted =>
+          grant_state granted
+            match written with
+            | Some level => invalidate level stepped
+            | None => stepped
+            end
+      | _ =>
+          match written with
+          | Some level => invalidate level stepped
+          | None => stepped
+          end
+      end.
+Proof.
+  unfold take_leaf. destruct (take_step cost state) as [error|stepped];
+    [discriminate|]. intros [= <-]. eauto.
+Qed.
+
+Lemma take_leaf_step_taken cost written state exit :
+  take_leaf cost written state = inr exit ->
+  exists stepped, take_step cost state = inr stepped /\
+    analysis_step_taken exit = analysis_step_taken stepped.
+Proof.
+  intros Hleaf. destruct (take_leaf_step _ _ _ _ Hleaf) as
+    (stepped & Hstep & ->).
+  exists stepped. split; [exact Hstep|]. destruct cost, written; reflexivity.
+Qed.
+
+Lemma take_leaf_preserves_records cost written state exit :
+  take_leaf cost written state = inr exit ->
+  analysis_records exit = analysis_records state.
+Proof.
+  intros Hleaf. destruct (take_leaf_step _ _ _ _ Hleaf) as
+    (stepped & Hstep & ->).
+  rewrite <- (take_step_preserves_records _ _ _ Hstep).
+  destruct cost, written; reflexivity.
+Qed.
+
+Lemma take_leaf_preserves_open cost written state exit :
+  take_leaf cost written state = inr exit ->
+  analysis_open exit = analysis_open state.
+Proof.
+  intros Hleaf. apply analysis_open_records.
+  exact (take_leaf_preserves_records _ _ _ _ Hleaf).
+Qed.
+
+Lemma take_leaf_preserves_in_atomic cost written state exit :
+  take_leaf cost written state = inr exit ->
+  analysis_in_atomic exit = analysis_in_atomic state.
+Proof.
+  intros Hleaf. destruct (take_leaf_step _ _ _ _ Hleaf) as
+    (stepped & Hstep & ->).
+  rewrite <- (take_step_preserves_in_atomic _ _ _ Hstep).
+  destruct cost, written; reflexivity.
+Qed.
+
+Lemma take_leaf_preserves_wf cost written state exit :
+  state_wf state -> take_leaf cost written state = inr exit -> state_wf exit.
+Proof.
+  intros Hwf Hleaf. unfold state_wf.
+  rewrite (take_leaf_preserves_records _ _ _ _ Hleaf). exact Hwf.
+Qed.
+
+Lemma invalidate_mask level state :
+  analysis_mask (invalidate level state) ⊆ analysis_mask state.
+Proof.
+  unfold analysis_mask, analysis_open, invalidate. cbn.
+  pose proof (entry_declarations_filter
+    (fun entry => entry_mentions level entry = false)
+    (analysis_entries state)).
+  set_solver.
+Qed.
+
+Lemma grant_state_mask granted state :
+  analysis_mask (grant_state granted state) =
+    analysis_mask state ∪ (entry_declarations granted ∖ analysis_open state).
+Proof.
+  unfold analysis_mask, analysis_open, grant_state. cbn.
+  rewrite entry_declarations_union, entry_declarations_resolve. set_solver.
+Qed.
+
+(** A leaf makes available at most the declarations its callee grants. *)
+Lemma take_leaf_mask cost written state exit :
+  take_leaf cost written state = inr exit ->
+  analysis_mask exit ⊆
+    analysis_mask state ∪ entry_declarations (cost_granted cost).
+Proof.
+  intros Hleaf. destruct (take_leaf_step _ _ _ _ Hleaf) as
+    (stepped & Hstep & ->).
+  destruct (take_step_preserves_sets _ _ _ Hstep) as [Hmask Hopen].
+  assert (Hwritten : analysis_mask (match written with
+      | Some level => invalidate level stepped
+      | None => stepped end) ⊆ analysis_mask state).
+  { destruct written; [|by rewrite Hmask].
+    etrans; [apply invalidate_mask|]. by rewrite Hmask. }
+  destruct cost; cbn [cost_granted]; try (etrans; [exact Hwritten|set_solver]).
+  rewrite grant_state_mask. set_solver.
 Qed.
 
 (** ** Opening and closing *)
@@ -608,15 +810,18 @@ Qed.
 Lemma open_invariant_records invariant key state exit :
   open_invariant invariant key state = inr exit ->
   exists entry,
-    select_entry invariant key (analysis_entries state) = Some entry /\
+    select_entry invariant (resolve_key (analysis_aliases state) key)
+      (analysis_entries state) = Some entry /\
     exit = AnalysisState (analysis_entries state ∖ {[entry]})
-      ((invariant, key, entry) :: analysis_records state)
+      ((invariant, key, consumed_entry invariant key entry) ::
+        analysis_records state)
+      (analysis_aliases state)
       (analysis_step_taken state) (analysis_in_atomic state).
 Proof.
   unfold open_invariant.
   destruct (bool_decide (invariant ∈ analysis_open state)); first discriminate.
-  destruct (select_entry invariant key (analysis_entries state)) as [entry|];
-    [|discriminate].
+  destruct (select_entry invariant (resolve_key (analysis_aliases state) key)
+    (analysis_entries state)) as [entry|]; [|discriminate].
   intros [= <-]. eauto.
 Qed.
 
@@ -688,7 +893,9 @@ Lemma fold_invariant_closes invariant key state record rest :
   analysis_records state = record :: rest ->
   record_invariant record = invariant ->
   fold_invariant invariant key state =
-    AnalysisState ({[record_consumed record]} ∪ analysis_entries state) rest
+    AnalysisState
+      ({[resolve_entry (analysis_aliases state) (record_consumed record)]} ∪
+        analysis_entries state) rest (analysis_aliases state)
       (match rest with [] => false | _ => analysis_step_taken state end)
       (analysis_in_atomic state).
 Proof.
@@ -726,7 +933,8 @@ Proof.
     by (rewrite elem_of_list_to_set; exact Hfresh).
   unfold analysis_mask, analysis_open. cbn [analysis_entries analysis_records].
   rewrite Hrecords. cbn [map list_to_set].
-  rewrite entry_declarations_union, entry_declarations_singleton, Hconsumed.
+  rewrite entry_declarations_union, entry_declarations_singleton.
+  cbn [resolve_entry fst]. rewrite Hconsumed.
   revert Hrest.
   generalize (list_to_set (map record_invariant rest) : gset inv_id) as R.
   generalize (entry_declarations (analysis_entries state)) as D.
@@ -745,9 +953,11 @@ Lemma fold_fresh_invariant invariant key state :
 Proof.
   intros Hclosed.
   assert (Hfresh : fold_invariant invariant key state =
-    AnalysisState ({[(invariant, key)]} ∪ analysis_entries state)
-      (analysis_records state) (analysis_step_taken state)
-      (analysis_in_atomic state)).
+    AnalysisState
+      ({[resolve_entry (analysis_aliases state) (invariant, key)]} ∪
+        analysis_entries state)
+      (analysis_records state) (analysis_aliases state)
+      (analysis_step_taken state) (analysis_in_atomic state)).
   { unfold fold_invariant.
     destruct (analysis_records state) as [|record rest] eqn:Hrecords;
       [reflexivity|].
@@ -833,7 +1043,9 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
   | 0 => inl FuelExhausted
   | S fuel' =>
       match syntax_view Γ statement with
-      | ViewLeaf => take_step (leaf_cost Γ statement) state
+      | ViewLeaf =>
+          take_leaf (leaf_cost Γ statement) (syntax_leaf_write Γ statement)
+            state
       | ViewDone => inr state
       | ViewUnfold invariant key => open_invariant invariant key state
       | ViewFold invariant key =>
@@ -852,12 +1064,7 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
               if bool_decide
                   (analysis_records then_state = analysis_records else_state /\
                    analysis_in_atomic then_state = analysis_in_atomic else_state)
-              then inr (AnalysisState
-                (entries_meet (analysis_entries then_state)
-                  (analysis_entries else_state))
-                (analysis_records then_state)
-                (analysis_step_taken then_state || analysis_step_taken else_state)
-                (analysis_in_atomic then_state))
+              then inr (join_state then_state else_state)
               else inl IncompatibleBranches
           | inl error, _ | _, inl error => inl error
           end
@@ -866,21 +1073,17 @@ Fixpoint analyze_fuel {Γ} (fuel : nat)
           match take_step AtomicStep state with
           | inl error => inl error
           | inr outer =>
-              let inner_entry := AnalysisState (analysis_entries outer)
-                (analysis_records outer) (analysis_step_taken outer) true in
+              let inner_entry := atomic_entry outer in
               match analyze_fuel fuel' inner_entry body with
               | inl error => inl error
               | inr inner =>
                   if bool_decide (analysis_records inner = analysis_records outer)
-                  then inr (AnalysisState (analysis_entries inner)
-                    (analysis_records inner)
-                    (analysis_step_taken outer || analysis_step_taken inner)
-                    (analysis_in_atomic outer))
+                  then inr (atomic_exit outer inner)
                   else inl AtomicBlockLeaksAccess
               end
           end
-      | ViewScope _ body =>
-          match analyze_fuel fuel' state body with
+      | ViewScope _ alias body =>
+          match analyze_fuel fuel' (enter_scope (length Γ) alias state) body with
           | inl error => inl error
           | inr inner =>
               if leave_scope_admissible (length Γ) inner
@@ -898,7 +1101,8 @@ Inductive analysis_certificate :
       analysis_state -> Type :=
 | CertLeaf Γ state statement exit :
     syntax_view Γ statement = ViewLeaf ->
-    take_step (leaf_cost Γ statement) state = inr exit ->
+    take_leaf (leaf_cost Γ statement) (syntax_leaf_write Γ statement) state =
+      inr exit ->
     analysis_certificate Γ state statement exit
 | CertDone Γ state statement :
     syntax_view Γ statement = ViewDone ->
@@ -925,25 +1129,19 @@ Inductive analysis_certificate :
     analysis_records then_exit = analysis_records else_exit ->
     analysis_in_atomic then_exit = analysis_in_atomic else_exit ->
     analysis_certificate Γ state statement
-      (AnalysisState
-        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
-        (analysis_records then_exit)
-        (analysis_step_taken then_exit || analysis_step_taken else_exit)
-        (analysis_in_atomic then_exit))
+      (join_state then_exit else_exit)
 | CertAtomic Γ state statement body outer inner :
     syntax_view Γ statement = ViewAtomic body ->
     take_step AtomicStep state = inr outer ->
     analysis_certificate Γ
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true) body inner ->
+      (atomic_entry outer) body inner ->
     analysis_records inner = analysis_records outer ->
     analysis_certificate Γ state statement
-      (AnalysisState (analysis_entries inner) (analysis_records inner)
-        (analysis_step_taken outer || analysis_step_taken inner)
-        (analysis_in_atomic outer))
-| CertScope Γ state statement d body inner :
-    syntax_view Γ statement = ViewScope d body ->
-    analysis_certificate (d :: Γ) state body inner ->
+      (atomic_exit outer inner)
+| CertScope Γ state statement d alias body inner :
+    syntax_view Γ statement = ViewScope d alias body ->
+    analysis_certificate (d :: Γ) (enter_scope (length Γ) alias state) body
+      inner ->
     leave_scope_admissible (length Γ) inner = true ->
     analysis_certificate Γ state statement
       (leave_scope (length Γ) state inner).
@@ -954,7 +1152,7 @@ Lemma analysis_certificate_preserves_in_atomic
   analysis_in_atomic exit = analysis_in_atomic entry.
 Proof.
   induction certificate; simpl.
-  - eapply take_step_preserves_in_atomic. exact e0.
+  - eapply take_leaf_preserves_in_atomic. exact e0.
   - reflexivity.
   - eapply open_invariant_preserves_in_atomic. exact e0.
   - apply fold_invariant_preserves_in_atomic.
@@ -983,7 +1181,7 @@ Fixpoint certificate_footprint {Γ entry statement exit}
       certificate_footprint else_certificate
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       certificate_footprint body_certificate
-  | CertScope _ _ _ _ _ _ _ body_certificate _ =>
+  | CertScope _ _ _ _ _ _ _ _ body_certificate _ =>
       certificate_footprint body_certificate
   | _ => ∅
   end.
@@ -1025,7 +1223,7 @@ Fixpoint certificate_height {Γ entry statement exit}
         (certificate_height else_certificate))
   | CertAtomic _ _ _ _ _ _ _ _ body_certificate _ =>
       S (certificate_height body_certificate)
-  | CertScope _ _ _ _ _ _ _ body_certificate _ =>
+  | CertScope _ _ _ _ _ _ _ _ body_certificate _ =>
       S (certificate_height body_certificate)
   end.
 
@@ -1067,12 +1265,7 @@ Proof.
           if bool_decide
             (analysis_records then_state = analysis_records else_state /\
              analysis_in_atomic then_state = analysis_in_atomic else_state)
-          then inr (AnalysisState
-            (entries_meet (analysis_entries then_state)
-              (analysis_entries else_state))
-            (analysis_records then_state)
-            (analysis_step_taken then_state || analysis_step_taken else_state)
-            (analysis_in_atomic then_state))
+          then inr (join_state then_state else_state)
           else inl IncompatibleBranches
       | inl error, _ | _, inl error => inl error
       end = inr exit).
@@ -1081,31 +1274,27 @@ Proof.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
     destruct (analyze_fuel fuel
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true) body) as [error|inner]
+      (atomic_entry outer) body) as [error|inner]
       eqn:Hbody; try discriminate.
     apply IH in Hbody.
     change (analyze_fuel (S fuel)
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true) body = inr inner) in Hbody.
+      (atomic_entry outer) body = inr inner) in Hbody.
     change (match analyze_fuel (S fuel)
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true) body with
+      (atomic_entry outer) body with
       | inl error => inl error
       | inr inner =>
           if bool_decide (analysis_records inner = analysis_records outer)
-          then inr (AnalysisState (analysis_entries inner)
-            (analysis_records inner)
-            (analysis_step_taken outer || analysis_step_taken inner)
-            (analysis_in_atomic outer))
+          then inr (atomic_exit outer inner)
           else inl AtomicBlockLeaksAccess
       end = inr exit).
     rewrite Hbody. exact Hrun.
-  - destruct (analyze_fuel fuel state body) as [error|inner] eqn:Hbody;
-      try discriminate.
+  - destruct (analyze_fuel fuel (enter_scope (length Γ) alias state) body)
+      as [error|inner] eqn:Hbody; try discriminate.
     apply IH in Hbody.
-    change (analyze_fuel (S fuel) state body = inr inner) in Hbody.
-    change (match analyze_fuel (S fuel) state body with
+    change (analyze_fuel (S fuel) (enter_scope (length Γ) alias state) body =
+      inr inner) in Hbody.
+    change (match analyze_fuel (S fuel) (enter_scope (length Γ) alias state)
+      body with
       | inl error => inl error
       | inr inner =>
           if leave_scope_admissible (length Γ) inner
@@ -1169,7 +1358,7 @@ Proof.
     lia.
   - pose proof (syntax_atomic_body_smaller Γ statement body e) as Hbody.
     lia.
-  - pose proof (syntax_scope_body_smaller Γ statement d body e) as Hbody.
+  - pose proof (syntax_scope_body_smaller Γ statement d alias body e) as Hbody.
     lia.
 Qed.
 
@@ -1177,7 +1366,7 @@ Qed.
     procedure-call grants. *)
 Definition step_cost_grants (cost : step_cost) : gset inv_id :=
   match cost with
-  | ProcedureCallStep _ granted => granted
+  | ProcedureCallStep _ granted => entry_declarations granted
   | _ => ∅
   end.
 
@@ -1197,7 +1386,7 @@ Fixpoint statement_allocations_fuel {Γ} (fuel : nat)
             statement_allocations_fuel fuel' else_branch
       | ViewStructuredAccess _ body | ViewAtomic body =>
           statement_allocations_fuel fuel' body
-      | ViewScope _ body => statement_allocations_fuel fuel' body
+      | ViewScope _ _ body => statement_allocations_fuel fuel' body
       | ViewDone | ViewUnfold _ _ => ∅
       end
   end.
@@ -1206,18 +1395,15 @@ Definition statement_allocations {Γ} (statement : syntax_statement Γ) :
     gset inv_id :=
   statement_allocations_fuel (syntax_size Γ statement) statement.
 
-Lemma take_step_resources_bound cost state exit :
-  take_step cost state = inr exit ->
+Lemma take_leaf_resources_bound cost written state exit :
+  take_leaf cost written state = inr exit ->
   analysis_mask exit ∪ analysis_open exit ⊆
     analysis_mask state ∪ analysis_open state ∪ step_cost_grants cost.
 Proof.
-  intros Hstep. destruct cost; simpl.
-  1-3: apply take_plain_step_preserves_sets in Hstep as [Hmask Hopen];
-    rewrite Hmask, Hopen; set_solver.
-  - apply procedure_call_step_success in Hstep as (_ & _ & Hmask & Hopen).
-    rewrite Hmask, Hopen. set_solver.
-  - apply procedure_spawn_step_success in Hstep as (_ & Hmask & Hopen).
-    rewrite Hmask, Hopen. set_solver.
+  intros Hleaf.
+  pose proof (take_leaf_mask _ _ _ _ Hleaf) as Hmask.
+  rewrite (take_leaf_preserves_open _ _ _ _ Hleaf).
+  destruct cost; cbn [cost_granted step_cost_grants] in *; set_solver.
 Qed.
 
 (** Every declaration named by a state is available or open. *)
@@ -1231,7 +1417,7 @@ Proof.
   destruct (analysis_records state) as [|record rest] eqn:Hrecords.
   - unfold analysis_mask, analysis_open. cbn [analysis_entries analysis_records].
     rewrite Hrecords, entry_declarations_union, entry_declarations_singleton.
-    cbn [fst]. abstract_declarations. apply elem_of_subseteq. intros x Hx.
+    cbn [resolve_entry fst]. abstract_declarations. apply elem_of_subseteq. intros x Hx.
     destruct (decide (x = invariant)); set_solver.
   - unfold records_consume_own in Hown. rewrite ?Hrecords in Hown.
     inversion Hown as [|? ? Hconsumed _]. subst.
@@ -1239,7 +1425,7 @@ Proof.
       unfold analysis_mask, analysis_open; cbn [analysis_entries
         analysis_records]; rewrite Hrecords, entry_declarations_union,
         entry_declarations_singleton; cbn [map list_to_set];
-      [rewrite Hconsumed|]; cbn [fst];
+      cbn [resolve_entry fst]; [rewrite Hconsumed|];
       generalize (list_to_set (map record_invariant rest) : gset inv_id) as R;
       generalize (entry_declarations (analysis_entries state)) as D;
       generalize (record_invariant record) as i;
@@ -1254,9 +1440,8 @@ Lemma open_invariant_consume_own invariant key state exit :
   records_consume_own (analysis_records exit).
 Proof.
   intros Hown Hopen.
-  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & Hselect & ->).
-  destruct (select_entry_sound _ _ _ _ Hselect) as [_ Hdecl].
-  constructor; [exact Hdecl | exact Hown].
+  destruct (open_invariant_records _ _ _ _ Hopen) as (entry & _ & ->).
+  constructor; [reflexivity | exact Hown].
 Qed.
 
 Lemma fold_invariant_consume_own invariant key state :
@@ -1278,7 +1463,7 @@ Theorem certificate_consume_own {Γ entry statement exit}
   records_consume_own (analysis_records exit).
 Proof.
   induction certificate; intros Hown; cbn.
-  - rewrite (take_step_preserves_records _ _ _ e0). exact Hown.
+  - rewrite (take_leaf_preserves_records _ _ _ _ e0). exact Hown.
   - exact Hown.
   - eapply open_invariant_consume_own; eassumption.
   - apply fold_invariant_consume_own. exact Hown.
@@ -1300,7 +1485,7 @@ Proof.
   induction certificate; intros [|fuel] Hown Hheight; simpl in Hheight;
     try lia; cbn [statement_allocations_fuel certificate_footprint];
     rewrite e.
-  - pose proof (take_step_resources_bound _ _ _ e0). set_solver.
+  - pose proof (take_leaf_resources_bound _ _ _ _ e0). set_solver.
   - set_solver.
   - apply open_invariant_success in e0 as (_ & Havailable & Hmask & Hopen).
     rewrite Hmask, Hopen. set_solver.
@@ -1319,17 +1504,9 @@ Proof.
     pose proof (certificate_exit_subset_footprint certificate1) as Hexit_mask.
     pose proof (certificate_exit_open_subset_footprint certificate1)
       as Hexit_open.
-    assert (Hjoin_open : analysis_open (AnalysisState
-        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
-        (analysis_records then_exit)
-        (analysis_step_taken then_exit || analysis_step_taken else_exit)
-        (analysis_in_atomic then_exit)) = analysis_open then_exit)
+    assert (Hjoin_open : analysis_open (join_state then_exit else_exit) = analysis_open then_exit)
       by reflexivity.
-    assert (Hjoin_mask : analysis_mask (AnalysisState
-        (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
-        (analysis_records then_exit)
-        (analysis_step_taken then_exit || analysis_step_taken else_exit)
-        (analysis_in_atomic then_exit)) ⊆ analysis_mask then_exit).
+    assert (Hjoin_mask : analysis_mask (join_state then_exit else_exit) ⊆ analysis_mask then_exit).
     { unfold analysis_mask, analysis_open, entries_meet, entry_declarations.
       cbn [analysis_entries analysis_records]. intros invariant Hin.
       apply elem_of_difference in Hin as [Hin Hclosed].
@@ -1349,8 +1526,7 @@ Proof.
     + apply Hthen in Hx. clear - Hx. set_solver.
     + apply Helse in Hx. clear - Hx. set_solver.
   - assert (Hbody_own : records_consume_own (analysis_records
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true))).
+      (atomic_entry outer))).
     { cbn. rewrite (take_step_preserves_records _ _ _ e0). exact Hown. }
     pose proof (IHcertificate fuel Hbody_own ltac:(lia)) as Hbody.
     apply atomic_step_preserves_sets in e0 as [Hmask Hopen].
@@ -1463,7 +1639,7 @@ Proof.
     rewrite (IHcertificate1 certificate2).
     f_equal; apply proof_irrelevance.
   - pose proof (eq_trans (eq_sym e) e1) as Hview.
-    injection Hview as <- Hbody.
+    injection Hview as <- <- Hbody.
     apply Eqdep.EqdepTheory.inj_pair2 in Hbody. subst body0.
     pose proof (analysis_certificate_exit_unique certificate1
       certificate2) as Hinner. subst inner0.
@@ -1479,7 +1655,7 @@ Theorem certificate_preserves_wf {Γ} state
   state_wf exit.
 Proof.
   intros Hwf certificate. induction certificate.
-  - eapply take_step_preserves_wf; eauto.
+  - eapply take_leaf_preserves_wf; eauto.
   - exact Hwf.
   - eapply open_invariant_preserves_wf; eauto.
   - apply fold_invariant_preserves_wf. exact Hwf.
@@ -1523,16 +1699,15 @@ Proof.
   - destruct (take_step AtomicStep state) as [error|outer] eqn:Hstep;
       try discriminate.
     destruct (analyze_fuel fuel
-      (AnalysisState (analysis_entries outer) (analysis_records outer)
-        (analysis_step_taken outer) true) body) as [error|inner] eqn:Hbody;
+      (atomic_entry outer) body) as [error|inner] eqn:Hbody;
       try discriminate.
     destruct (bool_decide (analysis_records inner = analysis_records outer))
       eqn:Hscope; last discriminate.
     apply bool_decide_eq_true in Hscope.
     inversion Hanalyze; subst exit.
     eapply CertAtomic; eauto.
-  - destruct (analyze_fuel fuel state body) as [error|inner] eqn:Hbody;
-      try discriminate.
+  - destruct (analyze_fuel fuel (enter_scope (length Γ) alias state) body)
+      as [error|inner] eqn:Hbody; try discriminate.
     destruct (leave_scope_admissible (length Γ) inner) eqn:Hadmissible;
       [|discriminate].
     inversion Hanalyze; subst exit.
@@ -1546,4 +1721,24 @@ Corollary analyze_builds_certificate {Γ} state
 Proof. apply analyze_fuel_builds_certificate. Defined.
 
 End WithSyntax.
+
+(** The state after a conditional, the state in which a trusted block's
+    body is analyzed, and the state after the block. *)
+Notation join_state then_exit else_exit :=
+  (AnalysisState
+    (entries_meet (analysis_entries then_exit) (analysis_entries else_exit))
+    (analysis_records then_exit)
+    (aliases_meet (analysis_aliases then_exit) (analysis_aliases else_exit))
+    (analysis_step_taken then_exit || analysis_step_taken else_exit)
+    (analysis_in_atomic then_exit)).
+(** A state with the given entries and nothing open. *)
+Notation closed_state entries := (AnalysisState entries [] ∅ false false).
+Notation atomic_entry outer :=
+  (AnalysisState (analysis_entries outer) (analysis_records outer)
+    (analysis_aliases outer) (analysis_step_taken outer) true).
+Notation atomic_exit outer inner :=
+  (AnalysisState (analysis_entries inner) (analysis_records inner)
+    (analysis_aliases inner)
+    (analysis_step_taken outer || analysis_step_taken inner)
+    (analysis_in_atomic outer)).
 End AnalysisView.

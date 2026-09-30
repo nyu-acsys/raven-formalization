@@ -1492,7 +1492,7 @@ Lemma access_neutral_records {Γ entry statement exit}
   Atom.analysis_records exit = Atom.analysis_records entry.
 Proof.
   induction certificate; intros Hneutral.
-  - eapply Atom.take_step_preserves_records; eauto.
+  - eapply Atom.take_leaf_preserves_records; eauto.
   - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hneutral. contradiction.
@@ -1508,7 +1508,7 @@ Proof.
     cbn [Atom.analysis_records]. rewrite e1.
     eapply Atom.take_step_preserves_records; eauto.
   - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
+    injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hneutral. exact (IHcertificate Hneutral).
 Qed.
@@ -1529,7 +1529,7 @@ Lemma unfold_free_records_suffix {Γ entry statement exit}
   Atom.analysis_records exit `suffix_of` Atom.analysis_records entry.
 Proof.
   induction certificate; intros Hfree.
-  - erewrite Atom.take_step_preserves_records by eauto. reflexivity.
+  - erewrite Atom.take_leaf_preserves_records by eauto. reflexivity.
   - reflexivity.
   - destruct statement; cbn in e; try discriminate.
     cbn in Hfree. contradiction.
@@ -1548,7 +1548,7 @@ Proof.
     cbn [Atom.analysis_records]. rewrite e1.
     erewrite Atom.take_step_preserves_records by eauto. reflexivity.
   - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
+    injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hfree. exact (IHcertificate Hfree).
 Qed.
@@ -1675,12 +1675,7 @@ Definition conditional_access_certificate {Γ} invariant
     Atom.analysis_certificate Γ entry
       (conditional_access invariant arguments prefix guard then_prefix
         then_continuation else_prefix else_continuation)
-      (Atom.AnalysisState
-        (Atom.entries_meet (Atom.analysis_entries then_exit)
-          (Atom.analysis_entries else_exit))
-        (Atom.analysis_records then_exit)
-        (Atom.analysis_step_taken then_exit || Atom.analysis_step_taken else_exit)
-        (Atom.analysis_in_atomic then_exit)) :=
+      (Atom.join_state then_exit else_exit) :=
   let then_branch :=
     canonical_branch invariant arguments then_prefix then_continuation in
   let else_branch :=
@@ -1737,13 +1732,7 @@ Record conditional_access_parts {Γ} invariant
     Atom.analysis_records cap_else_exit;
   cap_atomic_equal : Atom.analysis_in_atomic cap_then_exit =
     Atom.analysis_in_atomic cap_else_exit;
-  cap_exit : exit = Atom.AnalysisState
-    (Atom.entries_meet (Atom.analysis_entries cap_then_exit)
-      (Atom.analysis_entries cap_else_exit))
-    (Atom.analysis_records cap_then_exit)
-    (Atom.analysis_step_taken cap_then_exit ||
-      Atom.analysis_step_taken cap_else_exit)
-    (Atom.analysis_in_atomic cap_then_exit);
+  cap_exit : exit = Atom.join_state cap_then_exit cap_else_exit;
 }.
 
 Ltac view_inversion :=
@@ -2106,7 +2095,7 @@ Proof.
     + specialize (Hbody_subset Hbody). simpl. tauto.
     + exact body_result.(balanced_structured_safe).
   - destruct statement; cbn in e; try discriminate.
-    injection e as Hd Hscope_body. subst d.
+    injection e as Hd Halias Hscope_body. subst d alias.
     apply Eqdep.EqdepTheory.inj_pair2 in Hscope_body. subst body.
     cbn in Hfree.
     pose (body_result := IHcertificate Hfree Hbalanced).

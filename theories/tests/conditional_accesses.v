@@ -50,8 +50,7 @@ Definition counter_access : stmt Γ :=
 
 Definition initial_counter_mask : gset Core.inv_id := {[counter_invariant]}.
 Definition closed (available : gset Core.inv_id) : Atomicity.analysis_state :=
-  Atomicity.AnalysisState (Atomicity.declaration_entries available) [] false
-    false.
+  Atomicity.closed_state (Atomicity.declaration_entries available).
 
 (** 1. The conditional is wholly inside the access, which has one shared
     trailing fold. *)

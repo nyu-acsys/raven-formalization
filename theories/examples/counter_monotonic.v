@@ -4,7 +4,8 @@ From stdpp Require Import namespaces sets.
 From iris.base_logic.lib Require iprop invariants fancy_updates.
 From iris.proofmode Require proofmode.
 
-From raven Require Import runtime.erasure analysis.structured_certificates examples.mono_nat_ra surface.syntax surface.elaboration verification.expressions verification.assertions verification.ir verification.procedures analysis.normalization_base analysis.normalization soundness.runtime_model soundness.rule_validity soundness.procedure_validity soundness.adequacy verification.snapshots.
+From raven Require Import runtime.erasure analysis.structured_certificates examples.mono_nat_ra surface.syntax surface.elaboration verification.expressions verification.assertions verification.ir verification.procedures analysis.normalization_base analysis.normalization soundness.runtime_model soundness.rule_validity soundness.procedure_validity soundness.adequacy verification.snapshots
+  verification.masks.
 
 Import ListNotations.
 Open Scope list_scope.
@@ -151,11 +152,15 @@ Module Resource := IR.Resource.
 #[local] Existing Instances CounterRAConfig.ra_config counter_logic.
 Import Core IR IR.Core IR.Assertions Elaboration.
 
-(** The elaborated module, and the typed procedures it declares. *)
+(** The elaborated module, and the typed procedures it declares.  The
+    elaboration is checked by evaluation, not by conversion. *)
+Lemma counter_module_elaborated :
+  elaboration_succeeded (elaborate_module counter_declarations).
+Proof. vm_compute. exact I. Qed.
+
 Definition counter_module : RuleValidity.Hoare.module :=
   Eval vm_compute in elaborated
-    (elaborate_module counter_declarations)
-    ltac:(vm_compute; exact I).
+    (elaborate_module counter_declarations) counter_module_elaborated.
 
 Definition read_typed_procedure : typed_procedure (runtime_decls [TRef; TInt; TInt]) read_procedure :=
   Eval vm_compute in projT2 (elaborated
@@ -247,12 +252,14 @@ Lemma counter_invariant_body_eq :
     counter_invariant_body_core.
 Proof. vm_compute. reflexivity. Qed.
 
-(** Mask inference unfolds predicates.  The counter declares none, so this
-    checks the mechanism on a small hypothetical declaration: predicate 1
-    mentions itself and predicate 2, whose body depends on the counter
-    invariant.  Each predicate is unfolded at most once along a path, so the
-    recursion terminates and still finds the invariant through the nesting;
-    an undeclared predicate contributes nothing. *)
+(** Mask inference follows predicates to the invariants their bodies
+    require.  The counter declares no predicates, so this checks the
+    mechanism on a small hypothetical declaration: predicate 1 mentions
+    itself and predicate 2, whose body requires every instance of the
+    counter invariant (its argument is bound by a quantifier).  The
+    iteration reaches the fixed point through the recursion; an undeclared
+    predicate contributes nothing.  An application whose argument is a
+    formal requires that instance. *)
 Section MaskInferenceExamples.
 Let bodies (predicate : pred_id) :
     Resource.core_assertion (Assertion.predicate_args predicate) [] :=
@@ -261,14 +268,25 @@ Let bodies (predicate : pred_id) :
       (Resource.CPredicate 2%positive ExprNil)
   else Resource.CExists TRef (counter_token_core (ERef (RefBound MHere))).
 
-Example contract_invariants_through_predicates :
-  RuleValidity.Hoare.ResourceHoare.contract_invariants bodies [1%positive; 2%positive]
-    (Resource.CPredicate (F := []) (Δ := []) 1%positive ExprNil) = {[counter_invariant]}.
+Let declarations (predicates : list pred_id) : Masks.declarations :=
+  Masks.Declarations predicates bodies []
+    (fun _ => Resource.CPure True).
+
+Example requirements_through_predicates :
+  Masks.procedure_requirements (declarations [1%positive; 2%positive])
+    (Resource.CPredicate (F := []) (Δ := []) 1%positive ExprNil) =
+  {[(counter_invariant, None)]}.
 Proof. vm_compute. reflexivity. Qed.
 
-Example contract_invariants_undeclared_predicate :
-  RuleValidity.Hoare.ResourceHoare.contract_invariants bodies [1%positive]
+Example requirements_undeclared_predicate :
+  Masks.procedure_requirements (declarations [1%positive])
     (Resource.CPredicate (F := []) (Δ := []) 1%positive ExprNil) = ∅.
+Proof. vm_compute. reflexivity. Qed.
+
+Example requirements_formal_instance :
+  Masks.procedure_requirements (declarations [])
+    (counter_token_core (F := [TRef]) (Δ := []) (ERef (RefFormal MHere))) =
+  {[(counter_invariant, Some [Masks.TemplateFormal 0])]}.
 Proof. vm_compute. reflexivity. Qed.
 End MaskInferenceExamples.
 
@@ -688,14 +706,6 @@ Qed.
 
 Module CounterAtomicity := RuleValidity.GenericRegions.Atomicity.
 
-Definition counter_closed_state (available : RuleValidity.Hoare.mask) :
-    CounterAtomicity.analysis_state :=
-  CounterAtomicity.AnalysisState
-    (CounterAtomicity.declaration_entries available) [] false false.
-
-Definition read_exit_state : CounterAtomicity.analysis_state :=
-  counter_closed_state
-    ((counter_mask ∖ {[counter_invariant]}) ∪ {[counter_invariant]}).
 (** The allocation in [make] creates the concrete and ghost halves of a
     fresh counter at zero. *)
 Definition make_initializers : list (field_init ([runtime_val TRef; runtime_var TRef])) :=
@@ -1870,76 +1880,80 @@ Proof. vm_compute. reflexivity. Qed.
 
 Module CN := RuleValidity.CertifiedNormalization.
 
+(** Each body starts with the instances its precondition requires, at its
+    formal slots: [read] and [incr] with the counter at their parameter. *)
+Definition read_entry_state :=
+  ProcedureValidity.procedure_entry_state read_typed_procedure.
+Definition incr_entry_state :=
+  ProcedureValidity.procedure_entry_state incr_typed_procedure.
+Definition make_entry_state :=
+  ProcedureValidity.procedure_entry_state make_typed_procedure.
+Definition client_entry_state :=
+  ProcedureValidity.procedure_entry_state client_typed_procedure.
+
 Lemma read_analysis :
-  CounterAtomicity.analyze
-      (counter_closed_state counter_mask) read_typed_body =
-    inr read_exit_state.
-Proof. reflexivity. Qed.
+  CounterAtomicity.analyze read_entry_state read_typed_body =
+    inr read_entry_state.
+Proof. vm_compute. reflexivity. Qed.
 
 Lemma incr_analysis :
-  CounterAtomicity.analyze
-      (counter_closed_state counter_mask) incr_typed_body =
-    inr (counter_closed_state counter_mask).
-Proof. reflexivity. Qed.
+  CounterAtomicity.analyze incr_entry_state incr_typed_body =
+    inr incr_entry_state.
+Proof. vm_compute. reflexivity. Qed.
 
 (** [make] exits with the instance it allocated, named by the level of its
     local. *)
 Definition make_exit_state : CounterAtomicity.analysis_state :=
-  CounterAtomicity.AnalysisState
-    {[(counter_invariant, Some [CounterAtomicity.AtomLevel 1])]} [] false false.
+  CounterAtomicity.closed_state
+    {[(counter_invariant, Some [CounterAtomicity.AtomLevel 1])]}.
 
 Lemma make_analysis :
-  CounterAtomicity.analyze
-      (counter_closed_state ∅) make_typed_body =
+  CounterAtomicity.analyze make_entry_state make_typed_body =
     inr make_exit_state.
-Proof. reflexivity. Qed.
+Proof. vm_compute. reflexivity. Qed.
+
+(** [client] exits with the instance [make] granted, named by the level of
+    the local the result is stored in; the calls to [read] and [incr]
+    require exactly that instance. *)
+Definition client_exit_state : CounterAtomicity.analysis_state :=
+  CounterAtomicity.closed_state
+    {[(counter_invariant, Some [CounterAtomicity.AtomLevel 0])]}.
 
 Lemma client_analysis :
-  CounterAtomicity.analyze
-      (counter_closed_state ∅) client_typed_body =
-    inr (counter_closed_state counter_mask).
-Proof. reflexivity. Qed.
+  CounterAtomicity.analyze client_entry_state client_typed_body =
+    inr client_exit_state.
+Proof. vm_compute. reflexivity. Qed.
 
 Definition client_analyzed_certificate :=
   CounterAtomicity.analyze_builds_certificate
-    (counter_closed_state ∅) client_typed_body
-    (counter_closed_state counter_mask) client_analysis.
+    client_entry_state client_typed_body client_exit_state client_analysis.
 
 Definition read_analyzed_certificate :=
   CounterAtomicity.analyze_builds_certificate
-    (counter_closed_state counter_mask) read_typed_body
-    read_exit_state read_analysis.
+    read_entry_state read_typed_body read_entry_state read_analysis.
 
 Definition incr_analyzed_certificate :=
   CounterAtomicity.analyze_builds_certificate
-    (counter_closed_state counter_mask) incr_typed_body
-    (counter_closed_state counter_mask) incr_analysis.
+    incr_entry_state incr_typed_body incr_entry_state incr_analysis.
 
 Definition make_analyzed_certificate :=
   CounterAtomicity.analyze_builds_certificate
-    (counter_closed_state ∅) make_typed_body
-    make_exit_state make_analysis.
+    make_entry_state make_typed_body make_exit_state make_analysis.
 
 Definition read_analyzed_body :
   ProcedureValidity.analyzed_body_valid read_typed_procedure.
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    (runtime_decls [TRef; TInt; TInt]) read_procedure read_typed_procedure counter_mask
-    (counter_closed_state counter_mask) read_exit_state
-    [TInt; TInt; TInt] read_exit_store (RefBound MHere)
-    _ _ _ _ _ _ _ _).
-  8: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
+    (runtime_decls [TRef; TInt; TInt]) read_procedure read_typed_procedure
+    read_entry_state [TInt; TInt; TInt] read_exit_store (RefBound MHere)
+    _ _ _).
+  3: { refine {| CN.analyzed_certificate := read_analyzed_certificate;
                  CN.analyzed_hoare := read_resource_body_derivation;
                  CN.analyzed_restricted :=
                    read_restricted_fragment_accepted |}. }
   - reflexivity.
-  - constructor.
   - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - unfold read_exit_state. simpl. rewrite counter_mask_close. set_solver.
 Defined.
 
 Definition incr_analyzed_body :
@@ -1948,22 +1962,15 @@ Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
     (runtime_decls [TRef; TInt; TInt; TInt; TBool; TUnit; TUnit]) incr_procedure
-    incr_typed_procedure counter_mask
-    (counter_closed_state counter_mask)
-    (counter_closed_state counter_mask)
+    incr_typed_procedure incr_entry_state
     [TBool; TInt; TInt; TInt; TInt; TInt] incr_exit_store
-    incr_return_reference _ _ _ _ _ _ _ _).
-  8: { refine {| CN.analyzed_certificate := incr_analyzed_certificate;
+    incr_return_reference _ _ _).
+  3: { refine {| CN.analyzed_certificate := incr_analyzed_certificate;
                  CN.analyzed_hoare := incr_resource_body_derivation;
                  CN.analyzed_restricted :=
                    incr_restricted_fragment_accepted |}. }
   - reflexivity.
-  - constructor.
   - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - simpl. set_solver.
 Defined.
 
 Definition make_analyzed_body :
@@ -1971,21 +1978,14 @@ Definition make_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    ([runtime_val TRef; runtime_var TRef]) make_procedure make_typed_procedure ∅
-    (counter_closed_state ∅)
-    make_exit_state
-    [TRef; TRef] make_exit_store (RefBound MHere) _ _ _ _ _ _ _ _).
-  8: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
+    ([runtime_val TRef; runtime_var TRef]) make_procedure make_typed_procedure
+    make_exit_state [TRef; TRef] make_exit_store (RefBound MHere) _ _ _).
+  3: { refine {| CN.analyzed_certificate := make_analyzed_certificate;
                  CN.analyzed_hoare := make_resource_body_derivation;
                  CN.analyzed_restricted :=
                    make_restricted_fragment_accepted |}. }
   - reflexivity.
-  - constructor.
   - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - simpl. set_solver.
 Defined.
 
 Definition client_analyzed_body :
@@ -1993,22 +1993,15 @@ Definition client_analyzed_body :
 Proof.
   unfold ProcedureValidity.analyzed_body_valid.
   unshelve refine (@ProcedureValidity.AnalyzedBodyCertificate _ _ _
-    (runtime_decls [TInt; TRef]) client_procedure client_typed_procedure ∅
-    (counter_closed_state ∅)
-    (counter_closed_state counter_mask)
-    [TInt; TRef] client_exit_store (RefBound (MThere MHere))
-    _ _ _ _ _ _ _ _).
-  8: { refine {| CN.analyzed_certificate := client_analyzed_certificate;
+    (runtime_decls [TInt; TRef]) client_procedure client_typed_procedure
+    client_exit_state [TInt; TRef] client_exit_store (RefBound (MThere MHere))
+    _ _ _).
+  3: { refine {| CN.analyzed_certificate := client_analyzed_certificate;
                  CN.analyzed_hoare := client_resource_body_derivation;
                  CN.analyzed_restricted :=
                    client_restricted_fragment_accepted |}. }
   - exact client_exit_return.
-  - constructor.
   - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - reflexivity.
-  - simpl. set_solver.
 Defined.
 
 (** The module-soundness instantiation below is stated in Iris; its proof
